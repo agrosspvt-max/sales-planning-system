@@ -1,4 +1,5 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { PlanStatus, Role, ImportStatus, SeasonStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -321,106 +322,123 @@ export async function commitSeasonalImport(ctx: AuthContext, raw: unknown): Prom
   });
   const version = (maxV._max.version ?? 0) + 1;
 
-  let planId = "";
-  try {
-    await prisma.$transaction(async (tx: Tx) => {
-      const plan = await tx.seasonPlan.create({
-        data: {
-          seasonId: payload.seasonId,
-          officerId: payload.officerId,
-          planningType: "SEASONAL",
-          version,
-          versionName: "Imported from Excel",
-          source: "IMPORT",
-          status: PlanStatus.DRAFT,
-          dealers: {
-            create: dealers.map((d) => ({
-              dealerId: d.dealerId,
-              lines: {
-                create: d.rows.map((r) => ({
-                  productId: r.productId,
-                  packs: {
-                    create: r.packs
-                      .filter((p) => p.quantity > 0)
-                      .map((p) => ({ packSizeId: p.packSizeId, quantity: p.quantity })),
-                  },
-                })),
-              },
-            })),
-          },
-        },
-      });
-      planId = plan.id;
+  // --- Payload preparation (NO writes, NO locking) --------------------------------------
+  // The whole entity graph is materialised in memory with client-generated ids, so the
+  // transaction can bulk-insert each level with createMany() instead of thousands of nested,
+  // sequential inserts. IDs are opaque strings; generating them here lets us wire the foreign
+  // keys (planLine → planDealer, packs/monthly → planLine) without reading rows back.
+  const planId = randomUUID();
 
-      // Complete Workbook mode: also migrate existing Monthly plan quantities. This
-      // bypasses the "monthly only after approval" gate — migration exception only.
-      if (payload.mode === "COMPLETE") {
-        const months = await tx.seasonMonth.findMany({
-          where: { seasonId: payload.seasonId },
-          orderBy: { order: "asc" },
-          select: { id: true },
-        });
-        if (months.length > 0) {
-          const lines = await tx.planLine.findMany({
-            where: { planDealer: { seasonPlanId: plan.id } },
-            select: { id: true, productId: true, planDealer: { select: { dealerId: true } } },
-          });
-          const lineMap = new Map<string, string>(
-            lines.map((l: { id: string; productId: string; planDealer: { dealerId: string } }) => [
-              `${l.planDealer.dealerId}|${l.productId}`,
-              l.id,
-            ]),
-          );
-          const entries: { planLineId: string; seasonMonthId: string; planQty: number }[] = [];
-          for (const d of dealers) {
-            for (const r of d.rows) {
-              const lineId = lineMap.get(`${d.dealerId}|${r.productId}`);
-              if (!lineId) continue;
-              r.monthlyPlan.forEach((q, i) => {
-                if (i < months.length && q > 0) {
-                  entries.push({ planLineId: lineId, seasonMonthId: months[i].id, planQty: q });
-                }
-              });
+  const planDealerRows: { id: string; seasonPlanId: string; dealerId: string }[] = [];
+  const planLineRows: { id: string; planDealerId: string; productId: string }[] = [];
+  const planPackRows: { planLineId: string; packSizeId: string; quantity: number }[] = [];
+  // "dealerId|productId" → planLineId — the same key the monthly step used before.
+  const lineIdByKey = new Map<string, string>();
+
+  for (const d of dealers) {
+    const planDealerId = randomUUID();
+    planDealerRows.push({ id: planDealerId, seasonPlanId: planId, dealerId: d.dealerId });
+    for (const r of d.rows) {
+      const planLineId = randomUUID();
+      planLineRows.push({ id: planLineId, planDealerId, productId: r.productId });
+      lineIdByKey.set(`${d.dealerId}|${r.productId}`, planLineId);
+      // Preserve the original rule: a pack row only for quantity > 0.
+      for (const p of r.packs) {
+        if (p.quantity > 0) planPackRows.push({ planLineId, packSizeId: p.packSizeId, quantity: p.quantity });
+      }
+    }
+  }
+
+  // Complete Workbook mode: prepare monthly plan-qty rows. The month lookup is a READ, so it
+  // runs OUTSIDE the transaction; the mapping/filtering below is byte-for-byte the original
+  // logic (per-month plan qty, in month order, only q > 0, bounded by the season's months).
+  let monthlyEntryRows: { planLineId: string; seasonMonthId: string; planQty: number }[] = [];
+  let monthIdsWithData: string[] = [];
+  if (payload.mode === "COMPLETE") {
+    const months = await prisma.seasonMonth.findMany({
+      where: { seasonId: payload.seasonId },
+      orderBy: { order: "asc" },
+      select: { id: true },
+    });
+    if (months.length > 0) {
+      for (const d of dealers) {
+        for (const r of d.rows) {
+          const lineId = lineIdByKey.get(`${d.dealerId}|${r.productId}`);
+          if (!lineId) continue;
+          r.monthlyPlan.forEach((q, i) => {
+            if (i < months.length && q > 0) {
+              monthlyEntryRows.push({ planLineId: lineId, seasonMonthId: months[i].id, planQty: q });
             }
-          }
-          if (entries.length > 0) {
-            await tx.monthlyEntry.createMany({ data: entries });
-            // Open-Month initialization for imports (Section 42): a month that received imported
-            // monthly-plan data represents an in-progress planning window carried over from Excel,
-            // so auto-open it (only if still LOCKED — never override management's OPEN/CLOSED).
-            const monthIdsWithData = [...new Set(entries.map((e) => e.seasonMonthId))];
-            await tx.seasonMonth.updateMany({
-              where: { id: { in: monthIdsWithData }, status: "LOCKED" },
-              data: { status: "OPEN" },
-            });
-          }
+          });
         }
       }
+      monthIdsWithData = [...new Set(monthlyEntryRows.map((e) => e.seasonMonthId))];
+    }
+  }
 
-      // Optional: mark this imported version APPROVED/active (authorised users only),
-      // reusing the SAME approval finalisation as the normal approve flow.
-      if (payload.importAsApproved) {
-        await finalizeApprovalTx(tx, {
-          id: plan.id,
-          seasonId: payload.seasonId,
-          officerId: payload.officerId,
-          planningType: "SEASONAL",
+  // --- Writes only (single atomic transaction) ------------------------------------------
+  // Extended timeout for Vercel + Neon (each network round-trip is far slower than
+  // localhost). Every level is ONE createMany statement, so the whole import is a small,
+  // bounded number of statements regardless of workbook size. Written parent-first so
+  // foreign keys resolve: SeasonPlan → PlanDealers → PlanLines → PlanPacks → MonthlyEntries.
+  try {
+    await prisma.$transaction(
+      async (tx: Tx) => {
+        await tx.seasonPlan.create({
+          data: {
+            id: planId,
+            seasonId: payload.seasonId,
+            officerId: payload.officerId,
+            planningType: "SEASONAL",
+            version,
+            versionName: "Imported from Excel",
+            source: "IMPORT",
+            status: PlanStatus.DRAFT,
+          },
         });
-      }
 
-      await tx.seasonPlanImportRecord.create({
-        data: {
-          importedById: ctx.userId,
-          seasonId: payload.seasonId,
-          officerId: payload.officerId,
-          workbookName: payload.workbookName,
-          dealerCount: dealers.length,
-          productRows,
-          status: ImportStatus.COMPLETED,
-          summary: JSON.stringify({ dealerCount: dealers.length, productRows, version }),
-        },
-      });
-    });
+        if (planDealerRows.length > 0) await tx.planDealer.createMany({ data: planDealerRows });
+        if (planLineRows.length > 0) await tx.planLine.createMany({ data: planLineRows });
+        if (planPackRows.length > 0) await tx.planLinePack.createMany({ data: planPackRows });
+
+        // Complete Workbook mode: migrate existing Monthly plan quantities. This bypasses the
+        // "monthly only after approval" gate — migration exception only. Behaviour unchanged:
+        // bulk-insert entries, then auto-open only still-LOCKED months that received data
+        // (never override management's OPEN/CLOSED).
+        if (payload.mode === "COMPLETE" && monthlyEntryRows.length > 0) {
+          await tx.monthlyEntry.createMany({ data: monthlyEntryRows });
+          await tx.seasonMonth.updateMany({
+            where: { id: { in: monthIdsWithData }, status: "LOCKED" },
+            data: { status: "OPEN" },
+          });
+        }
+
+        // Optional: mark this imported version APPROVED/active (authorised users only),
+        // reusing the SAME approval finalisation as the normal approve flow (unchanged).
+        if (payload.importAsApproved) {
+          await finalizeApprovalTx(tx, {
+            id: planId,
+            seasonId: payload.seasonId,
+            officerId: payload.officerId,
+            planningType: "SEASONAL",
+          });
+        }
+
+        await tx.seasonPlanImportRecord.create({
+          data: {
+            importedById: ctx.userId,
+            seasonId: payload.seasonId,
+            officerId: payload.officerId,
+            workbookName: payload.workbookName,
+            dealerCount: dealers.length,
+            productRows,
+            status: ImportStatus.COMPLETED,
+            summary: JSON.stringify({ dealerCount: dealers.length, productRows, version }),
+          },
+        });
+      },
+      { timeout: 60000, maxWait: 10000 },
+    );
   } catch (e) {
     await prisma.seasonPlanImportRecord.create({
       data: {

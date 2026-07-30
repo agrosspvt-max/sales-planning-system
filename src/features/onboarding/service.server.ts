@@ -219,12 +219,18 @@ export async function commitOnboarding(
     name: string;
   }[];
   const dealerByTight = new Map(dealerRows.map((d) => [tightKey(d.name), d.id]));
-  await prisma.$transaction(async (tx: Tx) => {
-    for (const name of masters.dealerNames) {
-      const id = dealerByTight.get(tightKey(name));
-      if (id) await applyDealerAssignment(tx, id, officer.id, effectiveFrom);
-    }
-  });
+  await prisma.$transaction(
+    async (tx: Tx) => {
+      for (const name of masters.dealerNames) {
+        const id = dealerByTight.get(tightKey(name));
+        if (id) await applyDealerAssignment(tx, id, officer.id, effectiveFrom);
+      }
+    },
+    // Long-running import path on Vercel + Neon: extend beyond Prisma's 5s default. The
+    // per-dealer assignment logic (range-closing + insert) is unchanged — batching it would
+    // alter business behaviour, which is out of scope for this performance refactor.
+    { timeout: 60000, maxWait: 10000 },
+  );
 
   // 3) Sales Plan — re-parse now that masters exist, then reuse the seasonal importer.
   const parse = await parseSeasonalWorkbook(ctx, buffer, filename);

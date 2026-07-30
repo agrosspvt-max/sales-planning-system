@@ -1,0 +1,265 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { AlertTriangle, Save } from "lucide-react";
+import { api } from "@/lib/api-client";
+import { cn, formatCurrency, formatPercent } from "@/lib/utils";
+import { achievement, amount, isQuantityMode, PLANNING_MODE_LABELS } from "@/lib/calc";
+import { MONTH_STATUS_LABELS } from "./planning-state";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import type { MonthlyData } from "./types";
+
+type Cell = { plan: number; sale: number };
+type ValueMap = Record<string, Cell>; // key: planLineId|monthId
+
+const cellKey = (planLineId: string, monthId: string) => `${planLineId}|${monthId}`;
+
+export function MonthlyPlanner({ planId }: { planId: string }) {
+  const { data, isLoading } = useQuery<MonthlyData>({
+    queryKey: ["monthly", planId],
+    queryFn: () => api.get(`/api/planning/season-plans/${planId}/monthly`),
+  });
+
+  const [dealerId, setDealerId] = useState("");
+  const [monthId, setMonthId] = useState("");
+  const [values, setValues] = useState<ValueMap>({});
+  const [saving, setSaving] = useState(false);
+  const valuesRef = useRef<ValueMap>({});
+  const dirtyRef = useRef<Set<string>>(new Set());
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const qtyMode = data ? isQuantityMode(data.monthlyMode) : true;
+  const fmtUnit = useCallback(
+    (v: number) => (qtyMode ? String(Math.round(v)) : formatCurrency(v)),
+    [qtyMode],
+  );
+
+  useEffect(() => {
+    if (!data) return;
+    const map: ValueMap = {};
+    for (const d of data.dealers) {
+      for (const p of d.products) {
+        for (const m of data.months) {
+          const e = p.monthly[m.id] ?? { plan: 0, sale: 0 };
+          map[cellKey(p.planLineId, m.id)] = { plan: e.plan, sale: e.sale };
+        }
+      }
+    }
+    valuesRef.current = map;
+    setValues(map);
+    setDealerId((prev) => prev || data.dealers[0]?.dealerId || "");
+    setMonthId((prev) => prev || data.months[0]?.id || "");
+  }, [data]);
+
+  const saveMut = useMutation({
+    mutationFn: (entries: unknown[]) =>
+      api.patch(`/api/planning/season-plans/${planId}/monthly`, { entries }),
+  });
+
+  const flush = useCallback(async () => {
+    if (!data || dirtyRef.current.size === 0) return;
+    const keys = Array.from(dirtyRef.current);
+    dirtyRef.current.clear();
+    const entries = keys.map((k) => {
+      const [lineId, mId] = k.split("|");
+      const v = valuesRef.current[k];
+      return isQuantityMode(data.monthlyMode)
+        ? { planLineId: lineId, seasonMonthId: mId, planQty: v.plan, saleQty: v.sale }
+        : {
+            planLineId: lineId,
+            seasonMonthId: mId,
+            mode: data.monthlyMode,
+            planValue: v.plan,
+            saleValue: v.sale,
+          };
+    });
+    setSaving(true);
+    try {
+      await saveMut.mutateAsync(entries);
+    } finally {
+      setSaving(false);
+    }
+  }, [saveMut, data]);
+
+  const schedule = useCallback(
+    (k: string) => {
+      dirtyRef.current.add(k);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(flush, 1200);
+    },
+    [flush],
+  );
+
+  function onChange(planLineId: string, field: "plan" | "sale", raw: string) {
+    if (!data?.canEdit || !monthEditable) return;
+    const parsed = Number(raw) || 0;
+    const n = qtyMode ? Math.max(0, Math.floor(parsed)) : Math.max(0, parsed);
+    const k = cellKey(planLineId, monthId);
+    setValues((prev) => {
+      const next = { ...prev, [k]: { ...prev[k], [field]: n } };
+      valuesRef.current = next;
+      return next;
+    });
+    schedule(k);
+  }
+
+  if (isLoading) return <Skeleton className="h-64 w-full" />;
+  if (!data) return null;
+
+  const dealer = data.dealers.find((d) => d.dealerId === dealerId);
+  const unitLabel = PLANNING_MODE_LABELS[data.monthlyMode];
+  const selMonth = data.months.find((m) => m.id === monthId);
+  const monthEditable = selMonth?.editable ?? false;
+  const inputsDisabled = !data.canEdit || !monthEditable;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <NativeSelect
+            className="w-56"
+            options={data.dealers.map((d) => ({ value: d.dealerId, label: d.dealerName }))}
+            value={dealerId}
+            onChange={(e) => setDealerId(e.target.value)}
+          />
+          <NativeSelect
+            className="w-48"
+            options={data.months.map((m) => ({
+              value: m.id,
+              label: m.status === "OPEN" ? m.name : `${m.name} · ${MONTH_STATUS_LABELS[m.status]}`,
+            }))}
+            value={monthId}
+            onChange={(e) => setMonthId(e.target.value)}
+          />
+          {selMonth && (
+            <Badge variant={selMonth.status === "OPEN" ? "success" : "muted"}>
+              {MONTH_STATUS_LABELS[selMonth.status]}
+            </Badge>
+          )}
+        </div>
+        {data.canEdit && (
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span>{saving ? "Saving…" : "Saved"}</span>
+            <Button size="sm" variant="outline" onClick={flush} disabled={saving}>
+              <Save className="h-4 w-4" /> Save
+            </Button>
+          </div>
+        )}
+      </div>
+
+      <p className="text-xs text-muted-foreground">
+        Monthly mode: <span className="font-medium">{unitLabel}</span> — officers enter{" "}
+        {qtyMode ? "a quantity" : `a ${unitLabel.toLowerCase()} value`} per month.
+      </p>
+
+      <div className="rounded-lg border bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="min-w-[150px]">Product</TableHead>
+              <TableHead className="text-right">Season {qtyMode ? "Qty" : unitLabel}</TableHead>
+              <TableHead className="text-right">Planned (all months)</TableHead>
+              <TableHead className="text-right">Remaining</TableHead>
+              <TableHead className="text-center">This Month Plan</TableHead>
+              <TableHead className="text-center">This Month Sold</TableHead>
+              <TableHead className="text-right">Pending (mo)</TableHead>
+              <TableHead className="text-right">Diff Amt (mo)</TableHead>
+              <TableHead className="text-right">Achv %</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {!dealer || dealer.products.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
+                  Nothing planned for this dealer in the approved season plan.
+                </TableCell>
+              </TableRow>
+            ) : (
+              dealer.products.map((p) => {
+                const planned = data.months.map(
+                  (m) => values[cellKey(p.planLineId, m.id)]?.plan ?? 0,
+                );
+                const sold = data.months.map(
+                  (m) => values[cellKey(p.planLineId, m.id)]?.sale ?? 0,
+                );
+                const totalPlanned = planned.reduce((a, b) => a + b, 0);
+                const totalSold = sold.reduce((a, b) => a + b, 0);
+                const remaining = p.target - totalPlanned;
+                const excess = Math.max(0, totalPlanned - p.target);
+                const isOver = excess > 0;
+                const achv = achievement(totalSold, p.target);
+                const cur = values[cellKey(p.planLineId, monthId)] ?? { plan: 0, sale: 0 };
+                return (
+                  <TableRow key={p.planLineId} className={cn(isOver && "bg-amber-50")}>
+                    <TableCell className="font-medium">{p.productName}</TableCell>
+                    <TableCell className="text-right">{fmtUnit(p.target)}</TableCell>
+                    <TableCell className="text-right">
+                      {fmtUnit(totalPlanned)}
+                      {isOver && (
+                        <Badge variant="destructive" className="ml-1">
+                          <AlertTriangle className="mr-1 h-3 w-3" />+{fmtUnit(excess)}
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className={cn("text-right", remaining < 0 && "text-destructive")}>
+                      {fmtUnit(remaining)}
+                    </TableCell>
+                    <TableCell className="p-1 text-center">
+                      <Input
+                        type="number"
+                        min={0}
+                        step={qtyMode ? 1 : "0.01"}
+                        className="h-8 w-20 text-center"
+                        value={cur.plan === 0 ? "" : cur.plan}
+                        placeholder="0"
+                        disabled={!data.canEdit}
+                        onChange={(e) => onChange(p.planLineId, "plan", e.target.value)}
+                      />
+                    </TableCell>
+                    <TableCell className="p-1 text-center">
+                      <Input
+                        type="number"
+                        min={0}
+                        step={qtyMode ? 1 : "0.01"}
+                        className="h-8 w-20 text-center"
+                        value={cur.sale === 0 ? "" : cur.sale}
+                        placeholder="0"
+                        disabled={!data.canEdit}
+                        onChange={(e) => onChange(p.planLineId, "sale", e.target.value)}
+                      />
+                    </TableCell>
+                    {/* Month Pending = plan − sale; Difference Amount = (plan − sale) × rate (qty mode). */}
+                    <TableCell className="text-right text-muted-foreground">
+                      {fmtUnit(cur.plan - cur.sale)}
+                    </TableCell>
+                    <TableCell className="text-right text-muted-foreground">
+                      {formatCurrency(qtyMode ? amount(cur.plan - cur.sale, p.rate) : cur.plan - cur.sale)}
+                    </TableCell>
+                    <TableCell className="text-right">{formatPercent(achv)}</TableCell>
+                  </TableRow>
+                );
+              })
+            )}
+          </TableBody>
+        </Table>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Over-planning is allowed. Rows where monthly plans exceed the approved season figure are
+        highlighted with the excess; submission is never blocked.
+      </p>
+    </div>
+  );
+}

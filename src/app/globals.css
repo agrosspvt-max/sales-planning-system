@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Theme system — semantic design tokens.
+ *
+ * Every colour in the app resolves to one of these tokens (never a hard-coded Tailwind
+ * palette colour), so adding a theme = adding one more block of variables here. Two themes
+ * ship today (:root = Light, .dark = Dark); a High-Contrast or company-branded theme would
+ * be another selector (e.g. .theme-hc) with the same variable names — no component changes.
+ * Values are HSL channels ("H S% L%") consumed as hsl(var(--token)).
+ */
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 222 47% 24%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 24%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 210 40% 94%;
+    --accent-foreground: 222 47% 24%;
+
+    /* Status tokens (previously hard-coded greens/ambers/blues). */
+    --success: 142 71% 32%;
+    --success-foreground: 0 0% 100%;
+    --warning: 32 90% 40%;
+    --warning-foreground: 0 0% 100%;
+    --info: 217 91% 48%;
+    --info-foreground: 0 0% 100%;
+    /* Dealer completion "No Plan" status colour (purple). */
+    --noplan: 262 83% 58%;
+    --noplan-foreground: 0 0% 100%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214 32% 88%;
+    --input: 214 32% 88%;
+    --ring: 222 47% 24%;
+
+    /* Sidebar surface (own tokens so it can have a dedicated design per theme). */
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 222 47% 11%;
+    --sidebar-border: 214 32% 88%;
+    --sidebar-accent: 210 40% 94%;
+    --sidebar-accent-foreground: 222 47% 24%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Soft dark slate — never pure black; consistent elevation via lighter surfaces. */
+    --background: 222 30% 10%;
+    --foreground: 210 40% 96%;
+
+    --card: 222 26% 13%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 26% 13%;
+    --popover-foreground: 210 40% 96%;
+
+    /* On dark, primary brightens so fills/active states pop with dark text on them. */
+    --primary: 210 90% 62%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 217 25% 20%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 24% 17%;
+    --muted-foreground: 215 20% 68%;
+    --accent: 217 24% 22%;
+    --accent-foreground: 210 40% 98%;
+
+    --success: 142 60% 46%;
+    --success-foreground: 222 47% 11%;
+    --warning: 38 92% 58%;
+    --warning-foreground: 222 47% 11%;
+    --info: 213 94% 68%;
+    --info-foreground: 222 47% 11%;
+    --noplan: 262 83% 70%;
+    --noplan-foreground: 222 47% 11%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 22% 22%;
+    --input: 217 22% 24%;
+    --ring: 210 90% 62%;
+
+    --sidebar: 222 28% 12%;
+    --sidebar-foreground: 210 40% 94%;
+    --sidebar-border: 217 20% 20%;
+    --sidebar-accent: 217 24% 20%;
+    --sidebar-accent-foreground: 210 40% 98%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

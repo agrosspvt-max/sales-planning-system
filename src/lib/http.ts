@@ -57,7 +57,7 @@ export function ok<T>(data: T, status = 200) {
 }
 
 /** Wrap a route handler with uniform error handling. The handler itself must never throw. */
-export function handle<T>(fn: () => Promise<NextResponse<T>>) {
+export function handle(fn: () => Promise<NextResponse>) {
   return fn().catch((error: unknown) => {
     // Any failure while classifying/serialising the error must still yield a valid response,
     // never a second crash that masks the original problem.

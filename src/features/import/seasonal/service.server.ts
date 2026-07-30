@@ -14,7 +14,8 @@ import { writeAudit } from "@/lib/audit";
 type Tx = any;
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can import plans");
+  if (ctx.role !== Role.SUPER_ADMIN)
+    throw new ApiError(403, "Only the Super Admin can import plans");
 }
 
 /** Master sheets that are never dealer sheets (skipped, like the dealer import). */
@@ -140,7 +141,8 @@ function parseDealerSheet(rows: (string | number | null)[][], packs: Master["pac
     for (let r = headerIdx + 1; r < rows.length; r++) {
       const row = rows[r] ?? [];
       const nameCell = row[productCol];
-      const productName = typeof nameCell === "string" ? nameCell.trim() : nameCell === null ? "" : String(nameCell);
+      const productName =
+        typeof nameCell === "string" ? nameCell.trim() : nameCell === null ? "" : String(nameCell);
       if (!productName || TOTAL_ROW.test(productName)) continue;
       const packVals = packCols.map((pc) => ({
         header: pc.header,
@@ -171,7 +173,11 @@ export async function parseSeasonalWorkbook(
   if (detected) {
     const first = detected.split(/\s+/)[0];
     const matches = await prisma.user.findMany({
-      where: { role: Role.SALES_OFFICER, isActive: true, name: { contains: first, mode: "insensitive" } },
+      where: {
+        role: Role.SALES_OFFICER,
+        isActive: true,
+        name: { contains: first, mode: "insensitive" },
+      },
       select: { id: true, name: true },
       take: 5,
     });
@@ -280,14 +286,18 @@ export interface SeasonalImportResult {
  * written unless validation passes. The imported plan is an ordinary DRAFT SeasonPlan
  * (source = IMPORT) that then flows through the normal approval/monthly/reports pipeline.
  */
-export async function commitSeasonalImport(ctx: AuthContext, raw: unknown): Promise<SeasonalImportResult> {
+export async function commitSeasonalImport(
+  ctx: AuthContext,
+  raw: unknown,
+): Promise<SeasonalImportResult> {
   assertAdmin(ctx);
   const payload = commitSchema.parse(raw);
 
   // --- Validation (no writes) ---
   const season = await prisma.season.findUnique({ where: { id: payload.seasonId } });
   if (!season) throw new ApiError(422, "Season does not exist");
-  if (season.status !== SeasonStatus.OPEN) throw new ApiError(422, "The season is closed; open it before importing");
+  if (season.status !== SeasonStatus.OPEN)
+    throw new ApiError(422, "The season is closed; open it before importing");
 
   const officer = await prisma.user.findUnique({ where: { id: payload.officerId } });
   if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) {
@@ -295,23 +305,40 @@ export async function commitSeasonalImport(ctx: AuthContext, raw: unknown): Prom
   }
 
   const dealers = payload.dealers.filter((d) => d.rows.length > 0);
-  if (dealers.length === 0) throw new ApiError(422, "Nothing to import — no matched dealers with rows");
+  if (dealers.length === 0)
+    throw new ApiError(422, "Nothing to import — no matched dealers with rows");
 
   const dealerIds = [...new Set(dealers.map((d) => d.dealerId))];
-  if (dealerIds.length !== dealers.length) throw new ApiError(422, "Duplicate dealer in the import payload");
+  if (dealerIds.length !== dealers.length)
+    throw new ApiError(422, "Duplicate dealer in the import payload");
 
   const [dealerCount, productCount, packCount] = await Promise.all([
     prisma.dealer.count({ where: { id: { in: dealerIds } } }),
-    prisma.product.count({ where: { id: { in: [...new Set(dealers.flatMap((d) => d.rows.map((r) => r.productId)))] } } }),
+    prisma.product.count({
+      where: { id: { in: [...new Set(dealers.flatMap((d) => d.rows.map((r) => r.productId)))] } },
+    }),
     prisma.packSize.count({
-      where: { id: { in: [...new Set(dealers.flatMap((d) => d.rows.flatMap((r) => r.packs.map((p) => p.packSizeId))))] } },
+      where: {
+        id: {
+          in: [
+            ...new Set(
+              dealers.flatMap((d) => d.rows.flatMap((r) => r.packs.map((p) => p.packSizeId))),
+            ),
+          ],
+        },
+      },
     }),
   ]);
-  if (dealerCount !== dealerIds.length) throw new ApiError(422, "One or more dealers no longer exist");
+  if (dealerCount !== dealerIds.length)
+    throw new ApiError(422, "One or more dealers no longer exist");
   const productIds = [...new Set(dealers.flatMap((d) => d.rows.map((r) => r.productId)))];
-  if (productCount !== productIds.length) throw new ApiError(422, "One or more products no longer exist");
-  const packIds = [...new Set(dealers.flatMap((d) => d.rows.flatMap((r) => r.packs.map((p) => p.packSizeId))))];
-  if (packCount !== packIds.length) throw new ApiError(422, "One or more pack sizes no longer exist");
+  if (productCount !== productIds.length)
+    throw new ApiError(422, "One or more products no longer exist");
+  const packIds = [
+    ...new Set(dealers.flatMap((d) => d.rows.flatMap((r) => r.packs.map((p) => p.packSizeId)))),
+  ];
+  if (packCount !== packIds.length)
+    throw new ApiError(422, "One or more pack sizes no longer exist");
 
   const productRows = dealers.reduce((s, d) => s + d.rows.length, 0);
 
@@ -344,7 +371,8 @@ export async function commitSeasonalImport(ctx: AuthContext, raw: unknown): Prom
       lineIdByKey.set(`${d.dealerId}|${r.productId}`, planLineId);
       // Preserve the original rule: a pack row only for quantity > 0.
       for (const p of r.packs) {
-        if (p.quantity > 0) planPackRows.push({ planLineId, packSizeId: p.packSizeId, quantity: p.quantity });
+        if (p.quantity > 0)
+          planPackRows.push({ planLineId, packSizeId: p.packSizeId, quantity: p.quantity });
       }
     }
   }
@@ -352,7 +380,9 @@ export async function commitSeasonalImport(ctx: AuthContext, raw: unknown): Prom
   // Complete Workbook mode: prepare monthly plan-qty rows. The month lookup is a READ, so it
   // runs OUTSIDE the transaction; the mapping/filtering below is byte-for-byte the original
   // logic (per-month plan qty, in month order, only q > 0, bounded by the season's months).
-  let monthlyEntryRows: { planLineId: string; seasonMonthId: string; planQty: number }[] = [];
+
+  //let to const
+  const monthlyEntryRows: { planLineId: string; seasonMonthId: string; planQty: number }[] = [];
   let monthIdsWithData: string[] = [];
   if (payload.mode === "COMPLETE") {
     const months = await prisma.seasonMonth.findMany({
@@ -367,7 +397,11 @@ export async function commitSeasonalImport(ctx: AuthContext, raw: unknown): Prom
           if (!lineId) continue;
           r.monthlyPlan.forEach((q, i) => {
             if (i < months.length && q > 0) {
-              monthlyEntryRows.push({ planLineId: lineId, seasonMonthId: months[i].id, planQty: q });
+              monthlyEntryRows.push({
+                planLineId: lineId,
+                seasonMonthId: months[i].id,
+                planQty: q,
+              });
             }
           });
         }

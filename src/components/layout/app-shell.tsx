@@ -50,13 +50,13 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
   const toggleGroup = (group: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
-  
+
       if (next.has(group)) {
         next.delete(group);
       } else {
         next.add(group);
       }
-  
+
       return next;
     });
 
@@ -85,7 +85,7 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
   const sidebar = (
     <nav className="flex min-h-full flex-col gap-3 p-4">
       <div className="px-2 py-1 text-sm font-bold tracking-tight text-primary">
-        Sales Planning
+        AGROSS PLANNING SYSTEM
       </div>
       {groups.map(([group, groupItems]) => {
         // Ungrouped items (e.g. Dashboard) render as plain top-level leaves.

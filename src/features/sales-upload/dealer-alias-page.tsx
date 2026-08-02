@@ -87,6 +87,7 @@ export function DealerAliasPage() {
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <Button asChild variant="outline">
+              {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- API file-download endpoint, not a page route */}
               <a href="/api/dealer-alias/sample"><Download className="h-4 w-4" /> Download Sample Excel</a>
             </Button>
             <input

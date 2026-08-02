@@ -264,6 +264,10 @@ export async function assessDealerOperationalData(
       _count: { _all: true },
     });
     for (const g of grouped) {
+      // ApprovalAction.seasonPlanId is nullable since Recovery Planning (recovery approval
+      // actions have no seasonal plan). Those never match the seasonal `in` filter above, but
+      // skip them explicitly to satisfy the type and preserve seasonal-only counting.
+      if (g.seasonPlanId === null) continue;
       const count = g._count._all;
       for (const dealerId of seasonPlanToDealers.get(g.seasonPlanId) ?? []) {
         approvalByDealer.set(dealerId, (approvalByDealer.get(dealerId) ?? 0) + count);

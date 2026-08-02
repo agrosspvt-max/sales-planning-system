@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { useAutosaveMap } from "./use-autosave-map";
@@ -23,6 +23,8 @@ const cellKey = (planLineId: string, monthId: string) => `${planLineId}|${monthI
 
 export interface MonthlyEditContextValue {
   planId: string;
+  /** The first-class Monthly Plan id (present only in the Monthly Plan workspace, not legacy). */
+  monthlyPlanId?: string;
   data: MonthlyData;
   monthlyMode: PlanningMode;
   qtyMode: boolean;
@@ -38,11 +40,14 @@ const Ctx = createContext<MonthlyEditContextValue | null>(null);
 
 export function MonthlyEditProvider({
   planId,
+  monthlyPlanId,
   data,
   saveUrl,
+  invalidateKey,
   children,
 }: {
   planId: string;
+  monthlyPlanId?: string;
   data: MonthlyData;
   /**
    * Where to persist monthly entries. Defaults to the seasonal-plan monthly endpoint (legacy
@@ -50,10 +55,13 @@ export function MonthlyEditProvider({
    * provider drives both without duplication.
    */
   saveUrl?: string;
+  /** Query key refetched after each save so derived completion (progress bar / ticks) updates. */
+  invalidateKey?: readonly unknown[];
   children: React.ReactNode;
 }) {
   const qtyMode = isQuantityMode(data.monthlyMode);
   const persistUrl = saveUrl ?? `/api/planning/season-plans/${planId}/monthly`;
+  const qc = useQueryClient();
 
   const initial = useMemo<ValueMap>(() => {
     const map: ValueMap = {};
@@ -67,6 +75,11 @@ export function MonthlyEditProvider({
     }
     return map;
   }, [data]);
+
+  // Seed the editable grid ONCE per plan identity so a refetch (triggered after a save to
+  // refresh completion) never wipes in-progress edits — the same pattern as PlanEditProvider.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const seed = useMemo(() => initial, [planId]);
 
   const editableByMonth = useMemo(() => new Map(data.months.map((m) => [m.id, m.editable])), [data.months]);
   const monthEditable = useCallback((monthId: string) => data.canEdit && (editableByMonth.get(monthId) ?? false), [data.canEdit, editableByMonth]);
@@ -82,11 +95,14 @@ export function MonthlyEditProvider({
           : { planLineId: lineId, seasonMonthId: mId, mode: data.monthlyMode, planValue: v.plan, saleValue: v.sale };
       });
       await api.patch(persistUrl, { entries });
+      // Refresh derived completion (progress bar / dropdown ticks / submit gate). Safe: the
+      // editable grid is seeded per plan identity, so a refetch never wipes edits.
+      if (invalidateKey) qc.invalidateQueries({ queryKey: invalidateKey });
     },
-    [qtyMode, data.monthlyMode, persistUrl],
+    [qtyMode, data.monthlyMode, persistUrl, invalidateKey, qc],
   );
 
-  const { values, saving, update, flush } = useAutosaveMap<Cell>(initial, persist);
+  const { values, saving, update, flush } = useAutosaveMap<Cell>(seed, persist);
 
   const setCell = useCallback(
     (planLineId: string, monthId: string, field: "plan" | "sale", n: number) => {
@@ -101,8 +117,8 @@ export function MonthlyEditProvider({
   const cellFor = useCallback((planLineId: string, monthId: string) => values[cellKey(planLineId, monthId)] ?? { plan: 0, sale: 0 }, [values]);
 
   const value = useMemo<MonthlyEditContextValue>(
-    () => ({ planId, data, monthlyMode: data.monthlyMode, qtyMode, values, saving, cellFor, monthEditable, setCell, flush }),
-    [planId, data, qtyMode, values, saving, cellFor, monthEditable, setCell, flush],
+    () => ({ planId, monthlyPlanId, data, monthlyMode: data.monthlyMode, qtyMode, values, saving, cellFor, monthEditable, setCell, flush }),
+    [planId, monthlyPlanId, data, qtyMode, values, saving, cellFor, monthEditable, setCell, flush],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -1,10 +1,7 @@
-import { ComingSoon } from "@/features/planning/coming-soon";
+import { auth } from "@/auth";
+import { RecoveryPlanning } from "@/features/recovery/recovery-planning";
 
-export default function Page() {
-  return (
-    <ComingSoon
-      title="Recovery Planning"
-      description="Plan and track outstanding recovery. Business logic will be implemented in a later phase."
-    />
-  );
+export default async function Page() {
+  const session = await auth();
+  return <RecoveryPlanning role={session!.user.role} mode="create" />;
 }

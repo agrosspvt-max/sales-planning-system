@@ -31,8 +31,9 @@ export function PlanningModules({ mode }: { mode: PlanningWorkspaceMode }) {
   const subtitle = isCreate
     ? "Start or continue a plan. Only work-in-progress (Draft) plans live here."
     : "Browse finalised planning. Only Approved plans are shown here.";
-  // Sales Planning reuses the existing screens; the workspace mode selects create vs browse.
+  // Sales & Recovery reuse the existing screens; the workspace mode selects create vs browse.
   const salesHref = isCreate ? "/planning/sales" : "/planning/sales/plans";
+  const recoveryHref = isCreate ? "/planning/recovery" : "/planning/recovery/plans";
 
   const modules: Module[] = [
     {
@@ -43,7 +44,7 @@ export function PlanningModules({ mode }: { mode: PlanningWorkspaceMode }) {
       icon: ShoppingCart,
       available: true,
     },
-    { key: "recovery", label: "Recovery Planning", href: "/planning/recovery", description: "Plan and track outstanding recovery.", icon: Wallet, available: false },
+    { key: "recovery", label: "Recovery Planning", href: recoveryHref, description: "Plan and track outstanding recovery from the Aging Report.", icon: Wallet, available: true },
     { key: "scheme", label: "Scheme Planning", href: "/planning/scheme", description: "Design and plan dealer/product schemes.", icon: Gift, available: false },
     { key: "party", label: "Party Planning", href: "/planning/party", description: "Plan party-wise targets and engagement.", icon: UsersRound, available: false },
   ];

@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope } from "@/lib/scope";
 import { saveMonthlySchema } from "@/lib/validations/planning";
-import { figuresForMode, isQuantityMode, type PlanningMode } from "@/lib/calc";
+import { figuresForMode, isQuantityMode, amount, type PlanningMode } from "@/lib/calc";
 import { getEditableMonthMap, assertMonthOpen } from "./planning-state.server";
 import { isMonthEditable, type MonthStatus } from "./planning-state";
 
@@ -132,7 +132,10 @@ export function buildMonthlyDealers(
                 const e = entryByMonth.get(m.id);
                 const plan = valueMode ? num(e?.planValue ?? 0) : e?.planQty ?? 0;
                 const sale = valueMode ? num(e?.saleValue ?? 0) : e?.saleQty ?? 0;
-                return [m.id, { plan, sale }];
+                // Actual SALES VALUE from the uploaded Tally sheet (stored in saleValue). Falls
+                // back to qty×rate only when no upload value exists (legacy/backward-compat).
+                const saleAmount = num(e?.saleValue ?? 0) || amount(e?.saleQty ?? 0, rate);
+                return [m.id, { plan, sale, saleAmount }];
               }),
             ),
           };
@@ -207,9 +210,7 @@ export async function saveMonthly(ctx: AuthContext, planId: string, raw: unknown
         },
       })) as {
         planQty: number;
-        saleQty: number;
         planValue: unknown;
-        saleValue: unknown;
       } | null;
 
       const mode = (e.mode ?? "PACK_SIZE") as PlanningMode;
@@ -217,31 +218,21 @@ export async function saveMonthly(ctx: AuthContext, planId: string, raw: unknown
         planLineId_seasonMonthId: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId },
       };
 
+      // Actual sales (saleQty / saleValue) are owned by the Sales Upload only; monthly saving
+      // writes plan fields exclusively and preserves any imported actuals on the same entry.
       if (isQuantityMode(mode)) {
-        // Quantity modes store integers in planQty/saleQty (as before).
         const planQty = e.planQty ?? existing?.planQty ?? 0;
-        const saleQty = e.saleQty ?? existing?.saleQty ?? 0;
         await tx.monthlyEntry.upsert({
           where,
-          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, planQty, saleQty },
-          update: { planQty, saleQty, inputMode: null, planValue: null, saleValue: null },
+          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, planQty },
+          update: { planQty },
         });
       } else {
-        // Value modes (AMOUNT / NBV) store decimals in planValue/saleValue.
         const planValue = e.planValue ?? num(existing?.planValue ?? 0);
-        const saleValue = e.saleValue ?? num(existing?.saleValue ?? 0);
         await tx.monthlyEntry.upsert({
           where,
-          create: {
-            planLineId: e.planLineId,
-            seasonMonthId: e.seasonMonthId,
-            planQty: 0,
-            saleQty: 0,
-            inputMode: mode,
-            planValue,
-            saleValue,
-          },
-          update: { planQty: 0, saleQty: 0, inputMode: mode, planValue, saleValue },
+          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, inputMode: mode, planValue },
+          update: { inputMode: mode, planValue },
         });
       }
     }

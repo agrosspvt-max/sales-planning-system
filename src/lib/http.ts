@@ -72,7 +72,14 @@ export function handle(fn: () => Promise<NextResponse>) {
         );
       }
       if (prismaErrorCode(error) === "P2002") {
-        return NextResponse.json({ error: "A record with this value already exists" }, { status: 409 });
+        // Log the exact constraint so root causes are never masked by the generic message.
+        const target = (error as { meta?: { target?: unknown } }).meta?.target;
+        const targetStr = Array.isArray(target) ? target.join(", ") : String(target ?? "unknown");
+        console.error("P2002 unique constraint violation on:", targetStr, "\n", error);
+        return NextResponse.json(
+          { error: `A record with this value already exists (${targetStr})` },
+          { status: 409 },
+        );
       }
       if (prismaErrorCode(error) === "P2003") {
         // Foreign-key violation — typically a referenced record that no longer exists

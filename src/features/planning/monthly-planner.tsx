@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { AlertTriangle, Save } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, Save, Ban } from "lucide-react";
+import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
 import { amount, nbv, PLANNING_MODE_LABELS } from "@/lib/calc";
 import { MONTH_STATUS_LABELS } from "./planning-state";
@@ -18,6 +20,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useMonthlyEdit } from "./monthly-edit-context";
+import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "./dealer-completion";
+import { DealerPlanningStatus } from "./dealer-status";
+
+const OPTION_COLOR: Record<DealerPlanningStatus, string | undefined> = {
+  [DealerPlanningStatus.COMPLETED]: "hsl(var(--success))",
+  [DealerPlanningStatus.NO_PLAN]: "hsl(var(--noplan))",
+  [DealerPlanningStatus.REMAINING]: undefined,
+};
 
 /**
  * Dealer Monthly Plan — the editable Monthly page. Reads/writes the shared monthly-edit
@@ -26,10 +36,14 @@ import { useMonthlyEdit } from "./monthly-edit-context";
  * and Achievement %).
  */
 export function MonthlyPlanner() {
-  const { data, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush } = useMonthlyEdit();
+  const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush } = useMonthlyEdit();
+  const qc = useQueryClient();
 
-  const [dealerId, setDealerId] = useState(data.dealers[0]?.dealerId ?? "");
+  // First-class Monthly Plan shows the Seasonal-style dealer progress (tick / colour / No Plan).
+  const isFirstClass = !!monthlyPlanId;
+  const [dealerId, setDealerId] = useState(isFirstClass ? "" : data.dealers[0]?.dealerId ?? "");
   const [monthId, setMonthId] = useState(data.months[0]?.id ?? "");
+  const [noPlanOpen, setNoPlanOpen] = useState(false);
 
   const fmtUnit = (v: number) => (qtyMode ? String(Math.round(v)) : formatCurrency(v));
   const dealer = data.dealers.find((d) => d.dealerId === dealerId);
@@ -38,21 +52,81 @@ export function MonthlyPlanner() {
   const editable = monthEditable(monthId);
   const inputsDisabled = !editable;
 
-  const onChange = (planLineId: string, field: "plan" | "sale", raw: string) => {
+  // Dealer completion (Completed = ≥1 monthly plan value; No Plan = flagged; else Remaining) —
+  // the same three-state model and progress component as Seasonal Planning.
+  const statusByDealer = useMemo(() => {
+    const m = new Map<string, DealerPlanningStatus>();
+    for (const d of data.dealers)
+      m.set(d.dealerId, d.noPlan ? DealerPlanningStatus.NO_PLAN : d.completed ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING);
+    return m;
+  }, [data.dealers]);
+  const counts: StatusCounts = useMemo(() => {
+    let completed = 0, noPlan = 0, remaining = 0;
+    for (const s of statusByDealer.values()) {
+      if (s === DealerPlanningStatus.COMPLETED) completed++;
+      else if (s === DealerPlanningStatus.NO_PLAN) noPlan++;
+      else remaining++;
+    }
+    return { completed, noPlan, remaining, total: statusByDealer.size };
+  }, [statusByDealer]);
+  const selectedStatus = dealer ? statusByDealer.get(dealer.dealerId) : undefined;
+
+  const noPlanMut = useMutation({
+    mutationFn: (vars: { noPlan: boolean; reason?: string }) =>
+      api.post(`/api/planning/monthly-plans/${monthlyPlanId}/dealers/${dealerId}/no-plan`, vars),
+    onSuccess: () => {
+      setNoPlanOpen(false);
+      qc.invalidateQueries({ queryKey: ["monthly-plan", monthlyPlanId] });
+    },
+  });
+
+  // Only the PLAN is editable now. "This Month Sold" (actual) comes from the Sales Upload and
+  // is read-only for everyone — Sales Officers can view but never enter actuals.
+  const onChangePlan = (planLineId: string, raw: string) => {
     const parsed = Number(raw) || 0;
-    setCell(planLineId, monthId, field, qtyMode ? Math.max(0, Math.floor(parsed)) : Math.max(0, parsed));
+    setCell(planLineId, monthId, "plan", qtyMode ? Math.max(0, Math.floor(parsed)) : Math.max(0, parsed));
   };
 
   return (
     <div className="space-y-3">
+      {/* Planning progress: Green Completed · Purple No Plan · Grey Remaining (same component). */}
+      {isFirstClass && <DealerProgressBar counts={counts} />}
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <NativeSelect
-            className="w-56"
-            options={data.dealers.map((d) => ({ value: d.dealerId, label: d.dealerName }))}
-            value={dealerId}
-            onChange={(e) => setDealerId(e.target.value)}
-          />
+          {isFirstClass ? (
+            // Native select so each option can carry its status colour + tick (like Seasonal).
+            <select
+              className="h-9 w-64 rounded-md border border-input bg-background px-2 text-sm"
+              value={dealerId}
+              onChange={(e) => setDealerId(e.target.value)}
+            >
+              <option value="">Choose Dealer…</option>
+              {data.dealers.map((d) => (
+                <option key={d.dealerId} value={d.dealerId} style={{ color: OPTION_COLOR[statusByDealer.get(d.dealerId) ?? DealerPlanningStatus.REMAINING] }}>
+                  {d.dealerName}
+                  {statusByDealer.get(d.dealerId) === DealerPlanningStatus.COMPLETED ? " ✓" : statusByDealer.get(d.dealerId) === DealerPlanningStatus.NO_PLAN ? " ⦸" : ""}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <NativeSelect
+              className="w-56"
+              options={data.dealers.map((d) => ({ value: d.dealerId, label: d.dealerName }))}
+              value={dealerId}
+              onChange={(e) => setDealerId(e.target.value)}
+            />
+          )}
+          {isFirstClass && data.canEdit && dealer && selectedStatus !== DealerPlanningStatus.NO_PLAN && (
+            <Button variant="outline" size="sm" onClick={() => setNoPlanOpen(true)} className="text-noplan">
+              <Ban className="h-4 w-4" /> No Plan
+            </Button>
+          )}
+          {isFirstClass && data.canEdit && dealer && selectedStatus === DealerPlanningStatus.NO_PLAN && (
+            <Button variant="outline" size="sm" onClick={() => noPlanMut.mutate({ noPlan: false })} disabled={noPlanMut.isPending}>
+              Undo No Plan
+            </Button>
+          )}
           {/* A first-class Monthly Plan is exactly ONE month — no in-page month selector. */}
           {data.months.length > 1 ? (
             <NativeSelect
@@ -101,10 +175,10 @@ export function MonthlyPlanner() {
               <TableHead className="text-right">Planned (all months)</TableHead>
               <TableHead className="text-right">Remaining</TableHead>
               <TableHead className="text-center">This Month Plan</TableHead>
-              <TableHead className="text-center">This Month Sold</TableHead>
+              <TableHead className="text-center text-muted-foreground">This Month Sold</TableHead>
               <TableHead className="text-right">Pending (mo)</TableHead>
               <TableHead className="text-right">Planned Amount</TableHead>
-              <TableHead className="text-right">Planned NBV</TableHead>
+              <TableHead className="text-right text-muted-foreground">Actual Amount</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -123,6 +197,8 @@ export function MonthlyPlanner() {
                 const cur = cellFor(p.planLineId, monthId);
                 const plannedAmount = qtyMode ? amount(cur.plan, p.rate) : cur.plan;
                 const plannedNbv = nbv(plannedAmount, p.nbvPercent);
+                // Actual amount comes from the uploaded sales (saleValue) — not qty × rate.
+                const actualAmount = p.monthly[monthId]?.saleAmount ?? 0;
                 return (
                   <TableRow key={p.planLineId} className={cn(isOver && "bg-warning/10")}>
                     <TableCell className="font-medium">{p.productName}</TableCell>
@@ -145,24 +221,14 @@ export function MonthlyPlanner() {
                         value={cur.plan === 0 ? "" : cur.plan}
                         placeholder="0"
                         disabled={inputsDisabled}
-                        onChange={(e) => onChange(p.planLineId, "plan", e.target.value)}
+                        onChange={(e) => onChangePlan(p.planLineId, e.target.value)}
                       />
                     </TableCell>
-                    <TableCell className="p-1 text-center">
-                      <Input
-                        type="number"
-                        min={0}
-                        step={qtyMode ? 1 : "0.01"}
-                        className="h-8 w-20 text-center"
-                        value={cur.sale === 0 ? "" : cur.sale}
-                        placeholder="0"
-                        disabled={inputsDisabled}
-                        onChange={(e) => onChange(p.planLineId, "sale", e.target.value)}
-                      />
-                    </TableCell>
+                    {/* This Month Sold — read-only; sourced from the uploaded Sales Upload. */}
+                    <TableCell className="text-center tabular-nums text-muted-foreground">{fmtUnit(cur.sale)}</TableCell>
                     <TableCell className="text-right text-muted-foreground">{fmtUnit(cur.plan - cur.sale)}</TableCell>
                     <TableCell className="text-right tabular-nums">{formatCurrency(plannedAmount)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{formatCurrency(plannedNbv)}</TableCell>
+                    <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(actualAmount)}</TableCell>
                   </TableRow>
                 );
               })
@@ -173,6 +239,18 @@ export function MonthlyPlanner() {
       <p className="text-xs text-muted-foreground">
         Over-planning is allowed. Rows where monthly plans exceed the approved season figure are highlighted; submission is never blocked.
       </p>
+
+      {isFirstClass && dealer && (
+        <NoPlanDialog
+          open={noPlanOpen}
+          dealerName={dealer.dealerName}
+          onOpenChange={setNoPlanOpen}
+          saving={noPlanMut.isPending}
+          onConfirm={(reason) => {
+            void flush().then(() => noPlanMut.mutate({ noPlan: true, reason }));
+          }}
+        />
+      )}
     </div>
   );
 }

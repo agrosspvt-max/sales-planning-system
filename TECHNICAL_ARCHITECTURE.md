@@ -119,6 +119,18 @@ first-class plan persists to `PATCH /api/planning/monthly-plans/:id` while the l
 `/monthly`. The monthly planner drops its in-page month selector when a single month is present
 (`data.months.length <= 1`) — one plan = one month, opened directly.
 
+**Dealer completion parity with Seasonal.** The Monthly Plan reuses the SAME progress components
+as Seasonal (`dealer-completion.tsx`: `DealerProgressBar`, `NoPlanDialog`, `DealerPlanningStatus`)
+— progress bar, ✓/⦸ ticks and coloured dealer dropdown, per-dealer **No Plan** button, and a
+**completion-gated Submit** (disabled until every dealer is Completed or No Plan, with a No-Plan
+confirmation) enforced identically on the server in `submitMonthlyPlan`. "Completed" is derived
+(≥1 monthly plan value entered); only **No Plan** is stored, in **`MonthlyPlanDealer`**
+(`monthlyPlanId + dealerId`, unique) — the monthly analogue of `PlanDealer.noPlan`, kept separate
+so a dealer can be planned seasonally yet skipped for a specific month. Completion refreshes after
+each autosave via a query invalidation; the editable grid is seeded per plan identity so the
+refetch never wipes in-progress edits. Sales Upload actuals are untouched — "This Month Sold"
+stays read-only and Monthly approval governs only the plan.
+
 **Entry points**: *Create New Plan → Monthly* lists Draft/Returned monthly plans and offers
 **Create New Monthly Plan** (Step 1 = an approved seasonal plan; Step 2 = a month of that
 season; **+ Add Month** → a Month Extension Request). *View Approved Plans → Monthly* lists
@@ -138,6 +150,72 @@ Range**. The month/range options aggregate **Approved Monthly Plans only**
 no approved monthly plan exists the view shows *"Monthly Planning has not been initiated for this
 month."* instead of an empty table. One shared wrapper `SeasonalMonthlyView` serves both
 (grouped by product or dealer).
+
+## 2d. Sales Upload — Tally actual-sales import
+
+Actual Sales are no longer entered by hand. A Super Admin uploads a Tally **Product.xlsx**
+("Sales Register" sheet) and the system fills the **Actual** fields for the chosen month. Sales
+Officers can only view actuals; **"This Month Sold" is read-only** and **Actual Amount comes
+from the uploaded value, never qty × rate**.
+
+- **Parser** (`sales-upload/parser.ts`, pure): the sheet layout is fixed — Col A (Group Name)
+  non-empty marks a **dealer header** (name in Col B), an empty Col A is a **product row** for
+  the current dealer (Col C qty, Col D amount). Product names are stripped of pack info
+  (`CHIMA 10X500GM → CHIMA`) via regex; quantities reduced to a number; **amount taken
+  verbatim**. Duplicate products under one dealer are **merged** (qty + amount summed). Verified
+  against the reference file: 332 dealers, 2208 rows, 701 merged.
+- **Matching** reuses the ONE matcher (`match-key`): **Dealer** = Alias → exact → loose → fuzzy;
+  **Product** = exact → loose → fuzzy (cleaned name). The **`DealerAlias`** table is consulted
+  first (unique `tallyKey` enforces "duplicate alias").
+- **Dealer → Officer is implicit**: a row is importable only when the matched dealer+product map
+  to a `PlanLine` in an **APPROVED, active** seasonal plan for the target month's season — that
+  `PlanDealer` already encodes the dealer's Sales Officer, so no officer is ever chosen.
+- **Analyze** (`analyzeSalesUpload`) writes nothing and reports Dealers/Products found,
+  Duplicates merged, Unknown dealers/products, dealers without a plan, and Rows to import.
+  **Commit** (`commitSalesUpload`) writes in ONE transaction (`timeout: 60000`), reusing the
+  Seasonal-Import bulk pattern: new `MonthlyEntry` rows via **`createMany`**, existing rows
+  updated in **batched `Promise.all`** — touching **only `saleQty`/`saleValue`**, never
+  `planQty`/`planValue`. History = **`SalesUploadRun`**; audit via `writeAudit`.
+- **Read path**: `buildMonthlyDealers` and `getPlanDetail` now expose `saleAmount`/`actualAmount`
+  from `saleValue`; the monthly planner, seasonal Dealer Summary and Product-Plan month views
+  read those instead of qty × rate. `saveMonthly*` write plan fields only, so imports are never
+  clobbered by plan edits. Sidebar: **Sales Upload** + **Dealer Alias** under Planning (admin).
+
+## 2e. Recovery Planning — the third planning module
+
+Recovery Planning reuses the whole planning architecture; it is not a new one. Replaces the
+"Coming Soon" Recovery cards under Create New Plan / View Approved Plans (no new sidebar item).
+
+- **Model (normalised, never JSON).** `RecoveryPlan` (per season-month + officer) is the
+  lifecycle unit, reusing `PlanStatus` + `ApprovalAction` (new nullable `recoveryPlanId`;
+  `seasonPlanId` made nullable since recovery has no seasonal parent). `RecoveryPlanDealer`
+  holds read-only aging (outstanding/overdue/due/running) + editable month plan + No Plan.
+  `RecoveryWeekPlan` = Week View rows. Aging history lives in `AgingSnapshot` → normalised
+  `AgingSnapshotDealer` → `AgingSnapshotBill` (raw bills), so future features (payments,
+  actual recovery) need no schema change.
+- **Import.** The admin uploads the Tally **Bills Receivable** Aging Report (`recovery/parser.ts`,
+  built to the exact workbook — dealer header, bill rows, total rows; verified 590 dealers /
+  1612 bills). Dealer matching **reuses `matchByName`** (Alias → exact → loose → fuzzy). Bills
+  are bucketed by the chosen **cutoff** (`Due < cutoff → Overdue`; within the cutoff's month →
+  `Due`; later → `Running`; `Outstanding = Overdue+Due+Running`, verified exact). The report is
+  **split per officer** by current dealer assignment into a Draft `RecoveryPlan` each.
+- **Approval reuses the exact workflow** (`recovery/approval.server.ts`): Officer → RM → Admin
+  via the same `PlanStatus` machine, `ApprovalAction` log and notifications — no finalize, no
+  new framework. Recovery plans appear in the existing **Approvals** page.
+- **Plan screen** (`recovery-workspace.tsx`): **Month View** (editable Recovery Plan / Running
+  Recovery, auto Recovery %, Month Total, Weekly Total, Difference) and **Week View** (editable
+  per-week, auto Week Total + Difference), both autosaving through the shared **`useAutosaveMap`**.
+  Dealer progress reuses **`DealerProgressBar` / `NoPlanDialog` / `DealerPlanningStatus`** and a
+  completion-gated **Submit** (`RecoveryActions`, mirroring `MonthlyPlanActions`) enforced
+  server-side. Month View locks once approved; Week View re-opens on a weekly upload when the
+  "allow weekly edit" toggle is on (never while pending).
+- **Weekly re-upload** (`uploadWeeklyAging`) creates a NEW snapshot (never overwrites), refreshes
+  ONLY the read-only aging figures (month/weekly plans + history preserved), sets the edit
+  toggle, and returns a **change-tracking summary** (outstanding increased/decreased, new/removed
+  dealers) computed against the previous snapshot.
+- **Deferred (next increment):** the standalone **Recovery Dashboard** page (summary cards +
+  Outstanding/Recovery trend, Top Overdue, Officer Comparison charts). All the data it needs —
+  snapshots, aggregates, per-week plans, per-dealer deltas — is already stored.
 
 ## 3. Data-consistency model
 

@@ -49,6 +49,8 @@ export interface PlanLineDetail {
   /** Read-only roll-ups: Σ monthly plan qty (Live Monthly) and Σ monthly sale qty (Actual). */
   liveMonthlyQty: number;
   actualQty: number;
+  /** Σ actual SALES VALUE from the uploaded Tally sheet (saleValue); not qty × rate. */
+  actualAmount: number;
 }
 
 export interface PlanDealerDetail {
@@ -141,14 +143,23 @@ export interface MonthlyProductRow {
   nbvPercent: number;
   /** Approved season target expressed in the active monthly unit (qty / amount / nbv). */
   target: number;
-  /** Per-month figures already expressed in the active monthly unit. */
-  monthly: Record<string, { plan: number; sale: number }>;
+  /**
+   * Per-month figures in the active monthly unit. `sale` is the actual quantity (or value in
+   * value modes); `saleAmount` is the actual SALES VALUE sourced from the uploaded Tally sheet
+   * (MonthlyEntry.saleValue) — the authoritative Actual Amount, never recomputed from qty×rate.
+   */
+  monthly: Record<string, { plan: number; sale: number; saleAmount: number }>;
 }
 
 export interface MonthlyDealer {
   dealerId: string;
   dealerName: string;
   products: MonthlyProductRow[];
+  /** Dealer completion for this month (first-class Monthly Plan only): No Plan is stored,
+   *  Completed (≥1 monthly plan value) is derived; both absent on the legacy all-months view. */
+  noPlan?: boolean;
+  noPlanReason?: string | null;
+  completed?: boolean;
 }
 
 export interface MonthlyData {

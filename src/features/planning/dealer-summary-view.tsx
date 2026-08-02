@@ -43,7 +43,8 @@ export function DealerSummaryView() {
         const liveAmt = calcAmount(l.liveMonthlyQty, l.rate);
         liveMonthPlan += liveAmt;
         liveMonthNbv += calcNbv(liveAmt, l.nbvPercent);
-        const aAmt = calcAmount(l.actualQty, l.rate);
+        // Actual sales value comes from the uploaded sales (saleValue), not qty × rate.
+        const aAmt = l.actualAmount;
         actualSales += aAmt;
         actualNbv += calcNbv(aAmt, l.nbvPercent);
       }

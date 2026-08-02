@@ -100,7 +100,51 @@ export function ApprovalsInbox({ role }: { role: Role }) {
       </div>
 
       <MonthlyApprovals role={role} />
+      <RecoveryApprovals role={role} />
       {role === Role.SUPER_ADMIN && <MonthExtensionReview />}
+    </div>
+  );
+}
+
+/** Recovery plans awaiting the current approver (RM → PENDING_RM, Admin → PENDING_ADMIN). */
+function RecoveryApprovals({ role }: { role: Role }) {
+  const { data, isLoading } = useQuery<{ id: string; seasonName: string; monthName: string; officerName: string; status: PlanStatus }[]>({
+    queryKey: ["recovery-plans", "PENDING_RM,PENDING_ADMIN"],
+    queryFn: () => api.get("/api/recovery/plans?status=PENDING_RM,PENDING_ADMIN"),
+  });
+  const want = role === Role.REGIONAL_MANAGER ? "PENDING_RM" : "PENDING_ADMIN";
+  const rows = useMemo(() => (data ?? []).filter((m) => m.status === want), [data, want]);
+  if (isLoading) return <Skeleton className="h-16 w-full" />;
+  if (rows.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-semibold">Recovery plans awaiting review</h3>
+      <div className="rounded-lg border bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Season</TableHead>
+              <TableHead>Month</TableHead>
+              <TableHead>Sales Officer</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead className="text-right">Review</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((m) => (
+              <TableRow key={m.id}>
+                <TableCell className="font-medium">{m.seasonName}</TableCell>
+                <TableCell>{m.monthName}</TableCell>
+                <TableCell>{m.officerName}</TableCell>
+                <TableCell><StatusBadge status={m.status} /></TableCell>
+                <TableCell className="text-right">
+                  <Button asChild variant="outline" size="sm"><Link href={`/planning/recovery/${m.id}`}>Review</Link></Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
     </div>
   );
 }

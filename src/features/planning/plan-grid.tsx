@@ -89,8 +89,9 @@ export function PlanGrid() {
     for (const l of dealer?.lines ?? []) {
       acc.actualQty += l.actualQty;
       acc.liveQty += l.liveMonthlyQty;
-      acc.actualAmount += calcAmount(l.actualQty, l.rate);
-      acc.actualNbv += calcNbv(calcAmount(l.actualQty, l.rate), l.nbvPercent);
+      // Actual amount comes from the uploaded sales (saleValue), not qty × rate.
+      acc.actualAmount += l.actualAmount;
+      acc.actualNbv += calcNbv(l.actualAmount, l.nbvPercent);
       acc.liveAmount += calcAmount(l.liveMonthlyQty, l.rate);
       acc.liveNbv += calcNbv(calcAmount(l.liveMonthlyQty, l.rate), l.nbvPercent);
     }

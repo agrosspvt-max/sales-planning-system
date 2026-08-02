@@ -82,6 +82,9 @@ export function MonthlyPlanWorkspace({
         officerId={data.officerId}
         role={role}
         userId={userId}
+        remainingCount={data.dealers.filter((d) => !d.noPlan && !d.completed).length}
+        totalDealers={data.dealers.length}
+        noPlanDealers={data.dealers.filter((d) => d.noPlan).map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason ?? null }))}
       />
 
       <div className="flex gap-1 border-b">
@@ -101,8 +104,10 @@ export function MonthlyPlanWorkspace({
 
       <MonthlyEditProvider
         planId={data.planId}
+        monthlyPlanId={monthlyPlanId}
         data={data}
         saveUrl={`/api/planning/monthly-plans/${monthlyPlanId}`}
+        invalidateKey={["monthly-plan", monthlyPlanId]}
       >
         <div className={tab === "dealer" ? "" : "hidden"}>
           <MonthlyPlanner />

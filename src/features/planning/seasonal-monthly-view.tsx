@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
-import { figuresForMode, type PlanningMode } from "@/lib/calc";
+import { figuresForMode, nbv, type PlanningMode } from "@/lib/calc";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -23,7 +23,7 @@ interface AMProduct {
   productName: string;
   rate: number;
   nbvPercent: number;
-  monthly: Record<string, { plan: number; sale: number }>;
+  monthly: Record<string, { plan: number; sale: number; saleAmount: number }>;
 }
 interface AMDealer {
   dealerId: string;
@@ -107,11 +107,13 @@ export function SeasonalMonthlyView({
         }
         let planInput = 0;
         let saleInput = 0;
+        let soldAmount = 0; // actual sales VALUE from the upload (saleValue), never qty × rate
         for (const mid of selectedMonthIds) {
           const e = p.monthly[mid];
           if (e) {
             planInput += e.plan;
             saleInput += e.sale;
+            soldAmount += e.saleAmount ?? 0;
           }
         }
         const pf = figuresForMode(mode, planInput, p.rate, p.nbvPercent);
@@ -120,8 +122,8 @@ export function SeasonalMonthlyView({
         row.planAmount += pf.amount ?? 0;
         row.planNbv += pf.nbv ?? 0;
         row.soldQty += sf.totalQty ?? 0;
-        row.soldAmount += sf.amount ?? 0;
-        row.soldNbv += sf.nbv ?? 0;
+        row.soldAmount += soldAmount;
+        row.soldNbv += nbv(soldAmount, p.nbvPercent);
       }
     }
     return Array.from(acc.values()).sort((a, b) => b.planAmount - a.planAmount);

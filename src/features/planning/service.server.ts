@@ -17,7 +17,7 @@ import {
   notifyMany,
   getSuperAdminIds,
 } from "@/features/notifications/service.server";
-import { assembleWorkbookLine, type PlanningMode, type WorkbookLine } from "@/lib/calc";
+import { assembleWorkbookLine, amount, type PlanningMode, type WorkbookLine } from "@/lib/calc";
 
 const EDITABLE: PlanStatus[] = [PlanStatus.DRAFT, PlanStatus.RETURNED, PlanStatus.REJECTED];
 const PENDING: PlanStatus[] = [PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN];
@@ -75,16 +75,21 @@ async function finalizeApproval(
   tx: Tx,
   plan: { id: string; seasonId: string; officerId: string; planningType: string },
 ) {
-  const lines = await tx.planLine.findMany({
-    where: { planDealer: { seasonPlanId: plan.id } },
-    include: { product: { select: { rate: true, nbvPercent: true } } },
-  });
-  for (const l of lines) {
-    await tx.planLine.update({
-      where: { id: l.id },
-      data: { rateSnapshot: l.product.rate, nbvPercentSnapshot: l.product.nbvPercent },
-    });
-  }
+  // Snapshot Rate/NBV% onto every line of this plan. Business rule is unchanged — each line's
+  // rateSnapshot/nbvPercentSnapshot become its product's current rate/nbvPercent — but instead
+  // of a findMany + one UPDATE per line (thousands of sequential round-trips that blow the
+  // transaction timeout on Neon), it's ONE set-based UPDATE that joins PlanLine → Product.
+  // Decimal columns are copied column-to-column, so values are byte-for-byte identical.
+  await tx.$executeRaw`
+    UPDATE "PlanLine" AS pl
+    SET "rateSnapshot" = p."rate",
+        "nbvPercentSnapshot" = p."nbvPercent"
+    FROM "Product" AS p
+    WHERE pl."productId" = p."id"
+      AND pl."planDealerId" IN (
+        SELECT pd."id" FROM "PlanDealer" AS pd WHERE pd."seasonPlanId" = ${plan.id}
+      )
+  `;
   await tx.seasonPlan.updateMany({
     where: {
       seasonId: plan.seasonId,
@@ -321,7 +326,7 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
                   },
                 },
                 packs: true,
-                monthlyEntries: { select: { planQty: true, saleQty: true } },
+                monthlyEntries: { select: { planQty: true, saleQty: true, saleValue: true } },
               },
             },
           },
@@ -410,6 +415,12 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
               (s: number, e: { saleQty: number }) => s + e.saleQty,
               0,
             ),
+            // Actual SALES VALUE from the uploaded Tally sheet (MonthlyEntry.saleValue). Falls
+            // back to qty × rate only where no upload value exists (legacy/backward-compat).
+            actualAmount: l.monthlyEntries.reduce((s: number, e: { saleQty: number; saleValue: unknown }) => {
+              const v = num(e.saleValue ?? 0);
+              return s + (v || amount(e.saleQty, l.rateSnapshot !== null ? num(l.rateSnapshot) : num(l.product.rate)));
+            }, 0),
           })),
       })),
   };

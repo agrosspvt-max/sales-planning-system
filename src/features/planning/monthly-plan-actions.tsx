@@ -21,23 +21,36 @@ import type { PlanStatus } from "./types";
  * Monthly Plan workflow actions — the monthly analogue of PlanActions, driving the SAME
  * approval lifecycle (Officer → RM → Admin) against the monthly-plan endpoints.
  */
+interface NoPlanDealer {
+  dealerId: string;
+  dealerName: string;
+  noPlanReason: string | null;
+}
+
 export function MonthlyPlanActions({
   monthlyPlanId,
   status,
   officerId,
   role,
   userId,
+  remainingCount = 0,
+  totalDealers = 0,
+  noPlanDealers = [],
 }: {
   monthlyPlanId: string;
   status: PlanStatus;
   officerId: string;
   role: Role;
   userId: string;
+  remainingCount?: number;
+  totalDealers?: number;
+  noPlanDealers?: NoPlanDealer[];
 }) {
   const qc = useQueryClient();
   const [remarkKind, setRemarkKind] = useState<"return" | "reject" | null>(null);
   const [remarkText, setRemarkText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [confirmNoPlan, setConfirmNoPlan] = useState(false);
 
   const base = `/api/planning/monthly-plans/${monthlyPlanId}`;
   const isOwner = role === Role.SALES_OFFICER && officerId === userId;
@@ -67,10 +80,21 @@ export function MonthlyPlanActions({
   const editable = status === "DRAFT" || status === "RETURNED" || status === "REJECTED";
   const pending = status === "PENDING_RM" || status === "PENDING_ADMIN";
 
+  // Dealer completion gate — mirrors Seasonal: every dealer must be Completed or No Plan.
+  const canSubmit = totalDealers > 0 && remainingCount === 0;
+  const doSubmit = () => {
+    setConfirmNoPlan(false);
+    act.mutate("submit");
+  };
   if (isOwner && editable) {
     buttons.push(
-      <Button key="submit" onClick={() => act.mutate("submit")} disabled={act.isPending}>
-        Submit for approval
+      <Button
+        key="submit"
+        onClick={() => (noPlanDealers.length > 0 ? setConfirmNoPlan(true) : doSubmit())}
+        disabled={act.isPending || !canSubmit}
+        title={canSubmit ? undefined : `Account for every dealer first (${remainingCount} remaining).`}
+      >
+        Submit Monthly Plan
       </Button>,
     );
   }
@@ -98,6 +122,30 @@ export function MonthlyPlanActions({
     <div className="flex flex-wrap items-center gap-2">
       {buttons}
       {error && <span className="text-sm text-destructive">{error}</span>}
+
+      {/* Confirm before submitting when some dealers are intentionally skipped. */}
+      <Dialog open={confirmNoPlan} onOpenChange={setConfirmNoPlan}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Submit with No-Plan dealers?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            <p className="text-muted-foreground">The following dealers are marked as No Plan for this month and will be submitted as skipped:</p>
+            <ul className="list-disc pl-5">
+              {noPlanDealers.map((d) => (
+                <li key={d.dealerId}>
+                  {d.dealerName}
+                  {d.noPlanReason ? ` — ${d.noPlanReason}` : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmNoPlan(false)}>Cancel</Button>
+            <Button onClick={doSubmit} disabled={act.isPending}>Continue submit</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={remarkKind !== null} onOpenChange={(o) => !o && setRemarkKind(null)}>
         <DialogContent>

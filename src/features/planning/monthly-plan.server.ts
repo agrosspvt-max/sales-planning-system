@@ -184,7 +184,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   await assertOfficerInScope(ctx, mp.officerId);
 
   const seasonId = mp.seasonPlan.seasonId;
-  const [season, planDealers, month] = await Promise.all([
+  const [season, planDealers, month, noPlanRows] = await Promise.all([
     prisma.season.findUnique({ where: { id: seasonId }, select: { name: true, year: true, monthlyMode: true } }),
     prisma.planDealer.findMany({
       where: { seasonPlanId: mp.seasonPlanId },
@@ -200,6 +200,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
       },
     }),
     prisma.seasonMonth.findUnique({ where: { id: mp.seasonMonthId }, select: { id: true, name: true, order: true } }),
+    prisma.monthlyPlanDealer.findMany({ where: { monthlyPlanId: mp.id, noPlan: true }, select: { dealerId: true, noPlanReason: true } }),
   ]);
 
   const isOwner = ctx.userId === mp.officerId && ctx.role === Role.SALES_OFFICER;
@@ -211,17 +212,57 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
     ? [{ id: month.id, name: month.name, order: month.order, status: "OPEN", editable: canEdit }]
     : [];
 
+  const noPlanByDealer = new Map<string, string | null>(
+    (noPlanRows as { dealerId: string; noPlanReason: string | null }[]).map((r) => [r.dealerId, r.noPlanReason]),
+  );
+  const monthId = mp.seasonMonthId;
+  // Attach per-dealer completion (≥1 monthly plan value entered — the SAME "has a value" concept
+  // Seasonal Planning uses) and the stored monthly No Plan state.
+  const dealers = buildMonthlyDealers(planDealers, months, monthlyMode).map((d) => ({
+    ...d,
+    noPlan: noPlanByDealer.has(d.dealerId),
+    noPlanReason: noPlanByDealer.get(d.dealerId) ?? null,
+    completed: d.products.some((p) => (p.monthly[monthId]?.plan ?? 0) > 0),
+  }));
+
   return {
     monthlyPlanId: mp.id,
     planId: mp.seasonPlanId,
+    officerId: mp.officerId,
     status: mp.status,
     canEdit,
     seasonName: season ? `${season.name} ${season.year}` : "",
     monthName: month?.name ?? "",
     monthlyMode,
     months,
-    dealers: buildMonthlyDealers(planDealers, months, monthlyMode),
+    dealers,
   };
+}
+
+/**
+ * Mark a dealer "No Plan" for THIS month (or clear it) — the monthly analogue of
+ * setDealerNoPlan. Owner officer (editable plan) or Super Admin only. Completed/Remaining stay
+ * derived from stored monthly plan values; only No Plan is persisted (per month, not seasonal).
+ */
+export async function setMonthlyDealerNoPlan(
+  ctx: AuthContext,
+  monthlyPlanId: string,
+  dealerId: string,
+  noPlan: boolean,
+  reason?: string,
+): Promise<{ noPlan: boolean; noPlanReason: string | null }> {
+  const mp = await loadMonthlyPlanOr404(monthlyPlanId);
+  const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
+  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
+
+  const noPlanReason = noPlan ? reason?.trim() || null : null;
+  await prisma.monthlyPlanDealer.upsert({
+    where: { monthlyPlanId_dealerId: { monthlyPlanId, dealerId } },
+    create: { monthlyPlanId, dealerId, noPlan, noPlanReason },
+    update: { noPlan, noPlanReason },
+  });
+  return { noPlan, noPlanReason };
 }
 
 /**
@@ -294,25 +335,26 @@ export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: st
       }
       const where = { planLineId_seasonMonthId: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId } };
       const existing = (await tx.monthlyEntry.findUnique({ where })) as
-        | { planQty: number; saleQty: number; planValue: unknown; saleValue: unknown }
+        | { planQty: number; planValue: unknown }
         | null;
       const mode = (e.mode ?? "PACK_SIZE") as PlanningMode;
 
+      // Monthly planning writes ONLY the plan fields. Actual sales (saleQty / saleValue) are
+      // owned exclusively by the Sales Upload and must never be modified here — so an upsert on
+      // an existing entry preserves whatever actuals the upload wrote.
       if (isQuantityMode(mode)) {
         const planQty = e.planQty ?? existing?.planQty ?? 0;
-        const saleQty = e.saleQty ?? existing?.saleQty ?? 0;
         await tx.monthlyEntry.upsert({
           where,
-          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, planQty, saleQty },
-          update: { planQty, saleQty, inputMode: null, planValue: null, saleValue: null },
+          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, planQty },
+          update: { planQty },
         });
       } else {
         const planValue = e.planValue ?? num(existing?.planValue ?? 0);
-        const saleValue = e.saleValue ?? num(existing?.saleValue ?? 0);
         await tx.monthlyEntry.upsert({
           where,
-          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, planQty: 0, saleQty: 0, inputMode: mode, planValue, saleValue },
-          update: { planQty: 0, saleQty: 0, inputMode: mode, planValue, saleValue },
+          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, inputMode: mode, planValue },
+          update: { inputMode: mode, planValue },
         });
       }
     }
@@ -332,6 +374,38 @@ export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
   if (!EDITABLE.includes(mp.status)) {
     throw new ApiError(409, "This monthly plan cannot be submitted in its current state");
   }
+
+  // Dealer completion gate — mirrors the Seasonal submit gate: every dealer in the monthly view
+  // must be Completed (≥1 monthly plan value entered) or explicitly marked "No Plan".
+  const [gatePlanDealers, gateNoPlan, gateSeason] = await Promise.all([
+    prisma.planDealer.findMany({
+      where: { seasonPlanId: mp.seasonPlanId },
+      include: {
+        dealer: { select: { name: true } },
+        lines: {
+          include: {
+            product: { select: { name: true } },
+            packs: { select: { quantity: true } },
+            monthlyEntries: { where: { seasonMonthId: mp.seasonMonthId } },
+          },
+        },
+      },
+    }),
+    prisma.monthlyPlanDealer.findMany({ where: { monthlyPlanId: mp.id, noPlan: true }, select: { dealerId: true } }),
+    prisma.season.findUnique({ where: { id: mp.seasonPlan.seasonId }, select: { monthlyMode: true } }),
+  ]);
+  const gateNoPlanSet = new Set((gateNoPlan as { dealerId: string }[]).map((r) => r.dealerId));
+  const gateBuilt = buildMonthlyDealers(gatePlanDealers, [{ id: mp.seasonMonthId }], (gateSeason?.monthlyMode ?? "PACK_SIZE") as PlanningMode);
+  const remaining = gateBuilt.filter(
+    (d) => !gateNoPlanSet.has(d.dealerId) && !d.products.some((p) => (p.monthly[mp.seasonMonthId]?.plan ?? 0) > 0),
+  );
+  if (remaining.length > 0) {
+    throw new ApiError(
+      422,
+      `Every dealer must be planned or marked "No Plan". Not yet accounted for: ${remaining.map((r) => r.dealerName).join(", ")}`,
+    );
+  }
+
   const managerId = await getCurrentManagerId(mp.officerId);
   const nextStatus = managerId ? PlanStatus.PENDING_RM : PlanStatus.PENDING_ADMIN;
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: nextStatus, submittedAt: new Date() } });

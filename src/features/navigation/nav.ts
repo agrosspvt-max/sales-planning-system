@@ -23,6 +23,7 @@ import {
   FilePlus2,
   FileInput,
   Rocket,
+  Upload,
   type LucideIcon,
 } from "lucide-react";
 
@@ -55,6 +56,8 @@ export const NAV_ITEMS: NavItem[] = [
     roles: ADMIN_ONLY,
     group: "Planning",
   },
+  { label: "Sales Upload", href: "/planning/sales-upload", icon: Upload, roles: ADMIN_ONLY, group: "Planning" },
+  { label: "Dealer Alias", href: "/planning/dealer-alias", icon: Link2, roles: ADMIN_ONLY, group: "Planning" },
   {
     label: "Approvals",
     href: "/planning/approvals",

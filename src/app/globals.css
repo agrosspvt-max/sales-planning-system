@@ -170,7 +170,8 @@
   .sticky-first-col td:first-child {
     min-width: 0;
     max-width: 8.5rem; /* ~136px — enough for the name; long names wrap to a 2nd line */
-    white-space: normal;
-    overflow-wrap: anywhere;
+    white-space: normal;      /* allow wrapping */
+    word-break: normal;       /* wrap at word boundaries only — never letter-by-letter */
+    overflow-wrap: break-word; /* only a genuinely too-long single word breaks, as a last resort */
   }
 }

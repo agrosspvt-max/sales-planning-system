@@ -109,3 +109,51 @@
     @apply bg-background text-foreground;
   }
 }
+
+/*
+ * Sticky ("frozen") first column for horizontally-scrollable tables. Opt-in via <Table stickyFirstColumn>.
+ * Everything lives here in the shared component layer — screens only flip the prop, never write CSS.
+ *
+ * The frozen Product / Dealer cell:
+ *   - sticks to the left while the rest of the row scrolls horizontally (position: sticky; left: 0),
+ *   - layers above the scrolling cells (z-index) with a hairline right divider (box-shadow) that never
+ *     flickers while scrolling,
+ *   - carries an OPAQUE copy of its OWN row's colour, so scrolling cells never bleed through AND the
+ *     column is never visually disconnected from its row. Default, hover, and the highlight rows
+ *     (totals = muted, over-plan = warning) are each reproduced as an opaque composite (color-mix over
+ *     the surface), so the frozen cell matches whatever the row shows — in light and dark mode.
+ *   - only the FIRST cell is themed here; the rest of the row keeps its existing classes, so inputs,
+ *     borders, hover, selection and highlighting everywhere else are completely untouched.
+ *
+ * z-index layering (header-corner 3 > frozen body cell 2 > everything else) is future-proof for a
+ * sticky header as well, so both can be enabled together without the corner cell dropping behind.
+ */
+@layer components {
+  .sticky-first-col th:first-child,
+  .sticky-first-col td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background-color: hsl(var(--background));
+    box-shadow: inset -1px 0 0 0 hsl(var(--border));
+  }
+  .sticky-first-col thead th:first-child {
+    z-index: 3;
+  }
+
+  /* Hover row → frozen cell matches the hover tint (muted/50 composited over the surface). */
+  .sticky-first-col tbody tr:hover > td:first-child {
+    background-color: color-mix(in srgb, hsl(var(--muted)) 50%, hsl(var(--background)));
+  }
+
+  /* Total / sub-header rows (bg-muted/40) — frozen cell matches the same tint, opaquely. */
+  .sticky-first-col tr.bg-muted\/40 > th:first-child,
+  .sticky-first-col tr.bg-muted\/40 > td:first-child {
+    background-color: color-mix(in srgb, hsl(var(--muted)) 40%, hsl(var(--background)));
+  }
+
+  /* Over-planning / warning rows (bg-warning/10) — frozen cell picks up the warning tint too. */
+  .sticky-first-col tr.bg-warning\/10 > td:first-child {
+    background-color: color-mix(in srgb, hsl(var(--warning)) 10%, hsl(var(--background)));
+  }
+}

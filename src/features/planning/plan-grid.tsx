@@ -192,7 +192,7 @@ export function PlanGrid() {
         </div>
       ) : !dealer ? null : (
         <div className="overflow-auto rounded-lg border bg-background">
-          <Table>
+          <Table stickyFirstColumn>
             <TableHeader>
               <TableRow>
                 <TableHead className="min-w-[160px]">Product</TableHead>

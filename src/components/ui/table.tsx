@@ -1,13 +1,25 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableElement>>(
-  ({ className, ...props }, ref) => (
-    <div className="relative w-full overflow-auto">
-      <table ref={ref} className={cn("w-full caption-bottom text-sm", className)} {...props} />
-    </div>
-  ),
-);
+const Table = React.forwardRef<
+  HTMLTableElement,
+  React.HTMLAttributes<HTMLTableElement> & {
+    /**
+     * Freeze the first column (Product / Dealer) so it stays visible while the rest of the table
+     * scrolls horizontally. Shared behaviour — see `.sticky-first-col` in globals.css. Every planning
+     * grid opts in with this one prop; no table markup is duplicated.
+     */
+    stickyFirstColumn?: boolean;
+  }
+>(({ className, stickyFirstColumn, ...props }, ref) => (
+  <div className="relative w-full overflow-auto">
+    <table
+      ref={ref}
+      className={cn("w-full caption-bottom text-sm", stickyFirstColumn && "sticky-first-col", className)}
+      {...props}
+    />
+  </div>
+));
 Table.displayName = "Table";
 
 const TableHeader = React.forwardRef<

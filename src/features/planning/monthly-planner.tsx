@@ -188,9 +188,10 @@ export function MonthlyPlanner() {
         </div>
       )}
 
-      {/* Horizontal scroll on small screens so the wide product grid never overflows the page (req #4). */}
+      {/* Horizontal scroll on small screens so the wide product grid never overflows the page (req #4).
+          The Product column is frozen (stickyFirstColumn) so it stays visible while scrolling sideways. */}
       <div className="overflow-x-auto rounded-lg border bg-background">
-        <Table>
+        <Table stickyFirstColumn>
           <TableHeader>
             <TableRow>
               <TableHead className="min-w-[150px]">Product</TableHead>

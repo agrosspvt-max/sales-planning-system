@@ -182,7 +182,7 @@ export function SeasonalMonthlyView({
         <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">{EMPTY_MSG}</div>
       ) : (
         <div className="overflow-auto rounded-lg border bg-background">
-          <Table>
+          <Table stickyFirstColumn>
             <TableHeader>
               <TableRow>
                 <TableHead className="min-w-[160px]">{label}</TableHead>

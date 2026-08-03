@@ -163,7 +163,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
         </div>
       )}
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table stickyFirstColumn>
           <TableHeader>
             <TableRow>
               <TableHead className="min-w-[160px]">Dealer</TableHead>
@@ -294,7 +294,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
         </div>
       )}
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table stickyFirstColumn>
           <TableHeader>
             <TableRow>
               <TableHead className="min-w-[160px]">Dealer</TableHead>

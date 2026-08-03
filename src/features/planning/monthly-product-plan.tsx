@@ -69,7 +69,7 @@ export function MonthlyProductPlan() {
     <div className="space-y-3">
       <MonthFilter months={data.months} state={filter} onChange={setFilter} />
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table stickyFirstColumn>
           <TableHeader>
             <TableRow>
               <TableHead>Product</TableHead>

@@ -5,9 +5,11 @@ import { useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { api } from "@/lib/api-client";
 import { cn, formatDate } from "@/lib/utils";
+import { Save, Plus } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
-import { MonthlyEditProvider } from "./monthly-edit-context";
+import { MonthlyEditProvider, useMonthlyEdit } from "./monthly-edit-context";
 import { MonthlyPlanner } from "./monthly-planner";
 import { MonthlyProductPlan } from "./monthly-product-plan";
 import { MonthlyDealerSummary } from "./monthly-dealer-summary";
@@ -61,6 +63,21 @@ export function MonthlyPlanWorkspace({
     { key: "history", label: "History" },
   ];
 
+  // Approval/submit props shared by the desktop actions row and the mobile sticky bar — one source
+  // of truth, so no business logic is duplicated between the two layouts.
+  const actionProps = {
+    monthlyPlanId,
+    status: data.status,
+    officerId: data.officerId,
+    role,
+    userId,
+    remainingCount: data.dealers.filter((d) => !d.noPlan && !d.completed).length,
+    totalDealers: data.dealers.length,
+    noPlanDealers: data.dealers
+      .filter((d) => d.noPlan)
+      .map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason ?? null })),
+  };
+
   return (
     <div className="space-y-4">
       <PageHeader
@@ -76,16 +93,10 @@ export function MonthlyPlanWorkspace({
         actions={<StatusBadge status={data.status} />}
       />
 
-      <MonthlyPlanActions
-        monthlyPlanId={monthlyPlanId}
-        status={data.status}
-        officerId={data.officerId}
-        role={role}
-        userId={userId}
-        remainingCount={data.dealers.filter((d) => !d.noPlan && !d.completed).length}
-        totalDealers={data.dealers.length}
-        noPlanDealers={data.dealers.filter((d) => d.noPlan).map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason ?? null }))}
-      />
+      {/* Desktop keeps the inline actions row; mobile uses the sticky bottom bar below (req #2). */}
+      <div className="hidden sm:block">
+        <MonthlyPlanActions {...actionProps} />
+      </div>
 
       <div className="flex gap-1 border-b">
         {tabs.map((t) => (
@@ -111,11 +122,45 @@ export function MonthlyPlanWorkspace({
       >
         <div className={tab === "dealer" ? "" : "hidden"}>
           <MonthlyPlanner />
+          {/* Mobile-only sticky action bar (req #2 + #5): Save / Submit / Add Product stay reachable
+              while scrolling the long planner, reusing the exact submit/approval logic. */}
+          <MonthlyMobileActionBar actionProps={actionProps} />
         </div>
         {tab === "product" && <MonthlyProductPlan />}
         {tab === "dealer-summary" && <MonthlyDealerSummary />}
       </MonthlyEditProvider>
       {tab === "history" && <MonthlyPlanTimeline monthlyPlanId={monthlyPlanId} />}
+    </div>
+  );
+}
+
+/**
+ * Mobile-only sticky action bar. Reuses the shared monthly-edit context for Save (flush) and
+ * Add Product (opens the Additional Products section + auto-scroll), and the exact same
+ * MonthlyPlanActions component for Submit/approval — no duplicated business logic. Only rendered
+ * when the plan is editable (autosave already persists; this keeps Save/Submit/Add reachable per
+ * requirement #5 without scrolling to the bottom).
+ */
+function MonthlyMobileActionBar({
+  actionProps,
+}: {
+  actionProps: React.ComponentProps<typeof MonthlyPlanActions>;
+}) {
+  const { data, saving, flush, setAdditionalOpen } = useMonthlyEdit();
+  if (!data.canEdit) return null;
+  return (
+    <div className="sticky bottom-0 z-30 -mx-4 mt-4 flex items-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur sm:hidden">
+      <span className="text-xs text-muted-foreground">{saving ? "Saving…" : "Saved"}</span>
+      <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}>
+        <Save className="h-4 w-4" /> Save
+      </Button>
+      <Button size="sm" variant="outline" onClick={() => setAdditionalOpen(true)}>
+        <Plus className="h-4 w-4" /> Add Product
+      </Button>
+      {/* Submit lives here unchanged — the same completion-gated Submit + No-Plan confirm. */}
+      <div className="ml-auto">
+        <MonthlyPlanActions {...actionProps} />
+      </div>
     </div>
   );
 }

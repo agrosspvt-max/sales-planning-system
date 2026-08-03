@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { isQuantityMode, type PlanningMode } from "@/lib/calc";
@@ -34,6 +34,10 @@ export interface MonthlyEditContextValue {
   monthEditable: (monthId: string) => boolean;
   setCell: (planLineId: string, monthId: string, field: "plan" | "sale", n: number) => void;
   flush: () => Promise<void>;
+  /** Shared open-state for the "Additional Products" section, so a mobile FAB / action bar can
+   *  open it and auto-scroll to it without the user hunting at the bottom of the page. */
+  additionalOpen: boolean;
+  setAdditionalOpen: (open: boolean) => void;
 }
 
 const Ctx = createContext<MonthlyEditContextValue | null>(null);
@@ -116,9 +120,11 @@ export function MonthlyEditProvider({
 
   const cellFor = useCallback((planLineId: string, monthId: string) => values[cellKey(planLineId, monthId)] ?? { plan: 0, sale: 0 }, [values]);
 
+  const [additionalOpen, setAdditionalOpen] = useState(false);
+
   const value = useMemo<MonthlyEditContextValue>(
-    () => ({ planId, monthlyPlanId, data, monthlyMode: data.monthlyMode, qtyMode, values, saving, cellFor, monthEditable, setCell, flush }),
-    [planId, monthlyPlanId, data, qtyMode, values, saving, cellFor, monthEditable, setCell, flush],
+    () => ({ planId, monthlyPlanId, data, monthlyMode: data.monthlyMode, qtyMode, values, saving, cellFor, monthEditable, setCell, flush, additionalOpen, setAdditionalOpen }),
+    [planId, monthlyPlanId, data, qtyMode, values, saving, cellFor, monthEditable, setCell, flush, additionalOpen],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

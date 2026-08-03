@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Save, Ban } from "lucide-react";
+import { AlertTriangle, Save, Ban, Plus } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
 import { amount, nbv, PLANNING_MODE_LABELS } from "@/lib/calc";
@@ -37,7 +37,7 @@ const OPTION_COLOR: Record<DealerPlanningStatus, string | undefined> = {
  * and Achievement %).
  */
 export function MonthlyPlanner() {
-  const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush } = useMonthlyEdit();
+  const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush, setAdditionalOpen } = useMonthlyEdit();
   const qc = useQueryClient();
 
   // First-class Monthly Plan shows the Seasonal-style dealer progress (tick / colour / No Plan).
@@ -188,7 +188,8 @@ export function MonthlyPlanner() {
         </div>
       )}
 
-      <div className="rounded-lg border bg-background">
+      {/* Horizontal scroll on small screens so the wide product grid never overflows the page (req #4). */}
+      <div className="overflow-x-auto rounded-lg border bg-background">
         <Table>
           <TableHeader>
             <TableRow>
@@ -280,6 +281,19 @@ export function MonthlyPlanner() {
             void flush().then(() => noPlanMut.mutate({ noPlan: true, reason }));
           }}
         />
+      )}
+
+      {/* Mobile-only Floating Action Button (req #1): always visible while scrolling, opens the
+          Additional Products selector directly (context open-state + auto-scroll) without hunting
+          at the bottom of the page. Desktop keeps the inline section only. */}
+      {isFirstClass && data.canEdit && monthlyPlanId && dealer && (
+        <Button
+          onClick={() => setAdditionalOpen(true)}
+          className="fixed bottom-20 right-4 z-40 rounded-full shadow-lg sm:hidden"
+          size="sm"
+        >
+          <Plus className="h-4 w-4" /> Add Product
+        </Button>
       )}
     </div>
   );

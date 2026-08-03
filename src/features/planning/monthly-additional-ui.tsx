@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ChevronDown, ChevronRight, UserPlus, Pencil } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { DealerFormDialog, type DealerFields } from "./dealer-form-dialog";
+import { useMonthlyEdit } from "./monthly-edit-context";
 
 interface Candidate { productId: string; productName: string; rate: number; nbvPercent: number }
 
@@ -51,7 +52,14 @@ export function EditDealerButton({ monthlyPlanId, dealerId, initial }: { monthly
  */
 export function AdditionalProductsSection({ monthlyPlanId, dealerId, canEdit }: { monthlyPlanId: string; dealerId: string; canEdit: boolean }) {
   const qc = useQueryClient();
-  const [open, setOpen] = useState(false);
+  // Open-state is shared via the Monthly edit context so the mobile FAB / sticky bar can open this
+  // section (and trigger the auto-scroll below) without the user hunting at the bottom of the page.
+  const { additionalOpen: open, setAdditionalOpen: setOpen } = useMonthlyEdit();
+  const sectionRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll to the section whenever it opens (requirement #3), on desktop and mobile alike.
+  useEffect(() => {
+    if (open) sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [open]);
   const base = `/api/planning/monthly-plans/${monthlyPlanId}/dealers/${dealerId}/additional-products`;
   const { data, isFetching } = useQuery<Candidate[]>({
     queryKey: ["additional-products", monthlyPlanId, dealerId],
@@ -68,8 +76,8 @@ export function AdditionalProductsSection({ monthlyPlanId, dealerId, canEdit }: 
 
   if (!dealerId) return null;
   return (
-    <div className="rounded-lg border bg-background">
-      <button className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium" onClick={() => setOpen((o) => !o)}>
+    <div ref={sectionRef} className="scroll-mt-4 rounded-lg border bg-background">
+      <button className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium" onClick={() => setOpen(!open)}>
         {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         Show Additional Products
         <span className="text-xs font-normal text-muted-foreground">products not in the approved Seasonal Plan</span>

@@ -118,7 +118,8 @@ export function ProductPlan() {
               <TableRow key={r.productId}>
                 <TableCell className="font-medium">
                   {r.name}
-                  {r.technicalName && <div className="text-xs text-muted-foreground">{r.technicalName}</div>}
+                  {/* Technical/scientific name — hidden on phones to keep the frozen column narrow. */}
+                  {r.technicalName && <div className="hidden text-xs text-muted-foreground sm:block">{r.technicalName}</div>}
                 </TableCell>
                 {packMode && packColumns.map((p) => <TableCell key={p.id} className="text-center tabular-nums">{qty(r.packSums[p.id] ?? 0)}</TableCell>)}
                 <TableCell className="text-right tabular-nums">{qty(r.planQty)}</TableCell>

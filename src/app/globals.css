@@ -157,3 +157,20 @@
     background-color: color-mix(in srgb, hsl(var(--warning)) 10%, hsl(var(--background)));
   }
 }
+
+/*
+ * Mobile only (below the `sm` 640px breakpoint): the frozen column just needs room for the product /
+ * dealer NAME — the technical/scientific subtitle is hidden on phones (`hidden sm:block` in the
+ * cells). So drop the desktop min-width floor, cap the width, and let long names wrap onto extra
+ * lines instead of widening the column or truncating. Rules are unlayered so they override the
+ * per-table `min-w-[…]` utilities on mobile; desktop/tablet keep their exact current width.
+ */
+@media (max-width: 639.98px) {
+  .sticky-first-col th:first-child,
+  .sticky-first-col td:first-child {
+    min-width: 0;
+    max-width: 8.5rem; /* ~136px — enough for the name; long names wrap to a 2nd line */
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}

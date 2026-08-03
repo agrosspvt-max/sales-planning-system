@@ -226,7 +226,8 @@ export function PlanGrid() {
                   <TableRow key={l.productId}>
                     <TableCell className="font-medium">
                       {l.productName}
-                      <div className="text-xs text-muted-foreground">{l.technicalName}</div>
+                      {/* Technical/scientific name — hidden on phones to keep the frozen column narrow. */}
+                      <div className="hidden text-xs text-muted-foreground sm:block">{l.technicalName}</div>
                     </TableCell>
 
                     {packMode &&

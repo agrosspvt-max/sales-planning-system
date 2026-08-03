@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
+import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -61,7 +62,16 @@ export function DealerCoveragePanel() {
 
   return (
     <div className="space-y-2">
-      <h3 className="text-sm font-semibold">Dealer coverage</h3>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">Dealer coverage</h3>
+        {/* Export the "Without Alias" list (Dealer Name + current Sales Officer) as .xlsx. */}
+        {filter === "without" && (
+          <Button asChild variant="outline" size="sm">
+            {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- API file-download endpoint, not a page route */}
+            <a href="/api/dealer-alias/export-missing"><Download className="h-4 w-4" /> Export Missing Alias List</a>
+          </Button>
+        )}
+      </div>
       <div className="flex flex-wrap gap-1 text-sm">
         {TABS.map((t) => (
           <button

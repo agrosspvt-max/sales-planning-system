@@ -188,6 +188,44 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
   return { created: creates.length, updated: updates.length, unmatchedSystemDealers: unmatched, duplicateRows, totalRows: parsed.length };
 }
 
+/**
+ * Export the "Without Alias" list as an .xlsx: two columns [Dealer Name, Sales Officer]. Uses the
+ * SAME dealer set as the "Without Alias" filter (active dealers with no alias — inactive/deleted/
+ * rejected are isActive=false and already excluded), so the row count matches the filter badge.
+ * The Sales Officer is the CURRENT assigned officer (DealerAssignment.effectiveTo = null — the one
+ * assignment source of truth used everywhere), or "Unassigned". Ownership is never inferred from plans.
+ */
+export async function exportMissingAliases(ctx: AuthContext): Promise<{ buffer: Buffer; filename: string }> {
+  assertAdmin(ctx);
+  const [dealers, aliases, assignments] = await Promise.all([
+    prisma.dealer.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+    prisma.dealerAlias.findMany({ select: { systemDealerId: true } }),
+    prisma.dealerAssignment.findMany({ where: { effectiveTo: null }, select: { dealerId: true, officer: { select: { name: true } } } }),
+  ]);
+  const withAlias = new Set((aliases as { systemDealerId: string }[]).map((a) => a.systemDealerId));
+  const officerByDealer = new Map<string, string>(
+    (assignments as { dealerId: string; officer: { name: string } }[]).map((a) => [a.dealerId, a.officer.name]),
+  );
+
+  const missing = (dealers as { id: string; name: string }[]).filter((d) => !withAlias.has(d.id));
+  const rows: (string | number)[][] = [
+    ["Dealer Name", "Sales Officer"],
+    ...missing.map((d) => [d.name, officerByDealer.get(d.id) ?? "Unassigned"]),
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  // Bold header row (applied by style-capable readers; ignored otherwise).
+  for (const addr of ["A1", "B1"]) {
+    const cell = ws[addr] as { s?: unknown } | undefined;
+    if (cell) cell.s = { font: { bold: true } };
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Missing Alias");
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  const date = new Date().toISOString().slice(0, 10);
+  return { buffer, filename: `Missing_Dealer_Alias_${date}.xlsx` };
+}
+
 /** Build the sample alias workbook (System Dealer | Tally Dealer) as an .xlsx buffer. */
 export function buildAliasSampleWorkbook(): Buffer {
   const data = [

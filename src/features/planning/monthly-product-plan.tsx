@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { formatCurrency } from "@/lib/utils";
 import { figuresForMode } from "@/lib/calc";
+import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -23,14 +24,15 @@ export function MonthlyProductPlan() {
   const monthIds = useMemo(() => resolveFilteredMonths(data.months, filter), [data.months, filter]);
 
   const rows = useMemo(() => {
-    const byProduct = new Map<string, { name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number }>();
+    const byProduct = new Map<string, { name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number; additional: boolean }>();
     for (const d of data.dealers) {
       for (const p of d.products) {
         let r = byProduct.get(p.productId);
         if (!r) {
-          r = { name: p.productName, rate: p.rate, nbvPercent: p.nbvPercent, planInput: 0, saleInput: 0 };
+          r = { name: p.productName, rate: p.rate, nbvPercent: p.nbvPercent, planInput: 0, saleInput: 0, additional: false };
           byProduct.set(p.productId, r);
         }
+        if (p.isAdditional) r.additional = true;
         for (const mId of monthIds) {
           const c = cellFor(p.planLineId, mId);
           r.planInput += c.plan;
@@ -44,6 +46,7 @@ export function MonthlyProductPlan() {
       return {
         productId,
         name: r.name,
+        additional: r.additional,
         planQty: plan.totalQty ?? 0,
         planAmount: plan.amount ?? 0,
         planNbv: plan.nbv ?? 0,
@@ -84,7 +87,10 @@ export function MonthlyProductPlan() {
             ) : (
               rows.map((r) => (
                 <TableRow key={r.productId}>
-                  <TableCell className="font-medium">{r.name}</TableCell>
+                  <TableCell className="font-medium">
+                    {r.name}
+                    {r.additional && <Badge variant="secondary" className="ml-2 text-[10px]">ADDITIONAL</Badge>}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{qtyFmt(r.planQty)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.planNbv)}</TableCell>

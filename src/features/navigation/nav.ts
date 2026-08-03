@@ -65,6 +65,7 @@ export const NAV_ITEMS: NavItem[] = [
     roles: [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER],
     group: "Planning",
   },
+  { label: "My Account", href: "/account", icon: Users, roles: ALL_ROLES, group: "Insights" },
   { label: "Reports", href: "/reports", icon: BarChart3, roles: ALL_ROLES, group: "Insights" },
   { label: "Announcements", href: "/announcements", icon: Megaphone, roles: ALL_ROLES, group: "Insights" },
   {

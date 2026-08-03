@@ -217,6 +217,87 @@ Recovery Planning reuses the whole planning architecture; it is not a new one. R
   Outstanding/Recovery trend, Top Overdue, Officer Comparison charts). All the data it needs —
   snapshots, aggregates, per-week plans, per-dealer deltas — is already stored.
 
+## 2f. Monthly Planning — Additional Products & Create Dealer
+
+Officers can plan beyond the approved Seasonal Plan without ever changing it, reusing the
+existing Monthly lifecycle/approval/autosave/progress:
+
+- **Additional Products.** An additional product is a real **`PlanLine` with `isAdditional=true`
+  and zero seasonal quantity**, so `MonthlyEntry` works unchanged, but seasonal views exclude it
+  (`getPlanDetail` filters `isAdditional=false` / `fromMonthlyPlan=false`) — approved seasonal
+  figures/structure are untouched. `buildMonthlyDealers` always includes `isAdditional` lines so
+  they appear in the monthly table (badged **ADDITIONAL PRODUCT**) and plan through the normal
+  autosave. Candidates (active products not on the dealer) come from
+  `getAdditionalProductCandidates`; `addAdditionalProduct` creates the flagged line. They flow
+  through Monthly approval / summary / product plan / reports via their entries.
+- **Create Dealer.** `createMonthlyDealer` reuses the **existing Dealer model** with lifecycle
+  metadata (`status="PENDING_APPROVAL"`, `createdFrom="MONTHLY_PLAN"`, `createdByUserId`) and adds
+  a `PlanDealer` flagged **`fromMonthlyPlan`** (its monthly home; excluded from seasonal views). A
+  new dealer starts with zero seasonal products and is built entirely from Additional Products,
+  badged **NEW DEALER**.
+- **After approval.** On FINAL approval, `approveMonthlyPlan` activates each pending
+  monthly-created dealer (`status=ACTIVE`) and permanently assigns it to the officer via the
+  existing `applyDealerAssignment` — so it then flows into future Seasonal Planning, Recovery,
+  Sales Upload matching, Reports and Dealer lists with no manual reassignment.
+- **Dealer Alias coverage.** The Dealer Alias page adds filters (All / With / Without / SO
+  Created / Pending) with counts and an inline **Add Alias**, reusing the same `DealerAlias`
+  model/matcher. (Full `/reports` fact-engine badges are the remaining follow-up; monthly
+  product/dealer views already badge additional/new.)
+
+## 2g. Dealer creation & lifecycle (unified)
+
+Dealers are created from two places into the **same `Dealer` model / lifecycle** (no parallel
+system, no schema change — `status`/`createdFrom`/`createdByUserId`/`isActive` already exist):
+
+- **Monthly Planning (Sales Officer)** — `createMonthlyDealer` → `status=PENDING_APPROVAL`,
+  `createdFrom=MONTHLY_PLAN`, `PlanDealer.fromMonthlyPlan`. Visible ONLY in that officer's monthly
+  plan until approval. Editable (same dialog, Edit mode → `updateMonthlyDealer`) while the plan is
+  DRAFT/RETURNED; read-only after submit.
+- **Admin (User Details page)** — `createDealerForOfficer` → `status=ACTIVE`, `createdFrom=ADMIN`,
+  immediate `applyDealerAssignment` + first `DealerAlias` (from the name). No approval. Reuses the
+  same service/dialog; `assignExistingDealer` is the "assign existing" shortcut.
+- **Approval** (`approveMonthlyPlan`, unchanged workflow) — on FINAL approval the pending dealer
+  becomes `ACTIVE`, gets a permanent `DealerAssignment`, and its first `DealerAlias`.
+- **Reject** (`rejectMonthlyPlan`) — the plan's monthly-created dealers become `status=REJECTED,
+  isActive=false` (terminal); no permanently-pending strays. **Return** keeps them PENDING/editable.
+
+**Matching is ACTIVE-only (single rule).** `loadDealerResolver` and `findProbableDealers` filter
+`status="ACTIVE"`, and Sales Upload's plan query filters `dealer.status="ACTIVE"` — so Pending and
+Rejected dealers never participate in the alias resolver, Sales Upload, Recovery, fuzzy matching,
+seasonal planning or reports. Seasonal views already exclude `fromMonthlyPlan`/`isAdditional`;
+`getMonthlyPlan` hides REJECTED dealers.
+
+**Duplicate protection.** Both create paths first run `findProbableDealers` (Alias → exact
+tightKey → loose → fuzzy≥0.6 over ACTIVE dealers). Matches return a **"Possible Existing Dealer"**
+step in the shared `DealerFormDialog` (Cancel / Create-anyway `force` / Admin "Assign existing")
+instead of silently duplicating.
+
+## 2h. User & Organization Management
+
+Extends the existing `User`/`Dealer`/`DealerAssignment`/auth — no parallel systems.
+
+- **Soft delete everywhere.** `User.deletedAt` and `Dealer.deletedAt` (+ `isActive`) — nothing is
+  hard-deleted, so all plans/approvals/audit/uploads keep referencing the rows. Deactivate =
+  `isActive:false`; Delete = `isActive:false + deletedAt`.
+- **Auth (reused `requireAuth`).** Every request re-verifies the DB user: exists, `!deletedAt`,
+  `isActive` — so deactivate/delete take effect immediately even for a live JWT. **Session
+  invalidation**: `User.sessionValidAfter` is bumped on password reset/change and deactivation;
+  `requireAuth` rejects any session whose JWT `iat` predates it (login also blocks deleted users).
+- **Passwords (reused bcrypt).** Admin `resetUserPassword` (no old password); self
+  `changeOwnPassword` (old + confirm) at `/account`. Both bump `sessionValidAfter`.
+- **User Groups.** `UserGroup` + `User.groupId` (one officer ↔ one group, no join table). The flat
+  Users page is replaced by `UsersManagement` — **Group View | All Users** toggle. Group View =
+  cards + create + members (add from the Unassigned pool, remove → Unassigned); All Users = server-
+  filtered list (Active/Inactive/Deleted/All) with inline Reset/Deactivate/Delete. Officer profile
+  gains the same admin toolbar + Create Dealer.
+- **Dealer management.** `editDealer` (all fields + alias), `deactivate/activate/deleteDealer`
+  (soft). Visibility is **server-side**: Monthly/Seasonal/Recovery dealer queries filter
+  `dealer.isActive:true`, and the ACTIVE-only matcher (§2g) already covers Sales Upload/Recovery/
+  fuzzy — so deactivated/deleted dealers vanish from all planning/selectors while history remains.
+- **Audit.** Reused `writeAudit` (action union extended with `DELETE`) logs password reset/change,
+  user activate/deactivate/delete, group create/edit/add/remove, and dealer activate/deactivate/
+  delete/edit.
+
 ## 3. Data-consistency model
 
 All screens read the same stored inputs (pack quantities, monthly plan/sale qty) and the

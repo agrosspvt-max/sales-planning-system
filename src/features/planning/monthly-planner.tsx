@@ -22,6 +22,7 @@ import {
 import { useMonthlyEdit } from "./monthly-edit-context";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "./dealer-completion";
 import { DealerPlanningStatus } from "./dealer-status";
+import { CreateDealerButton, EditDealerButton, AdditionalProductsSection } from "./monthly-additional-ui";
 
 const OPTION_COLOR: Record<DealerPlanningStatus, string | undefined> = {
   [DealerPlanningStatus.COMPLETED]: "hsl(var(--success))",
@@ -127,6 +128,27 @@ export function MonthlyPlanner() {
               Undo No Plan
             </Button>
           )}
+          {/* NEW DEALER badge for dealers created from Monthly Planning. */}
+          {isFirstClass && dealer?.isNewDealer && <Badge variant="default" className="bg-info text-info-foreground">NEW DEALER</Badge>}
+          {/* Create a dealer directly from Monthly Planning (reuses the Dealer model). */}
+          {isFirstClass && data.canEdit && monthlyPlanId && (
+            <CreateDealerButton monthlyPlanId={monthlyPlanId} onCreated={(id) => setDealerId(id)} />
+          )}
+          {/* Edit a pending dealer created here (DRAFT/RETURNED only). */}
+          {isFirstClass && data.canEdit && monthlyPlanId && dealer?.isNewDealer && (
+            <EditDealerButton
+              monthlyPlanId={monthlyPlanId}
+              dealerId={dealer.dealerId}
+              initial={{
+                name: dealer.dealerName,
+                mobile: dealer.contact?.mobile ?? undefined,
+                village: dealer.contact?.village ?? undefined,
+                tehsil: dealer.contact?.tehsil ?? undefined,
+                district: dealer.contact?.district ?? undefined,
+                address: dealer.contact?.address ?? undefined,
+              }}
+            />
+          )}
           {/* A first-class Monthly Plan is exactly ONE month — no in-page month selector. */}
           {data.months.length > 1 ? (
             <NativeSelect
@@ -201,7 +223,10 @@ export function MonthlyPlanner() {
                 const actualAmount = p.monthly[monthId]?.saleAmount ?? 0;
                 return (
                   <TableRow key={p.planLineId} className={cn(isOver && "bg-warning/10")}>
-                    <TableCell className="font-medium">{p.productName}</TableCell>
+                    <TableCell className="font-medium">
+                      {p.productName}
+                      {p.isAdditional && <Badge variant="secondary" className="ml-2 align-middle text-[10px]">ADDITIONAL PRODUCT</Badge>}
+                    </TableCell>
                     <TableCell className="text-right">{fmtUnit(p.target)}</TableCell>
                     <TableCell className="text-right">
                       {fmtUnit(totalPlanned)}
@@ -239,6 +264,11 @@ export function MonthlyPlanner() {
       <p className="text-xs text-muted-foreground">
         Over-planning is allowed. Rows where monthly plans exceed the approved season figure are highlighted; submission is never blocked.
       </p>
+
+      {/* Additional Products: plan products not in the approved Seasonal Plan (collapsed). */}
+      {isFirstClass && monthlyPlanId && dealer && (
+        <AdditionalProductsSection monthlyPlanId={monthlyPlanId} dealerId={dealer.dealerId} canEdit={data.canEdit} />
+      )}
 
       {isFirstClass && dealer && (
         <NoPlanDialog

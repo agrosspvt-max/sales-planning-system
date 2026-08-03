@@ -37,6 +37,64 @@ export async function deleteDealerAlias(ctx: AuthContext, id: string) {
   return { deleted: true };
 }
 
+export type DealerAliasFilter = "all" | "with" | "without" | "so-created" | "pending";
+
+/**
+ * Dealers annotated with their alias status for the Dealer Alias page filters, plus the counts
+ * for each tab. Reuses the existing Dealer + DealerAlias models (no new tables).
+ */
+export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasFilter = "all") {
+  assertAdmin(ctx);
+  const [dealers, aliases] = await Promise.all([
+    prisma.dealer.findMany({
+      where: { isActive: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, status: true, createdFrom: true },
+    }),
+    prisma.dealerAlias.findMany({ select: { systemDealerId: true } }),
+  ]);
+  const withAlias = new Set((aliases as { systemDealerId: string }[]).map((a) => a.systemDealerId));
+
+  const rows = (dealers as { id: string; name: string; status: string; createdFrom: string | null }[]).map((d) => ({
+    id: d.id,
+    name: d.name,
+    hasAlias: withAlias.has(d.id),
+    status: d.status,
+    soCreated: d.createdFrom === "MONTHLY_PLAN",
+  }));
+
+  const counts = {
+    all: rows.length,
+    with: rows.filter((r) => r.hasAlias).length,
+    without: rows.filter((r) => !r.hasAlias).length,
+    soCreated: rows.filter((r) => r.soCreated).length,
+    pending: rows.filter((r) => r.status === "PENDING_APPROVAL").length,
+  };
+
+  const filtered = rows.filter((r) => {
+    if (filter === "with") return r.hasAlias;
+    if (filter === "without") return !r.hasAlias;
+    if (filter === "so-created") return r.soCreated;
+    if (filter === "pending") return r.status === "PENDING_APPROVAL";
+    return true;
+  });
+  return { counts, dealers: filtered.slice(0, 500) };
+}
+
+/** Add a single alias inline (System Dealer + Tally name). Reuses the unique tallyKey guard. */
+export async function addSingleAlias(ctx: AuthContext, systemDealerId: string, tallyName: string) {
+  assertAdmin(ctx);
+  const name = tallyName.trim();
+  if (!name) throw new ApiError(422, "Tally name is required");
+  const tallyKey = tightKey(name);
+  const dealer = await prisma.dealer.findUnique({ where: { id: systemDealerId }, select: { id: true } });
+  if (!dealer) throw new ApiError(404, "Dealer not found");
+  const existing = await prisma.dealerAlias.findUnique({ where: { tallyKey }, select: { id: true } });
+  if (existing) throw new ApiError(409, "An alias for that Tally name already exists");
+  await prisma.dealerAlias.create({ data: { systemDealerId, tallyName: name, tallyKey } });
+  return { created: true };
+}
+
 export interface AliasUploadResult {
   created: number;
   updated: number;

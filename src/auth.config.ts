@@ -36,6 +36,9 @@ export const authConfig = {
         session.user.id = token.id as string;
         session.user.role = token.role as Role;
         session.user.username = token.username as string;
+        // Expose the JWT issued-at so requireAuth can invalidate sessions minted before a
+        // password change / deactivation (User.sessionValidAfter).
+        session.user.iat = token.iat as number | undefined;
       }
       return session;
     },

@@ -311,10 +311,14 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
       include: {
         season: { select: { name: true, year: true, status: true, seasonalMode: true } },
         officer: { select: { name: true } },
+        // Exclude monthly-only additions (fromMonthlyPlan) and deactivated/deleted dealers
+        // (isActive=false) so the seasonal view shows only ACTIVE, seasonal dealers.
         dealers: {
+          where: { fromMonthlyPlan: false, dealer: { isActive: true } },
           include: {
             dealer: { select: { name: true, isActive: true } },
             lines: {
+              where: { isAdditional: false },
               include: {
                 product: {
                   select: {

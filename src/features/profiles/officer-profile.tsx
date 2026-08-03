@@ -1,8 +1,15 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { UserPlus, KeyRound, UserX, UserCheck, Trash2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DealerFormDialog } from "@/features/planning/dealer-form-dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +22,63 @@ import { ApprovalSummary } from "@/components/dashboard/approval-summary";
 import { ProfileHeaderFields } from "@/components/dashboard/profile-header";
 import { QuickActions } from "@/components/dashboard/quick-actions";
 import type { OfficerProfile } from "./types";
+
+/** Admin "Create Dealer" for this Sales Officer — reuses the shared Dealer dialog (ACTIVE + assigned). */
+function AdminCreateDealer({ officerId }: { officerId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button size="sm" onClick={() => setOpen(true)}><UserPlus className="h-4 w-4" /> Create Dealer</Button>
+      <DealerFormDialog open={open} onOpenChange={setOpen} ctx={{ variant: "admin", officerId }} onDone={() => undefined} />
+    </>
+  );
+}
+
+/** Admin actions on a Sales Officer's profile: reset password, deactivate/activate, soft-delete. */
+function OfficerAdminActions({ officerId, active }: { officerId: string; active: boolean }) {
+  const qc = useQueryClient();
+  const [resetOpen, setResetOpen] = useState(false);
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const invalidate = () => { qc.invalidateQueries({ queryKey: ["officer-profile", officerId] }); qc.invalidateQueries({ queryKey: ["officers"] }); };
+
+  const resetMut = useMutation({
+    mutationFn: () => api.post(`/api/users/${officerId}/password`, { newPassword: pw }),
+    onSuccess: () => { setResetOpen(false); setPw(""); },
+    onError: (e) => setError((e as Error).message),
+  });
+  const statusMut = useMutation({ mutationFn: (a: boolean) => api.post(`/api/users/${officerId}/status`, { active: a }), onSuccess: invalidate });
+  const deleteMut = useMutation({ mutationFn: () => api.del(`/api/users/${officerId}`), onSuccess: invalidate });
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <AdminCreateDealer officerId={officerId} />
+      <Button size="sm" variant="outline" onClick={() => { setError(null); setResetOpen(true); }}><KeyRound className="h-4 w-4" /> Reset Password</Button>
+      {active ? (
+        <Button size="sm" variant="outline" onClick={() => statusMut.mutate(false)}><UserX className="h-4 w-4" /> Deactivate</Button>
+      ) : (
+        <Button size="sm" variant="outline" onClick={() => statusMut.mutate(true)}><UserCheck className="h-4 w-4" /> Activate</Button>
+      )}
+      <Button size="sm" variant="destructive" onClick={() => { if (confirm("Soft-delete this Sales Officer? All history is kept.")) deleteMut.mutate(); }}><Trash2 className="h-4 w-4" /> Delete</Button>
+
+      <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Reset password</DialogTitle></DialogHeader>
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">Sets a new password and signs the officer out of existing sessions.</p>
+            <Label>New password</Label>
+            <Input type="password" value={pw} onChange={(e) => { setPw(e.target.value); setError(null); }} placeholder="At least 6 characters" />
+            {error && <p className="text-sm text-destructive">{error}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResetOpen(false)}>Cancel</Button>
+            <Button onClick={() => resetMut.mutate()} disabled={pw.length < 6 || resetMut.isPending}>Reset</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -52,6 +116,7 @@ export function SalesOfficerProfile({ officerId }: { officerId: string }) {
             <Badge variant="secondary">{h.planningStatus}</Badge>
           </span>
         }
+        actions={h.role === "SALES_OFFICER" ? <OfficerAdminActions officerId={officerId} active={h.status === "Active"} /> : undefined}
       />
 
       <ProfileHeaderFields

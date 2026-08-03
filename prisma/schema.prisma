@@ -33,8 +33,17 @@ model User {
   phone        String?
   email        String?  @unique
   isActive     Boolean  @default(true)
+  // Soft delete: set instead of hard-deleting, so all history (plans/approvals/audit) survives.
+  deletedAt    DateTime?
+  // Sessions issued (JWT iat) before this instant are rejected by requireAuth — used to
+  // invalidate existing sessions after a password reset/change or deactivation.
+  sessionValidAfter DateTime?
+  // One Sales Officer belongs to at most one UserGroup (MP / UP / WB / CG …).
+  groupId      String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  group             UserGroup? @relation(fields: [groupId], references: [id])
 
   // A Sales Officer owns dealer assignments (as officer).
   dealerAssignments DealerAssignment[] @relation("OfficerDealers")
@@ -64,6 +73,19 @@ model User {
 
   @@index([role])
   @@index([isActive])
+  @@index([deletedAt])
+  @@index([groupId])
+}
+
+/// A group of Sales Officers (e.g. MP / UP / WB / CG). One officer belongs to one group.
+model UserGroup {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members User[]
 }
 
 model Category {
@@ -113,7 +135,21 @@ model Dealer {
   id        String   @id @default(cuid())
   name      String
   town      String?
+  // Optional contact metadata (used by the "Create Dealer" flow from Monthly Planning).
+  mobile    String?
+  village   String?
+  tehsil    String?
+  district  String?
+  address   String?
   isActive  Boolean  @default(true)
+  // Dealer lifecycle. "ACTIVE" (normal) or "PENDING_APPROVAL" (created by a Sales Officer inside
+  // Monthly Planning — usable everywhere immediately, permanently assigned only once that
+  // Monthly Plan is APPROVED). createdFrom = "MONTHLY_PLAN" for those.
+  status         String  @default("ACTIVE")
+  createdByUserId String?
+  createdFrom     String?
+  // Soft delete (never hard-deleted, so historical plans/reports keep working).
+  deletedAt      DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -123,6 +159,7 @@ model Dealer {
   recoveryPlanDealers RecoveryPlanDealer[]
 
   @@index([isActive])
+  @@index([status])
 }
 
 /// A season (e.g. Kharif 2026) with up to six ordered, named months.
@@ -360,6 +397,9 @@ model PlanDealer {
   // optional reason. "Completed" is derived (has ≥1 saved quantity); "Remaining" = neither.
   noPlan       Boolean @default(false)
   noPlanReason String?
+  // A dealer added to this plan from Monthly Planning (new dealer). Flagged so seasonal views
+  // exclude it — the approved Seasonal Plan is never modified by monthly-only additions.
+  fromMonthlyPlan Boolean @default(false)
 
   seasonPlan SeasonPlan @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
   dealer     Dealer     @relation(fields: [dealerId], references: [id])
@@ -386,6 +426,11 @@ model PlanLine {
   // "TOTAL_QUANTITY" | "AMOUNT" | "NBV": the single entered number is stored in inputValue.
   inputMode  String?
   inputValue Decimal? @db.Decimal(14, 4)
+
+  // An "Additional Product" planned in Monthly Planning that is NOT part of the approved
+  // Seasonal Plan. Created with zero seasonal quantity, so seasonal views (which filter to
+  // target > 0) never show it; monthly views/reports flag it as ADDITIONAL PRODUCT.
+  isAdditional Boolean @default(false)
 
   planDealer     PlanDealer     @relation(fields: [planDealerId], references: [id], onDelete: Cascade)
   product        Product        @relation(fields: [productId], references: [id])

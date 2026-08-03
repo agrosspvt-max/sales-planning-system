@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 
 export async function writeAudit(params: {
   userId: string;
-  action: "CREATE" | "UPDATE" | "DEACTIVATE" | "REACTIVATE";
+  action: "CREATE" | "UPDATE" | "DEACTIVATE" | "REACTIVATE" | "DELETE";
   entity: string;
   entityId?: string;
   summary?: string;

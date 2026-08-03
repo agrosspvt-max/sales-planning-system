@@ -32,10 +32,17 @@ export async function requireAuth(): Promise<AuthContext> {
   if (!session?.user?.id) throw new ApiError(401, "Not authenticated");
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },
-    select: { id: true, role: true, username: true, isActive: true },
+    select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true },
   });
-  if (!user || !user.isActive) {
+  // Every request re-verifies the DB user: must exist, not be soft-deleted, and be active — so
+  // deactivating/deleting a user takes effect immediately, even for an already-issued JWT.
+  if (!user || user.deletedAt || !user.isActive) {
     throw new ApiError(401, "Your session is no longer valid. Please sign in again.");
+  }
+  // Sessions issued before a password change / forced logout are rejected (iat in seconds).
+  const iat = session.user.iat;
+  if (user.sessionValidAfter && (typeof iat !== "number" || iat * 1000 < user.sessionValidAfter.getTime())) {
+    throw new ApiError(401, "Your session has expired. Please sign in again.");
   }
   return { userId: user.id, role: user.role, username: user.username };
 }

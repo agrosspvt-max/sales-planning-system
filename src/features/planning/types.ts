@@ -139,6 +139,8 @@ export interface MonthlyProductRow {
   planLineId: string;
   productId: string;
   productName: string;
+  /** True for an Additional Product (planned monthly, not in the approved Seasonal Plan). */
+  isAdditional?: boolean;
   rate: number;
   nbvPercent: number;
   /** Approved season target expressed in the active monthly unit (qty / amount / nbv). */
@@ -154,6 +156,10 @@ export interface MonthlyProductRow {
 export interface MonthlyDealer {
   dealerId: string;
   dealerName: string;
+  /** True for a dealer created from Monthly Planning (new dealer, pending approval). */
+  isNewDealer?: boolean;
+  /** Contact info (for editing a pending, monthly-created dealer). */
+  contact?: { mobile: string | null; village: string | null; tehsil: string | null; district: string | null; address: string | null } | null;
   products: MonthlyProductRow[];
   /** Dealer completion for this month (first-class Monthly Plan only): No Plan is stored,
    *  Completed (≥1 monthly plan value) is derived; both absent on the legacy all-months view. */

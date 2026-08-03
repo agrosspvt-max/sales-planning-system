@@ -92,6 +92,8 @@ export function buildMonthlyDealers(
     .map((pd) => ({
       dealerId: pd.dealerId,
       dealerName: pd.dealer.name,
+      // A dealer added to this plan from Monthly Planning (new dealer).
+      isNewDealer: pd.fromMonthlyPlan ?? false,
       products: pd.lines
         .map((line) => {
           const rate = line.rateSnapshot !== null ? num(line.rateSnapshot) : 0;
@@ -111,6 +113,9 @@ export function buildMonthlyDealers(
         })
         .filter(
           (x) =>
+            // Additional monthly products (zero seasonal target) are always shown here so the
+            // officer can plan them; seasonal products show only when planned or have entries.
+            (x.line.isAdditional ?? false) ||
             x.target > 0 ||
             x.line.monthlyEntries.some(
               (e) =>
@@ -124,6 +129,7 @@ export function buildMonthlyDealers(
             planLineId: line.id,
             productId: line.productId,
             productName: line.product.name,
+            isAdditional: line.isAdditional ?? false,
             rate,
             nbvPercent,
             target,
@@ -158,12 +164,14 @@ interface MonthlyLineRow {
   nbvPercentSnapshot: unknown;
   inputMode: string | null;
   inputValue: unknown;
+  isAdditional?: boolean;
   packs: { quantity: number }[];
   monthlyEntries: MonthlyEntryRow[];
 }
 interface MonthlyPlanDealerRow {
   dealerId: string;
   dealer: { name: string };
+  fromMonthlyPlan?: boolean;
   lines: MonthlyLineRow[];
 }
 

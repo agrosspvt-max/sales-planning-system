@@ -12,6 +12,8 @@ declare module "next-auth" {
       id: string;
       role: Role;
       username: string;
+      /** JWT issued-at (seconds) — compared to User.sessionValidAfter to invalidate sessions. */
+      iat?: number;
     } & DefaultSession["user"];
   }
 }

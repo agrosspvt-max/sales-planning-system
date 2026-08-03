@@ -72,6 +72,9 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
         status: PlanStatus.APPROVED,
         isActiveVersion: true,
       },
+      // Only ACTIVE dealers participate — excludes still-pending dealers created in Monthly
+      // Planning (their PlanDealer/additional lines must not receive imported actuals).
+      dealer: { status: "ACTIVE" },
     },
     select: { dealerId: true, lines: { select: { id: true, productId: true } } },
   });

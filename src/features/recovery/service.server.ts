@@ -260,6 +260,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
       seasonMonth: { select: { name: true } },
       officer: { select: { name: true } },
       dealers: {
+        // Only ACTIVE dealers appear in Recovery (deactivated/deleted are hidden; history kept).
+        where: { dealer: { isActive: true } },
         include: { dealer: { select: { name: true } }, weekPlans: true },
         orderBy: { dealer: { name: "asc" } },
       },

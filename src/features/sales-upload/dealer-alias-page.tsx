@@ -17,6 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { DealerCoveragePanel } from "./dealer-coverage-panel";
 
 interface AliasRow {
   id: string;
@@ -115,6 +116,8 @@ export function DealerAliasPage() {
           )}
         </CardContent>
       </Card>
+
+      <DealerCoveragePanel />
 
       <div className="rounded-lg border bg-background">
         <Table>

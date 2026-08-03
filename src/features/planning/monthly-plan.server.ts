@@ -415,21 +415,24 @@ export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: stri
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
 
-  const product = (await prisma.product.findUnique({ where: { id: productId }, select: { rate: true, nbvPercent: true, isActive: true } })) as
-    | { rate: unknown; nbvPercent: unknown; isActive: boolean }
-    | null;
+  // No manual annotation: Prisma infers rate/nbvPercent as Decimal from the `select`, which is
+  // exactly what rateSnapshot/nbvPercentSnapshot expect. Casting them to `unknown` was the bug.
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { rate: true, nbvPercent: true, isActive: true },
+  });
   if (!product || !product.isActive) throw new ApiError(422, "Product not found or inactive");
 
-  let pd = (await prisma.planDealer.findUnique({
+  let pd = await prisma.planDealer.findUnique({
     where: { seasonPlanId_dealerId: { seasonPlanId: mp.seasonPlanId, dealerId } },
     select: { id: true },
-  })) as { id: string } | null;
-  if (!pd) pd = (await prisma.planDealer.create({ data: { seasonPlanId: mp.seasonPlanId, dealerId }, select: { id: true } })) as { id: string };
+  });
+  if (!pd) pd = await prisma.planDealer.create({ data: { seasonPlanId: mp.seasonPlanId, dealerId }, select: { id: true } });
 
-  const existingLine = (await prisma.planLine.findUnique({
+  const existingLine = await prisma.planLine.findUnique({
     where: { planDealerId_productId: { planDealerId: pd.id, productId } },
     select: { id: true },
-  })) as { id: string } | null;
+  });
   if (existingLine) return { planLineId: existingLine.id, alreadyExisted: true };
 
   const line = await prisma.planLine.create({

@@ -7,8 +7,13 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
 import { detectOfficerFromFilename } from "@/features/import/dealers/service.server";
 import { finalizeApprovalTx } from "@/features/planning/service.server";
-import { looseKey, decorate, matchByName, type Keyed } from "@/lib/match-key";
+import { looseKey, tightKey, decorate, matchByName, type Keyed } from "@/lib/match-key";
+import { loadDealerResolver } from "@/lib/dealer-resolver";
+import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { writeAudit } from "@/lib/audit";
+
+/** How a workbook dealer resolved during Seasonal Import (Existing / New-to-onboard / Invalid). */
+export type ImportDealerStatus = "EXISTING" | "NEW" | "INVALID";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Tx = any;
@@ -78,6 +83,8 @@ export interface ParsedDealer {
   sheetName: string;
   dealerName: string;
   dealerId: string | null;
+  /** EXISTING (matched a master) · NEW (unmatched but valid — can be onboarded) · INVALID (error). */
+  status: ImportDealerStatus;
   duplicate: boolean;
   rows: ParsedRow[];
 }
@@ -88,12 +95,15 @@ export interface SeasonalParseResult {
   counts: {
     dealerCount: number;
     productRows: number;
-    missingDealers: number;
+    existingDealers: number;
+    newDealers: number;
+    invalidDealers: number;
     missingProducts: number;
     unknownPackSizes: number;
     duplicateDealers: number;
   };
-  missingDealers: string[];
+  /** Names of dealers not found in the master — candidates to onboard as NEW. */
+  newDealerNames: string[];
   missingProducts: string[];
   unknownPackSizes: string[];
   /** Dealer-like sheets that yielded no readable rows (header not detected / empty). */
@@ -165,7 +175,7 @@ export async function parseSeasonalWorkbook(
   assertAdmin(ctx);
   const wb = readWorkbook(buffer);
   const names = sheetNames(wb);
-  const masters = await loadMasters();
+  const [masters, dealerResolver] = await Promise.all([loadMasters(), loadDealerResolver()]);
 
   // Officer detection from filename.
   const officerCandidates: SeasonalParseResult["officerCandidates"] = [];
@@ -187,7 +197,8 @@ export async function parseSeasonalWorkbook(
   const missingProducts = new Set<string>();
   const unknownPackSizes = new Set<string>();
   const seenDealerIds = new Set<string>();
-  const missingDealers: string[] = [];
+  const seenNewKeys = new Set<string>();
+  const newDealerNames: string[] = [];
   const skippedSheets: string[] = [];
   const dealers: ParsedDealer[] = [];
 
@@ -200,10 +211,28 @@ export async function parseSeasonalWorkbook(
       continue;
     }
 
-    const dealerMatch = resolveMaster(masters.dealers, sheet);
-    if (!dealerMatch) missingDealers.push(sheet);
-    const duplicate = dealerMatch ? seenDealerIds.has(dealerMatch.id) : false;
-    if (dealerMatch) seenDealerIds.add(dealerMatch.id);
+    // Reusable 3-outcome dealer resolution (alias → exact → loose → fuzzy → NEW/INVALID).
+    const cls = dealerResolver.classify(sheet);
+    let dealerId: string | null = null;
+    let dealerName = sheet;
+    let status: ImportDealerStatus;
+    let duplicate = false;
+    if (cls.outcome === "EXISTING") {
+      status = "EXISTING";
+      dealerId = cls.dealer.id;
+      dealerName = cls.dealer.name;
+      duplicate = seenDealerIds.has(dealerId);
+      seenDealerIds.add(dealerId);
+    } else if (cls.outcome === "NEW") {
+      status = "NEW";
+      dealerName = cls.rawName;
+      const key = tightKey(cls.rawName);
+      duplicate = seenNewKeys.has(key); // same new dealer on two sheets → onboard once
+      seenNewKeys.add(key);
+      if (!duplicate) newDealerNames.push(cls.rawName);
+    } else {
+      status = "INVALID";
+    }
 
     const rowsOut: ParsedRow[] = parsedRows.map((pr) => {
       const productMatch = resolveMaster(masters.products, pr.productName);
@@ -220,13 +249,7 @@ export async function parseSeasonalWorkbook(
       };
     });
 
-    dealers.push({
-      sheetName: sheet,
-      dealerName: dealerMatch?.name ?? sheet,
-      dealerId: dealerMatch?.id ?? null,
-      duplicate,
-      rows: rowsOut,
-    });
+    dealers.push({ sheetName: sheet, dealerName, dealerId, status, duplicate, rows: rowsOut });
   }
 
   const productRows = dealers.reduce((s, d) => s + d.rows.length, 0);
@@ -237,12 +260,14 @@ export async function parseSeasonalWorkbook(
     counts: {
       dealerCount: dealers.length,
       productRows,
-      missingDealers: missingDealers.length,
+      existingDealers: dealers.filter((d) => d.status === "EXISTING").length,
+      newDealers: dealers.filter((d) => d.status === "NEW").length,
+      invalidDealers: dealers.filter((d) => d.status === "INVALID").length,
       missingProducts: missingProducts.size,
       unknownPackSizes: unknownPackSizes.size,
       duplicateDealers: dealers.filter((d) => d.duplicate).length,
     },
-    missingDealers,
+    newDealerNames,
     missingProducts: [...missingProducts],
     unknownPackSizes: [...unknownPackSizes],
     skippedSheets,
@@ -259,9 +284,13 @@ const commitSchema = z.object({
   mode: z.enum(["SEASONAL_ONLY", "COMPLETE"]).default("SEASONAL_ONLY"),
   // Optional: mark the imported version APPROVED/active on commit (authorised users only).
   importAsApproved: z.boolean().default(false),
+  // Onboard unmatched (NEW) dealers into the Dealer Master during import (default on).
+  autoCreateNewDealers: z.boolean().default(true),
   dealers: z.array(
     z.object({
-      dealerId: z.string().min(1),
+      // Existing dealers carry a `dealerId`; NEW dealers carry a `dealerName` with a null id.
+      dealerId: z.string().min(1).nullable().default(null),
+      dealerName: z.string().optional(),
       rows: z.array(
         z.object({
           productId: z.string().min(1),
@@ -279,6 +308,9 @@ export interface SeasonalImportResult {
   planId: string;
   dealerCount: number;
   productRows: number;
+  existingDealers: number;
+  createdDealers: number;
+  skippedDealers: number;
 }
 
 /**
@@ -304,43 +336,66 @@ export async function commitSeasonalImport(
     throw new ApiError(422, "The selected Sales Officer is missing or inactive");
   }
 
-  const dealers = payload.dealers.filter((d) => d.rows.length > 0);
-  if (dealers.length === 0)
-    throw new ApiError(422, "Nothing to import — no matched dealers with rows");
+  const withRows = payload.dealers.filter((d) => d.rows.length > 0);
+  if (withRows.length === 0)
+    throw new ApiError(422, "Nothing to import — no dealers with matched rows");
 
-  const dealerIds = [...new Set(dealers.map((d) => d.dealerId))];
-  if (dealerIds.length !== dealers.length)
+  // --- Resolve each payload dealer to a target dealerId (DUPLICATE-SAFE) ---------------------
+  // Existing dealers use their id. NEW dealers are re-matched here (alias → exact → loose → fuzzy)
+  // against the CURRENT master — if one now matches (e.g. created since the preview) it is reused,
+  // never duplicated; otherwise it is queued for creation with a client-generated id. New dealers
+  // are only created when `autoCreateNewDealers` is on; otherwise they are skipped (not imported).
+  const resolver = await loadDealerResolver();
+  const toImport: { dealerId: string; rows: (typeof withRows)[number]["rows"] }[] = [];
+  const toCreate = new Map<string, { id: string; name: string }>(); // tightKey → dealer to create
+  let skippedDealers = 0;
+
+  for (const d of withRows) {
+    if (d.dealerId) {
+      toImport.push({ dealerId: d.dealerId, rows: d.rows });
+      continue;
+    }
+    const name = (d.dealerName ?? "").trim();
+    const cls = name ? resolver.classify(name) : ({ outcome: "INVALID" } as const);
+    if (cls.outcome === "EXISTING") {
+      toImport.push({ dealerId: cls.dealer.id, rows: d.rows }); // matched at commit — reuse, don't duplicate
+    } else if (cls.outcome === "NEW" && payload.autoCreateNewDealers) {
+      const key = tightKey(cls.rawName);
+      let entry = toCreate.get(key);
+      if (!entry) {
+        entry = { id: randomUUID(), name: cls.rawName };
+        toCreate.set(key, entry);
+      }
+      toImport.push({ dealerId: entry.id, rows: d.rows });
+    } else {
+      skippedDealers += 1; // NEW with auto-create off, or INVALID — never modified/created
+    }
+  }
+
+  if (toImport.length === 0)
+    throw new ApiError(422, "Nothing to import — no importable dealers after resolution");
+
+  const importDealerIds = toImport.map((d) => d.dealerId);
+  if (new Set(importDealerIds).size !== importDealerIds.length)
     throw new ApiError(422, "Duplicate dealer in the import payload");
 
+  // Validate ONLY the existing dealers (the to-create ids don't exist yet — created in the tx).
+  const createIds = new Set([...toCreate.values()].map((c) => c.id));
+  const existingIds = importDealerIds.filter((id) => !createIds.has(id));
+  const productIds = [...new Set(toImport.flatMap((d) => d.rows.map((r) => r.productId)))];
+  const packIds = [...new Set(toImport.flatMap((d) => d.rows.flatMap((r) => r.packs.map((p) => p.packSizeId))))];
   const [dealerCount, productCount, packCount] = await Promise.all([
-    prisma.dealer.count({ where: { id: { in: dealerIds } } }),
-    prisma.product.count({
-      where: { id: { in: [...new Set(dealers.flatMap((d) => d.rows.map((r) => r.productId)))] } },
-    }),
-    prisma.packSize.count({
-      where: {
-        id: {
-          in: [
-            ...new Set(
-              dealers.flatMap((d) => d.rows.flatMap((r) => r.packs.map((p) => p.packSizeId))),
-            ),
-          ],
-        },
-      },
-    }),
+    prisma.dealer.count({ where: { id: { in: existingIds } } }),
+    prisma.product.count({ where: { id: { in: productIds } } }),
+    prisma.packSize.count({ where: { id: { in: packIds } } }),
   ]);
-  if (dealerCount !== dealerIds.length)
-    throw new ApiError(422, "One or more dealers no longer exist");
-  const productIds = [...new Set(dealers.flatMap((d) => d.rows.map((r) => r.productId)))];
-  if (productCount !== productIds.length)
-    throw new ApiError(422, "One or more products no longer exist");
-  const packIds = [
-    ...new Set(dealers.flatMap((d) => d.rows.flatMap((r) => r.packs.map((p) => p.packSizeId)))),
-  ];
-  if (packCount !== packIds.length)
-    throw new ApiError(422, "One or more pack sizes no longer exist");
+  if (dealerCount !== existingIds.length) throw new ApiError(422, "One or more dealers no longer exist");
+  if (productCount !== productIds.length) throw new ApiError(422, "One or more products no longer exist");
+  if (packCount !== packIds.length) throw new ApiError(422, "One or more pack sizes no longer exist");
 
-  const productRows = dealers.reduce((s, d) => s + d.rows.length, 0);
+  const productRows = toImport.reduce((s, d) => s + d.rows.length, 0);
+  const createdDealers = toCreate.size;
+  const effectiveFrom = new Date();
 
   // Next version for this officer/season/SEASONAL.
   const maxV = await prisma.seasonPlan.aggregate({
@@ -362,7 +417,7 @@ export async function commitSeasonalImport(
   // "dealerId|productId" → planLineId — the same key the monthly step used before.
   const lineIdByKey = new Map<string, string>();
 
-  for (const d of dealers) {
+  for (const d of toImport) {
     const planDealerId = randomUUID();
     planDealerRows.push({ id: planDealerId, seasonPlanId: planId, dealerId: d.dealerId });
     for (const r of d.rows) {
@@ -391,7 +446,7 @@ export async function commitSeasonalImport(
       select: { id: true },
     });
     if (months.length > 0) {
-      for (const d of dealers) {
+      for (const d of toImport) {
         for (const r of d.rows) {
           const lineId = lineIdByKey.get(`${d.dealerId}|${r.productId}`);
           if (!lineId) continue;
@@ -418,6 +473,16 @@ export async function commitSeasonalImport(
   try {
     await prisma.$transaction(
       async (tx: Tx) => {
+        // Onboard NEW dealers FIRST, in the SAME transaction — a normal active Dealer Master record
+        // assigned to the selected officer (reusing the shared assignment helper). If any creation
+        // fails the whole import rolls back (no partial onboarding, no orphan dealers).
+        for (const c of toCreate.values()) {
+          await tx.dealer.create({
+            data: { id: c.id, name: c.name, status: "ACTIVE", isActive: true, createdByUserId: ctx.userId, createdFrom: "SEASONAL_IMPORT" },
+          });
+          await applyDealerAssignment(tx, c.id, payload.officerId, effectiveFrom);
+        }
+
         await tx.seasonPlan.create({
           data: {
             id: planId,
@@ -464,10 +529,10 @@ export async function commitSeasonalImport(
             seasonId: payload.seasonId,
             officerId: payload.officerId,
             workbookName: payload.workbookName,
-            dealerCount: dealers.length,
+            dealerCount: toImport.length,
             productRows,
             status: ImportStatus.COMPLETED,
-            summary: JSON.stringify({ dealerCount: dealers.length, productRows, version }),
+            summary: JSON.stringify({ dealerCount: toImport.length, productRows, version, createdDealers, skippedDealers }),
           },
         });
       },
@@ -480,7 +545,7 @@ export async function commitSeasonalImport(
         seasonId: payload.seasonId,
         officerId: payload.officerId,
         workbookName: payload.workbookName,
-        dealerCount: dealers.length,
+        dealerCount: toImport.length,
         productRows,
         status: ImportStatus.FAILED,
         summary: JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
@@ -494,8 +559,15 @@ export async function commitSeasonalImport(
     action: "CREATE",
     entity: "seasonPlanImport",
     entityId: planId,
-    summary: `Imported seasonal plan for ${officer.name} — ${dealers.length} dealers, ${productRows} product rows (v${version})`,
+    summary: `Imported seasonal plan for ${officer.name} — ${toImport.length} dealers (${createdDealers} new), ${productRows} product rows (v${version})`,
   });
 
-  return { planId, dealerCount: dealers.length, productRows };
+  return {
+    planId,
+    dealerCount: toImport.length,
+    productRows,
+    existingDealers: existingIds.length,
+    createdDealers,
+    skippedDealers,
+  };
 }

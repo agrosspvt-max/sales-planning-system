@@ -33,10 +33,12 @@ interface ParsedRow {
   totalQty: number;
   monthlyPlan: number[];
 }
+type ImportDealerStatus = "EXISTING" | "NEW" | "INVALID";
 interface ParsedDealer {
   sheetName: string;
   dealerName: string;
   dealerId: string | null;
+  status: ImportDealerStatus;
   duplicate: boolean;
   rows: ParsedRow[];
 }
@@ -47,12 +49,14 @@ interface ParseResult {
   counts: {
     dealerCount: number;
     productRows: number;
-    missingDealers: number;
+    existingDealers: number;
+    newDealers: number;
+    invalidDealers: number;
     missingProducts: number;
     unknownPackSizes: number;
     duplicateDealers: number;
   };
-  missingDealers: string[];
+  newDealerNames: string[];
   missingProducts: string[];
   unknownPackSizes: string[];
 }
@@ -69,6 +73,9 @@ interface CommitResult {
   planId: string;
   dealerCount: number;
   productRows: number;
+  existingDealers: number;
+  createdDealers: number;
+  skippedDealers: number;
 }
 
 type Step = "upload" | "configure" | "preview" | "done";
@@ -86,6 +93,7 @@ export function SeasonalImportWizard() {
   const [officerId, setOfficerId] = useState("");
   const [mode, setMode] = useState<"SEASONAL_ONLY" | "COMPLETE">("SEASONAL_ONLY");
   const [importAsApproved, setImportAsApproved] = useState(false);
+  const [autoCreateNewDealers, setAutoCreateNewDealers] = useState(true);
   const [result, setResult] = useState<CommitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -119,13 +127,15 @@ export function SeasonalImportWizard() {
     onError: (e) => setError((e as Error).message),
   });
 
-  // Only matched dealers/products/packs with quantity are committed.
+  // Existing dealers (matched) always import. NEW dealers import too when auto-create is on — sent
+  // with a null id + name so the server onboards them. Invalid/duplicate rows are excluded.
   const commitPayload = useMemo(() => {
     if (!parsed) return null;
     const dealers = parsed.dealers
-      .filter((d) => d.dealerId && !d.duplicate)
+      .filter((d) => !d.duplicate && d.status !== "INVALID" && (d.status === "EXISTING" || autoCreateNewDealers))
       .map((d) => ({
-        dealerId: d.dealerId as string,
+        dealerId: d.status === "EXISTING" ? (d.dealerId as string) : null,
+        dealerName: d.dealerName,
         rows: d.rows
           .filter((r) => r.productId)
           .map((r) => ({
@@ -138,8 +148,8 @@ export function SeasonalImportWizard() {
           .filter((r) => r.packs.length > 0 || r.monthlyPlan.some((q) => q > 0)),
       }))
       .filter((d) => d.rows.length > 0);
-    return { seasonId, officerId, mode, importAsApproved, workbookName: parsed.workbookName, dealers };
-  }, [parsed, seasonId, officerId, mode, importAsApproved]);
+    return { seasonId, officerId, mode, importAsApproved, autoCreateNewDealers, workbookName: parsed.workbookName, dealers };
+  }, [parsed, seasonId, officerId, mode, importAsApproved, autoCreateNewDealers]);
 
   const importableDealers = commitPayload?.dealers.length ?? 0;
   const importableRows = commitPayload?.dealers.reduce((s, d) => s + d.rows.length, 0) ?? 0;
@@ -296,23 +306,35 @@ export function SeasonalImportWizard() {
 
       {step === "preview" && parsed && (
         <div className="space-y-4">
+          {/* Import Summary */}
           <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            <Stat label="Dealers" value={parsed.counts.dealerCount} />
+            <Stat label="Existing Dealers" value={parsed.counts.existingDealers} />
+            <Stat label="New Dealers" value={parsed.counts.newDealers} />
+            <Stat label="Invalid" value={parsed.counts.invalidDealers} warn />
             <Stat label="Product rows" value={parsed.counts.productRows} />
-            <Stat label="Missing dealers" value={parsed.counts.missingDealers} warn />
             <Stat label="Missing products" value={parsed.counts.missingProducts} warn />
             <Stat label="Unknown packs" value={parsed.counts.unknownPackSizes} warn />
-            <Stat label="Duplicate dealers" value={parsed.counts.duplicateDealers} warn />
           </div>
 
-          {(parsed.missingDealers.length > 0 ||
-            parsed.missingProducts.length > 0 ||
-            parsed.unknownPackSizes.length > 0) && (
+          {/* Onboard new dealers option (default on). */}
+          {parsed.counts.newDealers > 0 && (
+            <label className="flex items-start gap-2 rounded-md border p-3 text-sm">
+              <input type="checkbox" className="mt-1" checked={autoCreateNewDealers} onChange={(e) => setAutoCreateNewDealers(e.target.checked)} />
+              <span>
+                <span className="font-medium">Automatically create new dealers during import</span>
+                <span className="block text-xs text-muted-foreground">
+                  {parsed.counts.newDealers} new dealer(s) will be created in the Dealer Master and assigned to the selected officer before the plan is imported — no manual assignment needed. Uncheck to skip them.
+                </span>
+              </span>
+            </label>
+          )}
+
+          {/* Only PRODUCT/pack mismatches are skipped now — unmatched dealers are onboarded, not skipped. */}
+          {(parsed.missingProducts.length > 0 || parsed.unknownPackSizes.length > 0) && (
             <div className="space-y-1 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">
               <p className="flex items-center gap-1 font-medium text-warning">
                 <AlertTriangle className="h-4 w-4" /> These rows will be skipped (unmatched to masters):
               </p>
-              {parsed.missingDealers.length > 0 && <p>Dealers: {parsed.missingDealers.join(", ")}</p>}
               {parsed.missingProducts.length > 0 && <p>Products: {parsed.missingProducts.join(", ")}</p>}
               {parsed.unknownPackSizes.length > 0 && <p>Pack sizes: {parsed.unknownPackSizes.join(", ")}</p>}
             </div>
@@ -323,7 +345,7 @@ export function SeasonalImportWizard() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Dealer (sheet)</TableHead>
-                  <TableHead>Matched dealer</TableHead>
+                  <TableHead>Dealer</TableHead>
                   <TableHead className="text-right">Rows</TableHead>
                   <TableHead className="text-right">Matched rows</TableHead>
                   <TableHead>Status</TableHead>
@@ -333,16 +355,22 @@ export function SeasonalImportWizard() {
                 {parsed.dealers.map((d) => {
                   const matched = d.rows.filter((r) => r.productId && r.packs.some((p) => p.packSizeId && p.quantity > 0)).length;
                   const status = d.duplicate
-                    ? { label: "Duplicate — skipped", variant: "destructive" as const }
-                    : !d.dealerId
-                      ? { label: "Unmatched — skipped", variant: "muted" as const }
-                      : matched === 0
-                        ? { label: "No matched rows", variant: "muted" as const }
-                        : { label: "Will import", variant: "success" as const };
+                    ? { label: "Duplicate — onboard once", variant: "muted" as const }
+                    : d.status === "INVALID"
+                      ? { label: "🔴 Invalid", variant: "destructive" as const }
+                      : d.status === "NEW"
+                        ? autoCreateNewDealers
+                          ? { label: "🟡 New Dealer (Can be Added)", variant: "secondary" as const }
+                          : { label: "New — will skip", variant: "muted" as const }
+                        : matched === 0
+                          ? { label: "No matched rows", variant: "muted" as const }
+                          : { label: "✓ Existing Dealer", variant: "success" as const };
                   return (
                     <TableRow key={d.sheetName}>
                       <TableCell className="font-medium">{d.sheetName}</TableCell>
-                      <TableCell className="text-muted-foreground">{d.dealerId ? d.dealerName : "—"}</TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {d.status === "EXISTING" ? d.dealerName : d.status === "NEW" ? <span className="italic">New: {d.dealerName}</span> : "—"}
+                      </TableCell>
                       <TableCell className="text-right">{d.rows.length}</TableCell>
                       <TableCell className="text-right">{matched}</TableCell>
                       <TableCell>
@@ -356,8 +384,11 @@ export function SeasonalImportWizard() {
           </div>
 
           <div className="rounded-md border bg-muted/30 p-3 text-sm">
-            Ready to import <span className="font-medium">{importableDealers}</span> dealers and{" "}
-            <span className="font-medium">{importableRows}</span> product rows into the selected season
+            Ready to import <span className="font-medium">{importableDealers}</span> dealers
+            {parsed.counts.newDealers > 0 && autoCreateNewDealers && (
+              <> (incl. <span className="font-medium">{parsed.counts.newDealers}</span> new to create)</>
+            )}{" "}
+            and <span className="font-medium">{importableRows}</span> product rows into the selected season
             as a new draft Seasonal Plan. It then follows the normal approval, monthly planning and
             reporting flow.
           </div>
@@ -383,8 +414,10 @@ export function SeasonalImportWizard() {
             <p className="flex items-center gap-2 text-lg font-medium text-success">
               <Check className="h-6 w-6" /> Seasonal plan imported successfully
             </p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Stat label="Dealers imported" value={result.dealerCount} />
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Stat label="Imported Existing Dealers" value={result.existingDealers} />
+              <Stat label="Created New Dealers" value={result.createdDealers} />
+              <Stat label="Skipped" value={result.skippedDealers} warn />
               <Stat label="Product rows" value={result.productRows} />
             </div>
             <div className="flex flex-wrap gap-2">

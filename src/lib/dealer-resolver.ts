@@ -16,10 +16,24 @@ import { decorate, matchByName, tightKey, looseKey, similarity, type Keyed } fro
  */
 export type DealerMatch = { id: string; name: string } & Keyed;
 
+/**
+ * Three-outcome classification of a raw workbook dealer name, for importers that can ONBOARD new
+ * dealers (Seasonal Import / Replace) instead of skipping them:
+ *   - EXISTING: matched an active master dealer (alias → exact → loose → fuzzy).
+ *   - NEW:      a valid, unmatched name — can be created and assigned.
+ *   - INVALID:  a genuinely unusable name (empty/blank) — a real error, never created.
+ */
+export type DealerResolution =
+  | { outcome: "EXISTING"; dealer: DealerMatch }
+  | { outcome: "NEW"; rawName: string }
+  | { outcome: "INVALID"; rawName: string; reason: string };
+
 export interface DealerResolver {
   dealers: DealerMatch[];
   /** Alias → exact → loose → fuzzy. Returns the master dealer or null. */
   resolve(rawName: string): DealerMatch | null;
+  /** Same matching, classified into EXISTING / NEW / INVALID. Reusable by any importer. */
+  classify(rawName: string): DealerResolution;
 }
 
 export async function loadDealerResolver(): Promise<DealerResolver> {
@@ -35,12 +49,20 @@ export async function loadDealerResolver(): Promise<DealerResolver> {
     (aliasRows as { tallyKey: string; systemDealerId: string }[]).map((a) => [a.tallyKey, a.systemDealerId]),
   );
 
+  function resolve(rawName: string): DealerMatch | null {
+    const aliasId = aliasByKey.get(tightKey(rawName));
+    if (aliasId) return byId.get(aliasId) ?? null; // alias wins outright
+    return matchByName(rawName, dealers, { fuzzy: true, threshold: 0.9 });
+  }
+
   return {
     dealers,
-    resolve(rawName: string): DealerMatch | null {
-      const aliasId = aliasByKey.get(tightKey(rawName));
-      if (aliasId) return byId.get(aliasId) ?? null; // alias wins outright
-      return matchByName(rawName, dealers, { fuzzy: true, threshold: 0.9 });
+    resolve,
+    classify(rawName: string): DealerResolution {
+      const name = rawName.trim();
+      if (!name || !tightKey(name)) return { outcome: "INVALID", rawName, reason: "Empty or unusable dealer name" };
+      const dealer = resolve(name); // alias → exact → loose → fuzzy
+      return dealer ? { outcome: "EXISTING", dealer } : { outcome: "NEW", rawName: name };
     },
   };
 }

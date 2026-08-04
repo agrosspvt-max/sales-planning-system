@@ -1,6 +1,8 @@
+import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { AppShell } from "@/components/layout/app-shell";
+import { NavHistoryProvider } from "@/features/navigation/history";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const session = await auth();
@@ -14,7 +16,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
         role: session.user.role,
       }}
     >
-      {children}
+      {/* Centralized navigation history — records the real journey so Back is history-aware. */}
+      <Suspense fallback={null}>
+        <NavHistoryProvider>{children}</NavHistoryProvider>
+      </Suspense>
     </AppShell>
   );
 }

@@ -71,6 +71,8 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
         planningType: "SEASONAL",
         status: PlanStatus.APPROVED,
         isActiveVersion: true,
+        // Never post actual sales against a closed/deactivated (frozen/archived) seasonal plan.
+        lifecycleState: "ACTIVE",
       },
       // Only ACTIVE dealers participate — excludes still-pending dealers created in Monthly
       // Planning (their PlanDealer/additional lines must not receive imported actuals).

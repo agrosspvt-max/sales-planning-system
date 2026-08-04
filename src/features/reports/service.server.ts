@@ -54,6 +54,8 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
       seasonId,
       status: PlanStatus.APPROVED,
       isActiveVersion: true,
+      // Reports include ACTIVE and CLOSED (frozen) plans; DEACTIVATED (archived) plans are excluded.
+      lifecycleState: { not: "DEACTIVATED" },
       officerId: scope.all ? undefined : { in: scope.ids },
     },
     include: {

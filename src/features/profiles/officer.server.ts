@@ -86,7 +86,7 @@ export async function getOfficerProfile(
     }),
     prisma.seasonPlan.findMany({
       where: { seasonId: season.id, officerId },
-      select: { id: true, status: true, version: true, versionName: true, source: true, isActiveVersion: true, createdAt: true },
+      select: { id: true, status: true, version: true, versionName: true, source: true, isActiveVersion: true, lifecycleState: true, createdAt: true },
       orderBy: { version: "desc" },
     }),
     getSeasonMonthStates(season.id),
@@ -131,12 +131,14 @@ export async function getOfficerProfile(
     achievement: r.progress as number,
   }));
 
-  // Plan / approval status.
-  const approvedPlans = plans.filter((p) => p.status === PlanStatus.APPROVED).length;
-  const draftPlans = plans.filter((p) => p.status === PlanStatus.DRAFT).length;
-  const rejectedPlans = plans.filter((p) => p.status === PlanStatus.REJECTED).length;
-  const pendingPlans = plans.filter((p) => p.status === PlanStatus.PENDING_RM || p.status === PlanStatus.PENDING_ADMIN).length;
-  const activePlan = plans.find((p) => p.isActiveVersion) ?? plans[0];
+  // Plan / approval status. KPI counts exclude DEACTIVATED (archived) plans — like reports — so the
+  // headline numbers reflect live planning, not archived versions. (Full history is kept below.)
+  const livePlans = plans.filter((p) => (p.lifecycleState ?? "ACTIVE") !== "DEACTIVATED");
+  const approvedPlans = livePlans.filter((p) => p.status === PlanStatus.APPROVED).length;
+  const draftPlans = livePlans.filter((p) => p.status === PlanStatus.DRAFT).length;
+  const rejectedPlans = livePlans.filter((p) => p.status === PlanStatus.REJECTED).length;
+  const pendingPlans = livePlans.filter((p) => p.status === PlanStatus.PENDING_RM || p.status === PlanStatus.PENDING_ADMIN).length;
+  const activePlan = livePlans.find((p) => p.isActiveVersion) ?? livePlans[0];
   const seasonalPlanStatus = activePlan ? statusLabel(activePlan.status) : "Not started";
   const openMonths = months.filter((m) => m.status === "OPEN");
 
@@ -156,9 +158,8 @@ export async function getOfficerProfile(
   const origin = { href: `/masters/users/${officerId}`, label: officer.name, kind: "officer" as const };
   const quickActions: QuickAction[] = [
     { label: "Create Seasonal Plan", href: withProfileContext("/planning/sales", origin, "Create Seasonal Plan"), variant: "default" },
-    activePlan
-      ? { label: "View Current Plan", href: withProfileContext(`/planning/${activePlan.id}`, origin, "Current Seasonal Plan") }
-      : { label: "View Current Plan", href: "#", disabled: true },
+    // Manage ALL of this officer's plans (Seasonal / Monthly / Recovery, every status + lifecycle).
+    { label: "Manage Plans", href: withProfileContext(`/masters/users/${officerId}/plans`, origin, "Manage Plans") },
     { label: "View Assigned Dealers", href: withProfileContext("/masters/dealers", origin, "Assigned Dealers") },
     { label: "Import Workbook", href: withProfileContext("/planning/sales/import", origin, "Import Workbook") },
     { label: "Export Report", href: `/api/reports/export?type=dealer&season=${season.id}&officer=${officerId}`, external: true },

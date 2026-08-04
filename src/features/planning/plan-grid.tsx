@@ -23,6 +23,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SectionColgroup, SectionHeaderRow, type TableSection } from "@/components/ui/table-group";
 import { usePlanEdit } from "./plan-edit-context";
 import {
   DealerProgressBar,
@@ -99,6 +100,16 @@ export function PlanGrid() {
   }, [dealer]);
 
   const showTotalQty = mode === "PACK_SIZE" || mode === "TOTAL_QUANTITY";
+
+  // Excel-style column sections (visual grouping only — data, order and calculations unchanged).
+  // "Planning" (pack-size columns) only exists in pack mode; the single-value modes plan in Plan
+  // Summary instead, so that section is omitted when there are no pack columns.
+  const seasonalSections: TableSection[] = [
+    ...(packMode && packColumns.length ? [{ label: "Planning", span: packColumns.length, tone: "blue" as const }] : []),
+    { label: "Plan Summary", span: (showTotalQty ? 1 : 0) + 2, tone: "slate" },
+    { label: "Actual Sales", span: 3, tone: "green" },
+    { label: "Live Month", span: 5, tone: "amber" },
+  ];
 
   const modeNote: Record<PlanningMode, string> = {
     PACK_SIZE: "Enter a quantity for each pack size.",
@@ -193,7 +204,10 @@ export function PlanGrid() {
       ) : !dealer ? null : (
         <div className="overflow-auto rounded-lg border bg-background">
           <Table stickyFirstColumn>
+            {/* Excel-style sections (visual grouping only — the workbook layout). */}
+            <SectionColgroup leading={1} sections={seasonalSections} />
             <TableHeader>
+              <SectionHeaderRow leading={1} sections={seasonalSections} />
               <TableRow>
                 <TableHead className="min-w-[160px]">Product</TableHead>
                 {packMode &&

@@ -100,6 +100,7 @@ export interface PlanListItem {
   source: string;
   version: number;
   status: PlanStatus;
+  lifecycleState: string;
   isActiveVersion: boolean;
   lastSavedAt: string;
   createdAt: string;

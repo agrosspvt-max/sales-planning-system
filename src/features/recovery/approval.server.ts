@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope, getCurrentManagerId } from "@/lib/scope";
 import { createNotification, notifyMany, getSuperAdminIds } from "@/features/notifications/service.server";
+import { assertLifecycleEditable } from "@/features/planning/lifecycle.server";
 
 /**
  * Recovery Plan approval — reuses the EXACT same status machine, ApprovalAction log and
@@ -22,17 +23,29 @@ interface RecoveryRow {
   id: string;
   officerId: string;
   status: PlanStatus;
+  lifecycleState: string;
   seasonMonth: { name: string };
   season: { name: string; year: number };
+  seasonPlan: { lifecycleState: string } | null;
 }
 
 async function loadOr404(id: string): Promise<RecoveryRow> {
   const p = await prisma.recoveryPlan.findUnique({
     where: { id },
-    include: { seasonMonth: { select: { name: true } }, season: { select: { name: true, year: true } } },
+    include: {
+      seasonMonth: { select: { name: true } },
+      season: { select: { name: true, year: true } },
+      seasonPlan: { select: { lifecycleState: true } },
+    },
   });
   if (!p) throw new ApiError(404, "Recovery plan not found");
   return p as unknown as RecoveryRow;
+}
+
+/** No workflow action on a closed/deactivated recovery plan (or under a frozen seasonal plan). */
+function assertRecoveryLive(p: RecoveryRow) {
+  if (p.seasonPlan) assertLifecycleEditable(p.seasonPlan.lifecycleState, "The parent seasonal plan");
+  assertLifecycleEditable(p.lifecycleState, "This recovery plan");
 }
 async function label(p: RecoveryRow): Promise<string> {
   const officer = await prisma.user.findUnique({ where: { id: p.officerId }, select: { name: true } });
@@ -46,6 +59,7 @@ export async function submitRecoveryPlan(ctx: AuthContext, id: string) {
   const p = await loadOr404(id);
   if (!(ctx.role === Role.SALES_OFFICER && p.officerId === ctx.userId)) throw new ApiError(403, "Only the owning Sales Officer can submit this recovery plan");
   if (!EDITABLE.includes(p.status)) throw new ApiError(409, "This recovery plan cannot be submitted in its current state");
+  assertRecoveryLive(p);
 
   // Dealer completion gate — every dealer must have a recovery plan value or be marked No Plan.
   const dealers = await prisma.recoveryPlanDealer.findMany({
@@ -75,6 +89,7 @@ export async function recallRecoveryPlan(ctx: AuthContext, id: string) {
   const p = await loadOr404(id);
   if (!(ctx.role === Role.SALES_OFFICER && p.officerId === ctx.userId)) throw new ApiError(403, "Only the owning Sales Officer can recall this recovery plan");
   if (!PENDING.includes(p.status)) throw new ApiError(409, "Only a submitted recovery plan can be recalled");
+  assertRecoveryLive(p);
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.DRAFT } });
   await record(p, ctx.userId, ApprovalActionType.RECALL, p.status, PlanStatus.DRAFT);
   return { status: PlanStatus.DRAFT };
@@ -94,6 +109,7 @@ async function assertApprover(ctx: AuthContext, p: RecoveryRow) {
 export async function approveRecoveryPlan(ctx: AuthContext, id: string) {
   const p = await loadOr404(id);
   await assertApprover(ctx, p);
+  assertRecoveryLive(p);
   if (p.status === PlanStatus.PENDING_RM) {
     await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.PENDING_ADMIN } });
     await record(p, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN);
@@ -109,6 +125,7 @@ export async function approveRecoveryPlan(ctx: AuthContext, id: string) {
 export async function returnRecoveryPlan(ctx: AuthContext, id: string, remarks: string) {
   const p = await loadOr404(id);
   await assertApprover(ctx, p);
+  assertRecoveryLive(p);
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.RETURNED } });
   await record(p, ctx.userId, ApprovalActionType.RETURN, p.status, PlanStatus.RETURNED, remarks);
   await createNotification({ userId: p.officerId, type: NotificationType.PLAN_RETURNED, title: "Recovery plan returned", message: `${await label(p)} was returned: "${remarks}"`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });
@@ -118,6 +135,7 @@ export async function returnRecoveryPlan(ctx: AuthContext, id: string, remarks: 
 export async function rejectRecoveryPlan(ctx: AuthContext, id: string, remarks: string) {
   const p = await loadOr404(id);
   await assertApprover(ctx, p);
+  assertRecoveryLive(p);
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.REJECTED } });
   await record(p, ctx.userId, ApprovalActionType.REJECT, p.status, PlanStatus.REJECTED, remarks);
   await createNotification({ userId: p.officerId, type: NotificationType.PLAN_RETURNED, title: "Recovery plan rejected", message: `${await label(p)} was rejected: "${remarks}"`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });

@@ -328,6 +328,13 @@ model SeasonPlan {
   // How the plan was created: "MANUAL" (default) or "IMPORT" (Seasonal Plan Import).
   source            String     @default("MANUAL")
   status            PlanStatus @default(DRAFT)
+  // Lifecycle axis, INDEPENDENT of the approval `status`. "ACTIVE" (normal), "CLOSED" (frozen —
+  // read-only everywhere but still in reports/history), or "DEACTIVATED" (hidden from the Sales
+  // Officer; Admin can still view/restore). Defaults ACTIVE so every existing row and query is
+  // unchanged. The DISPLAYED status is lifecycleState when not ACTIVE, else the approval status.
+  lifecycleState    String     @default("ACTIVE")
+  closedAt          DateTime?
+  deactivatedAt     DateTime?
   isActiveVersion   Boolean    @default(false)
   supersedesId      String? // the version this one was revised from
   revisionRequested Boolean    @default(false)
@@ -343,12 +350,14 @@ model SeasonPlan {
   dealers PlanDealer[]
   actions ApprovalAction[]
   monthlyPlans MonthlyPlan[]
+  recoveryPlans RecoveryPlan[]
 
   @@unique([seasonId, officerId, planningType, version])
   @@index([officerId])
   @@index([seasonId])
   @@index([status])
   @@index([planningType])
+  @@index([lifecycleState])
 }
 
 /// Company Onboarding run — the migration report (Section 41). Metadata only; the source
@@ -523,6 +532,15 @@ model MonthlyPlan {
   seasonMonthId String // the one month this plan covers
   officerId     String
   status        PlanStatus @default(DRAFT)
+  // Lifecycle axis (see SeasonPlan.lifecycleState). A Monthly Plan can be frozen (CLOSED) or hidden
+  // (DEACTIVATED) on its own, and also follows its parent Seasonal plan's lifecycle.
+  lifecycleState String    @default("ACTIVE")
+  // TRUE when the current non-ACTIVE state came from a PARENT cascade (not a direct admin action).
+  // Reopening the parent only restores children with lifecycleFromParent=true, so a month an admin
+  // closed on purpose stays closed. Reset to false whenever an admin acts on this plan directly.
+  lifecycleFromParent Boolean @default(false)
+  closedAt      DateTime?
+  deactivatedAt DateTime?
   submittedAt   DateTime?
   approvedAt    DateTime?
   lastSavedAt   DateTime   @default(now())
@@ -539,6 +557,7 @@ model MonthlyPlan {
   @@index([seasonPlanId])
   @@index([officerId])
   @@index([status])
+  @@index([lifecycleState])
 }
 
 /// Per-dealer completion state WITHIN a Monthly Plan — the monthly analogue of
@@ -639,12 +658,24 @@ model RecoveryPlan {
   seasonId          String
   seasonMonthId     String
   officerId         String
+  // The parent Seasonal plan this recovery belongs to. Recovery must ALWAYS belong to a Seasonal
+  // plan (business rule): it is set at creation and the FK is Restrict, so a seasonal plan cannot be
+  // deleted while recovery plans reference it (the service surfaces a clear error first). Nullable
+  // only to tolerate legacy rows created before this rule; new rows are always linked.
+  seasonPlanId      String?
   cutoffDate        DateTime
   // Weekly re-uploads may (default) re-open Week View for officers; Month View is read-only
   // once approved. This flag is set from the "Allow Sales Officers to edit weekly planning"
   // toggle on each weekly Aging Report upload.
   weeklyEditEnabled Boolean    @default(true)
   status            PlanStatus @default(DRAFT)
+  // Lifecycle axis (see SeasonPlan.lifecycleState). Follows its parent Seasonal plan and can also
+  // be closed/deactivated on its own.
+  lifecycleState    String     @default("ACTIVE")
+  // See MonthlyPlan.lifecycleFromParent — distinguishes cascade-closed from admin-closed.
+  lifecycleFromParent Boolean  @default(false)
+  closedAt          DateTime?
+  deactivatedAt     DateTime?
   submittedAt       DateTime?
   approvedAt        DateTime?
   lastSavedAt       DateTime   @default(now())
@@ -654,6 +685,7 @@ model RecoveryPlan {
   season      Season               @relation(fields: [seasonId], references: [id])
   seasonMonth SeasonMonth          @relation(fields: [seasonMonthId], references: [id])
   officer     User                 @relation("OfficerRecoveryPlans", fields: [officerId], references: [id])
+  seasonPlan  SeasonPlan?          @relation(fields: [seasonPlanId], references: [id], onDelete: Restrict)
   dealers     RecoveryPlanDealer[]
   snapshots   AgingSnapshot[]
   actions     ApprovalAction[]
@@ -662,6 +694,8 @@ model RecoveryPlan {
   @@index([seasonId])
   @@index([officerId])
   @@index([status])
+  @@index([lifecycleState])
+  @@index([seasonPlanId])
 }
 
 /// A dealer inside a Recovery Plan. Imported aging figures are READ-ONLY (refreshed from the

@@ -30,12 +30,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PageHeader } from "@/components/layout/page-header";
-import { StatusBadge } from "./status-badge";
+import { PlanStateBadge } from "./status-badge";
 import { MonthlyPlansPanel } from "./monthly-plans-panel";
 import { PLANNING_TYPE_LABELS, type PlanListItem, type PlanningType, type PlanStatus } from "./types";
 
 export type SalesMode = "create" | "view";
+export type LifecycleFilter = "ACTIVE" | "CLOSED" | "DEACTIVATED" | "ALL";
 type Tab = PlanningType;
+const LIFECYCLE_FILTERS: { value: LifecycleFilter; label: string }[] = [
+  { value: "ACTIVE", label: "Active" },
+  { value: "CLOSED", label: "Closed" },
+  { value: "DEACTIVATED", label: "Deactivated" },
+  { value: "ALL", label: "All" },
+];
 
 interface OfficerOption {
   id: string;
@@ -65,6 +72,7 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
 
   const [tab, setTab] = useState<Tab>("SEASONAL");
   const [officerFilter, setOfficerFilter] = useState(""); // admin: "" = all officers
+  const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("ACTIVE");
   const [open, setOpen] = useState(false);
 
   // New Seasonal draft form
@@ -92,10 +100,12 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
       if (p.planningType !== tab) return false;
       // Create = editable only; View = Approved only. (Submitted/pending never in Create.)
       if (isCreate ? !EDITABLE_STATUSES.includes(p.status) : p.status !== "APPROVED") return false;
+      // Lifecycle filter (Active / Closed / Deactivated / All). Default Active preserves prior behavior.
+      if (lifecycleFilter !== "ALL" && (p.lifecycleState ?? "ACTIVE") !== lifecycleFilter) return false;
       if (isAdmin && officerFilter && p.officerId !== officerFilter) return false;
       return true;
     });
-  }, [plans, tab, isCreate, isAdmin, officerFilter]);
+  }, [plans, tab, isCreate, isAdmin, officerFilter, lifecycleFilter]);
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -186,7 +196,19 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Lifecycle filter — Active (default) / Closed / Deactivated / All. */}
+          <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
+            {LIFECYCLE_FILTERS.map((f) => (
+              <button
+                key={f.value}
+                onClick={() => setLifecycleFilter(f.value)}
+                className={cn("rounded px-2.5 py-1 font-medium", lifecycleFilter === f.value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
           {isAdmin && (
             <NativeSelect
               className="w-56"
@@ -205,7 +227,7 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
       </div>
 
       {tab === "MONTHLY" ? (
-        <MonthlyPlansPanel role={role} mode={mode} officerFilter={officerFilter} />
+        <MonthlyPlansPanel role={role} mode={mode} officerFilter={officerFilter} lifecycleFilter={lifecycleFilter} />
       ) : (
       <div className="rounded-lg border bg-background">
         <Table>
@@ -242,7 +264,7 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
                     {p.versionName ? ` · ${p.versionName}` : ""}
                     {p.source === "IMPORT" && <Badge variant="muted" className="ml-1">Imported</Badge>}
                   </TableCell>
-                  <TableCell><StatusBadge status={p.status} /></TableCell>
+                  <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
                   <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>
                   <TableCell className="text-right">
                     <Button asChild variant="outline" size="sm">

@@ -28,9 +28,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { StatusBadge } from "./status-badge";
+import { PlanStateBadge } from "./status-badge";
 import type { PlanListItem, PlanStatus } from "./types";
-import type { SalesMode } from "./sales-planning";
+import type { SalesMode, LifecycleFilter } from "./sales-planning";
 
 interface MonthlyPlanRow {
   id: string;
@@ -42,6 +42,7 @@ interface MonthlyPlanRow {
   officerId: string;
   officerName: string;
   status: PlanStatus;
+  lifecycleState: string;
   lastSavedAt: string;
   updatedAt: string;
 }
@@ -74,10 +75,12 @@ export function MonthlyPlansPanel({
   role,
   mode,
   officerFilter,
+  lifecycleFilter = "ACTIVE",
 }: {
   role: Role;
   mode: SalesMode;
   officerFilter: string;
+  lifecycleFilter?: LifecycleFilter;
 }) {
   const router = useRouter();
   const qc = useQueryClient();
@@ -92,8 +95,13 @@ export function MonthlyPlansPanel({
   });
 
   const rows = useMemo(
-    () => (plans ?? []).filter((p) => !(isAdmin && officerFilter) || p.officerId === officerFilter),
-    [plans, isAdmin, officerFilter],
+    () =>
+      (plans ?? []).filter(
+        (p) =>
+          (!(isAdmin && officerFilter) || p.officerId === officerFilter) &&
+          (lifecycleFilter === "ALL" || (p.lifecycleState ?? "ACTIVE") === lifecycleFilter),
+      ),
+    [plans, isAdmin, officerFilter, lifecycleFilter],
   );
 
   // ---- Create New Monthly Plan dialog ----
@@ -196,7 +204,7 @@ export function MonthlyPlansPanel({
                   <TableCell className="font-medium">{p.seasonName}</TableCell>
                   <TableCell>{p.monthName}</TableCell>
                   {!isOfficer && <TableCell>{p.officerName}</TableCell>}
-                  <TableCell><StatusBadge status={p.status} /></TableCell>
+                  <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
                   <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>
                   <TableCell className="text-right">
                     <Button asChild variant="outline" size="sm">

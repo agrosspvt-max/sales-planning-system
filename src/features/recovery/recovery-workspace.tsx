@@ -19,6 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SectionColgroup, SectionHeaderRow, type TableSection } from "@/components/ui/table-group";
 import { StatusBadge } from "@/features/planning/status-badge";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "@/features/planning/dealer-completion";
 import { DealerPlanningStatus } from "@/features/planning/dealer-status";
@@ -40,6 +41,21 @@ interface RecoveryDealer {
   noPlanReason: string | null;
   completed: boolean;
   weeks: Record<number, { weekRecoveryPlan: number; weekRunningRecovery: number }>;
+  // Month's Due split across the four business weeks by invoice due date. Week View shows the
+  // selected week's slice; Month View continues to show the aggregate `due`.
+  dueByWeek: Record<number, number>;
+  // Change tracking vs the previous snapshot (aging-derived business data only).
+  prevAging: { outstanding: number; overdue: number; due: number; running: number } | null;
+  changed: boolean;
+}
+interface LastRefresh {
+  at: string;
+  businessWeek: number;
+  outstandingIncreased: number;
+  outstandingDecreased: number;
+  newDealers: number;
+  removedDealers: number;
+  outstandingDelta: number;
 }
 interface RecoveryDetail {
   id: string;
@@ -53,12 +69,78 @@ interface RecoveryDetail {
   monthEditable: boolean;
   weekEditable: boolean;
   weekCount: number;
+  currentWeek: number;
+  lastRefresh: LastRefresh | null;
   dealers: RecoveryDealer[];
 }
 
 type Tab = "month" | "week" | "history";
 const money = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n));
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+
+/**
+ * Business-aware change delta for receivables: a DECREASE is good (green), an increase is bad (red).
+ * The main value stays in the normal theme color; only the small delta is coloured. Theme-safe.
+ */
+function Delta({ value }: { value: number }) {
+  if (Math.round(value) === 0) return null;
+  const good = value < 0;
+  return (
+    <div className={cn("text-[10px] font-medium tabular-nums", good ? "text-success" : "text-destructive")}>
+      {good ? "▼" : "▲"} {value < 0 ? "-" : "+"}{money(Math.abs(value))}
+    </div>
+  );
+}
+
+/** An aging value with an optional change delta underneath (vs the previous snapshot). */
+function AgingCell({ value, prev }: { value: number; prev: number | null | undefined }) {
+  return (
+    <div className="text-right tabular-nums">
+      <div>{money(value)}</div>
+      {prev != null && <Delta value={value - prev} />}
+    </div>
+  );
+}
+
+/**
+ * Planning Guidance — a small informational panel shown after a refresh. It summarises the business
+ * change, the remaining monthly commitment, and which weeks are locked. GUIDANCE ONLY: it never
+ * modifies any planning value.
+ */
+function GuidancePanel({ data }: { data: RecoveryDetail }) {
+  const commitment = data.dealers.reduce((s, d) => s + d.monthRecoveryPlan, 0);
+  const recovered = data.dealers.reduce((s, d) => s + d.monthRunningRecovery, 0);
+  const remaining = Math.max(0, commitment - recovered);
+  const lr = data.lastRefresh;
+  if (!lr && data.currentWeek <= 1) return null; // nothing to guide at month start, no refresh yet
+  const lockNote =
+    data.currentWeek > 1
+      ? `Weeks 1–${data.currentWeek - 1} locked · Weeks ${data.currentWeek}–${data.weekCount} editable`
+      : `All weeks (1–${data.weekCount}) editable`;
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3 text-sm">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+        {lr && (
+          <span>
+            Business update:{" "}
+            {Math.round(lr.outstandingDelta) === 0 ? (
+              <span className="text-muted-foreground">no net Outstanding change</span>
+            ) : (
+              <span className={lr.outstandingDelta < 0 ? "text-success" : "text-destructive"}>
+                Outstanding {lr.outstandingDelta < 0 ? "decreased" : "increased"} by {money(Math.abs(lr.outstandingDelta))}
+              </span>
+            )}
+          </span>
+        )}
+        <span>
+          Remaining monthly commitment: <span className="font-medium tabular-nums">{money(remaining)}</span>
+        </span>
+        <span className="text-muted-foreground">{lockNote}</span>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">Guidance only — planning values are never changed automatically.</p>
+    </div>
+  );
+}
 
 export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role; userId: string }) {
   const [tab, setTab] = useState<Tab>("month");
@@ -104,6 +186,8 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
         noPlanDealers={noPlanDealers.map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason }))}
       />
 
+      <GuidancePanel data={data} />
+
       <DealerProgressBar counts={counts} />
 
       <div className="flex items-center gap-1 border-b">
@@ -116,7 +200,7 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
 
       {tab === "month" && <MonthView key={data.id + data.status} detail={data} />}
       {tab === "week" && <WeekView key={data.id + data.status} detail={data} />}
-      {tab === "history" && <RecoveryHistory id={id} />}
+      {tab === "history" && <RecoveryHistory id={id} role={role} />}
     </div>
   );
 }
@@ -154,6 +238,16 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   };
   const weeklyTotal = (d: RecoveryDealer) => Object.values(d.weeks).reduce((s, w) => s + w.weekRecoveryPlan + w.weekRunningRecovery, 0);
 
+  // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
+  // Dealer(frozen) → Outstanding → Overdue → Due → Recovery Plan → Running O/S Bills →
+  // Running Recovery Plan → Recovery % → Results.
+  const monthSections: TableSection[] = [
+    { label: "Dealer & Closing Balance", span: 1, tone: "blue" },
+    { label: "Recovery Planning", span: 3, tone: "amber" },
+    { label: "Recovery Progress", span: 3, tone: "green" },
+    { label: "Results", span: editable ? 4 : 3, tone: "purple" },
+  ];
+
   return (
     <div className="space-y-2">
       {editable && (
@@ -164,15 +258,19 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
       )}
       <div className="overflow-auto rounded-lg border bg-background">
         <Table stickyFirstColumn>
+          {/* Excel-style sections (visual only — column ORDER reflows to the business layout; data,
+              fields and calculations are unchanged). */}
+          <SectionColgroup leading={1} sections={monthSections} />
           <TableHeader>
+            <SectionHeaderRow leading={1} sections={monthSections} />
             <TableRow>
               <TableHead className="min-w-[160px]">Dealer</TableHead>
               <TableHead className="text-right">Outstanding</TableHead>
               <TableHead className="text-right">Overdue</TableHead>
               <TableHead className="text-right">Due</TableHead>
-              <TableHead className="text-right">Running O/S</TableHead>
               <TableHead className="text-center">Recovery Plan</TableHead>
-              <TableHead className="text-center">Running Recovery</TableHead>
+              <TableHead className="text-right">Running O/S Bills</TableHead>
+              <TableHead className="text-center">Running Recovery Plan</TableHead>
               <TableHead className="text-right">Recovery %</TableHead>
               <TableHead className="text-right">Month Total</TableHead>
               <TableHead className="text-right text-muted-foreground">Weekly Total</TableHead>
@@ -188,21 +286,25 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               const wTotal = weeklyTotal(d);
               const status = d.noPlan ? DealerPlanningStatus.NO_PLAN : monthTotal > 0 ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING;
               return (
-                <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60")}>
+                <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium" style={{ color: status === DealerPlanningStatus.COMPLETED ? "hsl(var(--success))" : status === DealerPlanningStatus.NO_PLAN ? "hsl(var(--noplan))" : undefined }}>
                     {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}{d.dealerName}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.outstanding)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.due)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.running)}</TableCell>
+                  {/* Section 1 — Dealer & Closing Balance */}
+                  <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
+                  {/* Section 2 — Recovery Planning */}
+                  <TableCell className="text-right"><AgingCell value={d.overdue} prev={d.prevAging?.overdue} /></TableCell>
+                  <TableCell className="text-right"><AgingCell value={d.due} prev={d.prevAging?.due} /></TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
+                  {/* Section 3 — Recovery Progress */}
+                  <TableCell className="text-right"><AgingCell value={d.running} prev={d.prevAging?.running} /></TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{pct(recPct)}</TableCell>
+                  {/* Section 4 — Results */}
                   <TableCell className="text-right tabular-nums font-medium">{money(monthTotal)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(wTotal)}</TableCell>
                   <TableCell className={cn("text-right tabular-nums", monthTotal - wTotal !== 0 && "text-warning")}>{money(monthTotal - wTotal)}</TableCell>
@@ -239,15 +341,22 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
 function WeekView({ detail }: { detail: RecoveryDetail }) {
   const qc = useQueryClient();
   const editable = detail.weekEditable;
-  const [weekNo, setWeekNo] = useState(1);
-  const weekOptions = Array.from({ length: detail.weekCount }, (_, i) => ({ value: String(i + 1), label: `Week ${i + 1}` }));
+  // Open on the current business week (later refreshes lock earlier weeks).
+  const [weekNo, setWeekNo] = useState(Math.min(Math.max(detail.currentWeek, 1), detail.weekCount));
+  const weekOptions = Array.from({ length: detail.weekCount }, (_, i) => ({
+    value: String(i + 1),
+    label: i + 1 < detail.currentWeek ? `Week ${i + 1} 🔒` : `Week ${i + 1}`,
+  }));
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">Week:</span>
-        <NativeSelect className="w-32" options={weekOptions} value={String(weekNo)} onChange={(e) => setWeekNo(Number(e.target.value))} />
+        <NativeSelect className="w-36" options={weekOptions} value={String(weekNo)} onChange={(e) => setWeekNo(Number(e.target.value))} />
         {!editable && <span className="text-xs text-muted-foreground">Week View is locked in this state.</span>}
+        {editable && weekNo < detail.currentWeek && (
+          <span className="text-xs text-warning">Week {weekNo} is locked — read-only after the Week {detail.currentWeek} refresh. Values are preserved.</span>
+        )}
       </div>
       <WeekGrid key={weekNo} detail={detail} weekNo={weekNo} editable={editable} onSaved={() => qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] })} />
     </div>
@@ -284,6 +393,31 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
     }
     return t;
   };
+  // "Weekly Plan Till Date" — cumulative "This Week Total" from Week 1 up to the SELECTED week.
+  // Read-only/calculated; uses the live edited values for the current week so it updates as you type.
+  const tillDateTotal = (d: RecoveryDealer, dealerId: string) => {
+    let t = 0;
+    for (let w = 1; w <= weekNo; w++) {
+      if (w === weekNo) { const v = values[dealerId] ?? { plan: 0, running: 0 }; t += v.plan + v.running; }
+      else { const wk = d.weeks[w]; if (wk) t += wk.weekRecoveryPlan + wk.weekRunningRecovery; }
+    }
+    return t;
+  };
+
+  // Week locking: weeks BEFORE the latest cutoff's business week are read-only. Values stay filled;
+  // only editing is disabled (the officer adjusts the current/later weeks).
+  const weekLocked = weekNo < detail.currentWeek;
+  const canEditWeek = editable && !weekLocked;
+
+  // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
+  // The Reference section keeps informational balances out of the primary planning flow.
+  const weekSections: TableSection[] = [
+    { label: "Dealer & Closing Balance", span: 1, tone: "blue" },
+    { label: "Weekly Planning", span: 3, tone: "amber" },
+    { label: "Recovery Progress", span: 3, tone: "green" },
+    { label: "Results", span: 2, tone: "purple" },
+    { label: "Reference (Read-only)", span: 2, tone: "slate" },
+  ];
 
   return (
     <div className="space-y-2">
@@ -295,19 +429,23 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
       )}
       <div className="overflow-auto rounded-lg border bg-background">
         <Table stickyFirstColumn>
+          {/* Excel-style sections (visual grouping only — columns, data and calculations unchanged). */}
+          <SectionColgroup leading={1} sections={weekSections} />
           <TableHeader>
+            <SectionHeaderRow leading={1} sections={weekSections} />
             <TableRow>
               <TableHead className="min-w-[160px]">Dealer</TableHead>
               <TableHead className="text-right">Outstanding</TableHead>
               <TableHead className="text-right">Overdue</TableHead>
-              <TableHead className="text-right">Due</TableHead>
-              <TableHead className="text-right">Running O/S</TableHead>
-              <TableHead className="text-right text-muted-foreground">Recovery Plan</TableHead>
-              <TableHead className="text-right text-muted-foreground">Running Recovery</TableHead>
+              <TableHead className="text-right">This Week&apos;s Due</TableHead>
               <TableHead className="text-center">Week Recovery</TableHead>
-              <TableHead className="text-center">Week Running</TableHead>
-              <TableHead className="text-right">Week Total</TableHead>
+              <TableHead className="text-right text-muted-foreground">Running Month Plan</TableHead>
+              <TableHead className="text-right">Weekly Plan Till Date</TableHead>
+              <TableHead className="text-center">Running Plan This Week</TableHead>
+              <TableHead className="text-right">This Week Total</TableHead>
               <TableHead className="text-right">Diff</TableHead>
+              <TableHead className="text-right text-muted-foreground">Running O/S Bills</TableHead>
+              <TableHead className="text-right text-muted-foreground">Running Recovery (Month)</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -316,23 +454,31 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               const weekTotal = v.plan + v.running;
               const monthTotal = d.monthRecoveryPlan + d.monthRunningRecovery;
               const diff = monthTotal - allWeeksTotal(d, d.dealerId);
+              const tillDate = tillDateTotal(d, d.dealerId);
               return (
-                <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60")}>
+                <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium">{d.dealerName}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.outstanding)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.due)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(d.running)}</TableCell>
+                  {/* Section 1 — Dealer & Closing Balance */}
+                  <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
+                  {/* Section 2 — Weekly Planning. "This Week's Due" = only invoices due in the
+                      SELECTED business week (not the whole month's Due). */}
+                  <TableCell className="text-right"><AgingCell value={d.overdue} prev={d.prevAging?.overdue} /></TableCell>
+                  <TableCell className="text-right tabular-nums">{money(d.dueByWeek?.[weekNo] ?? 0)}</TableCell>
+                  <TableCell className="p-1 text-center">
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={!canEditWeek || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                  </TableCell>
+                  {/* Section 3 — Recovery Progress */}
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRecoveryPlan)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRunningRecovery)}</TableCell>
+                  <TableCell className="text-right tabular-nums font-medium">{money(tillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={!canEditWeek || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                   </TableCell>
-                  <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
-                  </TableCell>
+                  {/* Section 4 — Results */}
                   <TableCell className="text-right tabular-nums font-medium">{money(weekTotal)}</TableCell>
                   <TableCell className={cn("text-right tabular-nums", diff !== 0 && "text-warning")}>{money(diff)}</TableCell>
+                  {/* Section 5 — Reference (Read-only) */}
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.running)}</TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRunningRecovery)}</TableCell>
                 </TableRow>
               );
             })}

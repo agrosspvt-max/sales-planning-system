@@ -18,6 +18,7 @@ import {
   getSuperAdminIds,
 } from "@/features/notifications/service.server";
 import { assembleWorkbookLine, amount, type PlanningMode, type WorkbookLine } from "@/lib/calc";
+import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer } from "./lifecycle.server";
 
 const EDITABLE: PlanStatus[] = [PlanStatus.DRAFT, PlanStatus.RETURNED, PlanStatus.REJECTED];
 const PENDING: PlanStatus[] = [PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN];
@@ -172,12 +173,17 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
     where: { seasonId: input.seasonId, officerId, planningType },
     orderBy: { version: "desc" },
   });
-  const editable = existing.find((p) => EDITABLE.includes(p.status));
+  // Only ACTIVE plans block creation / are reopened. Archived (deactivated) or frozen (closed)
+  // versions are ignored here, so after a Replace/Deactivate the admin can create a fresh plan.
+  const isActiveLifecycle = (p: { lifecycleState?: string | null }) => (p.lifecycleState ?? "ACTIVE") === "ACTIVE";
+  const editable = existing.find((p) => EDITABLE.includes(p.status) && isActiveLifecycle(p));
   if (editable) return editable.id;
-  const pending = existing.find((p) => PENDING.includes(p.status));
+  const pending = existing.find((p) => PENDING.includes(p.status) && isActiveLifecycle(p));
   if (pending) return pending.id;
-  const approved = existing.find((p) => p.status === PlanStatus.APPROVED && p.isActiveVersion);
+  const approved = existing.find((p) => p.status === PlanStatus.APPROVED && p.isActiveVersion && isActiveLifecycle(p));
   if (approved) return approved.id; // read-only; revision required to change
+  // A fresh plan takes the next version number so it never collides with an archived version.
+  const nextVersion = (existing[0]?.version ?? 0) + 1;
 
   await assertSeasonOpen(input.seasonId);
   const dealerIds = await getCurrentDealerIds(officerId); // V4 — assigned dealers
@@ -192,7 +198,7 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
       seasonId: input.seasonId,
       officerId,
       planningType,
-      version: 1,
+      version: nextVersion,
       versionName: input.versionName?.trim() || null,
       description: input.description?.trim() || null,
       status: PlanStatus.DRAFT,
@@ -233,6 +239,7 @@ export async function setDealerNoPlan(
   const isOwner = ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId;
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this plan");
   if (!EDITABLE.includes(plan.status)) throw new ApiError(409, "This plan is not editable");
+  assertLifecycleEditable(plan.lifecycleState);
 
   const pd = await prisma.planDealer.findUnique({
     where: { seasonPlanId_dealerId: { seasonPlanId: planId, dealerId } },
@@ -340,6 +347,8 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
     getPlanningPackSizes(),
   ]);
   if (!plan) throw new ApiError(404, "Plan not found");
+  // A deactivated plan is invisible to the Sales Officer (Admin/RM can still open it).
+  if (isHiddenFromOfficer(ctx, (plan as { lifecycleState?: string }).lifecycleState)) throw new ApiError(404, "Plan not found");
   await assertOfficerInScope(ctx, plan.officerId);
 
   // Grid columns = canonical PLANNING packs UNION every pack that already holds a stored
@@ -543,6 +552,7 @@ export async function saveLines(ctx: AuthContext, planId: string, raw: unknown) 
   if (!EDITABLE.includes(plan.status)) {
     throw new ApiError(409, "This plan is submitted or approved and cannot be edited"); // V12/V13
   }
+  assertLifecycleEditable(plan.lifecycleState);
   await assertSeasonOpen(plan.seasonId); // V5
 
   // Map (dealerId, productId) → planLineId for this plan.
@@ -604,6 +614,7 @@ export async function submitPlan(ctx: AuthContext, planId: string) {
   if (!EDITABLE.includes(plan.status)) {
     throw new ApiError(409, "This plan cannot be submitted in its current state");
   }
+  assertLifecycleEditable(plan.lifecycleState);
   await assertSeasonOpen(plan.seasonId); // V5
 
   // V31 — every dealer in the plan must currently be assigned to the officer.
@@ -676,6 +687,7 @@ export async function recallPlan(ctx: AuthContext, planId: string) {
   if (!PENDING.includes(plan.status)) {
     throw new ApiError(409, "Only a submitted plan can be recalled");
   }
+  assertLifecycleEditable(plan.lifecycleState);
   await prisma.seasonPlan.update({ where: { id: planId }, data: { status: PlanStatus.DRAFT } });
   await recordAction(planId, ctx.userId, ApprovalActionType.RECALL, plan.status, PlanStatus.DRAFT);
   return { status: PlanStatus.DRAFT };
@@ -701,6 +713,7 @@ async function assertCurrentApprover(ctx: AuthContext, plan: { officerId: string
 export async function approvePlan(ctx: AuthContext, planId: string) {
   const plan = await loadPlanOr404(planId);
   await assertCurrentApprover(ctx, plan);
+  assertLifecycleEditable(plan.lifecycleState);
 
   if (plan.status === PlanStatus.PENDING_RM) {
     await prisma.seasonPlan.update({
@@ -750,6 +763,7 @@ export async function returnPlan(ctx: AuthContext, planId: string, raw: unknown)
   const { remarks } = remarksSchema.parse(raw); // V14
   const plan = await loadPlanOr404(planId);
   await assertCurrentApprover(ctx, plan);
+  assertLifecycleEditable(plan.lifecycleState);
   await prisma.seasonPlan.update({ where: { id: planId }, data: { status: PlanStatus.RETURNED } });
   await recordAction(planId, ctx.userId, ApprovalActionType.RETURN, plan.status, PlanStatus.RETURNED, remarks);
   await createNotification({
@@ -767,6 +781,7 @@ export async function rejectPlan(ctx: AuthContext, planId: string, raw: unknown)
   const { remarks } = remarksSchema.parse(raw); // V14
   const plan = await loadPlanOr404(planId);
   await assertCurrentApprover(ctx, plan);
+  assertLifecycleEditable(plan.lifecycleState);
   await prisma.seasonPlan.update({ where: { id: planId }, data: { status: PlanStatus.REJECTED } });
   await recordAction(planId, ctx.userId, ApprovalActionType.REJECT, plan.status, PlanStatus.REJECTED, remarks);
   await createNotification({
@@ -791,6 +806,7 @@ export async function requestRevision(ctx: AuthContext, planId: string, raw: unk
   if (!(plan.status === PlanStatus.APPROVED && plan.isActiveVersion)) {
     throw new ApiError(409, "Only the active approved plan can be revised");
   }
+  assertLifecycleEditable(plan.lifecycleState);
   await prisma.seasonPlan.update({
     where: { id: planId },
     data: { revisionRequested: true, revisionReason: reason },
@@ -819,6 +835,7 @@ export async function authorizeRevision(ctx: AuthContext, planId: string): Promi
   if (!(plan.status === PlanStatus.APPROVED && plan.isActiveVersion)) {
     throw new ApiError(409, "Only the active approved plan can be revised");
   }
+  assertLifecycleEditable(plan.lifecycleState);
 
   const maxVersion = await prisma.seasonPlan.aggregate({
     where: { seasonId: plan.seasonId, officerId: plan.officerId },
@@ -912,6 +929,8 @@ export async function listPlans(ctx: AuthContext, seasonId?: string) {
     where: {
       seasonId: seasonId || undefined,
       officerId: scope.all ? undefined : { in: scope.ids },
+      // Deactivated plans are hidden from the Sales Officer; Admin/RM still see them.
+      ...officerVisibilityWhere(ctx),
     },
     include: {
       season: { select: { name: true, year: true, seasonalMode: true } },
@@ -931,6 +950,7 @@ export async function listPlans(ctx: AuthContext, seasonId?: string) {
     source: p.source,
     version: p.version,
     status: p.status,
+    lifecycleState: (p as { lifecycleState?: string }).lifecycleState ?? "ACTIVE",
     isActiveVersion: p.isActiveVersion,
     lastSavedAt: p.lastSavedAt,
     createdAt: p.createdAt,
@@ -1026,12 +1046,14 @@ export async function getApprovalsInbox(ctx: AuthContext) {
     where:
       ctx.role === Role.SUPER_ADMIN
         ? {
+            // Closed/deactivated plans are frozen and never appear in the approval queue.
+            lifecycleState: "ACTIVE",
             OR: [
               { status: PlanStatus.PENDING_ADMIN },
               { status: PlanStatus.APPROVED, isActiveVersion: true, revisionRequested: true },
             ],
           }
-        : { status: PlanStatus.PENDING_RM, officerId: { in: scope.ids } },
+        : { status: PlanStatus.PENDING_RM, officerId: { in: scope.ids }, lifecycleState: "ACTIVE" },
     include: {
       season: { select: { name: true, year: true } },
       officer: { select: { name: true } },

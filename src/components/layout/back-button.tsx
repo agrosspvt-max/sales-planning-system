@@ -1,17 +1,18 @@
 "use client";
 
-import { useRouter, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { routeParent } from "@/features/navigation/route-parents";
+import { useNavHistory } from "@/features/navigation/history";
 
 /**
- * Reusable, parent-aware Back control.
+ * Reusable Back control, wired to the centralized navigation history.
  *
- * If a logical parent exists (an explicit `to`, else the central route-parent map) it
- * navigates there; otherwise it uses browser history (`router.back()`). Pages never encode
- * navigation targets themselves.
+ * Priority: the page the user ACTUALLY came from (nav history) → else a logical parent (explicit
+ * `to`, else the route-parent map) → else the browser stack. So Back never jumps to a hardcoded
+ * generic destination when real history exists. Pages never encode navigation targets themselves.
  */
 export function BackButton({
   to,
@@ -22,20 +23,25 @@ export function BackButton({
   label?: string;
   className?: string;
 }) {
-  const router = useRouter();
   const pathname = usePathname();
-  const parent = to ?? routeParent(pathname);
+  const { previous, back } = useNavHistory();
+  const parent = to ?? routeParent(pathname) ?? undefined;
+
+  // When real history takes us somewhere other than the logical parent, "Back" is the honest label;
+  // otherwise keep the descriptive "Back to …" the caller provided.
+  const usingHistory = previous != null && previous !== parent;
+  const displayLabel = usingHistory ? "Back" : label;
 
   return (
     <Button
       variant="ghost"
       size="sm"
       className={cn("-ml-2 h-8 gap-1 px-2 text-muted-foreground", className)}
-      onClick={() => (parent ? router.push(parent) : router.back())}
+      onClick={() => back(parent)}
       aria-label="Go back"
     >
       <ArrowLeft className="h-4 w-4" />
-      {label}
+      {displayLabel}
     </Button>
   );
 }

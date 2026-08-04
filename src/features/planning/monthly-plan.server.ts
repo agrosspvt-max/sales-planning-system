@@ -12,6 +12,7 @@ import { findProbableDealers } from "@/lib/dealer-resolver";
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { buildMonthlyDealers } from "./monthly.server";
+import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer } from "./lifecycle.server";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Tx = any;
@@ -37,7 +38,8 @@ interface MonthlyPlanRow {
   seasonMonthId: string;
   officerId: string;
   status: PlanStatus;
-  seasonPlan: { seasonId: string; officerId: string };
+  lifecycleState: string;
+  seasonPlan: { seasonId: string; officerId: string; lifecycleState: string };
   seasonMonth: { name: string; order: number };
 }
 
@@ -45,12 +47,26 @@ async function loadMonthlyPlanOr404(id: string): Promise<MonthlyPlanRow> {
   const mp = await prisma.monthlyPlan.findUnique({
     where: { id },
     include: {
-      seasonPlan: { select: { seasonId: true, officerId: true } },
+      seasonPlan: { select: { seasonId: true, officerId: true, lifecycleState: true } },
       seasonMonth: { select: { name: true, order: true } },
     },
   });
   if (!mp) throw new ApiError(404, "Monthly plan not found");
   return mp as unknown as MonthlyPlanRow;
+}
+
+/**
+ * A monthly plan is editable only when BOTH it and its parent seasonal plan are ACTIVE (a closed or
+ * deactivated seasonal plan freezes its months too). One guard, called by every mutating action.
+ *
+ * BUSINESS RULE (Monthly CLOSED = planning read-only only): a CLOSED monthly plan blocks plan EDITING
+ * only. Actual-sales (Sales Upload) and reporting operate at the SEASONAL-plan level and are
+ * intentionally NOT gated by an individual month's lifecycle — sales still post and the month still
+ * appears in reports. Full month-level freezing of actuals/reports is deliberately out of scope.
+ */
+function assertMonthlyLive(mp: MonthlyPlanRow) {
+  assertLifecycleEditable(mp.seasonPlan.lifecycleState, "The parent seasonal plan");
+  assertLifecycleEditable(mp.lifecycleState, "This monthly plan");
 }
 
 async function monthlyLabel(mp: MonthlyPlanRow): Promise<string> {
@@ -86,6 +102,7 @@ export async function createMonthlyPlan(
   if (!(seasonPlan.status === PlanStatus.APPROVED && seasonPlan.isActiveVersion)) {
     throw new ApiError(409, "Monthly plans can only be created from an approved seasonal plan");
   }
+  assertLifecycleEditable((seasonPlan as { lifecycleState?: string }).lifecycleState, "The seasonal plan");
   const isOwner = ctx.role === Role.SALES_OFFICER && seasonPlan.officerId === ctx.userId;
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) {
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can create a monthly plan");
@@ -122,6 +139,10 @@ export async function listMonthlyPlans(
       seasonPlanId: opts.seasonPlanId || undefined,
       officerId: scope.all ? undefined : { in: scope.ids },
       status: opts.statuses ? { in: opts.statuses } : undefined,
+      // Deactivated monthly plans — and any under a deactivated SEASONAL plan — are hidden from the
+      // Sales Officer; Admin/RM still see them.
+      ...officerVisibilityWhere(ctx),
+      ...(ctx.role === Role.SALES_OFFICER ? { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } } : {}),
     },
     include: {
       seasonPlan: { select: { seasonId: true, season: { select: { name: true, year: true } } } },
@@ -140,6 +161,7 @@ export async function listMonthlyPlans(
     officerId: mp.officerId,
     officerName: mp.officer.name,
     status: mp.status as PlanStatus,
+    lifecycleState: (mp as { lifecycleState?: string }).lifecycleState ?? "ACTIVE",
     submittedAt: mp.submittedAt,
     approvedAt: mp.approvedAt,
     lastSavedAt: mp.lastSavedAt,
@@ -189,6 +211,10 @@ export async function getSeasonalPlanMonths(ctx: AuthContext, seasonPlanId: stri
 
 export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
+  // Deactivated monthly plans (or those under a deactivated seasonal plan) are hidden from the SO.
+  if (isHiddenFromOfficer(ctx, mp.lifecycleState) || isHiddenFromOfficer(ctx, mp.seasonPlan.lifecycleState)) {
+    throw new ApiError(404, "Monthly plan not found");
+  }
   await assertOfficerInScope(ctx, mp.officerId);
 
   const seasonId = mp.seasonPlan.seasonId;
@@ -215,7 +241,8 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
 
   const isOwner = ctx.userId === mp.officerId && ctx.role === Role.SALES_OFFICER;
   const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
-  const canEdit = (isOwner || ctx.role === Role.SUPER_ADMIN) && EDITABLE.includes(mp.status);
+  const isLive = mp.lifecycleState === "ACTIVE" && mp.seasonPlan.lifecycleState === "ACTIVE";
+  const canEdit = (isOwner || ctx.role === Role.SUPER_ADMIN) && EDITABLE.includes(mp.status) && isLive;
   // Exactly ONE month — shaped as MonthlyData so the existing provider/planner consume it
   // unchanged (no in-page month selector). Editability comes from the monthly plan lifecycle.
   const months = month
@@ -273,6 +300,7 @@ export async function setMonthlyDealerNoPlan(
   const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
+  assertMonthlyLive(mp);
 
   const noPlanReason = noPlan ? reason?.trim() || null : null;
   await prisma.monthlyPlanDealer.upsert({
@@ -337,6 +365,7 @@ export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: st
   if (!EDITABLE.includes(mp.status)) {
     throw new ApiError(409, "This monthly plan is not editable in its current state");
   }
+  assertMonthlyLive(mp);
 
   const validLines = new Set(
     (await prisma.planLine.findMany({ where: { planDealer: { seasonPlanId: mp.seasonPlanId } }, select: { id: true } })).map(
@@ -414,6 +443,7 @@ export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: stri
   const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
+  assertMonthlyLive(mp);
 
   // No manual annotation: Prisma infers rate/nbvPercent as Decimal from the `select`, which is
   // exactly what rateSnapshot/nbvPercentSnapshot expect. Casting them to `unknown` was the bug.
@@ -490,6 +520,7 @@ export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
   const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
+  assertMonthlyLive(mp);
   const data = dealerFieldsSchema.parse(raw);
 
   if (!data.force) {
@@ -565,6 +596,7 @@ export async function updateMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
   const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "Dealer info is read-only once the plan is submitted");
+  assertMonthlyLive(mp);
   const pd = (await prisma.planDealer.findUnique({
     where: { seasonPlanId_dealerId: { seasonPlanId: mp.seasonPlanId, dealerId } },
     select: { fromMonthlyPlan: true },
@@ -587,6 +619,7 @@ export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
   if (!EDITABLE.includes(mp.status)) {
     throw new ApiError(409, "This monthly plan cannot be submitted in its current state");
   }
+  assertMonthlyLive(mp);
 
   // Dealer completion gate — mirrors the Seasonal submit gate: every dealer in the monthly view
   // must be Completed (≥1 monthly plan value entered) or explicitly marked "No Plan".
@@ -652,6 +685,7 @@ export async function recallMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
     throw new ApiError(403, "Only the owning Sales Officer can recall this monthly plan");
   }
   if (!PENDING.includes(mp.status)) throw new ApiError(409, "Only a submitted monthly plan can be recalled");
+  assertMonthlyLive(mp);
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.DRAFT } });
   await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.RECALL, mp.status, PlanStatus.DRAFT);
   return { status: PlanStatus.DRAFT };
@@ -671,6 +705,7 @@ async function assertMonthlyApprover(ctx: AuthContext, mp: MonthlyPlanRow) {
 export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertMonthlyApprover(ctx, mp);
+  assertMonthlyLive(mp);
 
   if (mp.status === PlanStatus.PENDING_RM) {
     await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.PENDING_ADMIN } });
@@ -723,6 +758,7 @@ export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string
 export async function returnMonthlyPlan(ctx: AuthContext, monthlyPlanId: string, remarks: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertMonthlyApprover(ctx, mp);
+  assertMonthlyLive(mp);
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.RETURNED } });
   await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.RETURN, mp.status, PlanStatus.RETURNED, remarks);
   await createNotification({
@@ -739,6 +775,7 @@ export async function returnMonthlyPlan(ctx: AuthContext, monthlyPlanId: string,
 export async function rejectMonthlyPlan(ctx: AuthContext, monthlyPlanId: string, remarks: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertMonthlyApprover(ctx, mp);
+  assertMonthlyLive(mp);
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.REJECTED } });
   await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.REJECT, mp.status, PlanStatus.REJECTED, remarks);
 

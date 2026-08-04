@@ -869,17 +869,27 @@ export async function compareSnapshots(ctx: AuthContext, id: string, fromId: str
   const plan = await prisma.recoveryPlan.findUnique({ where: { id }, select: { officerId: true } });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
 
+  // AgingSnapshotDealer has scalar `dealerId` + relations `snapshot`/`bills` — there is NO `dealer`
+  // relation. Select the scalars only; dealer NAMES are resolved from the Dealer master by id below.
+  // The cast is the file's standard Decimal→unknown widening for `num()` — it matches the selected
+  // scalars exactly and no longer fabricates a `dealer` relation.
   const load = async (snapshotId: string) =>
     (await prisma.agingSnapshotDealer.findMany({
       where: { snapshotId, snapshot: { recoveryPlanId: id } },
-      select: { dealerId: true, outstanding: true, overdue: true, due: true, running: true, dealer: { select: { name: true } } },
-    })) as { dealerId: string; outstanding: unknown; overdue: unknown; due: unknown; running: unknown; dealer: { name: string } }[];
+      select: { dealerId: true, outstanding: true, overdue: true, due: true, running: true },
+    })) as { dealerId: string; outstanding: unknown; overdue: unknown; due: unknown; running: unknown }[];
   const [from, to] = await Promise.all([load(fromId), load(toId)]);
+
+  const dealerIds = [...new Set([...from, ...to].map((d) => d.dealerId))];
+  const dealerRows = await prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } });
+  const nameById = new Map(dealerRows.map((d) => [d.id, d.name]));
+  const nameOf = (dealerId: string) => nameById.get(dealerId) ?? "—";
+
   const asMetrics = (d: { outstanding: unknown; overdue: unknown; due: unknown; running: unknown }) => ({
     outstanding: num(d.outstanding), overdue: num(d.overdue), due: num(d.due), running: num(d.running),
   });
-  const fromByDealer = new Map(from.map((d) => [d.dealerId, { name: d.dealer.name, ...asMetrics(d) }]));
-  const toByDealer = new Map(to.map((d) => [d.dealerId, { name: d.dealer.name, ...asMetrics(d) }]));
+  const fromByDealer = new Map(from.map((d) => [d.dealerId, { name: nameOf(d.dealerId), ...asMetrics(d) }]));
+  const toByDealer = new Map(to.map((d) => [d.dealerId, { name: nameOf(d.dealerId), ...asMetrics(d) }]));
   const ids = [...new Set([...fromByDealer.keys(), ...toByDealer.keys()])];
   const zero = { outstanding: 0, overdue: 0, due: 0, running: 0 };
   const sum = (rows: Map<string, { outstanding: number; overdue: number; due: number; running: number }>) =>

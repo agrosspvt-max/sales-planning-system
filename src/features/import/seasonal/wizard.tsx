@@ -20,6 +20,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { RecoveryImportWizard } from "@/features/recovery/recovery-import-wizard";
 
 interface ParsedPack {
   header: string;
@@ -95,6 +96,7 @@ export function SeasonalImportWizard() {
   const [importAsApproved, setImportAsApproved] = useState(false);
   const [autoCreateNewDealers, setAutoCreateNewDealers] = useState(true);
   const [result, setResult] = useState<CommitResult | null>(null);
+  const [recovery, setRecovery] = useState<"offer" | "import" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const { data: seasons } = useQuery<SeasonOption[]>({
@@ -159,6 +161,7 @@ export function SeasonalImportWizard() {
     onSuccess: (r) => {
       setResult(r);
       setStep("done");
+      setRecovery("offer");
       setError(null);
     },
     onError: (e) => setError((e as Error).message),
@@ -428,8 +431,23 @@ export function SeasonalImportWizard() {
                 <Link href="/planning/sales">Back to Sales Planning</Link>
               </Button>
             </div>
+
+            {/* Continue into Recovery from the latest Aging Report (optional). */}
+            {recovery === "offer" && (
+              <div className="rounded-md border bg-muted/30 p-3">
+                <p className="text-sm font-medium">Would you like to create/update a Recovery Plan from the latest Aging Report?</p>
+                <div className="mt-2 flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setRecovery(null)}>Skip</Button>
+                  <Button size="sm" onClick={() => setRecovery("import")}>Import Aging Report</Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
+      )}
+
+      {step === "done" && result && recovery === "import" && (
+        <RecoveryImportWizard fixedScope={{ kind: "SINGLE_FROM_SEASONAL", seasonPlanId: result.planId }} onDone={() => setRecovery(null)} />
       )}
     </div>
   );

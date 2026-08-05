@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { decorate, matchByName, tightKey, looseKey, similarity, type Keyed } from "@/lib/match-key";
+import { decorate, tightKey, looseKey, similarity, type Keyed } from "@/lib/match-key";
 
 /**
  * The ONE dealer resolver for every importer (Sales Upload, Recovery, …). Resolution order is
@@ -15,6 +15,14 @@ import { decorate, matchByName, tightKey, looseKey, similarity, type Keyed } fro
  * the system dealer. There is no separate alias table or alias logic anywhere else.
  */
 export type DealerMatch = { id: string; name: string } & Keyed;
+
+/** How a raw name resolved to a master dealer — surfaced in previews (same rules, no new matcher). */
+export type MatchType = "ALIAS" | "EXACT" | "LOOSE" | "FUZZY";
+export interface DealerMatchResult {
+  dealer: DealerMatch;
+  matchType: MatchType;
+  score: number; // 1 for alias/exact, 0.95 for loose, the similarity (≥0.9) for fuzzy
+}
 
 /**
  * Three-outcome classification of a raw workbook dealer name, for importers that can ONBOARD new
@@ -32,6 +40,8 @@ export interface DealerResolver {
   dealers: DealerMatch[];
   /** Alias → exact → loose → fuzzy. Returns the master dealer or null. */
   resolve(rawName: string): DealerMatch | null;
+  /** Same rules as resolve(), but also reports HOW it matched (ALIAS/EXACT/LOOSE/FUZZY + score). */
+  resolveWithReason(rawName: string): DealerMatchResult | null;
   /** Same matching, classified into EXISTING / NEW / INVALID. Reusable by any importer. */
   classify(rawName: string): DealerResolution;
 }
@@ -49,15 +59,38 @@ export async function loadDealerResolver(): Promise<DealerResolver> {
     (aliasRows as { tallyKey: string; systemDealerId: string }[]).map((a) => [a.tallyKey, a.systemDealerId]),
   );
 
+  // ONE matching implementation with reasons; resolve() is just the dealer-only projection of it.
+  function resolveWithReason(rawName: string): DealerMatchResult | null {
+    const t = tightKey(rawName);
+    const aliasId = aliasByKey.get(t);
+    if (aliasId) {
+      const d = byId.get(aliasId);
+      if (d) return { dealer: d, matchType: "ALIAS", score: 1 }; // alias wins outright
+    }
+    if (t) {
+      const exact = dealers.find((x) => x.tight === t);
+      if (exact) return { dealer: exact, matchType: "EXACT", score: 1 };
+    }
+    const l = looseKey(rawName);
+    if (l) {
+      const loose = dealers.find((x) => x.loose === l);
+      if (loose) return { dealer: loose, matchType: "LOOSE", score: 0.95 };
+    }
+    let best: DealerMatchResult | null = null;
+    for (const x of dealers) {
+      const s = similarity(rawName, x.name);
+      if (s >= 0.9 && (!best || s > best.score)) best = { dealer: x, matchType: "FUZZY", score: s };
+    }
+    return best;
+  }
   function resolve(rawName: string): DealerMatch | null {
-    const aliasId = aliasByKey.get(tightKey(rawName));
-    if (aliasId) return byId.get(aliasId) ?? null; // alias wins outright
-    return matchByName(rawName, dealers, { fuzzy: true, threshold: 0.9 });
+    return resolveWithReason(rawName)?.dealer ?? null;
   }
 
   return {
     dealers,
     resolve,
+    resolveWithReason,
     classify(rawName: string): DealerResolution {
       const name = rawName.trim();
       if (!name || !tightKey(name)) return { outcome: "INVALID", rawName, reason: "Empty or unusable dealer name" };

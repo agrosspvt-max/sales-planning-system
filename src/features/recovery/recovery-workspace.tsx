@@ -47,6 +47,8 @@ interface RecoveryDealer {
   // Change tracking vs the previous snapshot (aging-derived business data only).
   prevAging: { outstanding: number; overdue: number; due: number; running: number } | null;
   changed: boolean;
+  // Kept in the plan but absent from the newest Aging snapshot → shown values are the last known.
+  missingInLatestAging?: boolean;
 }
 interface LastRefresh {
   at: string;
@@ -289,6 +291,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium" style={{ color: status === DealerPlanningStatus.COMPLETED ? "hsl(var(--success))" : status === DealerPlanningStatus.NO_PLAN ? "hsl(var(--noplan))" : undefined }}>
                     {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}{d.dealerName}
+                    {d.missingInLatestAging && <span className="ml-1.5 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning" title="This dealer is not in the latest Aging Report; the figures shown are the last known values.">Missing in latest aging</span>}
                   </TableCell>
                   {/* Section 1 — Dealer & Closing Balance */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>

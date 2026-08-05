@@ -107,6 +107,20 @@ export function officerVisibilityWhere(ctx: AuthContext): { lifecycleState?: { n
   return ctx.role === Role.SALES_OFFICER ? { lifecycleState: { not: "DEACTIVATED" } } : {};
 }
 
+/**
+ * SO PARENT-visibility gate (cascade-aware), applied in list queries as an inline typed literal per
+ * service (Monthly/Recovery). A child is hidden by its parent only while it STILL FOLLOWS a
+ * deactivated parent (`lifecycleFromParent = true`). A child the admin restored/manages DIRECTLY
+ * (`lifecycleFromParent = false`) is shown per its own state — this is what makes a "historical view"
+ * (a directly-CLOSED child under an archived parent) visible & read-only to the officer, and it fixes
+ * restored children being hidden. The runtime predicate for the detail (get) queries:
+ */
+
+/** True when a child must be hidden from the SO because it still follows a DEACTIVATED parent. */
+export function isHiddenByArchivedParent(ctx: AuthContext, childFromParent: boolean, parentLifecycleState: string | null | undefined): boolean {
+  return childFromParent === true && isHiddenFromOfficer(ctx, parentLifecycleState);
+}
+
 /* ---------------------------- Seasonal lifecycle -------------------------- */
 
 /**
@@ -256,6 +270,107 @@ export async function deleteRecoveryPlan(ctx: AuthContext, recoveryPlanId: strin
     summary: `Deleted ${rp.status} recovery plan`,
   });
   return { deleted: true };
+}
+
+/* ----------------- Restore dependency: child under an archived parent -------------------- */
+
+export type ChildKind = "MONTHLY" | "RECOVERY";
+export type RestoreMode = "WITH_PARENT" | "HISTORICAL" | "RESTORE_PARENT_ARCHIVE_NEWER";
+
+interface ParentInfo {
+  id: string;
+  version: number;
+  lifecycleState: string;
+  officerId: string;
+  seasonId: string;
+  planningType: string;
+}
+interface ChildContext {
+  childLifecycleState: string;
+  childFromParent: boolean;
+  parent: ParentInfo | null;
+}
+
+async function loadChildContext(kind: ChildKind, childId: string): Promise<ChildContext> {
+  const parentSelect = { id: true, version: true, lifecycleState: true, officerId: true, seasonId: true, planningType: true };
+  const row =
+    kind === "MONTHLY"
+      ? ((await prisma.monthlyPlan.findUnique({ where: { id: childId }, select: { lifecycleState: true, lifecycleFromParent: true, seasonPlan: { select: parentSelect } } })) as {
+          lifecycleState: string; lifecycleFromParent: boolean; seasonPlan: ParentInfo | null;
+        } | null)
+      : ((await prisma.recoveryPlan.findUnique({ where: { id: childId }, select: { lifecycleState: true, lifecycleFromParent: true, seasonPlan: { select: parentSelect } } })) as {
+          lifecycleState: string; lifecycleFromParent: boolean; seasonPlan: ParentInfo | null;
+        } | null);
+  if (!row) throw new ApiError(404, `${kind === "MONTHLY" ? "Monthly" : "Recovery"} plan not found`);
+  return { childLifecycleState: row.lifecycleState, childFromParent: row.lifecycleFromParent, parent: row.seasonPlan };
+}
+
+/** A DIFFERENT seasonal version that is currently the active one for the same officer+season+type. */
+async function findNewerActiveVersion(parent: ParentInfo): Promise<{ id: string; version: number } | null> {
+  const active = await prisma.seasonPlan.findFirst({
+    where: { seasonId: parent.seasonId, officerId: parent.officerId, planningType: parent.planningType, isActiveVersion: true, lifecycleState: "ACTIVE", id: { not: parent.id } },
+    select: { id: true, version: true },
+    orderBy: { version: "desc" },
+  });
+  return active ? { id: active.id, version: active.version } : null;
+}
+
+export interface RestoreContext {
+  kind: ChildKind;
+  childId: string;
+  /** True when the parent seasonal is archived (DEACTIVATED) and must be handled to use the child. */
+  needsParent: boolean;
+  parentPlanId: string | null;
+  parentVersion: number | null;
+  newerActiveVersion: { id: string; version: number } | null;
+}
+
+/** Detect whether restoring a Monthly/Recovery child requires resolving an archived parent. */
+export async function getChildRestoreContext(ctx: AuthContext, kind: ChildKind, childId: string): Promise<RestoreContext> {
+  assertAdmin(ctx);
+  const c = await loadChildContext(kind, childId);
+  const parentArchived = !!c.parent && (c.parent.lifecycleState ?? "ACTIVE") === "DEACTIVATED";
+  const newerActiveVersion = c.parent && parentArchived ? await findNewerActiveVersion(c.parent) : null;
+  return {
+    kind,
+    childId,
+    needsParent: parentArchived,
+    parentPlanId: c.parent?.id ?? null,
+    parentVersion: c.parent?.version ?? null,
+    newerActiveVersion,
+  };
+}
+
+/**
+ * Restore a child whose parent may be archived, using an explicit admin-chosen mode:
+ *   - HISTORICAL: make the child visible READ-ONLY (CLOSED, admin-managed) under the still-archived
+ *     parent — the "historical view". The active version (if any) is untouched.
+ *   - WITH_PARENT: reactivate the parent seasonal (cascade restores the followed children) and this
+ *     child — a full restore. Use when there is no newer active version.
+ *   - RESTORE_PARENT_ARCHIVE_NEWER: deactivate the newer active version, then reactivate this parent
+ *     + child (explicit, confirmed by the admin).
+ */
+export async function restoreChildPlan(ctx: AuthContext, kind: ChildKind, childId: string, mode: RestoreMode): Promise<{ ok: true }> {
+  assertAdmin(ctx);
+  const c = await loadChildContext(kind, childId);
+  const setChildLifecycle = kind === "MONTHLY" ? setMonthlyPlanLifecycle : setRecoveryPlanLifecycle;
+
+  if (mode === "HISTORICAL") {
+    await setChildLifecycle(ctx, childId, "close"); // visible + read-only, fromParent=false
+    return { ok: true };
+  }
+  if (!c.parent) {
+    await setChildLifecycle(ctx, childId, "reactivate"); // no parent to handle (unlinked recovery)
+    return { ok: true };
+  }
+  if (mode === "RESTORE_PARENT_ARCHIVE_NEWER") {
+    const newer = await findNewerActiveVersion(c.parent);
+    if (newer) await setSeasonalPlanLifecycle(ctx, newer.id, "deactivate");
+  }
+  // Reactivate the parent (cascade restores followed children), then ensure THIS child is active.
+  await setSeasonalPlanLifecycle(ctx, c.parent.id, "reactivate");
+  await setChildLifecycle(ctx, childId, "reactivate");
+  return { ok: true };
 }
 
 /**

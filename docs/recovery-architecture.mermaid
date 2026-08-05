@@ -1,0 +1,46 @@
+flowchart TD
+  %% ---- UI entry points (only the scope differs) ----
+  A1["Seasonal wizard done-step<br/>scope: SINGLE_FROM_SEASONAL"]:::ui
+  A2["Recovery Planning<br/>scope: ALL / SELECTED"]:::ui
+  A3["Manage Plans → Recovery → Replace<br/>scope: SINGLE (officer known)"]:::ui
+  A4["Recovery Workspace<br/>weekly re-upload (single plan)"]:::ui
+
+  A1 --> W
+  A2 --> W
+  A3 --> W
+
+  %% ---- One wizard, one API pair ----
+  W["RecoveryImportWizard (one component)"]:::core
+  W --> API["/api/recovery/import/analyze + /commit"]:::core
+  API --> AN["analyzeRecoveryImport / commitRecoveryImport (one each)"]:::core
+
+  %% ---- Shared pipeline ----
+  AN --> P["parseAgingReport (one parser)"]:::core
+  A4 --> P
+  P --> DA["loadDealerResolver — Dealer Alias<br/>alias → exact → loose → fuzzy (one)"]:::core
+  DA --> R["resolveAging → classified rows<br/>Accepted / Unknown / Other-officer / Inactive / Duplicate"]:::core
+  R --> PV["buildRecoveryImportPreview<br/>per-officer sections + summary card (one)"]:::core
+  PV --> ON["onboardDealersForOfficer → createAndAssignDealer (one onboarding)"]:::core
+  ON --> C{"mode: CREATE / UPDATE / REPLACE"}:::core
+
+  C --> CR["createRecoveryFromAging (officer-set scoped)"]:::core
+  C --> UP["updateRecoveryFromAging (officer-set scoped)"]:::core
+  A4 --> WK["uploadWeeklyAging (single plan)"]:::core
+  CR --> SN["writeRefreshSnapshot (one snapshot primitive)"]:::core
+  UP --> SN
+  WK --> SN
+
+  %% ---- Data + downstream ----
+  CR --> RP[("RecoveryPlan")]:::db
+  ON --> PD[("PlanDealer")]:::db
+  SN --> RPD[("RecoveryPlanDealer")]:::db
+  SN --> AS[("AgingSnapshot + Dealer + Bill")]:::db
+
+  RPD --> RPT["Reports / Recovery Workspace<br/>+ 'Missing in latest aging' badge (derived)"]:::db
+  RP --> AP["Approvals (approval.server)"]:::db
+  RP --> TL["Timeline / Compare"]:::db
+  C --> H["writeAudit → History"]:::db
+
+  classDef ui fill:#1e3a5f,stroke:#4a90d9,color:#fff;
+  classDef core fill:#2d4a3e,stroke:#5cb88a,color:#fff;
+  classDef db fill:#3d3a2e,stroke:#c9a94a,color:#fff;

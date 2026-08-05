@@ -9,7 +9,7 @@ import { detectOfficerFromFilename } from "@/features/import/dealers/service.ser
 import { finalizeApprovalTx } from "@/features/planning/service.server";
 import { looseKey, tightKey, decorate, matchByName, type Keyed } from "@/lib/match-key";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
-import { applyDealerAssignment } from "@/features/assignments/service.server";
+import { createAndAssignDealer } from "@/features/assignments/service.server";
 import { writeAudit } from "@/lib/audit";
 
 /** How a workbook dealer resolved during Seasonal Import (Existing / New-to-onboard / Invalid). */
@@ -477,10 +477,7 @@ export async function commitSeasonalImport(
         // assigned to the selected officer (reusing the shared assignment helper). If any creation
         // fails the whole import rolls back (no partial onboarding, no orphan dealers).
         for (const c of toCreate.values()) {
-          await tx.dealer.create({
-            data: { id: c.id, name: c.name, status: "ACTIVE", isActive: true, createdByUserId: ctx.userId, createdFrom: "SEASONAL_IMPORT" },
-          });
-          await applyDealerAssignment(tx, c.id, payload.officerId, effectiveFrom);
+          await createAndAssignDealer(tx, { id: c.id, name: c.name, officerId: payload.officerId, createdByUserId: ctx.userId, effectiveFrom });
         }
 
         await tx.seasonPlan.create({

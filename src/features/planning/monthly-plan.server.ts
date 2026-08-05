@@ -12,7 +12,7 @@ import { findProbableDealers } from "@/lib/dealer-resolver";
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { buildMonthlyDealers } from "./monthly.server";
-import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer } from "./lifecycle.server";
+import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "./lifecycle.server";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Tx = any;
@@ -39,6 +39,7 @@ interface MonthlyPlanRow {
   officerId: string;
   status: PlanStatus;
   lifecycleState: string;
+  lifecycleFromParent: boolean;
   seasonPlan: { seasonId: string; officerId: string; lifecycleState: string };
   seasonMonth: { name: string; order: number };
 }
@@ -139,10 +140,12 @@ export async function listMonthlyPlans(
       seasonPlanId: opts.seasonPlanId || undefined,
       officerId: scope.all ? undefined : { in: scope.ids },
       status: opts.statuses ? { in: opts.statuses } : undefined,
-      // Deactivated monthly plans — and any under a deactivated SEASONAL plan — are hidden from the
-      // Sales Officer; Admin/RM still see them.
+      // Deactivated monthly plans are hidden from the SO; so are plans that still FOLLOW a deactivated
+      // seasonal parent — but a directly-restored (historical/read-only) child stays visible.
       ...officerVisibilityWhere(ctx),
-      ...(ctx.role === Role.SALES_OFFICER ? { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } } : {}),
+      ...(ctx.role === Role.SALES_OFFICER
+        ? { OR: [{ lifecycleFromParent: false }, { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } }] }
+        : {}),
     },
     include: {
       seasonPlan: { select: { seasonId: true, season: { select: { name: true, year: true } } } },
@@ -211,8 +214,9 @@ export async function getSeasonalPlanMonths(ctx: AuthContext, seasonPlanId: stri
 
 export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  // Deactivated monthly plans (or those under a deactivated seasonal plan) are hidden from the SO.
-  if (isHiddenFromOfficer(ctx, mp.lifecycleState) || isHiddenFromOfficer(ctx, mp.seasonPlan.lifecycleState)) {
+  // Hidden from the SO if the plan itself is deactivated, or it still FOLLOWS a deactivated parent
+  // (a directly-restored historical/read-only child stays viewable).
+  if (isHiddenFromOfficer(ctx, mp.lifecycleState) || isHiddenByArchivedParent(ctx, mp.lifecycleFromParent, mp.seasonPlan.lifecycleState)) {
     throw new ApiError(404, "Monthly plan not found");
   }
   await assertOfficerInScope(ctx, mp.officerId);

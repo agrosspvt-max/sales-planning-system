@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/dialog";
 import { PlanStateBadge } from "@/features/planning/status-badge";
 import type { PlanStatus } from "@/features/planning/types";
+import { RecoveryImportWizard } from "@/features/recovery/recovery-import-wizard";
 
 type PlanKind = "SEASONAL" | "MONTHLY" | "RECOVERY";
 interface PlanRow {
@@ -65,11 +66,23 @@ type Confirm =
   | { kind: "deactivate" | "delete" | "replace"; row: PlanRow }
   | null;
 
+interface RestoreContext {
+  kind: "MONTHLY" | "RECOVERY";
+  childId: string;
+  needsParent: boolean;
+  parentPlanId: string | null;
+  parentVersion: number | null;
+  newerActiveVersion: { id: string; version: number } | null;
+}
+type RestoreMode = "WITH_PARENT" | "HISTORICAL" | "RESTORE_PARENT_ARCHIVE_NEWER";
+
 /** Officer profile → Plans: manage every plan's lifecycle (Super Admin). Reuses the lifecycle APIs. */
 export function OfficerPlansManagement({ officerId, role }: { officerId: string; role: Role }) {
   const qc = useQueryClient();
   const isAdmin = role === Role.SUPER_ADMIN;
   const [confirm, setConfirm] = useState<Confirm>(null);
+  const [restore, setRestore] = useState<{ row: PlanRow; ctx: RestoreContext } | null>(null);
+  const [recoveryImport, setRecoveryImport] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery<PlansResult>({
@@ -99,6 +112,25 @@ export function OfficerPlansManagement({ officerId, role }: { officerId: string;
     onSuccess: () => { setConfirm(null); setError(null); invalidate(); },
     onError: (e) => setError((e as Error).message),
   });
+  const restoreMut = useMutation({
+    mutationFn: (v: { row: PlanRow; mode: RestoreMode }) => api.post("/api/planning/lifecycle/restore", { kind: v.row.kind, id: v.row.id, mode: v.mode }),
+    onSuccess: () => { setRestore(null); setError(null); invalidate(); },
+    onError: (e) => setError((e as Error).message),
+  });
+
+  // Restore: Seasonal reactivates directly (cascades to children). For a Monthly/Recovery child we
+  // first check whether its parent Seasonal plan is archived — if so, present the dependency dialog.
+  async function openRestore(row: PlanRow) {
+    setError(null);
+    if (row.kind === "SEASONAL") { lifecycleMut.mutate({ row, action: "reactivate" }); return; }
+    try {
+      const ctx = await api.get<RestoreContext>(`/api/planning/lifecycle/restore-context?kind=${row.kind}&id=${row.id}`);
+      if (ctx.needsParent) setRestore({ row, ctx });
+      else lifecycleMut.mutate({ row, action: "reactivate" });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const grouped = useMemo(() => {
@@ -204,12 +236,17 @@ export function OfficerPlansManagement({ officerId, role }: { officerId: string;
                                     <EyeOff className="h-3.5 w-3.5" /> Deactivate
                                   </Button>
                                 ) : (
-                                  <Button variant="ghost" size="sm" onClick={() => lifecycleMut.mutate({ row: r, action: "reactivate" })} disabled={lifecycleMut.isPending}>
+                                  <Button variant="ghost" size="sm" onClick={() => openRestore(r)} disabled={lifecycleMut.isPending || restoreMut.isPending}>
                                     <Eye className="h-3.5 w-3.5" /> Restore
                                   </Button>
                                 )}
                                 {r.kind === "SEASONAL" && active && (
                                   <Button variant="ghost" size="sm" onClick={() => setConfirm({ kind: "replace", row: r })}>
+                                    <RefreshCw className="h-3.5 w-3.5" /> Replace
+                                  </Button>
+                                )}
+                                {r.kind === "RECOVERY" && active && (
+                                  <Button variant="ghost" size="sm" onClick={() => setRecoveryImport(true)}>
                                     <RefreshCw className="h-3.5 w-3.5" /> Replace
                                   </Button>
                                 )}
@@ -231,6 +268,14 @@ export function OfficerPlansManagement({ officerId, role }: { officerId: string;
           </div>
         ))
       )}
+
+      {/* Recovery import (Create / Update / Replace) scoped to THIS officer — officer already known. */}
+      <Dialog open={recoveryImport} onOpenChange={setRecoveryImport}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader><DialogTitle>Recovery Import (this officer)</DialogTitle></DialogHeader>
+          <RecoveryImportWizard fixedScope={{ kind: "SINGLE", officerId }} onDone={() => { setRecoveryImport(false); invalidate(); }} />
+        </DialogContent>
+      </Dialog>
 
       {/* Confirmations for the destructive / archival actions. */}
       <Dialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}>
@@ -264,6 +309,53 @@ export function OfficerPlansManagement({ officerId, role }: { officerId: string;
               <Button disabled={replaceMut.isPending} onClick={() => replaceMut.mutate(confirm.row)}>Archive &amp; import replacement</Button>
             )}
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restore dependency: this child belongs to an archived Seasonal plan. */}
+      <Dialog open={!!restore} onOpenChange={(o) => !o && setRestore(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Restore under an archived Seasonal plan</DialogTitle>
+          </DialogHeader>
+          {restore && (
+            <div className="space-y-3 text-sm">
+              {restore.ctx.newerActiveVersion ? (
+                <>
+                  <p className="text-muted-foreground">
+                    This {restore.row.kind === "MONTHLY" ? "monthly" : "recovery"} plan belongs to Seasonal Plan v{restore.ctx.parentVersion}, but Seasonal Plan v{restore.ctx.newerActiveVersion.version} is currently active.
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    <Button disabled={restoreMut.isPending} onClick={() => restoreMut.mutate({ row: restore.row, mode: "HISTORICAL" })}>
+                      Restore as Historical View (Read Only) — recommended
+                    </Button>
+                    <Button variant="outline" disabled={restoreMut.isPending} onClick={() => restoreMut.mutate({ row: restore.row, mode: "RESTORE_PARENT_ARCHIVE_NEWER" })}>
+                      Restore Parent v{restore.ctx.parentVersion} (archives v{restore.ctx.newerActiveVersion.version})
+                    </Button>
+                    <Button variant="ghost" onClick={() => setRestore(null)}>Cancel</Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-muted-foreground">
+                    This {restore.row.kind === "MONTHLY" ? "monthly" : "recovery"} plan belongs to an archived Seasonal Plan (v{restore.ctx.parentVersion}). To use it, its parent Seasonal Plan must also be active.
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    <Button disabled={restoreMut.isPending} onClick={() => restoreMut.mutate({ row: restore.row, mode: "WITH_PARENT" })}>
+                      Restore Parent + This Plan — recommended
+                    </Button>
+                    {restore.ctx.parentPlanId && (
+                      <Button asChild variant="outline">
+                        <Link href={`/planning/${restore.ctx.parentPlanId}`}>Open Parent Plan</Link>
+                      </Button>
+                    )}
+                    <Button variant="ghost" onClick={() => setRestore(null)}>Cancel</Button>
+                  </div>
+                </>
+              )}
+              {error && <p className="text-destructive">{error}</p>}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

@@ -1,8 +1,9 @@
 import { type NextRequest } from "next/server";
 import { handle, ok, requireAuth, ApiError } from "@/lib/http";
 import { fileToBuffer } from "@/lib/import/workbook";
-import { createRecoveryFromAging } from "@/features/recovery/service.server";
+import { commitRecoveryImport } from "@/features/recovery/service.server";
 
+/** Commit a Recovery import for any scope: onboard (single) + Create/Update/Replace the in-scope plans. */
 export async function POST(req: NextRequest) {
   return handle(async () => {
     const auth = await requireAuth();
@@ -11,6 +12,6 @@ export async function POST(req: NextRequest) {
     if (!(file instanceof File)) throw new ApiError(422, "No file uploaded");
     const dataRaw = form.get("data");
     const data = typeof dataRaw === "string" ? JSON.parse(dataRaw) : {};
-    return ok(await createRecoveryFromAging(auth, await fileToBuffer(file), file.name, data));
+    return ok(await commitRecoveryImport(auth, await fileToBuffer(file), file.name, data));
   });
 }

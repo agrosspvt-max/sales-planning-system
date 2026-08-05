@@ -4,10 +4,12 @@ import { z } from "zod";
 import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { loadDealerResolver } from "@/lib/dealer-resolver";
+import { loadDealerResolver, type MatchType } from "@/lib/dealer-resolver";
+import { tightKey } from "@/lib/match-key";
+import { createAndAssignDealer } from "@/features/assignments/service.server";
 import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
-import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer } from "@/features/planning/lifecycle.server";
+import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -49,11 +51,28 @@ interface ResolvedDealer {
   officerId: string;
   aging: ReturnType<typeof aggregateDealer>;
 }
+
+/**
+ * One classified row of the Aging Report, produced ONCE by resolveAging and reused by every preview.
+ * Scope-neutral: the officer this row's dealer is assigned to (if any) is recorded here; whether that
+ * makes it "accepted" or "assigned to another officer" is decided per-scope by buildOfficerSections.
+ */
+interface ClassifiedAgingRow {
+  rawName: string;
+  dealerId: string | null; // resolved master dealer, or null when unmatched
+  dealerName: string | null;
+  officerId: string | null; // active-assignment officer, or null when matched-but-unassigned
+  duplicate: boolean; // this dealerId already appeared in an earlier row (rows merged into one)
+  matchType: MatchType | null; // how the name resolved (ALIAS/EXACT/LOOSE/FUZZY) — null when unmatched
+  score: number | null; // resolver confidence (fuzzy < 1); null when unmatched
+  aging: ReturnType<typeof aggregateDealer>;
+}
 interface Resolution {
   resolved: ResolvedDealer[];
   unknownDealers: string[];
   unassignedDealers: string[]; // matched but no current officer assignment
   byOfficer: Map<string, ResolvedDealer[]>;
+  rows: ClassifiedAgingRow[]; // every parsed row, classified (single source for the rich preview)
 }
 
 /**
@@ -75,18 +94,25 @@ async function resolveAging(parsed: ParsedAgingReport, cutoff: Date): Promise<Re
   const byDealer = new Map<string, ResolvedDealer>();
   const unknownDealers: string[] = [];
   const unassignedSet = new Set<string>();
+  const rows: ClassifiedAgingRow[] = [];
+  const seenDealerIds = new Set<string>();
   for (const d of parsed.dealers) {
-    const dealer = resolver.resolve(d.rawName);
-    if (!dealer) {
+    const ag = aggregateDealer(d.bills, cutoff);
+    const match = resolver.resolveWithReason(d.rawName);
+    if (!match) {
       unknownDealers.push(d.rawName);
+      rows.push({ rawName: d.rawName, dealerId: null, dealerName: null, officerId: null, duplicate: false, matchType: null, score: null, aging: ag });
       continue;
     }
-    const officerId = officerByDealer.get(dealer.id);
+    const dealer = match.dealer;
+    const officerId = officerByDealer.get(dealer.id) ?? null;
+    const duplicate = seenDealerIds.has(dealer.id);
+    seenDealerIds.add(dealer.id);
+    rows.push({ rawName: d.rawName, dealerId: dealer.id, dealerName: dealer.name, officerId, duplicate, matchType: match.matchType, score: match.score, aging: ag });
     if (!officerId) {
       unassignedSet.add(dealer.name);
       continue;
     }
-    const ag = aggregateDealer(d.bills, cutoff);
     const existing = byDealer.get(dealer.id);
     if (existing) {
       existing.aging = {
@@ -108,7 +134,125 @@ async function resolveAging(parsed: ParsedAgingReport, cutoff: Date): Promise<Re
     arr.push(r);
     byOfficer.set(r.officerId, arr);
   }
-  return { resolved, unknownDealers, unassignedDealers: [...unassignedSet], byOfficer };
+  return { resolved, unknownDealers, unassignedDealers: [...unassignedSet], byOfficer, rows };
+}
+
+/* ------------------------- Rich preview (shared) -------------------------- */
+// ONE preview builder for every scope (All / Selected / Single / Seasonal). It buckets the classified
+// rows from resolveAging into per-officer accepted/duplicate sections plus report-level skip sections,
+// each skipped dealer carrying an exact reason. No caller recomputes parsing, matching or totals.
+
+export interface DealerLine {
+  name: string;
+  outstanding: number;
+  overdue: number;
+  due: number;
+  running: number;
+  matchType: MatchType | null; // ALIAS / EXACT / LOOSE / FUZZY
+  score: number | null; // resolver confidence (surfaced for FUZZY)
+}
+export interface SkipLine {
+  name: string;
+  reason: string;
+}
+export interface OfficerPreviewSection {
+  officerId: string;
+  officerName: string;
+  accepted: DealerLine[];
+  duplicates: SkipLine[];
+  totals: { outstanding: number; overdue: number; due: number; running: number };
+  existingRecovery: { id: string; status: PlanStatus; lifecycleState: string } | null;
+}
+export interface RecoveryImportPreview {
+  officers: OfficerPreviewSection[];
+  skipped: {
+    unknown: SkipLine[]; // no Dealer Alias / master match — onboarding candidates
+    inactive: SkipLine[]; // matched dealer with no active officer assignment
+    otherOfficer: SkipLine[]; // assigned to an officer NOT in the chosen scope
+  };
+  summary: {
+    totalRows: number;
+    accepted: number;
+    skipped: number;
+    unknown: number;
+    duplicates: number;
+    inactive: number;
+    assignedToOther: number;
+    newDealers: number;
+  };
+  newDealerCandidates: string[]; // unknown names offered for onboarding (default unchecked)
+}
+
+const zeroTotals = () => ({ outstanding: 0, overdue: 0, due: 0, running: 0 });
+
+/** Build the rich preview for a set of in-scope officers from already-classified rows. */
+function buildRecoveryImportPreview(
+  rows: ClassifiedAgingRow[],
+  scopeOfficerIds: string[],
+  officerNameById: Map<string, string>,
+  existingByOfficer: Map<string, { id: string; status: PlanStatus; lifecycleState: string }>,
+): RecoveryImportPreview {
+  const inScope = new Set(scopeOfficerIds);
+  const sections = new Map<string, OfficerPreviewSection>();
+  for (const oid of scopeOfficerIds) {
+    sections.set(oid, {
+      officerId: oid,
+      officerName: officerNameById.get(oid) ?? "—",
+      accepted: [],
+      duplicates: [],
+      totals: zeroTotals(),
+      existingRecovery: existingByOfficer.get(oid) ?? null,
+    });
+  }
+  const unknown: SkipLine[] = [];
+  const inactive: SkipLine[] = [];
+  const otherOfficer: SkipLine[] = [];
+
+  for (const r of rows) {
+    if (r.dealerId === null) {
+      unknown.push({ name: r.rawName, reason: "Dealer Alias not found" });
+      continue;
+    }
+    if (r.officerId === null) {
+      inactive.push({ name: r.dealerName ?? r.rawName, reason: "Matched, but no active officer assignment" });
+      continue;
+    }
+    if (!inScope.has(r.officerId)) {
+      otherOfficer.push({ name: r.dealerName ?? r.rawName, reason: `Assigned to ${officerNameById.get(r.officerId) ?? "another officer"}` });
+      continue;
+    }
+    const sec = sections.get(r.officerId);
+    if (!sec) continue;
+    if (r.duplicate) {
+      sec.duplicates.push({ name: r.dealerName ?? r.rawName, reason: "Duplicate row (merged into one dealer)" });
+      continue;
+    }
+    sec.accepted.push({ name: r.dealerName ?? r.rawName, outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running, matchType: r.matchType, score: r.score });
+    sec.totals.outstanding += r.aging.outstanding;
+    sec.totals.overdue += r.aging.overdue;
+    sec.totals.due += r.aging.due;
+    sec.totals.running += r.aging.running;
+  }
+
+  const officers = [...sections.values()];
+  const accepted = officers.reduce((n, s) => n + s.accepted.length, 0);
+  const duplicates = officers.reduce((n, s) => n + s.duplicates.length, 0);
+  const skipped = unknown.length + inactive.length + otherOfficer.length + duplicates;
+  return {
+    officers,
+    skipped: { unknown, inactive, otherOfficer },
+    summary: {
+      totalRows: rows.length,
+      accepted,
+      skipped,
+      unknown: unknown.length,
+      duplicates,
+      inactive: inactive.length,
+      assignedToOther: otherOfficer.length,
+      newDealers: unknown.length,
+    },
+    newDealerCandidates: unknown.map((u) => u.name),
+  };
 }
 
 /* --------------------------------- Analyze -------------------------------- */
@@ -116,46 +260,12 @@ async function resolveAging(parsed: ParsedAgingReport, cutoff: Date): Promise<Re
 const createSchema = z.object({
   seasonMonthId: z.string().min(1, "Select a Month"),
   cutoffDate: z.string().min(1, "Select a Cutoff Date"),
+  // Optional scope: restrict creation to a set of officers (Single / Selected / Seasonal flows). When
+  // omitted, every matched officer is planned (All). `officerScope` (single id) is kept for callers
+  // that still pass one officer; it is folded into `officerIds`.
+  officerScope: z.string().optional(),
+  officerIds: z.array(z.string()).optional(),
 });
-
-export interface RecoveryAnalysis {
-  workbookName: string;
-  seasonName: string;
-  monthName: string;
-  dealersFound: number;
-  billsParsed: number;
-  officersAffected: number;
-  unknownDealers: string[];
-  unassignedDealers: string[];
-  totals: { outstanding: number; overdue: number; due: number; running: number };
-}
-
-export async function analyzeAgingReport(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<RecoveryAnalysis> {
-  assertAdmin(ctx);
-  const input = createSchema.parse(raw);
-  const cutoff = new Date(input.cutoffDate);
-  const month = await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, include: { season: { select: { name: true, year: true } } } });
-  if (!month) throw new ApiError(422, "The selected Month does not exist");
-  const parsed = parseAgingReport(buffer);
-  if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
-  const res = await resolveAging(parsed, cutoff);
-
-  const totals = res.resolved.reduce(
-    (t, r) => ({ outstanding: t.outstanding + r.aging.outstanding, overdue: t.overdue + r.aging.overdue, due: t.due + r.aging.due, running: t.running + r.aging.running }),
-    { outstanding: 0, overdue: 0, due: 0, running: 0 },
-  );
-  return {
-    workbookName: filename,
-    seasonName: `${month.season.name} ${month.season.year}`,
-    monthName: month.name,
-    dealersFound: res.resolved.length,
-    billsParsed: parsed.totalBills,
-    officersAffected: res.byOfficer.size,
-    unknownDealers: res.unknownDealers,
-    unassignedDealers: res.unassignedDealers,
-    totals,
-  };
-}
 
 /* ---------------------------- Create (week 0) ----------------------------- */
 
@@ -180,6 +290,10 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   if (!month) throw new ApiError(422, "The selected Month does not exist");
   const parsed = parseAgingReport(buffer);
   const res = await resolveAging(parsed, cutoff);
+  const scopeSet = input.officerIds?.length ? new Set(input.officerIds) : input.officerScope ? new Set([input.officerScope]) : null;
+  if (scopeSet) {
+    for (const o of [...res.byOfficer.keys()]) if (!scopeSet.has(o)) res.byOfficer.delete(o);
+  }
   if (res.byOfficer.size === 0) throw new ApiError(422, "No matched, assigned dealers to plan recovery for");
 
   // Guard: a recovery plan for this month must not already exist for any affected officer.
@@ -279,7 +393,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
       // Sales Officer; Admin/RM still see them. (seasonPlanId null tolerated for legacy rows.)
       ...officerVisibilityWhere(ctx),
       ...(ctx.role === Role.SALES_OFFICER
-        ? { OR: [{ seasonPlanId: null }, { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } }] }
+        ? { OR: [{ seasonPlanId: null }, { lifecycleFromParent: false }, { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } }] }
         : {}),
     },
     include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true } }, officer: { select: { name: true } } },
@@ -318,9 +432,11 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     },
   });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
-  // A deactivated recovery plan (or one under a deactivated seasonal plan) is hidden from the SO.
+  // Hidden from the SO if the plan itself is deactivated, or it still FOLLOWS a deactivated parent
+  // (a directly-restored historical/read-only child stays viewable).
   const parentLifecycle = (plan as { seasonPlan?: { lifecycleState: string } | null }).seasonPlan?.lifecycleState;
-  if (isHiddenFromOfficer(ctx, (plan as { lifecycleState?: string }).lifecycleState) || isHiddenFromOfficer(ctx, parentLifecycle)) {
+  const childFromParent = (plan as { lifecycleFromParent?: boolean }).lifecycleFromParent ?? false;
+  if (isHiddenFromOfficer(ctx, (plan as { lifecycleState?: string }).lifecycleState) || isHiddenByArchivedParent(ctx, childFromParent, parentLifecycle)) {
     throw new ApiError(404, "Recovery plan not found");
   }
   await assertOfficerInScope(ctx, plan.officerId);
@@ -371,6 +487,12 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
       }[])
     : [];
   const prevByDealer = new Map(prevDealers.map((d) => [d.dealerId, { outstanding: num(d.outstanding), overdue: num(d.overdue), due: num(d.due), running: num(d.running) }]));
+
+  // "Missing in Latest Aging" (derived, Option C): a dealer kept in the plan but absent from the newest
+  // snapshot shows its last-known aging with a stale badge — no value is zeroed, no row is removed.
+  const latestDealerIds = latestSnapshot
+    ? new Set(((await prisma.agingSnapshotDealer.findMany({ where: { snapshotId: latestSnapshot.id }, select: { dealerId: true } })) as { dealerId: string }[]).map((d) => d.dealerId))
+    : new Set<string>();
 
   // Week locking follows the REFRESH SEQUENCE, matching the business rule: the initial upload =
   // Week 1 (nothing locked), and each Update Recovery advances the current week by one, locking the
@@ -423,6 +545,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         // Change tracking (vs previous snapshot): previous aging values + a changed flag.
         prevAging: prev,
         changed,
+        // Present in the plan but absent from the newest Aging snapshot → last-known values are stale.
+        missingInLatestAging: latestSnapshot ? !latestDealerIds.has(d.dealerId) : false,
       };
     }),
   };
@@ -676,70 +800,19 @@ const updateSchema = z.object({
   seasonMonthId: z.string().min(1, "Select a Month"),
   cutoffDate: z.string().min(1, "Select a Cutoff Date"),
   allowWeeklyEdit: z.coerce.boolean().default(true),
+  // Optional scope: restrict the refresh to a set of officers (Single / Selected / Seasonal flows).
+  // `officerScope` (single id) is kept for existing callers and folded into `officerIds`.
+  officerScope: z.string().optional(),
+  officerIds: z.array(z.string()).optional(),
 });
 
-export interface RecoveryUpdateAnalysis {
-  workbookName: string;
-  seasonName: string;
-  monthName: string;
-  cutoffDate: string;
-  plansMatched: number;
-  officersAffected: number;
-  dealersInReport: number;
-  unknownDealers: string[];
-  unassignedDealers: string[];
-  reportTotals: { outstanding: number; overdue: number; due: number; running: number };
-  currentTotals: { outstanding: number; overdue: number; due: number; running: number };
-}
-
-/** Preview an Update Recovery: which active plans for the month refresh, and the aggregate change. */
-export async function analyzeRecoveryUpdate(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<RecoveryUpdateAnalysis> {
-  assertAdmin(ctx);
-  const input = updateSchema.parse(raw);
-  const cutoff = new Date(input.cutoffDate);
-  const month = await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, include: { season: { select: { name: true, year: true } } } });
-  if (!month) throw new ApiError(422, "The selected Month does not exist");
-  const parsed = parseAgingReport(buffer);
-  if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
-  const res = await resolveAging(parsed, cutoff);
-
-  const plans = (await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: month.id, lifecycleState: "ACTIVE" },
-    select: { id: true, officerId: true, seasonPlan: { select: { lifecycleState: true } } },
-  })) as { id: string; officerId: string; seasonPlan: { lifecycleState: string } | null }[];
-  const refreshable = plans.filter((p) => (p.seasonPlan?.lifecycleState ?? "ACTIVE") === "ACTIVE");
-  const officersWithPlan = new Set(refreshable.map((p) => p.officerId));
-
-  const affectedDealers = res.resolved.filter((r) => officersWithPlan.has(r.officerId));
-  const reportTotals = affectedDealers.reduce(
-    (t, r) => ({ outstanding: t.outstanding + r.aging.outstanding, overdue: t.overdue + r.aging.overdue, due: t.due + r.aging.due, running: t.running + r.aging.running }),
-    { outstanding: 0, overdue: 0, due: 0, running: 0 },
-  );
-  const planIds = refreshable.filter((p) => res.byOfficer.has(p.officerId)).map((p) => p.id);
-  const current = (await prisma.recoveryPlanDealer.findMany({ where: { recoveryPlanId: { in: planIds } }, select: { outstanding: true, overdue: true, due: true, running: true } })) as {
-    outstanding: unknown; overdue: unknown; due: unknown; running: unknown;
-  }[];
-  const currentTotals = current.reduce<{ outstanding: number; overdue: number; due: number; running: number }>(
-    (t, d) => ({ outstanding: t.outstanding + num(d.outstanding), overdue: t.overdue + num(d.overdue), due: t.due + num(d.due), running: t.running + num(d.running) }),
-    { outstanding: 0, overdue: 0, due: 0, running: 0 },
-  );
-
-  return {
-    workbookName: filename,
-    seasonName: `${month.season.name} ${month.season.year}`,
-    monthName: month.name,
-    cutoffDate: input.cutoffDate,
-    plansMatched: planIds.length,
-    officersAffected: [...officersWithPlan].filter((o) => res.byOfficer.has(o)).length,
-    dealersInReport: affectedDealers.length,
-    unknownDealers: res.unknownDealers,
-    unassignedDealers: res.unassignedDealers,
-    reportTotals,
-    currentTotals,
-  };
-}
-
 export interface RecoverySkip {
+  officerName: string;
+  reason: string;
+}
+/** A plan whose refresh threw (transient/DB error) — retryable, NOT an intentional skip. */
+export interface RecoveryFailure {
+  officerId: string;
   officerName: string;
   reason: string;
 }
@@ -747,6 +820,7 @@ export interface RecoveryUpdateResult {
   updatedPlans: number;
   skippedPlans: number;
   skipped: RecoverySkip[];
+  failed: RecoveryFailure[];
   officers: number;
   dealersRefreshed: number;
   totalOutstandingDelta: number;
@@ -775,8 +849,9 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
   const res = await resolveAging(parsed, cutoff);
 
+  const updateScopeIds = input.officerIds?.length ? input.officerIds : input.officerScope ? [input.officerScope] : null;
   const plans = (await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: month.id, lifecycleState: "ACTIVE" },
+    where: { seasonMonthId: month.id, lifecycleState: "ACTIVE", officerId: updateScopeIds ? { in: updateScopeIds } : undefined },
     select: { id: true, officerId: true, officer: { select: { name: true } }, seasonPlan: { select: { lifecycleState: true } } },
   })) as { id: string; officerId: string; officer: { name: string }; seasonPlan: { lifecycleState: string } | null }[];
   if (plans.length === 0) throw new ApiError(422, "No active recovery plans exist for the selected month.");
@@ -784,6 +859,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   let updatedPlans = 0, dealersRefreshed = 0, totalOutstandingDelta = 0;
   const officers = new Set<string>();
   const skipped: RecoverySkip[] = [];
+  const failed: RecoveryFailure[] = [];
 
   for (const plan of plans) {
     const officerName = plan.officer.name;
@@ -807,19 +883,25 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
       continue;
     }
 
-    // Confidently matched → refresh.
+    // Confidently matched → refresh. RESILIENT (D1): a single plan's failure is recorded and the
+    // batch continues, so one officer's transient error never aborts the others — and a retry can be
+    // scoped to just the failed officers, so already-refreshed officers are NOT snapshotted again.
     const newByDealer = new Map<string, ResolvedDealer["aging"]>(forOfficer.map((r) => [r.dealerId, r.aging]));
     const prevByDealer = new Map<string, number>(existing.map((d) => [d.dealerId, num(d.outstanding)]));
     const summary = buildChangeSummary(prevByDealer, newByDealer);
-    const weekNo = await nextSnapshotWeekNo(plan.id);
-
-    await prisma.$transaction(
-      async (tx: Tx) => {
-        await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
-        await tx.recoveryPlan.update({ where: { id: plan.id }, data: { cutoffDate: cutoff, weeklyEditEnabled: input.allowWeeklyEdit } });
-      },
-      { timeout: 60000, maxWait: 10000 },
-    );
+    try {
+      const weekNo = await nextSnapshotWeekNo(plan.id);
+      await prisma.$transaction(
+        async (tx: Tx) => {
+          await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
+          await tx.recoveryPlan.update({ where: { id: plan.id }, data: { cutoffDate: cutoff, weeklyEditEnabled: input.allowWeeklyEdit } });
+        },
+        { timeout: 60000, maxWait: 10000 },
+      );
+    } catch {
+      failed.push({ officerId: plan.officerId, officerName, reason: "Refresh did not complete — you can retry this officer." });
+      continue;
+    }
 
     updatedPlans += 1;
     dealersRefreshed += forOfficer.length;
@@ -827,13 +909,14 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
     officers.add(plan.officerId);
   }
 
+  // Audit ALWAYS runs now (the batch never aborts mid-way), so partial progress is recorded truthfully.
   await writeAudit({
     userId: ctx.userId,
     action: "UPDATE",
     entity: "recoveryPlan",
-    summary: `Update Recovery from ${filename}: ${updatedPlans} updated, ${skipped.length} skipped, ${dealersRefreshed} dealer(s), ₹${Math.round(totalOutstandingDelta)} outstanding change`,
+    summary: `Update Recovery from ${filename}: ${updatedPlans} updated, ${skipped.length} skipped, ${failed.length} failed, ${dealersRefreshed} dealer(s), ₹${Math.round(totalOutstandingDelta)} outstanding change`,
   });
-  return { updatedPlans, skippedPlans: skipped.length, skipped, officers: officers.size, dealersRefreshed, totalOutstandingDelta };
+  return { updatedPlans, skippedPlans: skipped.length, skipped, failed, officers: officers.size, dealersRefreshed, totalOutstandingDelta };
 }
 
 /* ----------------------------- Timeline + compare ------------------------- */
@@ -906,4 +989,318 @@ export async function compareSnapshots(ctx: AuthContext, id: string, fromId: str
       .filter((d) => d.from.outstanding !== d.to.outstanding || d.from.overdue !== d.to.overdue || d.from.due !== d.to.due || d.from.running !== d.to.running)
       .sort((a, b) => Math.abs(b.to.outstanding - b.from.outstanding) - Math.abs(a.to.outstanding - a.from.outstanding)),
   };
+}
+
+/* ===================== Unified Recovery Import (any scope) =====================
+ * ONE analyze + ONE commit for every entry point (All / Selected / Single / Seasonal Replace). The
+ * ONLY thing that varies is scope. Everything downstream is reused: parseAgingReport + resolveAging
+ * (Dealer Alias resolution), buildRecoveryImportPreview, createAndAssignDealer (onboarding), and the
+ * existing createRecoveryFromAging / updateRecoveryFromAging services (now officer-set scoped).
+ * ============================================================================= */
+
+const importScopeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("ALL") }),
+  z.object({ kind: z.literal("SELECTED"), officerIds: z.array(z.string().min(1)).min(1) }),
+  z.object({ kind: z.literal("SINGLE"), officerId: z.string().min(1) }),
+  z.object({ kind: z.literal("SINGLE_FROM_SEASONAL"), seasonPlanId: z.string().min(1) }),
+]);
+export type RecoveryImportScope = z.infer<typeof importScopeSchema>;
+
+const recoveryImportSchema = z.object({
+  scope: importScopeSchema,
+  seasonMonthId: z.string().min(1, "Select a Month"),
+  cutoffDate: z.string().min(1, "Select a Cutoff Date"),
+});
+const recoveryImportCommitSchema = recoveryImportSchema.extend({
+  mode: z.enum(["CREATE", "UPDATE", "REPLACE"]),
+  // Onboarding candidates the admin selected (single-officer scopes only). Ignored for All/Selected,
+  // where an unknown name has no officer to attribute it to.
+  newDealerNames: z.array(z.string()).default([]),
+  allowWeeklyEdit: z.coerce.boolean().default(true),
+});
+
+export interface RecoveryImportAnalysis extends RecoveryImportPreview {
+  context: { seasonName: string; monthName: string; scopeKind: RecoveryImportScope["kind"] };
+}
+export interface RecoveryImportResult {
+  mode: "CREATE" | "UPDATE" | "REPLACE";
+  officersAffected: number;
+  recoveryPlanIds: string[];
+  createdDealers: number;
+  // Officers whose refresh threw (retryable). Retrying scoped to ONLY these never re-snapshots the
+  // officers that already succeeded, so their Recovery week is not silently advanced (D1).
+  failedOfficers: RecoveryFailure[];
+}
+
+/** Load the officer + month for a Seasonal-Replace scope, validating the month belongs to the plan. */
+async function loadSeasonalRecoveryContext(input: { seasonPlanId: string; seasonMonthId: string }) {
+  const plan = (await prisma.seasonPlan.findUnique({
+    where: { id: input.seasonPlanId },
+    select: { officerId: true, seasonId: true, officer: { select: { name: true } }, season: { select: { name: true, year: true } } },
+  })) as { officerId: string; seasonId: string; officer: { name: string }; season: { name: string; year: number } } | null;
+  if (!plan) throw new ApiError(404, "Seasonal plan not found");
+  const month = (await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, select: { id: true, name: true, seasonId: true } })) as { id: string; name: string; seasonId: string } | null;
+  if (!month || month.seasonId !== plan.seasonId) throw new ApiError(422, "That month does not belong to this plan's season");
+  return { plan, month };
+}
+
+/** The officer's active seasonal plan id for the month's season (recovery must belong to one). */
+async function activeSeasonalPlanIdForOfficer(officerId: string, seasonMonthId: string): Promise<string> {
+  const month = await prisma.seasonMonth.findUnique({ where: { id: seasonMonthId }, select: { seasonId: true } });
+  if (!month) throw new ApiError(422, "The selected Month does not exist");
+  const sp = (await prisma.seasonPlan.findFirst({
+    where: { seasonId: month.seasonId, planningType: "SEASONAL", officerId },
+    select: { id: true },
+    orderBy: [{ isActiveVersion: "desc" }, { version: "desc" }],
+  })) as { id: string } | null;
+  if (!sp) throw new ApiError(422, "This officer has no Seasonal plan for the season — create it first; recovery must belong to a seasonal plan.");
+  return sp.id;
+}
+
+/** Resolve a scope to its concrete officer id set (null = ALL). */
+function scopeOfficerIdList(scope: RecoveryImportScope, singleOfficerId: string | null): string[] | null {
+  if (scope.kind === "ALL") return null;
+  if (scope.kind === "SELECTED") return scope.officerIds;
+  return singleOfficerId ? [singleOfficerId] : null;
+}
+
+/**
+ * Onboard admin-selected NEW dealers to ONE officer inside a transaction: create-if-new + assign +
+ * add to the officer's seasonal plan. Reuses createAndAssignDealer (the single onboarding primitive).
+ * Returns the count of freshly created dealers; fills `onboardedIds` with every added dealer id.
+ */
+async function onboardDealersForOfficer(
+  ctx: AuthContext,
+  names: string[],
+  officerId: string,
+  seasonPlanId: string,
+  onboardedIds: Set<string>,
+): Promise<number> {
+  const resolver = await loadDealerResolver();
+  const created = new Map<string, string>(); // tightKey → new dealer id
+  const effectiveFrom = new Date();
+  let createdDealers = 0;
+  await prisma.$transaction(
+    async (tx: Tx) => {
+      for (const name of names) {
+        const cls = resolver.classify(name);
+        let dealerId: string | null = null;
+        if (cls.outcome === "EXISTING") {
+          dealerId = cls.dealer.id;
+        } else if (cls.outcome === "NEW") {
+          const key = tightKey(cls.rawName);
+          dealerId = created.get(key) ?? null;
+          if (!dealerId) {
+            dealerId = randomUUID();
+            created.set(key, dealerId);
+            await createAndAssignDealer(tx, { id: dealerId, name: cls.rawName, officerId, createdByUserId: ctx.userId, effectiveFrom });
+            createdDealers += 1;
+          }
+        }
+        if (!dealerId) continue;
+        onboardedIds.add(dealerId);
+        await tx.planDealer.upsert({
+          where: { seasonPlanId_dealerId: { seasonPlanId, dealerId } },
+          create: { seasonPlanId, dealerId, fromMonthlyPlan: true },
+          update: {},
+        });
+      }
+    },
+    { timeout: 60000, maxWait: 10000 },
+  );
+  return createdDealers;
+}
+
+/**
+ * Add newly-onboarded dealers to an EXISTING recovery plan. A weekly refresh only UPDATEs existing
+ * RecoveryPlanDealer rows, so dealers onboarded during an UPDATE/REPLACE would be missing. We read
+ * their aging from the latest snapshot (written by that same refresh) and upsert one row per dealer —
+ * idempotent, and a no-op for any dealer already present.
+ */
+async function reconcileRecoveryDealers(recoveryPlanId: string, dealerIds: Set<string>): Promise<void> {
+  const latest = await prisma.agingSnapshot.findFirst({ where: { recoveryPlanId }, orderBy: { weekNo: "desc" }, select: { id: true } });
+  if (!latest) return;
+  const snapDealers = await prisma.agingSnapshotDealer.findMany({
+    where: { snapshotId: latest.id, dealerId: { in: [...dealerIds] } },
+    select: { dealerId: true, outstanding: true, overdue: true, due: true, running: true },
+  });
+  for (const sd of snapDealers) {
+    const vals = { outstanding: num(sd.outstanding), overdue: num(sd.overdue), due: num(sd.due), running: num(sd.running) };
+    await prisma.recoveryPlanDealer.upsert({
+      where: { recoveryPlanId_dealerId: { recoveryPlanId, dealerId: sd.dealerId } },
+      create: { recoveryPlanId, dealerId: sd.dealerId, ...vals },
+      update: {}, // present already → refresh left its aging correct; don't touch officer inputs.
+    });
+  }
+}
+
+/**
+ * REPLACE one recovery plan ATOMICALLY: reset the officer's planning inputs AND write the replacement
+ * aging snapshot in the SAME transaction. This is the critical safety boundary — officer planning is
+ * NEVER cleared unless the replacement snapshot is written in the same commit. Reuses writeRefreshSnapshot
+ * (the shared snapshot primitive) rather than the separate updateRecoveryFromAging path.
+ * Returns false (and touches NOTHING) when the report has no aging for this officer, so we never reset
+ * planning without a replacement to write. Idempotent on retry: re-running clears already-clear planning
+ * and appends the next sequential snapshot — no duplicate plan, no double-effect on officer inputs.
+ */
+async function replaceRecoveryPlanAtomic(
+  ctx: AuthContext,
+  planId: string,
+  officerId: string,
+  res: Resolution,
+  cutoff: Date,
+  filename: string,
+  allowWeeklyEdit: boolean,
+): Promise<boolean> {
+  const forOfficer = res.resolved.filter((r) => r.officerId === officerId);
+  if (forOfficer.length === 0) return false; // never reset without a replacement snapshot to write
+
+  const existing = (await prisma.recoveryPlanDealer.findMany({ where: { recoveryPlanId: planId }, select: { dealerId: true, outstanding: true } })) as { dealerId: string; outstanding: unknown }[];
+  const prevByDealer = new Map<string, number>(existing.map((d) => [d.dealerId, num(d.outstanding)]));
+  const newByDealer = new Map<string, ResolvedDealer["aging"]>(forOfficer.map((r) => [r.dealerId, r.aging]));
+  const summary = buildChangeSummary(prevByDealer, newByDealer);
+  const weekNo = await nextSnapshotWeekNo(planId);
+
+  await prisma.$transaction(
+    async (tx: Tx) => {
+      // (a) reset the officer's planning inputs …
+      await tx.recoveryWeekPlan.deleteMany({ where: { recoveryPlanDealer: { recoveryPlanId: planId } } });
+      await tx.recoveryPlanDealer.updateMany({ where: { recoveryPlanId: planId }, data: { monthRecoveryPlan: null, monthRunningRecovery: null, noPlan: false, noPlanReason: null } });
+      // (b) … and write the replacement snapshot + refresh aging, in the SAME commit.
+      await writeRefreshSnapshot(tx, planId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
+      await tx.recoveryPlan.update({ where: { id: planId }, data: { status: PlanStatus.DRAFT, cutoffDate: cutoff, weeklyEditEnabled: allowWeeklyEdit } });
+    },
+    { timeout: 60000, maxWait: 10000 },
+  );
+  return true;
+}
+
+/** Preview a Recovery import for any scope: rich per-officer accepted/skip sections + summary card. */
+export async function analyzeRecoveryImport(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<RecoveryImportAnalysis> {
+  assertAdmin(ctx);
+  const input = recoveryImportSchema.parse(raw);
+  const cutoff = new Date(input.cutoffDate);
+
+  const month = (await prisma.seasonMonth.findUnique({
+    where: { id: input.seasonMonthId },
+    select: { id: true, name: true, seasonId: true, season: { select: { name: true, year: true } } },
+  })) as { id: string; name: string; seasonId: string; season: { name: string; year: number } } | null;
+  if (!month) throw new ApiError(422, "The selected Month does not exist");
+
+  // Resolve scope → officer id set (null until parsed for ALL).
+  let singleOfficerId: string | null = null;
+  if (input.scope.kind === "SINGLE") singleOfficerId = input.scope.officerId;
+  else if (input.scope.kind === "SINGLE_FROM_SEASONAL") singleOfficerId = (await loadSeasonalRecoveryContext({ seasonPlanId: input.scope.seasonPlanId, seasonMonthId: input.seasonMonthId })).plan.officerId;
+  let scopeOfficerIds = scopeOfficerIdList(input.scope, singleOfficerId);
+
+  const parsed = parseAgingReport(buffer);
+  if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
+  const res = await resolveAging(parsed, cutoff);
+
+  // ALL → every officer that has at least one assigned dealer in this report.
+  if (scopeOfficerIds === null) scopeOfficerIds = [...new Set(res.rows.map((r) => r.officerId).filter((o): o is string => o !== null))];
+
+  // Officer names for scope officers AND any 'other officer' referenced by a skipped row.
+  const referenced = new Set<string>(scopeOfficerIds);
+  for (const r of res.rows) if (r.officerId) referenced.add(r.officerId);
+  const users = (await prisma.user.findMany({ where: { id: { in: [...referenced] } }, select: { id: true, name: true } })) as { id: string; name: string }[];
+  const officerNameById = new Map(users.map((u) => [u.id, u.name]));
+
+  const existingRows = (await prisma.recoveryPlan.findMany({
+    where: { seasonMonthId: input.seasonMonthId, officerId: { in: scopeOfficerIds } },
+    select: { id: true, officerId: true, status: true, lifecycleState: true },
+  })) as { id: string; officerId: string; status: PlanStatus; lifecycleState: string }[];
+  const existingByOfficer = new Map(existingRows.map((e) => [e.officerId, { id: e.id, status: e.status, lifecycleState: e.lifecycleState }]));
+
+  const preview = buildRecoveryImportPreview(res.rows, scopeOfficerIds, officerNameById, existingByOfficer);
+  return { ...preview, context: { seasonName: `${month.season.name} ${month.season.year}`, monthName: month.name, scopeKind: input.scope.kind } };
+}
+
+/**
+ * Commit a Recovery import for any scope: (1) onboard selected NEW dealers (single-officer scopes),
+ * then (2) CREATE / UPDATE / REPLACE recovery for the in-scope officers by delegating to the existing
+ * scoped services, (3) reconcile onboarded dealers, and (4) relink seasonal-scope recovery to v2.
+ */
+export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<RecoveryImportResult> {
+  assertAdmin(ctx);
+  const input = recoveryImportCommitSchema.parse(raw);
+
+  let singleOfficerId: string | null = null;
+  let seasonPlanIdForRelink: string | null = null;
+  if (input.scope.kind === "SINGLE") singleOfficerId = input.scope.officerId;
+  else if (input.scope.kind === "SINGLE_FROM_SEASONAL") {
+    singleOfficerId = (await loadSeasonalRecoveryContext({ seasonPlanId: input.scope.seasonPlanId, seasonMonthId: input.seasonMonthId })).plan.officerId;
+    seasonPlanIdForRelink = input.scope.seasonPlanId;
+  }
+  const officerIds = scopeOfficerIdList(input.scope, singleOfficerId); // null = ALL
+
+  // 1) Onboarding — only meaningful for a single officer (unknown names have no officer otherwise).
+  let createdDealers = 0;
+  const onboardedIds = new Set<string>();
+  if (singleOfficerId && input.newDealerNames.length > 0) {
+    const seasonPlanId = seasonPlanIdForRelink ?? (await activeSeasonalPlanIdForOfficer(singleOfficerId, input.seasonMonthId));
+    createdDealers = await onboardDealersForOfficer(ctx, input.newDealerNames, singleOfficerId, seasonPlanId, onboardedIds);
+  }
+
+  // 2) CREATE / UPDATE / REPLACE via the scoped services (officerIds omitted = ALL).
+  const scoped = officerIds ? { officerIds } : {};
+  const recoveryPlanIds: string[] = [];
+  const failedOfficers: RecoveryFailure[] = [];
+  if (input.mode === "CREATE") {
+    // CREATE is one atomic transaction (all-or-nothing), so there is no partial-batch retry hazard.
+    const res = await createRecoveryFromAging(ctx, buffer, filename, JSON.stringify({ seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, ...scoped }));
+    recoveryPlanIds.push(...res.planIds);
+  } else if (input.mode === "REPLACE") {
+    // REPLACE: reset + refresh are done ATOMICALLY per plan (replaceRecoveryPlanAtomic), so officer
+    // planning is never cleared unless the replacement snapshot is written in the same commit. Each
+    // in-scope plan is independent and RESILIENT (D1): one officer's failure is recorded, not thrown,
+    // so the others still complete and a retry can be scoped to only the failed officers.
+    const targetPlans = (await prisma.recoveryPlan.findMany({
+      where: { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) },
+      select: { id: true, officerId: true, officer: { select: { name: true } }, seasonPlan: { select: { lifecycleState: true } } },
+    })) as { id: string; officerId: string; officer: { name: string }; seasonPlan: { lifecycleState: string } | null }[];
+    const cutoff = new Date(input.cutoffDate);
+    const parsed = parseAgingReport(buffer);
+    if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
+    const res = await resolveAging(parsed, cutoff);
+    let replaced = 0;
+    for (const p of targetPlans) {
+      // Never replace a plan under a frozen (deactivated) parent seasonal plan — same guard as refresh.
+      if ((p.seasonPlan?.lifecycleState ?? "ACTIVE") !== "ACTIVE") continue;
+      try {
+        const didReplace = await replaceRecoveryPlanAtomic(ctx, p.id, p.officerId, res, cutoff, filename, input.allowWeeklyEdit);
+        if (didReplace) {
+          replaced += 1;
+          recoveryPlanIds.push(p.id);
+        }
+      } catch {
+        failedOfficers.push({ officerId: p.officerId, officerName: p.officer.name, reason: "Replace did not complete — you can retry this officer." });
+      }
+    }
+    await writeAudit({ userId: ctx.userId, action: "REPLACE", entity: "recoveryPlan", summary: `Recovery reset & refreshed from ${filename} (${replaced} plan(s), ${failedOfficers.length} failed)` });
+  } else {
+    // UPDATE: refresh aging only (officer planning preserved) via the shared batch service, which is
+    // itself resilient and returns per-officer failures.
+    const targetPlans = (await prisma.recoveryPlan.findMany({
+      where: { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) },
+      select: { id: true, officerId: true },
+    })) as { id: string; officerId: string }[];
+    const upd = await updateRecoveryFromAging(ctx, buffer, filename, JSON.stringify({ seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, allowWeeklyEdit: input.allowWeeklyEdit, ...scoped }));
+    failedOfficers.push(...upd.failed);
+    const failedIds = new Set(upd.failed.map((f) => f.officerId));
+    recoveryPlanIds.push(...targetPlans.filter((p) => !failedIds.has(p.officerId)).map((p) => p.id));
+  }
+
+  // 3) Reconcile onboarded dealers into the single officer's plan; 4) relink seasonal-scope recovery.
+  if (singleOfficerId) {
+    const rp = (await prisma.recoveryPlan.findFirst({ where: { seasonMonthId: input.seasonMonthId, officerId: singleOfficerId }, select: { id: true } })) as { id: string } | null;
+    if (rp) {
+      if (input.mode !== "CREATE" && onboardedIds.size > 0) await reconcileRecoveryDealers(rp.id, onboardedIds);
+      if (seasonPlanIdForRelink) await prisma.recoveryPlan.update({ where: { id: rp.id }, data: { seasonPlanId: seasonPlanIdForRelink } });
+      if (!recoveryPlanIds.includes(rp.id)) recoveryPlanIds.push(rp.id);
+    }
+  }
+
+  const officersAffected = officerIds ? officerIds.length - failedOfficers.length : new Set(recoveryPlanIds).size;
+  return { mode: input.mode, officersAffected, recoveryPlanIds, createdDealers, failedOfficers };
 }

@@ -28,6 +28,21 @@ export async function applyDealerAssignment(
   await tx.dealerAssignment.create({ data: { dealerId, officerId, effectiveFrom } });
 }
 
+/**
+ * Onboard a brand-new dealer inside an existing transaction: create an ACTIVE Dealer Master record
+ * (client-supplied id) and assign it to the officer. The ONE place importers create+assign a new
+ * dealer (Seasonal Import + the Seasonal→Recovery flow), so the create/assign pair is never duplicated.
+ */
+export async function createAndAssignDealer(
+  tx: Tx,
+  args: { id: string; name: string; officerId: string; createdByUserId: string; effectiveFrom: Date; createdFrom?: string },
+): Promise<void> {
+  await tx.dealer.create({
+    data: { id: args.id, name: args.name, status: "ACTIVE", isActive: true, createdByUserId: args.createdByUserId, createdFrom: args.createdFrom ?? "SEASONAL_IMPORT" },
+  });
+  await applyDealerAssignment(tx, args.id, args.officerId, args.effectiveFrom);
+}
+
 /** Apply an officer→RM assignment inside an existing transaction (close + open). */
 export async function applyRmAssignment(
   tx: Tx,

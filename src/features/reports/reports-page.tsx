@@ -18,6 +18,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { WrapHeader } from "@/features/labels/label-ui";
 import type { CellFormat, ReportPayload, ReportRow, ReportSort, ReportType } from "./types";
 
 interface SeasonOption {
@@ -210,7 +211,7 @@ export function ReportsPage({ initialType = "product", lockType = false, title }
                     onClick={() => toggleSort(c.key)}
                   >
                     <span className="inline-flex items-center gap-1">
-                      {c.label}
+                      <WrapHeader text={c.label} />
                       {activeSort?.key === c.key &&
                         (activeSort.dir === "asc" ? (
                           <ArrowUp className="h-3 w-3" />

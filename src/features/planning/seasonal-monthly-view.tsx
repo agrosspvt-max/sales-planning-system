@@ -11,10 +11,10 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Th } from "@/features/labels/label-ui";
 
 const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n));
 
@@ -76,7 +76,7 @@ export function SeasonalMonthlyView({
     enabled: view !== "total",
   });
 
-  const months = data?.months ?? [];
+  const months = useMemo(() => data?.months ?? [], [data?.months]);
   const monthOpts = months.map((m) => ({ value: m.id, label: m.name }));
 
   // Which months feed the aggregation for the current view.
@@ -143,8 +143,6 @@ export function SeasonalMonthlyView({
     );
   }, [rows]);
 
-  const label = groupBy === "product" ? "Product" : "Dealer";
-
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
@@ -185,13 +183,13 @@ export function SeasonalMonthlyView({
           <Table stickyFirstColumn>
             <TableHeader>
               <TableRow>
-                <TableHead className="min-w-[160px]">{label}</TableHead>
-                <TableHead className="text-right">Plan Qty</TableHead>
-                <TableHead className="text-right">Plan Amount</TableHead>
-                <TableHead className="text-right">Planned NBV</TableHead>
-                <TableHead className="text-right text-muted-foreground">Sold Qty</TableHead>
-                <TableHead className="text-right text-muted-foreground">Sold Amount</TableHead>
-                <TableHead className="text-right text-muted-foreground">Sold NBV</TableHead>
+                <Th labelKey={groupBy === "product" ? "col.product" : "col.dealer"} className="min-w-[160px]" />
+                <Th labelKey="summary.planQty" className="text-right" />
+                <Th labelKey="summary.planAmount" className="text-right" />
+                <Th labelKey="summary.plannedNbv" className="text-right" />
+                <Th labelKey="summary.soldQty" className="text-right text-muted-foreground" />
+                <Th labelKey="summary.soldAmount" className="text-right text-muted-foreground" />
+                <Th labelKey="summary.soldNbv" className="text-right text-muted-foreground" />
               </TableRow>
             </TableHeader>
             <TableBody>

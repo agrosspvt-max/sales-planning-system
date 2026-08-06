@@ -11,6 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Th } from "@/features/labels/label-ui";
 import { usePlanEdit } from "./plan-edit-context";
 import { SeasonalMonthlyView } from "./seasonal-monthly-view";
 
@@ -96,14 +97,14 @@ export function ProductPlan() {
       <Table stickyFirstColumn>
         <TableHeader>
           <TableRow>
-            <TableHead className="min-w-[160px]">Product</TableHead>
+            <Th labelKey="col.product" className="min-w-[160px]" />
             {packMode && packColumns.map((p) => <TableHead key={p.id} className="text-center">{p.name}</TableHead>)}
-            <TableHead className="text-right">Total Qty</TableHead>
-            <TableHead className="text-right">Total Amount</TableHead>
-            <TableHead className="text-right">Planned NBV</TableHead>
-            <TableHead className="text-right text-muted-foreground">Actual Qty</TableHead>
-            <TableHead className="text-right text-muted-foreground">Actual Amount</TableHead>
-            <TableHead className="text-right text-muted-foreground">Actual NBV</TableHead>
+            <Th labelKey="seasonal.totalQty" className="text-right" />
+            <Th labelKey="productPlan.totalAmount" className="text-right" />
+            <Th labelKey="summary.plannedNbv" className="text-right" />
+            <Th labelKey="col.actualQty" className="text-right text-muted-foreground" />
+            <Th labelKey="productPlan.actualAmount" className="text-right text-muted-foreground" />
+            <Th labelKey="col.actualNbv" className="text-right text-muted-foreground" />
           </TableRow>
         </TableHeader>
         <TableBody>

@@ -15,11 +15,11 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { SectionColgroup, SectionHeaderRow, type TableSection } from "@/components/ui/table-group";
+import { SectionColgroup } from "@/components/ui/table-group";
+import { Th, LabelSectionHeaderRow, type LabelSection } from "@/features/labels/label-ui";
 import { StatusBadge } from "@/features/planning/status-badge";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "@/features/planning/dealer-completion";
 import { DealerPlanningStatus } from "@/features/planning/dealer-status";
@@ -35,6 +35,13 @@ interface RecoveryDealer {
   overdue: number;
   due: number;
   running: number;
+  // Opening balances for the month (frozen after the first import) + Daybook-derived business values.
+  outstandingTillDate: number;
+  runningTillDate: number;
+  srCr: number;
+  liveRecovery: number;
+  // DERIVED: Live Recovery + SR/CR − (Due + Overdue). Auto-refreshes from Daybook or Aging changes.
+  actualRunningRecovery: number;
   monthRecoveryPlan: number;
   monthRunningRecovery: number;
   noPlan: boolean;
@@ -238,16 +245,16 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
     const cur = values[dealerId] ?? { plan: 0, running: 0 };
     update(dealerId, { ...cur, [field]: Math.max(0, Number(raw) || 0) });
   };
-  const weeklyTotal = (d: RecoveryDealer) => Object.values(d.weeks).reduce((s, w) => s + w.weekRecoveryPlan + w.weekRunningRecovery, 0);
 
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
   // Dealer(frozen) → Outstanding → Overdue → Due → Recovery Plan → Running O/S Bills →
   // Running Recovery Plan → Recovery % → Results.
-  const monthSections: TableSection[] = [
-    { label: "Dealer & Closing Balance", span: 1, tone: "blue" },
-    { label: "Recovery Planning", span: 3, tone: "amber" },
-    { label: "Recovery Progress", span: 3, tone: "green" },
-    { label: "Results", span: editable ? 4 : 3, tone: "purple" },
+  const monthSections: LabelSection[] = [
+    { labelKey: "recovery.section.dealerClosing", span: 2, tone: "blue" },
+    { labelKey: "recovery.section.recoveryPlanning", span: 3, tone: "amber" },
+    { labelKey: "recovery.section.recoveryProgress", span: 4, tone: "green" },
+    { labelKey: "recovery.section.daybook", span: 3, tone: "slate" },
+    { labelKey: "recovery.section.results", span: editable ? 2 : 1, tone: "purple" },
   ];
 
   return (
@@ -264,20 +271,23 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               fields and calculations are unchanged). */}
           <SectionColgroup leading={1} sections={monthSections} />
           <TableHeader>
-            <SectionHeaderRow leading={1} sections={monthSections} />
+            <LabelSectionHeaderRow leading={1} sections={monthSections} />
             <TableRow>
-              <TableHead className="min-w-[160px]">Dealer</TableHead>
-              <TableHead className="text-right">Outstanding</TableHead>
-              <TableHead className="text-right">Overdue</TableHead>
-              <TableHead className="text-right">Due</TableHead>
-              <TableHead className="text-center">Recovery Plan</TableHead>
-              <TableHead className="text-right">Running O/S Bills</TableHead>
-              <TableHead className="text-center">Running Recovery Plan</TableHead>
-              <TableHead className="text-right">Recovery %</TableHead>
-              <TableHead className="text-right">Month Total</TableHead>
-              <TableHead className="text-right text-muted-foreground">Weekly Total</TableHead>
-              <TableHead className="text-right">Diff</TableHead>
-              {editable && <TableHead className="text-right">No Plan</TableHead>}
+              <Th labelKey="col.dealer" className="min-w-[160px]" />
+              <Th labelKey="recovery.currentOutstanding" className="text-right" />
+              <Th labelKey="recovery.outstandingTillDate" className="text-right text-muted-foreground" />
+              <Th labelKey="recovery.overdue" className="text-right" />
+              <Th labelKey="recovery.due" className="text-right" />
+              <Th labelKey="recovery.recoveryPlan" className="text-center" />
+              <Th labelKey="recovery.runningOsBills" className="text-right" />
+              <Th labelKey="recovery.runningOsTillDate" className="text-right text-muted-foreground" />
+              <Th labelKey="recovery.runningRecoveryPlan" className="text-center" />
+              <Th labelKey="recovery.recoveryPct" className="text-right" />
+              <Th labelKey="recovery.srCr" className="text-right text-muted-foreground" />
+              <Th labelKey="recovery.liveRecovery" className="text-right text-muted-foreground" />
+              <Th labelKey="recovery.actualRunningRecovery" className="text-right" />
+              <Th labelKey="recovery.monthTotal" className="text-right" />
+              {editable && <Th labelKey="col.noPlan" className="text-right" />}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -285,7 +295,6 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               const v = values[d.dealerId] ?? { plan: 0, running: 0 };
               const monthTotal = v.plan + v.running;
               const recPct = d.running > 0 ? v.running / d.running : 0;
-              const wTotal = weeklyTotal(d);
               const status = d.noPlan ? DealerPlanningStatus.NO_PLAN : monthTotal > 0 ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING;
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
@@ -293,24 +302,30 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                     {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}{d.dealerName}
                     {d.missingInLatestAging && <span className="ml-1.5 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning" title="This dealer is not in the latest Aging Report; the figures shown are the last known values.">Missing in latest aging</span>}
                   </TableCell>
-                  {/* Section 1 — Dealer & Closing Balance */}
+                  {/* Section 1 — Dealer & Closing Balance. Current Outstanding refreshes each import;
+                      Outstanding Till Date is the month's opening balance (frozen after first import). */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
                   {/* Section 2 — Recovery Planning */}
                   <TableCell className="text-right"><AgingCell value={d.overdue} prev={d.prevAging?.overdue} /></TableCell>
                   <TableCell className="text-right"><AgingCell value={d.due} prev={d.prevAging?.due} /></TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
-                  {/* Section 3 — Recovery Progress */}
+                  {/* Section 3 — Recovery Progress. Running O/S Till Date is frozen after first import. */}
                   <TableCell className="text-right"><AgingCell value={d.running} prev={d.prevAging?.running} /></TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.runningTillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{pct(recPct)}</TableCell>
+                  {/* Daybook-derived business values. Actual Running Recovery is DERIVED (Part 5):
+                      Live Recovery + SR/CR − (Due + Overdue). */}
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.srCr)}</TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.liveRecovery)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums font-medium", d.actualRunningRecovery < 0 && "text-warning")}>{money(d.actualRunningRecovery)}</TableCell>
                   {/* Section 4 — Results */}
                   <TableCell className="text-right tabular-nums font-medium">{money(monthTotal)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(wTotal)}</TableCell>
-                  <TableCell className={cn("text-right tabular-nums", monthTotal - wTotal !== 0 && "text-warning")}>{money(monthTotal - wTotal)}</TableCell>
                   {editable && (
                     <TableCell className="text-right">
                       {d.noPlan ? (
@@ -414,12 +429,12 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
 
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
   // The Reference section keeps informational balances out of the primary planning flow.
-  const weekSections: TableSection[] = [
-    { label: "Dealer & Closing Balance", span: 1, tone: "blue" },
-    { label: "Weekly Planning", span: 3, tone: "amber" },
-    { label: "Recovery Progress", span: 3, tone: "green" },
-    { label: "Results", span: 2, tone: "purple" },
-    { label: "Reference (Read-only)", span: 2, tone: "slate" },
+  const weekSections: LabelSection[] = [
+    { labelKey: "recovery.section.dealerClosing", span: 1, tone: "blue" },
+    { labelKey: "recovery.section.weeklyPlanning", span: 3, tone: "amber" },
+    { labelKey: "recovery.section.recoveryProgress", span: 3, tone: "green" },
+    { labelKey: "recovery.section.results", span: 2, tone: "purple" },
+    { labelKey: "recovery.section.reference", span: 2, tone: "slate" },
   ];
 
   return (
@@ -435,20 +450,20 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
           {/* Excel-style sections (visual grouping only — columns, data and calculations unchanged). */}
           <SectionColgroup leading={1} sections={weekSections} />
           <TableHeader>
-            <SectionHeaderRow leading={1} sections={weekSections} />
+            <LabelSectionHeaderRow leading={1} sections={weekSections} />
             <TableRow>
-              <TableHead className="min-w-[160px]">Dealer</TableHead>
-              <TableHead className="text-right">Outstanding</TableHead>
-              <TableHead className="text-right">Overdue</TableHead>
-              <TableHead className="text-right">This Week&apos;s Due</TableHead>
-              <TableHead className="text-center">Week Recovery</TableHead>
-              <TableHead className="text-right text-muted-foreground">Running Month Plan</TableHead>
-              <TableHead className="text-right">Weekly Plan Till Date</TableHead>
-              <TableHead className="text-center">Running Plan This Week</TableHead>
-              <TableHead className="text-right">This Week Total</TableHead>
-              <TableHead className="text-right">Diff</TableHead>
-              <TableHead className="text-right text-muted-foreground">Running O/S Bills</TableHead>
-              <TableHead className="text-right text-muted-foreground">Running Recovery (Month)</TableHead>
+              <Th labelKey="col.dealer" className="min-w-[160px]" />
+              <Th labelKey="recovery.currentOutstanding" className="text-right" />
+              <Th labelKey="recovery.overdue" className="text-right" />
+              <Th labelKey="recovery.thisWeeksDue" className="text-right" />
+              <Th labelKey="recovery.weekRecovery" className="text-center" />
+              <Th labelKey="recovery.runningMonthPlan" className="text-right text-muted-foreground" />
+              <Th labelKey="recovery.weeklyPlanTillDate" className="text-right" />
+              <Th labelKey="recovery.runningPlanThisWeek" className="text-center" />
+              <Th labelKey="recovery.thisWeekTotal" className="text-right" />
+              <Th labelKey="recovery.diff" className="text-right" />
+              <Th labelKey="recovery.runningOsBills" className="text-right text-muted-foreground" />
+              <Th labelKey="recovery.runningRecoveryMonth" className="text-right text-muted-foreground" />
             </TableRow>
           </TableHeader>
           <TableBody>

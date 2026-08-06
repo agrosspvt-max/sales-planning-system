@@ -7,10 +7,10 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Th } from "@/features/labels/label-ui";
 import { usePlanEdit } from "./plan-edit-context";
 import { SeasonalMonthlyView } from "./seasonal-monthly-view";
 
@@ -67,15 +67,15 @@ export function DealerSummaryView() {
       <Table stickyFirstColumn>
         <TableHeader>
           <TableRow>
-            <TableHead className="min-w-[160px]">Dealer</TableHead>
-            <TableHead className="text-right">Sales Plan</TableHead>
-            <TableHead className="text-right">Sales Plan NBV</TableHead>
-            <TableHead className="text-right text-muted-foreground">Live Month Plan</TableHead>
-            <TableHead className="text-right text-muted-foreground">Live Month NBV</TableHead>
-            <TableHead className="text-right text-muted-foreground">Actual Sales</TableHead>
-            <TableHead className="text-right text-muted-foreground">Actual NBV</TableHead>
-            <TableHead className="text-right">Sales Achv %</TableHead>
-            <TableHead className="text-right">NBV Achv %</TableHead>
+            <Th labelKey="col.dealer" className="min-w-[160px]" />
+            <Th labelKey="dealerSummary.salesPlan" className="text-right" />
+            <Th labelKey="dealerSummary.salesPlanNbv" className="text-right" />
+            <Th labelKey="dealerSummary.liveMonthPlan" className="text-right text-muted-foreground" />
+            <Th labelKey="dealerSummary.liveMonthNbv" className="text-right text-muted-foreground" />
+            <Th labelKey="dealerSummary.actualSales" className="text-right text-muted-foreground" />
+            <Th labelKey="dealerSummary.actualNbv" className="text-right text-muted-foreground" />
+            <Th labelKey="dealerSummary.salesAchvPct" className="text-right" />
+            <Th labelKey="dealerSummary.nbvAchvPct" className="text-right" />
           </TableRow>
         </TableHeader>
         <TableBody>

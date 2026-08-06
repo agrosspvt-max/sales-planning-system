@@ -706,11 +706,24 @@ model RecoveryPlanDealer {
   recoveryPlanId String
   dealerId       String
 
-  // Imported aging (read-only), mirrored from the newest AgingSnapshotDealer.
+  // Imported aging (read-only), mirrored from the newest AgingSnapshotDealer. These REFRESH on every
+  // Update / Replace / Weekly upload.
   outstanding Decimal @default(0) @db.Decimal(14, 2)
   overdue     Decimal @default(0) @db.Decimal(14, 2)
   due         Decimal @default(0) @db.Decimal(14, 2)
   running     Decimal @default(0) @db.Decimal(14, 2)
+
+  // "Till Date" = OPENING balances for the Recovery month. Set ONCE when this dealer row is first
+  // created (the first successful Recovery import of the month, or when the dealer is onboarded
+  // mid-month). NEVER overwritten by Update / Replace / Weekly Refresh — they change only when a NEW
+  // Recovery month (a new RecoveryPlan) is created. Nullable only to tolerate rows created before this
+  // field existed (back-filled from `outstanding`/`running` at migration time).
+  outstandingTillDate Decimal? @db.Decimal(14, 2)
+  runningTillDate     Decimal? @db.Decimal(14, 2)
+
+  // Additional business columns (columns only for now — Excel mapping / formulas to follow; default 0).
+  srCr         Decimal @default(0) @db.Decimal(14, 2)
+  liveRecovery Decimal @default(0) @db.Decimal(14, 2)
 
   // Month View — editable by the officer.
   monthRecoveryPlan    Decimal? @db.Decimal(14, 2)

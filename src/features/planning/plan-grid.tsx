@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Save, Ban } from "lucide-react";
 import { api } from "@/lib/api-client";
+import { PlanGridMonthView } from "./plan-grid-month-view";
 import { formatCurrency } from "@/lib/utils";
 import {
   sumFlex,
@@ -23,7 +24,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { SectionColgroup, SectionHeaderRow, type TableSection } from "@/components/ui/table-group";
+import { SectionColgroup } from "@/components/ui/table-group";
+import { Th, LabelSectionHeaderRow, type LabelSection } from "@/features/labels/label-ui";
 import { usePlanEdit } from "./plan-edit-context";
 import {
   DealerProgressBar,
@@ -41,14 +43,26 @@ const fmtNum = (n: number | null) => (n === null ? "—" : Number.isInteger(n) ?
  * live cells). Autosave and the mode-aware calc engine are reused unchanged.
  */
 export function PlanGrid() {
-  const { detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, lineFig, dealerCompleted, flush } =
+  const { detail, mode, packMode, packColumns, editable, saving, lastSaved, cells, setPack, setValue, lineFig, dealerCompleted, flush } =
     usePlanEdit();
   const qc = useQueryClient();
 
   // Default to "Choose Dealer" (no auto-select of the first dealer).
   const [dealerId, setDealerId] = useState("");
+  // Month View filter: "" = Seasonal (default, unchanged). A month id → read-only monthly VIEW.
+  const [monthId, setMonthId] = useState("");
   const [noPlanOpen, setNoPlanOpen] = useState(false);
   const dealer = detail.dealers.find((d) => d.dealerId === dealerId);
+
+  // Season months for the Month View selector (all months, so months without an approved monthly
+  // plan still appear and show the "not started" banner). Only fetched for approved plans.
+  const { data: monthsData } = useQuery<{ months: { id: string; name: string }[] }>({
+    queryKey: ["season-months", detail.id],
+    queryFn: () => api.get(`/api/planning/season-plans/${detail.id}/months`),
+    enabled: detail.status === "APPROVED",
+  });
+  const monthOptions = monthsData?.months ?? [];
+  const monthName = monthOptions.find((m) => m.id === monthId)?.name ?? "";
 
   // Live completion (Completed = ≥1 saved qty; No Plan = flagged; else Remaining).
   const statusByDealer = useMemo(() => {
@@ -104,11 +118,11 @@ export function PlanGrid() {
   // Excel-style column sections (visual grouping only — data, order and calculations unchanged).
   // "Planning" (pack-size columns) only exists in pack mode; the single-value modes plan in Plan
   // Summary instead, so that section is omitted when there are no pack columns.
-  const seasonalSections: TableSection[] = [
-    ...(packMode && packColumns.length ? [{ label: "Planning", span: packColumns.length, tone: "blue" as const }] : []),
-    { label: "Plan Summary", span: (showTotalQty ? 1 : 0) + 2, tone: "slate" },
-    { label: "Actual Sales", span: 3, tone: "green" },
-    { label: "Live Month", span: 5, tone: "amber" },
+  const seasonalSections: LabelSection[] = [
+    ...(packMode && packColumns.length ? [{ labelKey: "seasonal.section.planning" as const, span: packColumns.length, tone: "blue" as const }] : []),
+    { labelKey: "seasonal.section.planSummary", span: (showTotalQty ? 1 : 0) + 2, tone: "slate" },
+    { labelKey: "seasonal.section.actualSales", span: 3, tone: "green" },
+    { labelKey: "seasonal.section.liveMonth", span: 5, tone: "amber" },
   ];
 
   const modeNote: Record<PlanningMode, string> = {
@@ -149,15 +163,31 @@ export function PlanGrid() {
               </option>
             ))}
           </select>
-          {editable && dealer && selectedStatus !== DealerPlanningStatus.NO_PLAN && (
+          {!monthId && editable && dealer && selectedStatus !== DealerPlanningStatus.NO_PLAN && (
             <Button variant="outline" size="sm" onClick={() => setNoPlanOpen(true)} className="text-noplan">
               <Ban className="h-4 w-4" /> No Plan
             </Button>
           )}
-          {editable && dealer && selectedStatus === DealerPlanningStatus.NO_PLAN && (
+          {!monthId && editable && dealer && selectedStatus === DealerPlanningStatus.NO_PLAN && (
             <Button variant="outline" size="sm" onClick={() => noPlanMut.mutate({ noPlan: false })} disabled={noPlanMut.isPending}>
               Undo No Plan
             </Button>
+          )}
+          {/* Month View filter — a VIEW only; changing it never modifies Seasonal Planning. */}
+          {detail.status === "APPROVED" && monthOptions.length > 0 && (
+            <>
+              <span className="ml-2 text-sm font-medium">Month:</span>
+              <select
+                className="h-9 w-44 rounded-md border border-input bg-background px-2 text-sm"
+                value={monthId}
+                onChange={(e) => setMonthId(e.target.value)}
+              >
+                <option value="">Seasonal (all)</option>
+                {monthOptions.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </select>
+            </>
           )}
         </div>
         {editable && (
@@ -188,12 +218,25 @@ export function PlanGrid() {
         </p>
       )}
 
-      <p className="text-xs text-muted-foreground">
-        Planning mode: <span className="font-medium">{mode.replace("_", " ")}</span> — {modeNote[mode]}
-        {editable && " Changes autosave; Product Plan and Dealer Summary update instantly."}
-      </p>
+      {!monthId && (
+        <p className="text-xs text-muted-foreground">
+          Planning mode: <span className="font-medium">{mode.replace("_", " ")}</span> — {modeNote[mode]}
+          {editable && " Changes autosave; Product Plan and Dealer Summary update instantly."}
+        </p>
+      )}
 
-      {detail.dealers.length === 0 ? (
+      {/* MONTH VIEW — read-only monthly figures for the selected dealer (Seasonal Planning untouched). */}
+      {monthId && (
+        !dealer ? (
+          <p className="rounded-md border border-dashed bg-muted/20 p-3 text-sm text-muted-foreground">
+            Choose a dealer to see their {monthName} figures.
+          </p>
+        ) : (
+          <PlanGridMonthView seasonPlanId={detail.id} dealerId={dealerId} monthId={monthId} monthName={monthName} />
+        )
+      )}
+
+      {!monthId && (detail.dealers.length === 0 ? (
         <div className="rounded-lg border bg-background py-10 text-center text-muted-foreground">
           No active dealers are assigned to you for this season.
         </div>
@@ -207,26 +250,26 @@ export function PlanGrid() {
             {/* Excel-style sections (visual grouping only — the workbook layout). */}
             <SectionColgroup leading={1} sections={seasonalSections} />
             <TableHeader>
-              <SectionHeaderRow leading={1} sections={seasonalSections} />
+              <LabelSectionHeaderRow leading={1} sections={seasonalSections} />
               <TableRow>
-                <TableHead className="min-w-[160px]">Product</TableHead>
+                <Th labelKey="col.product" className="min-w-[160px]" />
                 {packMode &&
                   packColumns.map((p) => (
                     <TableHead key={p.id} className="text-center">
                       {p.name}
                     </TableHead>
                   ))}
-                {showTotalQty && <TableHead className="text-right">Total Qty</TableHead>}
-                <TableHead className="text-right">Amount</TableHead>
-                <TableHead className="text-right">NBV</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Actual Qty</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Actual Amt</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Actual NBV</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Live Qty</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Live Amt</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Live NBV</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Season − Month</TableHead>
-                <TableHead className="whitespace-nowrap text-right text-muted-foreground">Pending</TableHead>
+                {showTotalQty && <Th labelKey="seasonal.totalQty" className="text-right" />}
+                <Th labelKey="col.amount" className="text-right" />
+                <Th labelKey="col.nbv" className="text-right" />
+                <Th labelKey="col.actualQty" className="text-right text-muted-foreground" />
+                <Th labelKey="col.actualAmt" className="text-right text-muted-foreground" />
+                <Th labelKey="col.actualNbv" className="text-right text-muted-foreground" />
+                <Th labelKey="col.liveQty" className="text-right text-muted-foreground" />
+                <Th labelKey="col.liveAmt" className="text-right text-muted-foreground" />
+                <Th labelKey="col.liveNbv" className="text-right text-muted-foreground" />
+                <Th labelKey="col.seasonMinusMonth" className="text-right text-muted-foreground" />
+                <Th labelKey="col.pending" className="text-right text-muted-foreground" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -350,9 +393,9 @@ export function PlanGrid() {
             </tfoot>
           </Table>
         </div>
-      )}
+      ))}
 
-      {editable && (
+      {!monthId && editable && (
         <div className="flex justify-end">
           <SaveHint />
         </div>

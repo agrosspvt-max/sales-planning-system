@@ -18,7 +18,7 @@ import { TableHead, TableRow } from "./table";
 
 export type SectionTone = "blue" | "slate" | "green" | "amber" | "purple";
 
-const TONE_BG: Record<SectionTone, string> = {
+export const TONE_BG: Record<SectionTone, string> = {
   blue: "bg-blue-50/70 dark:bg-blue-950/30",
   slate: "bg-slate-100/70 dark:bg-slate-800/40",
   green: "bg-green-50/70 dark:bg-green-950/30",
@@ -33,8 +33,8 @@ export interface TableSection {
   tone: SectionTone;
 }
 
-/** <colgroup> that tints each section's columns (header + body) in one place. */
-export function SectionColgroup({ leading = 0, sections }: { leading?: number; sections: TableSection[] }) {
+/** <colgroup> that tints each section's columns (header + body) in one place. Only span+tone matter. */
+export function SectionColgroup({ leading = 0, sections }: { leading?: number; sections: { span: number; tone: SectionTone }[] }) {
   return (
     <colgroup>
       {leading > 0 && <col span={leading} />}

@@ -5,7 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Save, Ban, Plus } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
-import { amount, nbv, PLANNING_MODE_LABELS } from "@/lib/calc";
+import { amount, PLANNING_MODE_LABELS } from "@/lib/calc";
 import { MONTH_STATUS_LABELS } from "./planning-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,10 +15,10 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Th, ThPlain } from "@/features/labels/label-ui";
 import { useMonthlyEdit } from "./monthly-edit-context";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "./dealer-completion";
 import { DealerPlanningStatus } from "./dealer-status";
@@ -194,15 +194,15 @@ export function MonthlyPlanner() {
         <Table stickyFirstColumn>
           <TableHeader>
             <TableRow>
-              <TableHead className="min-w-[150px]">Product</TableHead>
-              <TableHead className="text-right">Season {qtyMode ? "Qty" : unitLabel}</TableHead>
-              <TableHead className="text-right">Planned (all months)</TableHead>
-              <TableHead className="text-right">Remaining</TableHead>
-              <TableHead className="text-center">This Month Plan</TableHead>
-              <TableHead className="text-center text-muted-foreground">This Month Sold</TableHead>
-              <TableHead className="text-right">Pending (mo)</TableHead>
-              <TableHead className="text-right">Planned Amount</TableHead>
-              <TableHead className="text-right text-muted-foreground">Actual Amount</TableHead>
+              <Th labelKey="col.product" className="min-w-[150px]" />
+              <ThPlain className="text-right">Season {qtyMode ? "Qty" : unitLabel}</ThPlain>
+              <Th labelKey="monthly.plannedAllMonths" className="text-right" />
+              <Th labelKey="monthly.remaining" className="text-right" />
+              <Th labelKey="monthly.thisMonthPlan" className="text-center" />
+              <Th labelKey="monthly.thisMonthSold" className="text-center text-muted-foreground" />
+              <Th labelKey="monthly.pendingMo" className="text-right" />
+              <Th labelKey="monthly.plannedAmount" className="text-right" />
+              <Th labelKey="monthly.actualAmount" className="text-right text-muted-foreground" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -220,7 +220,6 @@ export function MonthlyPlanner() {
                 const isOver = excess > 0;
                 const cur = cellFor(p.planLineId, monthId);
                 const plannedAmount = qtyMode ? amount(cur.plan, p.rate) : cur.plan;
-                const plannedNbv = nbv(plannedAmount, p.nbvPercent);
                 // Actual amount comes from the uploaded sales (saleValue) — not qty × rate.
                 const actualAmount = p.monthly[monthId]?.saleAmount ?? 0;
                 return (

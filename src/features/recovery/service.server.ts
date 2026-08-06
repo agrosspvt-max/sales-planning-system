@@ -11,6 +11,7 @@ import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
+import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Tx = any;
@@ -334,7 +335,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   const agingSnapshotRows: { id: string; recoveryPlanId: string; weekNo: number; cutoffDate: Date; workbookName: string; uploadedById: string }[] = [];
   const agingSnapshotDealerRows: { id: string; snapshotId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number }[] = [];
   const agingSnapshotBillRows: { snapshotId: string; snapshotDealerId: string; dealerId: string; billDate: Date | null; refNo: string | null; amount: number; dueDate: Date | null; bucket: string }[] = [];
-  const recoveryPlanDealerRows: { recoveryPlanId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number }[] = [];
+  const recoveryPlanDealerRows: { recoveryPlanId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number; outstandingTillDate: number; runningTillDate: number }[] = [];
 
   const planIds: string[] = [];
   let dealerCount = 0;
@@ -351,7 +352,8 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
     for (const d of dealersFor) {
       const snapDealerId = randomUUID();
       agingSnapshotDealerRows.push({ id: snapDealerId, snapshotId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running });
-      recoveryPlanDealerRows.push({ recoveryPlanId: planId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running });
+      // First import of the month → seed OPENING balances (Till Date). Set once here; never updated.
+      recoveryPlanDealerRows.push({ recoveryPlanId: planId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running, outstandingTillDate: d.aging.outstanding, runningTillDate: d.aging.running });
       for (const b of d.aging.bills) {
         agingSnapshotBillRows.push({ snapshotId, snapshotDealerId: snapDealerId, dealerId: d.dealerId, billDate: b.billDate, refNo: b.refNo, amount: b.amount, dueDate: b.dueDate, bucket: b.bucket });
       }
@@ -533,6 +535,16 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         overdue: cur.overdue,
         due: cur.due,
         running: cur.running,
+        // OPENING balances for the month (frozen after the first import). Fall back to current values
+        // for any legacy row created before these columns existed.
+        outstandingTillDate: num(d.outstandingTillDate ?? d.outstanding),
+        runningTillDate: num(d.runningTillDate ?? d.running),
+        // Day Book-derived business values (populated by the Daybook upload; default 0).
+        srCr: num(d.srCr ?? 0),
+        liveRecovery: num(d.liveRecovery ?? 0),
+        // DERIVED (Part 5): Actual Running Recovery = Live Recovery + SR/CR − (Due + Overdue). Computed
+        // at read time so it auto-refreshes from EITHER a Daybook or an Aging change; never stored.
+        actualRunningRecovery: num(d.liveRecovery ?? 0) + num(d.srCr ?? 0) - (cur.due + cur.overdue),
         monthRecoveryPlan,
         monthRunningRecovery,
         noPlan: d.noPlan,
@@ -1128,8 +1140,9 @@ async function reconcileRecoveryDealers(recoveryPlanId: string, dealerIds: Set<s
     const vals = { outstanding: num(sd.outstanding), overdue: num(sd.overdue), due: num(sd.due), running: num(sd.running) };
     await prisma.recoveryPlanDealer.upsert({
       where: { recoveryPlanId_dealerId: { recoveryPlanId, dealerId: sd.dealerId } },
-      create: { recoveryPlanId, dealerId: sd.dealerId, ...vals },
-      update: {}, // present already → refresh left its aging correct; don't touch officer inputs.
+      // First appearance of an onboarded dealer in the month → seed its OPENING balances (Till Date).
+      create: { recoveryPlanId, dealerId: sd.dealerId, ...vals, outstandingTillDate: vals.outstanding, runningTillDate: vals.running },
+      update: {}, // present already → refresh left its aging correct; don't touch officer inputs or Till Date.
     });
   }
 }
@@ -1303,4 +1316,174 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
 
   const officersAffected = officerIds ? officerIds.length - failedOfficers.length : new Set(recoveryPlanIds).size;
   return { mode: input.mode, officersAffected, recoveryPlanIds, createdDealers, failedOfficers };
+}
+
+/* ========================= Daybook Upload → SR/CR + Live Recovery =========================
+ * A SEPARATE business document from Sales Upload. Scoped to ONE Recovery month, it resolves each
+ * Day Book row's dealer through the SAME Dealer Alias resolver (Alias→exact→loose→fuzzy) and writes
+ * ONLY srCr + liveRecovery on that month's RecoveryPlanDealer rows. It NEVER touches any aging-derived
+ * or officer-planning field. Reupload for the month RESETS then re-sets those two columns (no
+ * accumulation). Actual Running Recovery is DERIVED at read time (getRecoveryPlan), so it refreshes
+ * automatically from either a Daybook or an Aging change.
+ * ======================================================================================== */
+
+const daybookSchema = z.object({
+  seasonMonthId: z.string().min(1, "Select a Recovery Month"),
+  fromDate: z.string().optional(),
+  toDate: z.string().optional(),
+});
+
+export interface DaybookMatchedLine { dealerName: string; officerName: string; receipt: number; srCr: number }
+export interface DaybookSkippedLine { dealerName: string; reason: string }
+export interface DaybookAnalysis {
+  workbookName: string;
+  monthName: string;
+  seasonName: string;
+  summary: { totalRows: number; dealersMatched: number; dealersSkipped: number; receiptTotal: number; srCrTotal: number };
+  matched: DaybookMatchedLine[];
+  skipped: DaybookSkippedLine[];
+}
+export interface DaybookResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number }
+
+interface DaybookResolution {
+  monthName: string;
+  seasonName: string;
+  totalRows: number;
+  // dealerId → aggregated Day Book totals + the month's RecoveryPlanDealer row it maps to.
+  matched: Map<string, { rpdId: string; dealerName: string; officerName: string; receipt: number; srCr: number }>;
+  skippedUnknown: string[]; // raw names with no Dealer Alias / master match
+  skippedNoPlan: { dealerName: string }[]; // resolved, but no Recovery Plan for this month
+  monthRpdIds: string[]; // ALL RecoveryPlanDealer ids in the month (for the reupload reset)
+}
+
+/** Resolve a parsed Day Book against the month's Recovery Plans (NO writes). Shared by analyze+commit. */
+async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMonthId: string): Promise<DaybookResolution> {
+  const month = (await prisma.seasonMonth.findUnique({
+    where: { id: seasonMonthId },
+    select: { name: true, season: { select: { name: true, year: true } } },
+  })) as { name: string; season: { name: string; year: number } } | null;
+  if (!month) throw new ApiError(422, "The selected Recovery Month does not exist");
+
+  const [resolver, plans] = await Promise.all([
+    loadDealerResolver(),
+    prisma.recoveryPlan.findMany({
+      where: { seasonMonthId },
+      select: { officer: { select: { name: true } }, dealers: { select: { id: true, dealerId: true, dealer: { select: { name: true } } } } },
+    }),
+  ]);
+  // dealerId → its RecoveryPlanDealer row for this month (a dealer belongs to exactly one officer).
+  const rpdByDealer = new Map<string, { rpdId: string; dealerName: string; officerName: string }>();
+  const monthRpdIds: string[] = [];
+  for (const p of plans as { officer: { name: string }; dealers: { id: string; dealerId: string; dealer: { name: string } }[] }[]) {
+    for (const d of p.dealers) {
+      monthRpdIds.push(d.id);
+      rpdByDealer.set(d.dealerId, { rpdId: d.id, dealerName: d.dealer.name, officerName: p.officer.name });
+    }
+  }
+
+  // Aggregate Day Book totals per resolved dealerId; collect unresolved raw names once.
+  const byDealer = new Map<string, { receipt: number; srCr: number }>();
+  const unknownSet = new Set<string>();
+  for (const row of parsed.rows) {
+    const isSr = isSrCrVoucher(row.vchType);
+    const isRcpt = isReceiptVoucher(row.vchType);
+    if (!isSr && !isRcpt) continue; // other voucher types don't contribute to SR/CR or Live Recovery
+    const match = resolver.resolveWithReason(row.particulars);
+    if (!match) {
+      unknownSet.add(row.particulars);
+      continue;
+    }
+    const acc = byDealer.get(match.dealer.id) ?? { receipt: 0, srCr: 0 };
+    if (isSr) acc.srCr += row.creditAmount;
+    if (isRcpt) acc.receipt += row.creditAmount;
+    byDealer.set(match.dealer.id, acc);
+  }
+
+  const matched = new Map<string, { rpdId: string; dealerName: string; officerName: string; receipt: number; srCr: number }>();
+  const skippedNoPlan: { dealerName: string }[] = [];
+  for (const [dealerId, totals] of byDealer) {
+    const rpd = rpdByDealer.get(dealerId);
+    if (!rpd) {
+      // Resolved to a master dealer, but that dealer has no Recovery Plan for this month.
+      const name = resolver.dealers.find((x) => x.id === dealerId)?.name ?? dealerId;
+      skippedNoPlan.push({ dealerName: name });
+      continue;
+    }
+    matched.set(dealerId, { rpdId: rpd.rpdId, dealerName: rpd.dealerName, officerName: rpd.officerName, ...totals });
+  }
+
+  return {
+    monthName: month.name,
+    seasonName: `${month.season.name} ${month.season.year}`,
+    totalRows: parsed.totalRows,
+    matched,
+    skippedUnknown: [...unknownSet],
+    skippedNoPlan,
+    monthRpdIds,
+  };
+}
+
+/** Preview a Day Book upload (NO writes) — summary + matched/skipped sections. */
+export async function analyzeDaybook(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<DaybookAnalysis> {
+  assertAdmin(ctx);
+  const input = daybookSchema.parse(raw);
+  const parsed = parseDaybook(buffer);
+  if (parsed.rows.length === 0) throw new ApiError(422, "No voucher rows were found — is this a Tally Day Book export?");
+  const res = await resolveDaybook(parsed, input.seasonMonthId);
+
+  const matched = [...res.matched.values()].map((m) => ({ dealerName: m.dealerName, officerName: m.officerName, receipt: m.receipt, srCr: m.srCr }));
+  const skipped: DaybookSkippedLine[] = [
+    ...res.skippedUnknown.map((name) => ({ dealerName: name, reason: "Unknown Alias — no Dealer Master match" })),
+    ...res.skippedNoPlan.map((s) => ({ dealerName: s.dealerName, reason: "Not in a Recovery Plan for this month" })),
+  ];
+  const receiptTotal = matched.reduce((t, m) => t + m.receipt, 0);
+  const srCrTotal = matched.reduce((t, m) => t + m.srCr, 0);
+
+  return {
+    workbookName: filename,
+    monthName: res.monthName,
+    seasonName: res.seasonName,
+    summary: { totalRows: res.totalRows, dealersMatched: matched.length, dealersSkipped: skipped.length, receiptTotal, srCrTotal },
+    matched: matched.sort((a, b) => b.receipt + b.srCr - (a.receipt + a.srCr)),
+    skipped,
+  };
+}
+
+/**
+ * Commit a Day Book upload: RESET srCr + liveRecovery to 0 for every RecoveryPlanDealer of the month,
+ * then set the newly-computed totals for the matched dealers — all in ONE transaction. Reupload-safe
+ * (no accumulation). Writes ONLY srCr + liveRecovery; no aging/planning field is ever touched.
+ */
+export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<DaybookResult> {
+  assertAdmin(ctx);
+  const input = daybookSchema.parse(raw);
+  const parsed = parseDaybook(buffer);
+  if (parsed.rows.length === 0) throw new ApiError(422, "No voucher rows were found in the Day Book");
+  const res = await resolveDaybook(parsed, input.seasonMonthId);
+
+  const matched = [...res.matched.values()];
+  await prisma.$transaction(
+    async (tx: Tx) => {
+      // Reset the two Daybook-owned columns for the WHOLE month first (clears any prior upload).
+      if (res.monthRpdIds.length > 0) {
+        await tx.recoveryPlanDealer.updateMany({ where: { id: { in: res.monthRpdIds } }, data: { srCr: 0, liveRecovery: 0 } });
+      }
+      // Then set the matched dealers' totals (ONLY srCr + liveRecovery).
+      for (const m of matched) {
+        await tx.recoveryPlanDealer.update({ where: { id: m.rpdId }, data: { srCr: m.srCr, liveRecovery: m.receipt } });
+      }
+    },
+    { timeout: 60000, maxWait: 10000 },
+  );
+
+  const receiptTotal = matched.reduce((t, m) => t + m.receipt, 0);
+  const srCrTotal = matched.reduce((t, m) => t + m.srCr, 0);
+  await writeAudit({
+    userId: ctx.userId,
+    action: "UPDATE",
+    entity: "recoveryPlan",
+    summary: `Day Book upload for ${res.seasonName} · ${res.monthName} (${filename}): ${matched.length} dealer(s) updated — Receipts ₹${Math.round(receiptTotal)}, SR/CR ₹${Math.round(srCrTotal)}`,
+  });
+
+  return { monthName: res.monthName, dealersUpdated: matched.length, receiptTotal, srCrTotal, dealersCleared: res.monthRpdIds.length };
 }

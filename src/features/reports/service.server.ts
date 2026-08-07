@@ -3,7 +3,7 @@ import { PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
-import { achievement, amount, nbv, figuresForMode, isQuantityMode, pendingQty, type PlanningMode } from "@/lib/calc";
+import { achievement, nbv, figuresForMode, isQuantityMode, pendingQty, type PlanningMode } from "@/lib/calc";
 import type {
   ReportColumn,
   ReportFilters,
@@ -66,7 +66,7 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
           lines: {
             include: {
               product: {
-                select: { name: true, brand: { select: { name: true } }, category: { select: { name: true } } },
+                select: { name: true, rate: true, nbvPercent: true, brand: { select: { name: true } }, category: { select: { name: true } } },
               },
               packs: { select: { quantity: true } },
               monthlyEntries: {
@@ -98,8 +98,9 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
     const rm = rmByOfficer.get(plan.officerId) as { id: string; name: string } | undefined;
     for (const pd of plan.dealers) {
       for (const l of pd.lines) {
-        const rate = l.rateSnapshot !== null ? num(l.rateSnapshot) : 0;
-        const nbvPct = l.nbvPercentSnapshot !== null ? num(l.nbvPercentSnapshot) : 0;
+        // All planning calculations use the current Product Master values.
+        const rate = num(l.product.rate);
+        const nbvPct = num(l.product.nbvPercent);
 
         // Planned figures come from the line's OWN seasonal mode (null => PACK_SIZE),
         // via the centralized calc — so amount/NBV are correct in every mode.
@@ -125,9 +126,8 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
           const saleValue = num(e.saleValue ?? 0);
           if (isQuantityMode(eMode)) {
             actualQty += e.saleQty;
-            const amt = amount(e.saleQty, rate);
-            actualAmount += amt;
-            actualNbv += nbv(amt, nbvPct);
+            actualAmount += saleValue;
+            actualNbv += nbv(saleValue, nbvPct);
           } else if (eMode === "AMOUNT") {
             actualAmount += saleValue;
             actualNbv += nbv(saleValue, nbvPct);

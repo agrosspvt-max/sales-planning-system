@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope } from "@/lib/scope";
 import { saveMonthlySchema } from "@/lib/validations/planning";
-import { figuresForMode, isQuantityMode, amount, type PlanningMode } from "@/lib/calc";
+import { figuresForMode, isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { getEditableMonthMap, assertMonthOpen } from "./planning-state.server";
 import { isMonthEditable, type MonthStatus } from "./planning-state";
 
@@ -47,7 +47,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
         dealer: { select: { name: true } },
         lines: {
           include: {
-            product: { select: { name: true } },
+            product: { select: { name: true, rate: true, nbvPercent: true } },
             packs: { select: { quantity: true } },
             monthlyEntries: true,
           },
@@ -96,8 +96,9 @@ export function buildMonthlyDealers(
       isNewDealer: pd.fromMonthlyPlan ?? false,
       products: pd.lines
         .map((line) => {
-          const rate = line.rateSnapshot !== null ? num(line.rateSnapshot) : 0;
-          const nbvPercent = line.nbvPercentSnapshot !== null ? num(line.nbvPercentSnapshot) : 0;
+          // Monthly planning always prices against the current Master Price List.
+          const rate = num(line.product.rate);
+          const nbvPercent = num(line.product.nbvPercent);
           // The season target comes from the line's OWN stored seasonal mode,
           // re-expressed in the active monthly unit.
           const seasonalMode: PlanningMode = (line.inputMode as PlanningMode | null) ?? "PACK_SIZE";
@@ -139,9 +140,8 @@ export function buildMonthlyDealers(
                 const e = entryByMonth.get(m.id);
                 const plan = valueMode ? num(e?.planValue ?? 0) : e?.planQty ?? 0;
                 const sale = valueMode ? num(e?.saleValue ?? 0) : e?.saleQty ?? 0;
-                // Actual SALES VALUE from the uploaded Tally sheet (stored in saleValue). Falls
-                // back to qty×rate only when no upload value exists (legacy/backward-compat).
-                const saleAmount = num(e?.saleValue ?? 0) || amount(e?.saleQty ?? 0, rate);
+                // Actual SALES VALUE comes only from the uploaded Sales file.
+                const saleAmount = num(e?.saleValue ?? 0);
                 return [m.id, { plan, sale, saleAmount }];
               }),
             ),
@@ -160,9 +160,7 @@ interface MonthlyEntryRow {
 interface MonthlyLineRow {
   id: string;
   productId: string;
-  product: { name: string };
-  rateSnapshot: unknown;
-  nbvPercentSnapshot: unknown;
+  product: { name: string; rate: unknown; nbvPercent: unknown };
   inputMode: string | null;
   inputValue: unknown;
   isAdditional?: boolean;

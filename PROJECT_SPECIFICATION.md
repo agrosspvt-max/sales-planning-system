@@ -41,6 +41,14 @@
 >
 > **Version 1 workflow (confirmed).** Version 1 preserves the existing **dealer-by-dealer (dealer-first / bottom-up)** planning workflow exactly as performed in Excel. Product summaries are always **automatically calculated** from dealer planning. Product-first (top-down) planning is explicitly a **future enhancement**, not Version 1 (Sections 14, 28, 33). The exact Version 1 boundary is defined in Section 33.
 
+> **Pricing policy override (current).** This rule supersedes every earlier statement in this
+> specification about approval-time Rate/NBV% snapshots. All Planning amounts and NBV values
+> always use the current Product Master (Price List) Rate and NBV%. Actual Sales Quantity and
+> Actual Sales Amount are imported from the Sales file; Actual Sales Amount is the uploaded Value
+> total and is never recalculated from the Price List. A repeated Dealer + Product row is summed
+> for both Quantity and Value. Legacy snapshot fields may remain for compatibility but are not a
+> calculation source.
+
 ---
 
 ## Table of Contents
@@ -2300,4 +2308,3 @@ Multiple simultaneously-open months, reopening previous months, per-month audit 
 
 <!-- superseded stamp retained for history -->
 *Prior stamp — End of PROJECT_SPECIFICATION.md v4.2 (FINAL). This is the definitive business specification. It normalizes pack sizes (Pack Size master + PlanLinePack), links MonthlyEntry to PlanLine, retains versioning and PlanDealer, and documents the planning data model in Section 36. Business workflow, UI, authentication, approval, permissions and technology are unchanged. Implementation code will be updated to match in the next phase.*
-

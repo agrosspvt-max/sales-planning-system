@@ -51,6 +51,14 @@ export function ResourcePage({
 
   function invalidate() {
     qc.invalidateQueries({ queryKey: ["resource", config.key] });
+    // Product Price List changes are live inputs to every planning calculation. Refresh any
+    // currently open planning/report queries immediately, rather than waiting for navigation.
+    if (config.key === "products") {
+      qc.invalidateQueries({ queryKey: ["plan"] });
+      qc.invalidateQueries({ queryKey: ["monthly-plan"] });
+      qc.invalidateQueries({ queryKey: ["approved-monthly"] });
+      qc.invalidateQueries({ queryKey: ["reports"] });
+    }
   }
 
   const createMut = useMutation({

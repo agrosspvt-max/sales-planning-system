@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { formatCurrency } from "@/lib/utils";
-import { amount as calcAmount, nbv as calcNbv } from "@/lib/calc";
+import { nbv as calcNbv } from "@/lib/calc";
 import {
   Table,
   TableBody,
@@ -69,7 +69,8 @@ export function ProductPlan() {
           if (cell) for (const pid of Object.keys(cell.packs)) row.packSums[pid] = (row.packSums[pid] ?? 0) + (cell.packs[pid] ?? 0);
         }
         // Actuals from stored monthly sales.
-        const aAmt = calcAmount(l.actualQty, l.rate);
+        // Actual amount comes from the uploaded sales value, never from the price list.
+        const aAmt = l.actualAmount;
         row.actualQty += l.actualQty;
         row.actualAmount += aAmt;
         row.actualNbv += calcNbv(aAmt, l.nbvPercent);

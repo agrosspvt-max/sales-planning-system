@@ -276,7 +276,8 @@ export function PlanGrid() {
               {dealer?.lines.map((l) => {
                 const cell = cellFor(l.productId);
                 const fig = lineFig(dealerId, l);
-                const actualAmt = calcAmount(l.actualQty, l.rate);
+                // Actual amount comes from the uploaded sales value, never from the price list.
+                const actualAmt = l.actualAmount;
                 const liveAmt = calcAmount(l.liveMonthlyQty, l.rate);
                 const target = fig.totalQty ?? 0;
                 return (

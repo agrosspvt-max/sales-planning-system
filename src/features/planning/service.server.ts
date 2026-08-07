@@ -17,7 +17,7 @@ import {
   notifyMany,
   getSuperAdminIds,
 } from "@/features/notifications/service.server";
-import { assembleWorkbookLine, amount, type PlanningMode, type WorkbookLine } from "@/lib/calc";
+import { assembleWorkbookLine, type PlanningMode, type WorkbookLine } from "@/lib/calc";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer } from "./lifecycle.server";
 
 const EDITABLE: PlanStatus[] = [PlanStatus.DRAFT, PlanStatus.RETURNED, PlanStatus.REJECTED];
@@ -67,30 +67,14 @@ function getPlanningPackSizes() {
 type Tx = any;
 
 /**
- * The ONE approval finalisation used everywhere a plan becomes APPROVED/active:
- * snapshot Rate/NBV% onto the version's lines, supersede the prior active version of
- * the SAME planning type, and activate this one. Reused by the normal approve flow and
- * by "Import as Approved" — never duplicated.
+ * The ONE approval finalisation used everywhere a plan becomes APPROVED/active: supersede the
+ * prior active version of the SAME planning type and activate this one. Planning figures always
+ * read the current Product Master rate/NBV%, so stored line snapshots are not refreshed or read.
  */
 async function finalizeApproval(
   tx: Tx,
   plan: { id: string; seasonId: string; officerId: string; planningType: string },
 ) {
-  // Snapshot Rate/NBV% onto every line of this plan. Business rule is unchanged — each line's
-  // rateSnapshot/nbvPercentSnapshot become its product's current rate/nbvPercent — but instead
-  // of a findMany + one UPDATE per line (thousands of sequential round-trips that blow the
-  // transaction timeout on Neon), it's ONE set-based UPDATE that joins PlanLine → Product.
-  // Decimal columns are copied column-to-column, so values are byte-for-byte identical.
-  await tx.$executeRaw`
-    UPDATE "PlanLine" AS pl
-    SET "rateSnapshot" = p."rate",
-        "nbvPercentSnapshot" = p."nbvPercent"
-    FROM "Product" AS p
-    WHERE pl."productId" = p."id"
-      AND pl."planDealerId" IN (
-        SELECT pd."id" FROM "PlanDealer" AS pd WHERE pd."seasonPlanId" = ${plan.id}
-      )
-  `;
   await tx.seasonPlan.updateMany({
     where: {
       seasonId: plan.seasonId,
@@ -413,9 +397,9 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
             productActive: l.product.isActive,
             // Auto-added by Sales Upload (unplanned sold product) — drives the "Auto Added" badge.
             isAutoAdded: (l as { isAutoAdded?: boolean }).isAutoAdded ?? false,
-            rate: l.rateSnapshot !== null ? num(l.rateSnapshot) : num(l.product.rate),
-            nbvPercent:
-              l.nbvPercentSnapshot !== null ? num(l.nbvPercentSnapshot) : num(l.product.nbvPercent),
+            // Planning pricing always comes from the live Master Price List.
+            rate: num(l.product.rate),
+            nbvPercent: num(l.product.nbvPercent),
             // Planning Configuration: how this line was stored (null => PACK_SIZE).
             inputMode: (l.inputMode as PlanningMode | null) ?? null,
             inputValue: l.inputValue !== null ? num(l.inputValue) : null,
@@ -430,11 +414,11 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
               (s: number, e: { saleQty: number }) => s + e.saleQty,
               0,
             ),
-            // Actual SALES VALUE from the uploaded Tally sheet (MonthlyEntry.saleValue). Falls
-            // back to qty × rate only where no upload value exists (legacy/backward-compat).
+            // Actual SALES VALUE is only the uploaded Sales-file value. Never price actuals
+            // from the Master Price List.
             actualAmount: l.monthlyEntries.reduce((s: number, e: { saleQty: number; saleValue: unknown }) => {
-              const v = num(e.saleValue ?? 0);
-              return s + (v || amount(e.saleQty, l.rateSnapshot !== null ? num(l.rateSnapshot) : num(l.product.rate)));
+              void e.saleQty;
+              return s + num(e.saleValue ?? 0);
             }, 0),
           })),
       })),
@@ -461,7 +445,7 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
             include: {
               product: { select: { name: true, rate: true, nbvPercent: true } },
               packs: { select: { quantity: true } },
-              monthlyEntries: { select: { seasonMonthId: true, planQty: true, saleQty: true } },
+              monthlyEntries: { select: { seasonMonthId: true, planQty: true, saleQty: true, saleValue: true } },
             },
           },
         },
@@ -487,8 +471,8 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
   const pd = plan.dealers.find((d) => d.dealerId === selectedDealerId);
   const rows = (pd?.lines ?? [])
     .map((l) => {
-      const rate = l.rateSnapshot !== null ? num(l.rateSnapshot) : num(l.product.rate);
-      const nbvPct = l.nbvPercentSnapshot !== null ? num(l.nbvPercentSnapshot) : num(l.product.nbvPercent);
+      const rate = num(l.product.rate);
+      const nbvPct = num(l.product.nbvPercent);
       const lineMode = (l.inputMode as PlanningMode | null) ?? "PACK_SIZE";
       const seasonalInput =
         lineMode === "PACK_SIZE"
@@ -496,15 +480,16 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
           : l.inputValue !== null
             ? num(l.inputValue)
             : 0;
-      const byMonth = new Map<string, { planQty: number; saleQty: number }>(
-        l.monthlyEntries.map((e: { seasonMonthId: string; planQty: number; saleQty: number }) => [
+      const byMonth = new Map<string, { planQty: number; saleQty: number; saleValue: unknown }>(
+        l.monthlyEntries.map((e: { seasonMonthId: string; planQty: number; saleQty: number; saleValue: unknown }) => [
           e.seasonMonthId,
           e,
         ]),
       );
       const planQ = months.map((m: { id: string }) => byMonth.get(m.id)?.planQty ?? 0);
       const saleQ = months.map((m: { id: string }) => byMonth.get(m.id)?.saleQty ?? 0);
-      const line: WorkbookLine = assembleWorkbookLine(lineMode, seasonalInput, planQ, saleQ, rate, nbvPct);
+      const saleAmounts = months.map((m: { id: string }) => num(byMonth.get(m.id)?.saleValue ?? 0));
+      const line: WorkbookLine = assembleWorkbookLine(lineMode, seasonalInput, planQ, saleQ, saleAmounts, rate, nbvPct);
       return { productId: l.productId, productName: l.product.name, line };
     })
     .filter((r) => (r.line.targetQty ?? 0) > 0 || r.line.actualQty > 0 || r.line.liveMonthlyQty > 0)

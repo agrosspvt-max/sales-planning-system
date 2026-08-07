@@ -232,7 +232,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
         dealer: { select: { name: true, mobile: true, village: true, tehsil: true, district: true, address: true } },
         lines: {
           include: {
-            product: { select: { name: true } },
+            product: { select: { name: true, rate: true, nbvPercent: true } },
             packs: { select: { quantity: true } },
             monthlyEntries: { where: { seasonMonthId: mp.seasonMonthId } },
           },
@@ -345,7 +345,7 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
         dealer: { select: { name: true } },
         lines: {
           include: {
-            product: { select: { name: true } },
+            product: { select: { name: true, rate: true, nbvPercent: true } },
             packs: { select: { quantity: true } },
             monthlyEntries: { where: { seasonMonthId: { in: approvedIds } } },
           },
@@ -475,11 +475,9 @@ export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: stri
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
 
-  // No manual annotation: Prisma infers rate/nbvPercent as Decimal from the `select`, which is
-  // exactly what rateSnapshot/nbvPercentSnapshot expect. Casting them to `unknown` was the bug.
   const product = await prisma.product.findUnique({
     where: { id: productId },
-    select: { rate: true, nbvPercent: true, isActive: true },
+    select: { isActive: true },
   });
   if (!product || !product.isActive) throw new ApiError(422, "Product not found or inactive");
 
@@ -499,7 +497,7 @@ export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: stri
     select: { id: true },
   });
   const line = existingLine ?? await prisma.planLine.create({
-    data: { planDealerId: pd.id, productId, isAdditional: true, rateSnapshot: product.rate, nbvPercentSnapshot: product.nbvPercent },
+    data: { planDealerId: pd.id, productId, isAdditional: true },
     select: { id: true },
   });
   await prisma.monthlyEntry.upsert({
@@ -669,7 +667,7 @@ export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
         dealer: { select: { name: true } },
         lines: {
           include: {
-            product: { select: { name: true } },
+            product: { select: { name: true, rate: true, nbvPercent: true } },
             packs: { select: { quantity: true } },
             monthlyEntries: { where: { seasonMonthId: mp.seasonMonthId } },
           },

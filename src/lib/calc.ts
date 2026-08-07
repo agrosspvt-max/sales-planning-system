@@ -250,13 +250,15 @@ export interface WorkbookLine {
  * The ONE place the workbook line is assembled. Every screen (Seasonal grid read-only
  * columns, Monthly planner, Workbook View) consumes this — no duplicated formulas.
  * `seasonalInput` is the stored seasonal figure (pack-sum for PACK_SIZE, else inputValue);
- * monthly plan/sale are per-month quantities. Amount = qty×rate, NBV = amount×nbv%.
+ * monthly plan quantities are priced at the current master rate. Actual sale amounts come from
+ * the uploaded sales file and are never recomputed from a rate.
  */
 export function assembleWorkbookLine(
   seasonalMode: PlanningMode,
   seasonalInput: number,
   monthlyPlanQty: number[],
   monthlySaleQty: number[],
+  monthlySaleAmounts: number[],
   rate: number,
   nbvPercent: number,
 ): WorkbookLine {
@@ -270,7 +272,7 @@ export function assembleWorkbookLine(
   const months: WorkbookMonth[] = monthlyPlanQty.map((pq, i) => {
     const sq = monthlySaleQty[i] ?? 0;
     const planAmount = amount(pq, rate);
-    const saleAmount = amount(sq, rate);
+    const saleAmount = monthlySaleAmounts[i] ?? 0;
     return {
       planQty: pq,
       planAmount,
@@ -283,7 +285,7 @@ export function assembleWorkbookLine(
     };
   });
 
-  const actualAmount = amount(actualQty, rate);
+  const actualAmount = monthlySaleAmounts.reduce((a, b) => a + b, 0);
   const liveMonthlyAmount = amount(liveMonthlyQty, rate);
   return {
     targetQty,

@@ -4,6 +4,11 @@ Implementation notes for the Sales Planning module. Business rules live in
 `PROJECT_SPECIFICATION.md`; this file documents *how* the code realises them. Written
 after the final regression review.
 
+> **Current pricing policy.** Planning reads the live Product Master Rate/NBV% on every request;
+> `PlanLine` snapshot fields are retained only for database compatibility and are not read or
+> refreshed. Sales Upload stores the workbook's Quantity and Value in `MonthlyEntry.saleQty` and
+> `saleValue`; actual-sale amounts always come from `saleValue`, never from quantity × rate.
+
 ## 1. Single calculation engine
 
 Every planning figure resolves to `src/lib/calc.ts`. The only definitions of the base

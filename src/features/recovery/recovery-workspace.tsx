@@ -434,7 +434,6 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
     { labelKey: "recovery.section.weeklyPlanning", span: 3, tone: "amber" },
     { labelKey: "recovery.section.recoveryProgress", span: 3, tone: "green" },
     { labelKey: "recovery.section.results", span: 2, tone: "purple" },
-    { labelKey: "recovery.section.reference", span: 2, tone: "slate" },
   ];
 
   return (
@@ -462,8 +461,6 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               <Th labelKey="recovery.runningPlanThisWeek" className="text-center" />
               <Th labelKey="recovery.thisWeekTotal" className="text-right" />
               <Th labelKey="recovery.diff" className="text-right" />
-              <Th labelKey="recovery.runningOsBills" className="text-right text-muted-foreground" />
-              <Th labelKey="recovery.runningRecoveryMonth" className="text-right text-muted-foreground" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -486,7 +483,9 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={!canEditWeek || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress */}
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRecoveryPlan)}</TableCell>
+                  {/* "Running Plan Month" is the Month View's Running Recovery Plan. Labels are
+                      configurable, but the stable business field is monthRunningRecovery. */}
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRunningRecovery)}</TableCell>
                   <TableCell className="text-right tabular-nums font-medium">{money(tillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={!canEditWeek || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
@@ -494,9 +493,6 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   {/* Section 4 — Results */}
                   <TableCell className="text-right tabular-nums font-medium">{money(weekTotal)}</TableCell>
                   <TableCell className={cn("text-right tabular-nums", diff !== 0 && "text-warning")}>{money(diff)}</TableCell>
-                  {/* Section 5 — Reference (Read-only) */}
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.running)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRunningRecovery)}</TableCell>
                 </TableRow>
               );
             })}

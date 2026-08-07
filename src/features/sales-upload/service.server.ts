@@ -396,13 +396,12 @@ async function autoAddUnplannedProducts(
     byOfficer.set(s.officerId, set);
   }
   const allProductIds = [...new Set(selections.map((s) => s.productId))];
-  // Type rate/nbvPercent as Prisma.Decimal (the real column type) so they satisfy PlanLineCreateManyInput
-  // (rateSnapshot/nbvPercentSnapshot accept Decimal). Casting these to `unknown` was the original bug.
-  const productMaster = (await prisma.product.findMany({
-    where: { id: { in: allProductIds }, isActive: true },
-    select: { id: true, rate: true, nbvPercent: true },
-  })) as { id: string; rate: Prisma.Decimal; nbvPercent: Prisma.Decimal }[];
-  const productById = new Map(productMaster.map((p) => [p.id, p]));
+  const activeProductIds = new Set(
+    (await prisma.product.findMany({
+      where: { id: { in: allProductIds }, isActive: true },
+      select: { id: true },
+    })).map((p) => p.id),
+  );
 
   let created = 0;
   for (const [officerId, productIds] of byOfficer) {
@@ -423,10 +422,10 @@ async function autoAddUnplannedProducts(
       const have = new Set(pd.lines.map((l) => l.productId));
       for (const pid of productIds) {
         if (have.has(pid)) continue;
-        const prod = productById.get(pid);
-        if (!prod) continue;
+        if (!activeProductIds.has(pid)) continue;
         // isAdditional stays FALSE (a normal seasonal line); isAutoAdded=true drives the badge only.
-        creates.push({ planDealerId: pd.id, productId: pid, isAutoAdded: true, rateSnapshot: prod.rate, nbvPercentSnapshot: prod.nbvPercent });
+        // Planning prices are always read live from Product Master, never from line snapshots.
+        creates.push({ planDealerId: pd.id, productId: pid, isAutoAdded: true });
       }
     }
 

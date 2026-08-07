@@ -418,22 +418,58 @@ export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: st
 /* --------------------- Additional products & new dealers ------------------ */
 
 /** Active products NOT yet on this dealer (seasonal or additional) — the "Add" candidates. */
-export async function getAdditionalProductCandidates(ctx: AuthContext, monthlyPlanId: string, dealerId: string) {
+// export async function getAdditionalProductCandidates(ctx: AuthContext, monthlyPlanId: string, dealerId: string) {
+//   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
+//   await assertOfficerInScope(ctx, mp.officerId);
+//   const existing = await prisma.planLine.findMany({
+//     where: { planDealer: { seasonPlanId: mp.seasonPlanId, dealerId } },
+//     select: { productId: true },
+//   });
+//   const have = new Set(existing.map((l) => l.productId));
+//   const products = (await prisma.product.findMany({
+//     where: { isActive: true },
+//     orderBy: { name: "asc" },
+//     select: { id: true, name: true, rate: true, nbvPercent: true },
+//   })) as { id: string; name: string; rate: unknown; nbvPercent: unknown }[];
+//   return products
+//     .filter((p) => !have.has(p.id))
+//     .map((p) => ({ productId: p.id, productName: p.name, rate: num(p.rate), nbvPercent: num(p.nbvPercent) }));
+// }
+
+// temp fixxxxxxxxxxxx
+
+export async function getAdditionalProductCandidates(
+  ctx: AuthContext,
+  monthlyPlanId: string,
+  dealerId: string,
+) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertOfficerInScope(ctx, mp.officerId);
-  const existing = await prisma.planLine.findMany({
-    where: { planDealer: { seasonPlanId: mp.seasonPlanId, dealerId } },
-    select: { productId: true },
-  });
-  const have = new Set(existing.map((l) => l.productId));
+
+  void dealerId; // temporarily unused
+
   const products = (await prisma.product.findMany({
     where: { isActive: true },
     orderBy: { name: "asc" },
-    select: { id: true, name: true, rate: true, nbvPercent: true },
-  })) as { id: string; name: string; rate: unknown; nbvPercent: unknown }[];
-  return products
-    .filter((p) => !have.has(p.id))
-    .map((p) => ({ productId: p.id, productName: p.name, rate: num(p.rate), nbvPercent: num(p.nbvPercent) }));
+    select: {
+      id: true,
+      name: true,
+      rate: true,
+      nbvPercent: true,
+    },
+  })) as {
+    id: string;
+    name: string;
+    rate: unknown;
+    nbvPercent: unknown;
+  }[];
+
+  return products.map((p) => ({
+    productId: p.id,
+    productName: p.name,
+    rate: num(p.rate),
+    nbvPercent: num(p.nbvPercent),
+  }));
 }
 
 /**

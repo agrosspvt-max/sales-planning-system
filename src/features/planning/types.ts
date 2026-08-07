@@ -38,6 +38,7 @@ export interface PlanLineDetail {
   productName: string;
   technicalName: string | null;
   productActive: boolean;
+  isAutoAdded?: boolean;
   rate: number;
   nbvPercent: number;
   /** How this line was stored (null => PACK_SIZE). */
@@ -142,6 +143,8 @@ export interface MonthlyProductRow {
   productName: string;
   /** True for an Additional Product (planned monthly, not in the approved Seasonal Plan). */
   isAdditional?: boolean;
+  /** True for an Auto-Added / Unplanned product created by Sales Upload. */
+  isAutoAdded?: boolean;
   rate: number;
   nbvPercent: number;
   /** Approved season target expressed in the active monthly unit (qty / amount / nbv). */

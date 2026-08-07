@@ -8,8 +8,11 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // Runtime uses the Neon POOLER (pgBouncer) URL — see DATABASE_URL (pgbouncer=true&connection_limit=…).
+  url       = env("DATABASE_URL")
+  // Migrations need a DIRECT (non-pooled) connection; falls back to DATABASE_URL if DIRECT_URL is unset.
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -440,6 +443,12 @@ model PlanLine {
   // Seasonal Plan. Created with zero seasonal quantity, so seasonal views (which filter to
   // target > 0) never show it; monthly views/reports flag it as ADDITIONAL PRODUCT.
   isAdditional Boolean @default(false)
+
+  // An "Auto Added / Unplanned" product line created by Sales Upload when a dealer sold a product
+  // that wasn't in the Seasonal Plan. Stored as a NORMAL seasonal line (isAdditional stays false) with
+  // zero planning, so it appears wherever seasonal products appear; this flag only drives an
+  // "Auto Added" badge. Independent of isAdditional — does not change its meaning/behaviour.
+  isAutoAdded Boolean @default(false)
 
   planDealer     PlanDealer     @relation(fields: [planDealerId], references: [id], onDelete: Cascade)
   product        Product        @relation(fields: [productId], references: [id])

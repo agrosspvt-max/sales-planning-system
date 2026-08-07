@@ -115,7 +115,9 @@ export function buildMonthlyDealers(
           (x) =>
             // Additional monthly products (zero seasonal target) are always shown here so the
             // officer can plan them; seasonal products show only when planned or have entries.
+            // Auto-added (unplanned sold) products are also always shown, like additional products.
             (x.line.isAdditional ?? false) ||
+            (x.line.isAutoAdded ?? false) ||
             x.target > 0 ||
             x.line.monthlyEntries.some(
               (e) =>
@@ -130,6 +132,7 @@ export function buildMonthlyDealers(
             productId: line.productId,
             productName: line.product.name,
             isAdditional: line.isAdditional ?? false,
+            isAutoAdded: line.isAutoAdded ?? false,
             rate,
             nbvPercent,
             target,
@@ -165,6 +168,7 @@ interface MonthlyLineRow {
   inputMode: string | null;
   inputValue: unknown;
   isAdditional?: boolean;
+  isAutoAdded?: boolean;
   packs: { quantity: number }[];
   monthlyEntries: MonthlyEntryRow[];
 }

@@ -51,17 +51,27 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
       orderBy: { name: "asc" },
       select: { id: true, name: true, status: true, createdFrom: true },
     }),
-    prisma.dealerAlias.findMany({ select: { systemDealerId: true } }),
+    prisma.dealerAlias.findMany({ select: { id: true, tallyName: true, systemDealerId: true }, orderBy: { tallyName: "asc" } }),
   ]);
-  const withAlias = new Set((aliases as { systemDealerId: string }[]).map((a) => a.systemDealerId));
+  // Group every alias under its dealer so the page can show them inline and manage them per dealer.
+  const aliasesByDealer = new Map<string, { id: string; tallyName: string }[]>();
+  for (const a of aliases as { id: string; tallyName: string; systemDealerId: string }[]) {
+    const list = aliasesByDealer.get(a.systemDealerId) ?? [];
+    list.push({ id: a.id, tallyName: a.tallyName });
+    aliasesByDealer.set(a.systemDealerId, list);
+  }
 
-  const rows = (dealers as { id: string; name: string; status: string; createdFrom: string | null }[]).map((d) => ({
-    id: d.id,
-    name: d.name,
-    hasAlias: withAlias.has(d.id),
-    status: d.status,
-    soCreated: d.createdFrom === "MONTHLY_PLAN",
-  }));
+  const rows = (dealers as { id: string; name: string; status: string; createdFrom: string | null }[]).map((d) => {
+    const dealerAliases = aliasesByDealer.get(d.id) ?? [];
+    return {
+      id: d.id,
+      name: d.name,
+      hasAlias: dealerAliases.length > 0,
+      aliases: dealerAliases,
+      status: d.status,
+      soCreated: d.createdFrom === "MONTHLY_PLAN",
+    };
+  });
 
   const counts = {
     all: rows.length,
@@ -93,6 +103,21 @@ export async function addSingleAlias(ctx: AuthContext, systemDealerId: string, t
   if (existing) throw new ApiError(409, "An alias for that Tally name already exists");
   await prisma.dealerAlias.create({ data: { systemDealerId, tallyName: name, tallyKey } });
   return { created: true };
+}
+
+/** Edit an existing alias's Tally name in place (same uniqueness guard, allowing the row itself). */
+export async function updateSingleAlias(ctx: AuthContext, id: string, tallyName: string) {
+  assertAdmin(ctx);
+  const name = tallyName.trim();
+  if (!name) throw new ApiError(422, "Tally name is required");
+  const tallyKey = tightKey(name);
+  const alias = await prisma.dealerAlias.findUnique({ where: { id }, select: { id: true } });
+  if (!alias) throw new ApiError(404, "Alias not found");
+  // A different alias must not already own this Tally key (case/spacing-only edits keep the same key).
+  const clash = await prisma.dealerAlias.findUnique({ where: { tallyKey }, select: { id: true } });
+  if (clash && clash.id !== id) throw new ApiError(409, "An alias for that Tally name already exists");
+  await prisma.dealerAlias.update({ where: { id }, data: { tallyName: name, tallyKey } });
+  return { updated: true };
 }
 
 export interface AliasUploadResult {

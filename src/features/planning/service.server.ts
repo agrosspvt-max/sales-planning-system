@@ -411,6 +411,8 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
             productName: l.product.name,
             technicalName: l.product.technicalName,
             productActive: l.product.isActive,
+            // Auto-added by Sales Upload (unplanned sold product) — drives the "Auto Added" badge.
+            isAutoAdded: (l as { isAutoAdded?: boolean }).isAutoAdded ?? false,
             rate: l.rateSnapshot !== null ? num(l.rateSnapshot) : num(l.product.rate),
             nbvPercent:
               l.nbvPercentSnapshot !== null ? num(l.nbvPercentSnapshot) : num(l.product.nbvPercent),

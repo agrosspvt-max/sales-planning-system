@@ -227,6 +227,7 @@ export function MonthlyPlanner() {
                     <TableCell className="font-medium">
                       {p.productName}
                       {p.isAdditional && <Badge variant="secondary" className="ml-2 align-middle text-[10px]">ADDITIONAL PRODUCT</Badge>}
+                      {p.isAutoAdded && <Badge variant="default" className="ml-2 align-middle bg-info text-info-foreground text-[10px]">AUTO ADDED</Badge>}
                     </TableCell>
                     <TableCell className="text-right">{fmtUnit(p.target)}</TableCell>
                     <TableCell className="text-right">

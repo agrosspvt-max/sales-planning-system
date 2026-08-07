@@ -283,6 +283,7 @@ export function PlanGrid() {
                   <TableRow key={l.productId}>
                     <TableCell className="font-medium">
                       {l.productName}
+                      {l.isAutoAdded && <span className="ml-1.5 rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info" title="Added by Sales Upload for an unplanned sold product">Auto Added</span>}
                       {/* Technical/scientific name — hidden on phones to keep the frozen column narrow. */}
                       <div className="hidden text-xs text-muted-foreground sm:block">{l.technicalName}</div>
                     </TableCell>

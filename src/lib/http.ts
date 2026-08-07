@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { withDbRetry } from "@/lib/db-retry";
 import { can, type Action, type Resource } from "@/lib/rbac";
 import type { Role } from "@prisma/client";
 
@@ -33,10 +34,15 @@ export async function requireAuth(): Promise<AuthContext> {
     console.warn("[requireAuth] 401 — no session/JWT on the request");
     throw new ApiError(401, "Not authenticated");
   }
-  const user = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true },
-  });
+  // The auth check itself is unchanged; only the DB read is retried on TRANSIENT connectivity errors
+  // (e.g. a Neon connection briefly unavailable during a heavy import) so a momentary P1001 does not
+  // turn every request into a 500. Security is not affected — the same user validation still runs.
+  const user = (await withDbRetry(() =>
+    prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true },
+    }),
+  )) as { id: string; role: Role; username: string; isActive: boolean; deletedAt: Date | null; sessionValidAfter: Date | null } | null;
   // Every request re-verifies the DB user: must exist, not be soft-deleted, and be active — so
   // deactivating/deleting a user takes effect immediately, even for an already-issued JWT. The most
   // common cause of "found=false" is a JWT that outlived the database (user row recreated by a

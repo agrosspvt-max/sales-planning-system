@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ImportPreviewReport, type ImportPreviewReportData } from "./import-preview-report";
 
 interface Analysis {
   workbookName: string;
@@ -24,6 +25,7 @@ interface Analysis {
   dealersWithoutPlan: string[];
   rowsToImport: number;
   warnings: string[];
+  report: ImportPreviewReportData | null;
 }
 interface CommitResult {
   runId: string;
@@ -32,6 +34,7 @@ interface CommitResult {
   productsUpdated: number;
   unknownDealers: number;
   unknownProducts: number;
+  autoAddedLines: number;
 }
 
 type Step = "upload" | "review" | "done";
@@ -58,12 +61,25 @@ export function SalesUploadWizard() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
+  // Auto-add unplanned products to the Seasonal Plan (default off). Keys are "officerId|productId".
+  const [autoAdd, setAutoAdd] = useState(false);
+  const [selectedUnplanned, setSelectedUnplanned] = useState<Set<string>>(new Set());
+
   const { data: months } = useQuery<{ id: string; label: string }[]>({
     queryKey: ["sales-upload-months"],
     queryFn: () => api.get("/api/sales-upload/months"),
   });
 
   const dataPayload = () => JSON.stringify({ seasonMonthId, fromDate: fromDate || undefined, toDate: toDate || undefined });
+  // Only auto-addable entries (dealer has an approved seasonal plan → officerId present).
+  const autoAddableKeys = () =>
+    [...new Set((analysis?.report?.matchedNotPlanned ?? []).filter((r) => r.officerId).map((r) => `${r.officerId}|${r.productId}`))];
+  const commitDataPayload = () => {
+    const selections = autoAdd
+      ? [...selectedUnplanned].map((k) => { const [officerId, productId] = k.split("|"); return { officerId, productId }; })
+      : [];
+    return JSON.stringify({ seasonMonthId, fromDate: fromDate || undefined, toDate: toDate || undefined, autoAddUnplanned: selections });
+  };
 
   const analyzeMut = useMutation({
     mutationFn: async () => {
@@ -77,17 +93,30 @@ export function SalesUploadWizard() {
     },
     onSuccess: (a) => {
       setAnalysis(a);
+      setAutoAdd(false);
+      setSelectedUnplanned(new Set());
       setStep("review");
       setError(null);
     },
     onError: (e) => setError((e as Error).message),
   });
 
+  const onAutoAddChange = (on: boolean) => {
+    setAutoAdd(on);
+    setSelectedUnplanned(on ? new Set(autoAddableKeys()) : new Set());
+  };
+  const onToggleUnplanned = (key: string) =>
+    setSelectedUnplanned((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+
   const commitMut = useMutation({
     mutationFn: async () => {
       const form = new FormData();
       form.append("file", file as File);
-      form.append("data", dataPayload());
+      form.append("data", commitDataPayload());
       const res = await fetch("/api/sales-upload/commit", { method: "POST", body: form });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Import failed");
@@ -200,11 +229,20 @@ export function SalesUploadWizard() {
             </div>
           )}
 
+          {/* Verification-only detailed preview + optional auto-add of unplanned products. */}
+          {analysis.report && (
+            <ImportPreviewReport
+              report={analysis.report}
+              workbookName={analysis.workbookName}
+              autoAddControls={{ autoAdd, onAutoAddChange, selected: selectedUnplanned, onToggle: onToggleUnplanned }}
+            />
+          )}
+
           <div className="flex justify-between">
             <Button variant="outline" onClick={() => setStep("upload")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            <Button onClick={() => commitMut.mutate()} disabled={commitMut.isPending || analysis.rowsToImport === 0}>
+            <Button onClick={() => commitMut.mutate()} disabled={commitMut.isPending || (analysis.rowsToImport === 0 && !(autoAdd && selectedUnplanned.size > 0))}>
               {commitMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Importing…</> : <><ArrowRight className="h-4 w-4" /> Import Sales</>}
             </Button>
           </div>
@@ -222,6 +260,7 @@ export function SalesUploadWizard() {
             <Stat label="Products Updated" value={result.productsUpdated} />
             <Stat label="Unknown Dealers" value={result.unknownDealers} warn={result.unknownDealers > 0} />
             <Stat label="Unknown Products" value={result.unknownProducts} warn={result.unknownProducts > 0} />
+            <Stat label="Auto-Added Plan Lines" value={result.autoAddedLines} good={result.autoAddedLines > 0} />
           </div>
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="outline"><Link href="/planning/sales-upload/history">Sales Upload history</Link></Button>

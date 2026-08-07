@@ -63,6 +63,9 @@ export type ImportStatus = (typeof ImportStatus)[keyof typeof ImportStatus];
 export namespace Prisma {
   export type TransactionClient = any;
   export type PrismaClientKnownRequestError = any;
+  // Model input types are permissive in the stub; the real generated client supplies exact types.
+  export type PlanLineCreateManyInput = any;
+  export type Decimal = any;
 }
 
 export class PrismaClient {

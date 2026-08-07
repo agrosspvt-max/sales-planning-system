@@ -1,6 +1,6 @@
 import "server-only";
 import { z } from "zod";
-import { Role, ImportStatus, PlanStatus } from "@prisma/client";
+import { Role, ImportStatus, PlanStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { decorate, matchByName, similarity, type Keyed } from "@/lib/match-key";
@@ -396,10 +396,12 @@ async function autoAddUnplannedProducts(
     byOfficer.set(s.officerId, set);
   }
   const allProductIds = [...new Set(selections.map((s) => s.productId))];
+  // Type rate/nbvPercent as Prisma.Decimal (the real column type) so they satisfy PlanLineCreateManyInput
+  // (rateSnapshot/nbvPercentSnapshot accept Decimal). Casting these to `unknown` was the original bug.
   const productMaster = (await prisma.product.findMany({
     where: { id: { in: allProductIds }, isActive: true },
     select: { id: true, rate: true, nbvPercent: true },
-  })) as { id: string; rate: unknown; nbvPercent: unknown }[];
+  })) as { id: string; rate: Prisma.Decimal; nbvPercent: Prisma.Decimal }[];
   const productById = new Map(productMaster.map((p) => [p.id, p]));
 
   let created = 0;
@@ -416,7 +418,7 @@ async function autoAddUnplannedProducts(
       select: { id: true, lines: { where: { productId: { in: [...productIds] } }, select: { productId: true } } },
     })) as { id: string; lines: { productId: string }[] }[];
 
-    const creates: { planDealerId: string; productId: string; isAutoAdded: boolean; rateSnapshot: unknown; nbvPercentSnapshot: unknown }[] = [];
+    const creates: Prisma.PlanLineCreateManyInput[] = [];
     for (const pd of planDealers) {
       const have = new Set(pd.lines.map((l) => l.productId));
       for (const pid of productIds) {

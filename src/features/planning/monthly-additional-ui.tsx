@@ -46,9 +46,8 @@ export function EditDealerButton({ monthlyPlanId, dealerId, initial }: { monthly
 }
 
 /**
- * Collapsible "Show Additional Products" — lists active products NOT in the dealer's seasonal
- * plan. Adding one creates an isAdditional PlanLine; it then appears in the main monthly table
- * (badged ADDITIONAL PRODUCT) and is planned through the normal monthly autosave.
+ * Collapsible product picker for this dealer and month. It includes products from the seasonal
+ * plan that have not yet been added to this month, plus products outside the seasonal plan.
  */
 export function AdditionalProductsSection({ monthlyPlanId, dealerId, canEdit }: { monthlyPlanId: string; dealerId: string; canEdit: boolean }) {
   const qc = useQueryClient();
@@ -80,7 +79,7 @@ export function AdditionalProductsSection({ monthlyPlanId, dealerId, canEdit }: 
       <button className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium" onClick={() => setOpen(!open)}>
         {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         Show Additional Products
-        <span className="text-xs font-normal text-muted-foreground">products not in the approved Seasonal Plan</span>
+        <span className="text-xs font-normal text-muted-foreground">products not yet added to this monthly plan</span>
       </button>
       {open && (
         <div className="border-t p-3">
@@ -99,7 +98,7 @@ export function AdditionalProductsSection({ monthlyPlanId, dealerId, canEdit }: 
               ))}
             </div>
           )}
-          <p className="mt-2 text-xs text-muted-foreground">Adding a product places it in the table above as an <span className="font-medium">Additional Product</span>; enter This Month Plan there. The approved Seasonal Plan is not changed.</p>
+          <p className="mt-2 text-xs text-muted-foreground">Adding a product places it in the table above for this dealer and month. The approved Seasonal Plan is not changed.</p>
         </div>
       )}
     </div>

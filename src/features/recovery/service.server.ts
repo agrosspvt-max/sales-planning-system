@@ -387,6 +387,10 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
 
 export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[]) {
   const scope = await getOfficerScope(ctx);
+  //Temp test fixxxxx
+  console.log("ROLE:", ctx.role);
+  console.log("USER:", ctx.userId);
+  console.log("SCOPE:", scope);
   const rows = await prisma.recoveryPlan.findMany({
     where: {
       officerId: scope.all ? undefined : { in: scope.ids },

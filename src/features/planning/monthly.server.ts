@@ -113,16 +113,14 @@ export function buildMonthlyDealers(
         })
         .filter(
           (x) =>
-            // Additional monthly products (zero seasonal target) are always shown here so the
-            // officer can plan them; seasonal products show only when planned or have entries.
-            // Auto-added (unplanned sold) products are also always shown, like additional products.
+            // Existing additional products remain visible, preserving the established monthly
+            // planning behaviour and all previously entered values. A zero-value MonthlyEntry
+            // also makes a seasonal product explicitly added to this month visible before a
+            // quantity is entered.
             (x.line.isAdditional ?? false) ||
             (x.line.isAutoAdded ?? false) ||
             x.target > 0 ||
-            x.line.monthlyEntries.some(
-              (e) =>
-                e.planQty > 0 || e.saleQty > 0 || num(e.planValue) > 0 || num(e.saleValue) > 0,
-            ),
+            x.line.monthlyEntries.length > 0,
         )
         .sort((a, b) => a.line.product.name.localeCompare(b.line.product.name))
         .map(({ line, rate, nbvPercent, target }) => {

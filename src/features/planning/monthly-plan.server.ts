@@ -417,27 +417,7 @@ export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: st
 
 /* --------------------- Additional products & new dealers ------------------ */
 
-/** Active products NOT yet on this dealer (seasonal or additional) — the "Add" candidates. */
-// export async function getAdditionalProductCandidates(ctx: AuthContext, monthlyPlanId: string, dealerId: string) {
-//   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-//   await assertOfficerInScope(ctx, mp.officerId);
-//   const existing = await prisma.planLine.findMany({
-//     where: { planDealer: { seasonPlanId: mp.seasonPlanId, dealerId } },
-//     select: { productId: true },
-//   });
-//   const have = new Set(existing.map((l) => l.productId));
-//   const products = (await prisma.product.findMany({
-//     where: { isActive: true },
-//     orderBy: { name: "asc" },
-//     select: { id: true, name: true, rate: true, nbvPercent: true },
-//   })) as { id: string; name: string; rate: unknown; nbvPercent: unknown }[];
-//   return products
-//     .filter((p) => !have.has(p.id))
-//     .map((p) => ({ productId: p.id, productName: p.name, rate: num(p.rate), nbvPercent: num(p.nbvPercent) }));
-// }
-
-// temp fixxxxxxxxxxxx
-
+/** Active products not already present in this dealer's current monthly plan. */
 export async function getAdditionalProductCandidates(
   ctx: AuthContext,
   monthlyPlanId: string,
@@ -446,7 +426,16 @@ export async function getAdditionalProductCandidates(
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertOfficerInScope(ctx, mp.officerId);
 
-  void dealerId; // temporarily unused
+  // A product can already exist in the seasonal plan but still be absent from this
+  // particular month. Only a MonthlyEntry for this month makes it ineligible to add.
+  const existing = await prisma.planLine.findMany({
+    where: {
+      planDealer: { seasonPlanId: mp.seasonPlanId, dealerId },
+      monthlyEntries: { some: { seasonMonthId: mp.seasonMonthId } },
+    },
+    select: { productId: true },
+  });
+  const alreadyInMonth = new Set(existing.map((line) => line.productId));
 
   const products = (await prisma.product.findMany({
     where: { isActive: true },
@@ -464,19 +453,20 @@ export async function getAdditionalProductCandidates(
     nbvPercent: unknown;
   }[];
 
-  return products.map((p) => ({
-    productId: p.id,
-    productName: p.name,
-    rate: num(p.rate),
-    nbvPercent: num(p.nbvPercent),
-  }));
+  return products
+    .filter((p) => !alreadyInMonth.has(p.id))
+    .map((p) => ({
+      productId: p.id,
+      productName: p.name,
+      rate: num(p.rate),
+      nbvPercent: num(p.nbvPercent),
+    }));
 }
 
 /**
- * Add an Additional Product to a dealer's monthly plan: a real PlanLine with `isAdditional`
- * and ZERO seasonal quantity, so the approved Seasonal Plan is never modified. Snapshots the
- * product's current rate/NBV% so amounts compute exactly like a seasonal line. The officer
- * then plans "This Month Plan" through the normal monthly autosave (the line now exists).
+ * Add a product to one dealer's current monthly plan. A seasonal product reuses its existing
+ * PlanLine; a product absent from the seasonal plan gets an additional zero-seasonal PlanLine.
+ * In both cases, the zero-valued MonthlyEntry is the month-specific membership record.
  */
 export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: string, dealerId: string, productId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
@@ -500,16 +490,25 @@ export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: stri
   if (!pd) pd = await prisma.planDealer.create({ data: { seasonPlanId: mp.seasonPlanId, dealerId }, select: { id: true } });
 
   const existingLine = await prisma.planLine.findUnique({
-    where: { planDealerId_productId: { planDealerId: pd.id, productId } },
+    where: {
+      planDealerId_productId: {
+        planDealerId: pd.id,
+        productId,
+      },
+    },
     select: { id: true },
   });
-  if (existingLine) return { planLineId: existingLine.id, alreadyExisted: true };
-
-  const line = await prisma.planLine.create({
+  const line = existingLine ?? await prisma.planLine.create({
     data: { planDealerId: pd.id, productId, isAdditional: true, rateSnapshot: product.rate, nbvPercentSnapshot: product.nbvPercent },
+    select: { id: true },
+  });
+  await prisma.monthlyEntry.upsert({
+    where: { planLineId_seasonMonthId: { planLineId: line.id, seasonMonthId: mp.seasonMonthId } },
+    create: { planLineId: line.id, seasonMonthId: mp.seasonMonthId },
+    update: {},
   });
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { lastSavedAt: new Date() } });
-  return { planLineId: line.id, alreadyExisted: false };
+  return { planLineId: line.id, alreadyExisted: Boolean(existingLine) };
 }
 
 const dealerFieldsSchema = z.object({

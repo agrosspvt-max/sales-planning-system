@@ -6,7 +6,8 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
 import { applyDealerAssignment, applyRmAssignment } from "@/features/assignments/service.server";
-import { looseKey, tightKey, similarity, matchByName, type Keyed } from "@/lib/match-key";
+import { dealerSimilarity, looseKey, tightKey, similarity, type Keyed } from "@/lib/match-key";
+import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { writeAudit } from "@/lib/audit";
 
 // Re-exported for callers that already import fuzzy similarity from this module.
@@ -21,7 +22,7 @@ function assertAdmin(ctx: AuthContext) {
   if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can import");
 }
 
-/* ---- Matching uses the shared utility (lib/match-key): similarity, keys, matchByName ---- */
+/* ---- Dealer matching is delegated to the shared central DealerResolver. ---- */
 
 /* --------------------------- Officer detection ---------------------------- */
 
@@ -161,14 +162,16 @@ async function loadDealerContext(): Promise<DealerCtx[]> {
 
 export async function resolveDealers(ctx: AuthContext, names: string[]) {
   assertAdmin(ctx);
-  const contexts = await loadDealerContext();
+  const [contexts, resolver] = await Promise.all([loadDealerContext(), loadDealerResolver()]);
+  const byId = new Map(contexts.map((context) => [context.id, context]));
   return names.map((name) => {
-    const exact = matchByName(name, contexts, {});
+    const match = resolver.resolveWithReason(name);
+    const exact = match ? byId.get(match.dealer.id) : undefined;
     const possibleDuplicates = exact
       ? []
       : contexts
-          .map((d) => ({ d, sim: similarity(name, d.name) }))
-          .filter((x) => x.sim >= DUP_THRESHOLD)
+          .map((d) => ({ d, sim: dealerSimilarity(name, d.name) }))
+          .filter((x) => x.sim >= 0.78)
           .sort((a, b) => b.sim - a.sim)
           .slice(0, 3)
           .map((x) => ({
@@ -359,7 +362,7 @@ export interface ImportPlan {
 async function planImport(payload: CommitPayload): Promise<{ plan: ImportPlan; contexts: DealerCtx[] }> {
   const errors: string[] = [];
   const warnings: string[] = [];
-  const contexts = await loadDealerContext();
+  const [contexts, resolver] = await Promise.all([loadDealerContext(), loadDealerResolver()]);
   const byId = new Map(contexts.map((c) => [c.id, c]));
 
   const toImport = payload.dealers.filter((d) => d.action === "import");
@@ -406,11 +409,12 @@ async function planImport(payload: CommitPayload): Promise<{ plan: ImportPlan; c
     if (!d.existingOfficerId && !d.newOfficerTempId) errors.push(`No Sales Officer selected for "${name}"`);
 
     // Resolve the target dealer (merge target, exact match, or new).
-    const matchedExisting = matchByName(name, contexts, {});
+    const resolved = resolver.resolveWithReason(name);
+    const matchedExisting = resolved ? byId.get(resolved.dealer.id) : undefined;
     const target = d.mergeWithExistingId ? byId.get(d.mergeWithExistingId) : matchedExisting ?? undefined;
     if (!target && !matchedExisting) {
       // Not an exact match — was there a possible duplicate offered? (informational)
-      const dup = contexts.find((c) => similarity(name, c.name) >= DUP_THRESHOLD);
+      const dup = contexts.find((c) => dealerSimilarity(name, c.name) >= 0.78);
       if (dup && !d.mergeWithExistingId) possibleDuplicates++;
     }
 
@@ -460,6 +464,7 @@ export async function commitDealerImport(ctx: AuthContext, raw: unknown): Promis
   const payload = commitSchema.parse(raw);
   const { plan, contexts } = await planImport(payload);
   const byId = new Map(contexts.map((c) => [c.id, c]));
+  const resolver = await loadDealerResolver();
 
   if (payload.validateOnly) {
     return { ...plan, status: "VALIDATED", createdCredentials: [] };
@@ -502,7 +507,8 @@ export async function commitDealerImport(ctx: AuthContext, raw: unknown): Promis
       for (const d of toImport) {
         const officerId = d.existingOfficerId ?? tempToId.get(d.newOfficerTempId!);
         if (!officerId) throw new ApiError(422, `No officer resolved for "${d.name}"`);
-        const target = d.mergeWithExistingId ? byId.get(d.mergeWithExistingId) : matchByName(d.name.trim(), contexts, {}) ?? undefined;
+        const match = resolver.resolveWithReason(d.name.trim());
+        const target = d.mergeWithExistingId ? byId.get(d.mergeWithExistingId) : (match ? byId.get(match.dealer.id) : undefined);
         let dealerId: string;
         if (target) {
           dealerId = target.id;

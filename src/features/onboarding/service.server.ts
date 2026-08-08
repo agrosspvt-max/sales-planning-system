@@ -5,6 +5,7 @@ import { Role, ImportStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { tightKey } from "@/lib/match-key";
+import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { findOrCreateSeason } from "@/features/seasons/service.server";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { parseSeasonalWorkbook, commitSeasonalImport } from "@/features/import/seasonal/service.server";
@@ -148,20 +149,18 @@ async function upsertProducts(products: OnboardingMasters["products"]) {
 }
 
 async function upsertDealers(names: string[]) {
-  const existing = (await prisma.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } })) as {
-    id: string;
-    name: string;
-  }[];
-  const byTight = new Map(existing.map((d) => [tightKey(d.name), d.id]));
+  const resolver = await loadDealerResolver();
+  const createdKeys = new Set<string>();
   const createdNames: string[] = [];
   let matched = 0;
   for (const name of names) {
-    if (byTight.has(tightKey(name))) {
+    const key = tightKey(name);
+    if (resolver.resolveWithReason(name) || createdKeys.has(key)) {
       matched++;
       continue;
     }
-    const d = await prisma.dealer.create({ data: { name } });
-    byTight.set(tightKey(name), d.id);
+    await prisma.dealer.create({ data: { name } });
+    createdKeys.add(key);
     createdNames.push(name);
   }
   return { created: createdNames.length, matched, createdNames };
@@ -214,16 +213,12 @@ export async function commitOnboarding(
 
   // 2) Assign this workbook's dealers to the officer (scoping), idempotently.
   const effectiveFrom = new Date(input.startYear, input.startMonth - 1, 1);
-  const dealerRows = (await prisma.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } })) as {
-    id: string;
-    name: string;
-  }[];
-  const dealerByTight = new Map(dealerRows.map((d) => [tightKey(d.name), d.id]));
+  const dealerResolver = await loadDealerResolver();
   await prisma.$transaction(
     async (tx: Tx) => {
       for (const name of masters.dealerNames) {
-        const id = dealerByTight.get(tightKey(name));
-        if (id) await applyDealerAssignment(tx, id, officer.id, effectiveFrom);
+        const dealer = dealerResolver.resolve(name);
+        if (dealer) await applyDealerAssignment(tx, dealer.id, officer.id, effectiveFrom);
       }
     },
     // Long-running import path on Vercel + Neon: extend beyond Prisma's 5s default. The

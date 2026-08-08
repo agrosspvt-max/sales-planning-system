@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { decorate, tightKey, looseKey, similarity, type Keyed } from "@/lib/match-key";
+import { decorate, dealerNameProfile, dealerSimilarityWithProfile, tightKey, looseKey, type DealerNameProfile, type Keyed } from "@/lib/match-key";
 
 /**
  * The ONE dealer resolver for every importer (Sales Upload, Recovery, …). Resolution order is
@@ -9,19 +9,20 @@ import { decorate, tightKey, looseKey, similarity, type Keyed } from "@/lib/matc
  *   1. Dealer Alias  (Tally name → System dealer, via DealerAlias.tallyKey)
  *   2. Exact         (tightKey)          ┐
  *   3. Loose         (looseKey)          ├─ the shared `matchByName`
- *   4. Fuzzy         (similarity ≥ 0.9)  ┘
+ *   4. Fuzzy         (dealer score ≥ 0.78)  ┘
  *
  * When an alias exists it wins outright (no fuzzy fallback) — the Tally name maps straight to
  * the system dealer. There is no separate alias table or alias logic anywhere else.
  */
-export type DealerMatch = { id: string; name: string } & Keyed;
+export type DealerMatch = { id: string; name: string; profile: DealerNameProfile } & Keyed;
+export const DEALER_FUZZY_THRESHOLD = 0.78;
 
 /** How a raw name resolved to a master dealer — surfaced in previews (same rules, no new matcher). */
 export type MatchType = "ALIAS" | "EXACT" | "LOOSE" | "FUZZY";
 export interface DealerMatchResult {
   dealer: DealerMatch;
   matchType: MatchType;
-  score: number; // 1 for alias/exact, 0.95 for loose, the similarity (≥0.9) for fuzzy
+  score: number; // 1 for alias/exact, 0.95 for loose, the dealer fuzzy score for fuzzy
 }
 
 /**
@@ -53,7 +54,10 @@ export async function loadDealerResolver(): Promise<DealerResolver> {
     prisma.dealer.findMany({ where: { status: "ACTIVE", isActive: true }, select: { id: true, name: true } }),
     prisma.dealerAlias.findMany({ select: { tallyKey: true, systemDealerId: true } }),
   ]);
-  const dealers = decorate(dealerRows as { id: string; name: string }[]);
+  const dealers: DealerMatch[] = decorate(dealerRows as { id: string; name: string }[]).map((dealer) => ({
+    ...dealer,
+    profile: dealerNameProfile(dealer.name),
+  }));
   const byId = new Map(dealers.map((d) => [d.id, d]));
   const aliasByKey = new Map<string, string>(
     (aliasRows as { tallyKey: string; systemDealerId: string }[]).map((a) => [a.tallyKey, a.systemDealerId]),
@@ -62,31 +66,65 @@ export async function loadDealerResolver(): Promise<DealerResolver> {
   // ONE matching implementation with reasons; resolve() is just the dealer-only projection of it.
   function resolveWithReason(rawName: string): DealerMatchResult | null {
     const t = tightKey(rawName);
+    const l = looseKey(rawName);
+
+    // 1. Alias
     const aliasId = aliasByKey.get(t);
     if (aliasId) {
       const d = byId.get(aliasId);
-      if (d) return { dealer: d, matchType: "ALIAS", score: 1 }; // alias wins outright
+      if (d) {
+        return {
+          dealer: d,
+          matchType: "ALIAS",
+          score: 1,
+        };
+      }
     }
+
+    // 2. Exact
     if (t) {
       const exact = dealers.find((x) => x.tight === t);
-      if (exact) return { dealer: exact, matchType: "EXACT", score: 1 };
+      if (exact) {
+        return {
+          dealer: exact,
+          matchType: "EXACT",
+          score: 1,
+        };
+      }
     }
-    const l = looseKey(rawName);
+
+    // 3. Loose
     if (l) {
       const loose = dealers.find((x) => x.loose === l);
-      if (loose) return { dealer: loose, matchType: "LOOSE", score: 0.95 };
+      if (loose) {
+        return {
+          dealer: loose,
+          matchType: "LOOSE",
+          score: 0.95,
+        };
+      }
     }
+
+    // 4. Fuzzy
     let best: DealerMatchResult | null = null;
     for (const x of dealers) {
-      const s = similarity(rawName, x.name);
-      if (s >= 0.9 && (!best || s > best.score)) best = { dealer: x, matchType: "FUZZY", score: s };
+      const s = dealerSimilarityWithProfile(rawName, x.profile);
+      if (s >= DEALER_FUZZY_THRESHOLD) {
+        if (!best || s > best.score) {
+          best = {
+            dealer: x,
+            matchType: "FUZZY",
+            score: s,
+          };
+        }
+      }
     }
     return best;
   }
+
   function resolve(rawName: string): DealerMatch | null {
     return resolveWithReason(rawName)?.dealer ?? null;
   }
-
   return {
     dealers,
     resolve,
@@ -120,7 +158,10 @@ export async function findProbableDealers(name: string, limit = 5): Promise<Prob
     prisma.dealer.findMany({ where: { status: "ACTIVE", isActive: true }, select: { id: true, name: true } }),
     prisma.dealerAlias.findMany({ select: { tallyKey: true, systemDealerId: true, tallyName: true } }),
   ]);
-  const dealers = decorate(dealerRows as { id: string; name: string }[]);
+  const dealers: DealerMatch[] = decorate(dealerRows as { id: string; name: string }[]).map((dealer) => ({
+    ...dealer,
+    profile: dealerNameProfile(dealer.name),
+  }));
   const byId = new Map(dealers.map((d) => [d.id, d]));
   const t = tightKey(trimmed);
   const l = looseKey(trimmed);
@@ -138,13 +179,13 @@ export async function findProbableDealers(name: string, limit = 5): Promise<Prob
       if (d) add(d.id, d.name, "alias", 1);
     }
   }
-  // 2. Exact tightKey, 3. loose key, 4. fuzzy ≥ 0.6.
+  // 2. Exact tightKey, 3. loose key, 4. the same dealer fuzzy scorer.
   for (const d of dealers) {
     if (d.tight === t) add(d.id, d.name, "exact", 1);
     else if (d.loose === l) add(d.id, d.name, "loose", 0.95);
     else {
-      const s = similarity(trimmed, d.name);
-      if (s >= 0.6) add(d.id, d.name, "fuzzy", s);
+      const s = dealerSimilarityWithProfile(trimmed, d.profile);
+      if (s >= DEALER_FUZZY_THRESHOLD) add(d.id, d.name, "fuzzy", s);
     }
   }
   return [...out.values()].sort((a, b) => b.score - a.score).slice(0, limit);

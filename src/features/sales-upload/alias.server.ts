@@ -4,7 +4,8 @@ import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
-import { decorate, matchByName, tightKey, type Keyed } from "@/lib/match-key";
+import { tightKey } from "@/lib/match-key";
+import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { writeAudit } from "@/lib/audit";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -130,7 +131,7 @@ export interface AliasUploadResult {
 
 /**
  * Upload an alias mapping workbook (columns: System Dealer | Tally Dealer). The System Dealer is
- * matched to the Dealer master (exact → loose → fuzzy, reusing matchByName); the Tally name is
+ * matched to the Dealer master through the central resolver (Alias → exact → loose → fuzzy); the Tally name is
  * stored verbatim with a unique tightKey. Existing tally keys are updated, new ones inserted.
  */
 export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Promise<AliasUploadResult> {
@@ -140,11 +141,7 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
   if (!sheet) throw new ApiError(422, "The workbook has no sheets");
   const rows = sheetRows(wb, sheet);
 
-  const dealerRows = (await prisma.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } })) as {
-    id: string;
-    name: string;
-  }[];
-  const dealers: ({ id: string; name: string } & Keyed)[] = decorate(dealerRows);
+  const resolver = await loadDealerResolver();
 
   // Parse rows → { systemName, tallyName }, skipping the header.
   const parsed: { systemName: string; tallyName: string }[] = [];
@@ -162,8 +159,8 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
   let duplicateRows = 0;
   const wanted = new Map<string, { systemDealerId: string; tallyName: string; tallyKey: string }>();
   for (const p of parsed) {
-    const dealer = matchByName(p.systemName, dealers, { fuzzy: true, threshold: 0.9 });
-    if (!dealer) {
+    const match = resolver.resolveWithReason(p.systemName);
+    if (!match) {
       unmatched.push(p.systemName);
       continue;
     }
@@ -171,7 +168,7 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
     if (!tallyKey) continue;
     if (seenTallyKeys.has(tallyKey)) duplicateRows += 1; // same Tally dealer twice in the sheet — last wins
     seenTallyKeys.add(tallyKey);
-    wanted.set(tallyKey, { systemDealerId: dealer.id, tallyName: p.tallyName, tallyKey });
+    wanted.set(tallyKey, { systemDealerId: match.dealer.id, tallyName: p.tallyName, tallyKey });
   }
 
   const keys = [...wanted.keys()];

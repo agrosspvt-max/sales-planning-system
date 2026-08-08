@@ -8,8 +8,8 @@ import { tightKey } from "@/lib/match-key";
  *
  *   Col A (Group Name) · Col B (Particulars) · Col C (Qty) · Col D (Value)
  *   - Rows 0–2 are headers.
- *   - A row with a non-empty Col A is a DEALER header (dealer name in Col B; its Col C/D are
- *     the dealer's own totals, ignored).
+ *   - A row with a dealer total (blank Qty in Col C) is a DEALER header (dealer name in Col B;
+ *     its Col A group may be blank for later dealers in the same Tally group).
  *   - A row with an empty Col A and a non-empty Col B is a PRODUCT row for the current dealer.
  *
  * Product names carry pack info (e.g. "CHIMA 10X500GM") which is stripped to the base name.
@@ -20,6 +20,11 @@ import { tightKey } from "@/lib/match-key";
 const TARGET_SHEET = /sales\s*register/i;
 const HEADER_PARTICULARS = /^particulars$/i;
 const HEADER_GROUP = /^group\s*name$/i;
+const TOTAL_LABEL = /^total\b/i;
+
+function hasCellValue(value: string | number | null | undefined): boolean {
+  return value !== null && value !== undefined && String(value).trim() !== "";
+}
 
 // Pack-size / unit tokens to strip from a Tally product name.
 const UNIT = "(?:GMS?|KGS?|MLS?|LTRS?|LT|L|G)";
@@ -100,9 +105,15 @@ export function parseSalesWorkbook(buffer: Buffer): ParsedSalesWorkbook {
     // Skip the three header rows and any blank line.
     if (HEADER_GROUP.test(region) || HEADER_PARTICULARS.test(particulars)) continue;
     if (!region && !particulars) continue;
+    if (TOTAL_LABEL.test(particulars)) continue;
 
-    if (region) {
-      // Dealer header row — its Col C/D are the dealer's totals and are ignored.
+    // Tally writes a Group Name only for the first dealer in some groups. Subsequent dealer
+    // headers have an empty Group Name but the same structural marker: no product quantity in
+    // Col C and a dealer total in Col D. Relying on Col A silently turned those dealers into
+    // product rows under the preceding dealer, so they never reached the shared resolver.
+    const isDealerHeader = !!particulars && (hasCellValue(region) || !hasCellValue(row[2] ?? null));
+    if (isDealerHeader) {
+      // Dealer header row — its Col C/D are the dealer's own totals, ignored.
       current = { rawName: particulars, products: [] };
       byKey = new Map();
       dealers.push(current);

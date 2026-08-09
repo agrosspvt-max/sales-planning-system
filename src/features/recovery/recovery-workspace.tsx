@@ -246,6 +246,34 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
     update(dealerId, { ...cur, [field]: Math.max(0, Number(raw) || 0) });
   };
 
+  // Deliberately derived in the client from the live edit map: this makes the summary move with
+  // each keystroke, while keeping totals out of the persisted Recovery Plan data.
+  const totals = useMemo(
+    () => detail.dealers.reduce(
+      (sum, d) => {
+        const v = values[d.dealerId] ?? { plan: 0, running: 0 };
+        const monthTotal = v.plan + v.running;
+        return {
+          outstanding: sum.outstanding + d.outstanding,
+          outstandingTillDate: sum.outstandingTillDate + d.outstandingTillDate,
+          overdue: sum.overdue + d.overdue,
+          due: sum.due + d.due,
+          recoveryPlan: sum.recoveryPlan + v.plan,
+          runningOs: sum.runningOs + d.running,
+          runningOsTillDate: sum.runningOsTillDate + d.runningTillDate,
+          runningRecoveryPlan: sum.runningRecoveryPlan + v.running,
+          recoveryPct: sum.recoveryPct + (d.running > 0 ? v.running / d.running : 0),
+          srCr: sum.srCr + d.srCr,
+          liveRecovery: sum.liveRecovery + d.liveRecovery,
+          actualRunningRecovery: sum.actualRunningRecovery + d.actualRunningRecovery,
+          monthTotal: sum.monthTotal + monthTotal,
+        };
+      },
+      { outstanding: 0, outstandingTillDate: 0, overdue: 0, due: 0, recoveryPlan: 0, runningOs: 0, runningOsTillDate: 0, runningRecoveryPlan: 0, recoveryPct: 0, srCr: 0, liveRecovery: 0, actualRunningRecovery: 0, monthTotal: 0 },
+    ),
+    [detail.dealers, values],
+  );
+
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
   // Dealer(frozen) → Outstanding → Overdue → Due → Recovery Plan → Running O/S Bills →
   // Running Recovery Plan → Recovery % → Results.
@@ -339,6 +367,25 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               );
             })}
           </TableBody>
+          <tfoot className="sticky bottom-0 z-[1] bg-muted/40 shadow-[0_-1px_0_hsl(var(--border))]">
+            <TableRow className="bg-muted/40 font-semibold hover:bg-muted/40">
+              <TableCell>Total</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.outstanding)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.outstandingTillDate)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.overdue)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.due)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.recoveryPlan)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.runningOs)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.runningOsTillDate)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.runningRecoveryPlan)}</TableCell>
+              <TableCell className="text-right tabular-nums">{pct(totals.recoveryPct)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.srCr)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.liveRecovery)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.actualRunningRecovery)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.monthTotal)}</TableCell>
+              {editable && <TableCell />}
+            </TableRow>
+          </tfoot>
         </Table>
       </div>
       {noPlanFor && (
@@ -427,6 +474,33 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
   const weekLocked = weekNo < detail.currentWeek;
   const canEditWeek = editable && !weekLocked;
 
+  // This footer follows the same live values as the inputs. It is a view calculation only and
+  // therefore never becomes part of a save request.
+  const totals = useMemo(
+    () => detail.dealers.reduce(
+      (sum, d) => {
+        const v = values[d.dealerId] ?? { plan: 0, running: 0 };
+        const weekTotal = v.plan + v.running;
+        const monthTotal = d.monthRecoveryPlan + d.monthRunningRecovery;
+        const weekPlanTillDate = tillDateTotal(d, d.dealerId);
+        const allWeeks = allWeeksTotal(d, d.dealerId);
+        return {
+          outstanding: sum.outstanding + d.outstanding,
+          overdue: sum.overdue + d.overdue,
+          due: sum.due + (d.dueByWeek?.[weekNo] ?? 0),
+          recoveryPlan: sum.recoveryPlan + v.plan,
+          runningMonthPlan: sum.runningMonthPlan + d.monthRunningRecovery,
+          weeklyPlanTillDate: sum.weeklyPlanTillDate + weekPlanTillDate,
+          runningPlanThisWeek: sum.runningPlanThisWeek + v.running,
+          weekTotal: sum.weekTotal + weekTotal,
+          diff: sum.diff + (monthTotal - allWeeks),
+        };
+      },
+      { outstanding: 0, overdue: 0, due: 0, recoveryPlan: 0, runningMonthPlan: 0, weeklyPlanTillDate: 0, runningPlanThisWeek: 0, weekTotal: 0, diff: 0 },
+    ),
+    [detail.dealers, values, weekNo],
+  );
+
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
   // The Reference section keeps informational balances out of the primary planning flow.
   const weekSections: LabelSection[] = [
@@ -497,6 +571,20 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               );
             })}
           </TableBody>
+          <tfoot className="sticky bottom-0 z-[1] bg-muted/40 shadow-[0_-1px_0_hsl(var(--border))]">
+            <TableRow className="bg-muted/40 font-semibold hover:bg-muted/40">
+              <TableCell>Total</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.outstanding)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.overdue)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.due)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.recoveryPlan)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.runningMonthPlan)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.weeklyPlanTillDate)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.runningPlanThisWeek)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.weekTotal)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", totals.diff !== 0 && "text-warning")}>{money(totals.diff)}</TableCell>
+            </TableRow>
+          </tfoot>
         </Table>
       </div>
     </div>

@@ -1265,7 +1265,10 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
   const failedOfficers: RecoveryFailure[] = [];
   if (input.mode === "CREATE") {
     // CREATE is one atomic transaction (all-or-nothing), so there is no partial-batch retry hazard.
-    const res = await createRecoveryFromAging(ctx, buffer, filename, JSON.stringify({ seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, ...scoped }));
+    // createRecoveryFromAging validates its input as an object. UPDATE uses a legacy JSON-string
+    // entry point, but passing that format here made every CREATE fail Zod validation before any
+    // report data could be processed.
+    const res = await createRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, ...scoped });
     recoveryPlanIds.push(...res.planIds);
   } else if (input.mode === "REPLACE") {
     // REPLACE: reset + refresh are done ATOMICALLY per plan (replaceRecoveryPlanAtomic), so officer

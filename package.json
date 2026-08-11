@@ -13,7 +13,10 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "db:normalize-seasons": "tsx scripts/normalize-season-names.ts",
+    "db:season-conflict-report": "tsx scripts/season-conflict-report.ts",
+    "db:delete-duplicate-season": "tsx scripts/delete-duplicate-season.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

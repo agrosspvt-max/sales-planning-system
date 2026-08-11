@@ -1,78 +1,47 @@
-// Sales Planning System — Prisma schema (Phase 1)
-// Scope: master data, users/roles, time-aware assignments, audit log.
-// Planning tables (seasonal/monthly plans, actual sales) are intentionally
-// NOT included here — they belong to Phase 2.
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider  = "postgresql"
-  // Runtime uses the Neon POOLER (pgBouncer) URL — see DATABASE_URL (pgbouncer=true&connection_limit=…).
   url       = env("DATABASE_URL")
-  // Migrations need a DIRECT (non-pooled) connection; falls back to DATABASE_URL if DIRECT_URL is unset.
   directUrl = env("DIRECT_URL")
-}
-
-enum Role {
-  SUPER_ADMIN
-  REGIONAL_MANAGER
-  SALES_OFFICER
-}
-
-enum SeasonStatus {
-  OPEN
-  CLOSED
 }
 
 /// Application user. Login identity is `username`. Never hard-deleted — use isActive.
 model User {
-  id           String   @id @default(cuid())
-  name         String
-  username     String   @unique
-  passwordHash String
-  role         Role
-  phone        String?
-  email        String?  @unique
-  isActive     Boolean  @default(true)
-  // Soft delete: set instead of hard-deleting, so all history (plans/approvals/audit) survives.
-  deletedAt    DateTime?
-  // Sessions issued (JWT iat) before this instant are rejected by requireAuth — used to
-  // invalidate existing sessions after a password reset/change or deactivation.
-  sessionValidAfter DateTime?
-  // One Sales Officer belongs to at most one UserGroup (MP / UP / WB / CG …).
-  groupId      String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  group             UserGroup? @relation(fields: [groupId], references: [id])
-
-  // A Sales Officer owns dealer assignments (as officer).
-  dealerAssignments DealerAssignment[] @relation("OfficerDealers")
-
-  // Officer→RM assignments (this user acting as the Sales Officer).
-  asOfficerRmAssignments RmAssignment[] @relation("OfficerRm")
-
-  // Officer→RM assignments (this user acting as the Regional Manager).
-  asManagerRmAssignments RmAssignment[] @relation("ManagerRm")
-
-  auditLogs         AuditLog[]
-  targetedAnnouncements Announcement[] @relation("AnnouncementTargetUser")
-
-  seasonPlans      SeasonPlan[]     @relation("OfficerPlans")
-  monthlyPlans     MonthlyPlan[]    @relation("OfficerMonthlyPlans")
-  approvalActions  ApprovalAction[]
-  notifications    Notification[]
-  announcementReads AnnouncementReadStatus[]
-  importRecords    DealerImportRecord[]
-  planImportRecords SeasonPlanImportRecord[] @relation("PlanImports")
-  onboardingRuns    OnboardingRecord[]       @relation("OnboardingRuns")
-  requestedExtensions MonthExtensionRequest[] @relation("ExtensionRequestedBy")
-  decidedExtensions   MonthExtensionRequest[] @relation("ExtensionDecidedBy")
-  salesUploads        SalesUploadRun[]        @relation("SalesUploads")
-  recoveryPlans       RecoveryPlan[]          @relation("OfficerRecoveryPlans")
-  recoveryUploads     AgingSnapshot[]         @relation("RecoveryUploads")
+  id                     String                   @id @default(cuid())
+  name                   String
+  username               String                   @unique
+  passwordHash           String
+  role                   Role
+  phone                  String?
+  email                  String?                  @unique
+  isActive               Boolean                  @default(true)
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+  deletedAt              DateTime?
+  sessionValidAfter      DateTime?
+  groupId                String?
+  recoveryUploads        AgingSnapshot[]          @relation("RecoveryUploads")
+  targetedAnnouncements  Announcement[]           @relation("AnnouncementTargetUser")
+  announcementReads      AnnouncementReadStatus[]
+  approvalActions        ApprovalAction[]
+  auditLogs              AuditLog[]
+  dealerAssignments      DealerAssignment[]       @relation("OfficerDealers")
+  importRecords          DealerImportRecord[]
+  decidedExtensions      MonthExtensionRequest[]  @relation("ExtensionDecidedBy")
+  requestedExtensions    MonthExtensionRequest[]  @relation("ExtensionRequestedBy")
+  monthlyPlans           MonthlyPlan[]            @relation("OfficerMonthlyPlans")
+  notifications          Notification[]
+  onboardingRuns         OnboardingRecord[]       @relation("OnboardingRuns")
+  recoveryPlans          RecoveryPlan[]           @relation("OfficerRecoveryPlans")
+  asManagerRmAssignments RmAssignment[]           @relation("ManagerRm")
+  asOfficerRmAssignments RmAssignment[]           @relation("OfficerRm")
+  salesUploads           SalesUploadRun[]         @relation("SalesUploads")
+  seasonPlans            SeasonPlan[]             @relation("OfficerPlans")
+  planImportRecords      SeasonPlanImportRecord[] @relation("PlanImports")
+  group                  UserGroup?               @relation(fields: [groupId], references: [id])
 
   @@index([role])
   @@index([isActive])
@@ -87,8 +56,7 @@ model UserGroup {
   description String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-
-  members User[]
+  members     User[]
 }
 
 model Category {
@@ -112,21 +80,19 @@ model Brand {
 /// Product master (replaces the Excel PRICELIST). Rate & NBV% are read-only to
 /// SO/RM and flow into planning by product identity — never by row position.
 model Product {
-  id            String   @id @default(cuid())
-  name          String   @unique
+  id            String     @id @default(cuid())
+  name          String     @unique
   technicalName String?
-  rate          Decimal  @db.Decimal(12, 2)
-  nbvPercent    Decimal  @db.Decimal(6, 4) // stored as a fraction, e.g. 0.25 = 25%
+  rate          Decimal    @db.Decimal(12, 2)
+  nbvPercent    Decimal    @db.Decimal(6, 4)
   categoryId    String?
   brandId       String?
-  isActive      Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  category Category? @relation(fields: [categoryId], references: [id])
-  brand    Brand?    @relation(fields: [brandId], references: [id])
-
-  planLines PlanLine[]
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  planLines     PlanLine[]
+  brand         Brand?     @relation(fields: [brandId], references: [id])
+  category      Category?  @relation(fields: [categoryId], references: [id])
 
   @@index([categoryId])
   @@index([brandId])
@@ -135,30 +101,24 @@ model Product {
 
 /// Dealer master. Ownership over time is expressed via DealerAssignment.
 model Dealer {
-  id        String   @id @default(cuid())
-  name      String
-  town      String?
-  // Optional contact metadata (used by the "Create Dealer" flow from Monthly Planning).
-  mobile    String?
-  village   String?
-  tehsil    String?
-  district  String?
-  address   String?
-  isActive  Boolean  @default(true)
-  // Dealer lifecycle. "ACTIVE" (normal) or "PENDING_APPROVAL" (created by a Sales Officer inside
-  // Monthly Planning — usable everywhere immediately, permanently assigned only once that
-  // Monthly Plan is APPROVED). createdFrom = "MONTHLY_PLAN" for those.
-  status         String  @default("ACTIVE")
-  createdByUserId String?
-  createdFrom     String?
-  // Soft delete (never hard-deleted, so historical plans/reports keep working).
-  deletedAt      DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  assignments DealerAssignment[]
-  planDealers PlanDealer[]
-  aliases     DealerAlias[]
+  id                  String               @id @default(cuid())
+  name                String
+  town                String?
+  isActive            Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  mobile              String?
+  village             String?
+  tehsil              String?
+  district            String?
+  address             String?
+  status              String               @default("ACTIVE")
+  createdByUserId     String?
+  createdFrom         String?
+  deletedAt           DateTime?
+  aliases             DealerAlias[]
+  assignments         DealerAssignment[]
+  planDealers         PlanDealer[]
   recoveryPlanDealers RecoveryPlanDealer[]
 
   @@index([isActive])
@@ -167,66 +127,54 @@ model Dealer {
 
 /// A season (e.g. Kharif 2026) with up to six ordered, named months.
 model Season {
-  id        String        @id @default(cuid())
-  name      String
-  year      Int
-  // Season period (1–12 months). Nullable so pre-existing seasons stay valid; new
-  // seasons are created from Start/End month+year and the SeasonMonth rows are
-  // generated automatically. `year` mirrors startYear for the display label & unique key.
-  startMonth Int?
-  startYear  Int?
-  endMonth   Int?
-  endYear    Int?
-  status    SeasonStatus  @default(OPEN)
-  // Planning Configuration is a DEFAULT only; each season captures its own modes at
-  // creation (prefilled from the global default) and always uses them thereafter, so
-  // changing the global default never alters historical seasons. Defaults to PACK_SIZE
-  // so any pre-existing season keeps its original pack-size behaviour after migration.
-  seasonalMode String    @default("PACK_SIZE")
-  monthlyMode  String    @default("PACK_SIZE")
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
-  months    SeasonMonth[]
-  plans     SeasonPlan[]
+  id                String                  @id @default(cuid())
+  name              String
+  year              Int
+  status            SeasonStatus            @default(OPEN)
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  endMonth          Int?
+  endYear           Int?
+  monthlyMode       String                  @default("PACK_SIZE")
+  seasonalMode      String                  @default("PACK_SIZE")
+  startMonth        Int?
+  startYear         Int?
   extensionRequests MonthExtensionRequest[]
   recoveryPlans     RecoveryPlan[]
+  months            SeasonMonth[]
+  plans             SeasonPlan[]
 
   @@unique([name, year])
 }
 
 model SeasonMonth {
-  id       String @id @default(cuid())
-  seasonId String
-  name     String
-  order    Int
-  // Open-Month lifecycle (Section 42). "LOCKED" (not yet opened), "OPEN" (management has
-  // opened it for monthly plan + actual-sales entry), "CLOSED" (opened then closed; read-only).
-  // DB default OPEN keeps existing seasons editable; app-created seasons start LOCKED.
-  status   String @default("OPEN")
-
-  season         Season         @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  id             String         @id @default(cuid())
+  seasonId       String
+  name           String
+  order          Int
+  status         String         @default("OPEN")
   monthlyEntries MonthlyEntry[]
   monthlyPlans   MonthlyPlan[]
   recoveryPlans  RecoveryPlan[]
+  season         Season         @relation(fields: [seasonId], references: [id], onDelete: Cascade)
 
   @@unique([seasonId, order])
   @@index([seasonId])
 }
 
 model Announcement {
-  id           String   @id @default(cuid())
+  id           String                   @id @default(cuid())
   title        String
   body         String
-  audienceRole Role? // null = all roles
-  targetUserId String? // null = not user-specific
-  activeFrom   DateTime @default(now())
+  audienceRole Role?
+  targetUserId String?
+  activeFrom   DateTime                 @default(now())
   activeTo     DateTime?
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  targetUser User? @relation("AnnouncementTargetUser", fields: [targetUserId], references: [id])
-  reads      AnnouncementReadStatus[]
+  isActive     Boolean                  @default(true)
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  targetUser   User?                    @relation("AnnouncementTargetUser", fields: [targetUserId], references: [id])
+  reads        AnnouncementReadStatus[]
 
   @@index([isActive])
 }
@@ -242,15 +190,14 @@ model SystemSetting {
 /// Time-aware Dealer→Sales Officer assignment (explicit from–to ranges).
 /// A dealer must not have overlapping active ranges (enforced in the service layer).
 model DealerAssignment {
-  id           String   @id @default(cuid())
-  dealerId     String
-  officerId    String
+  id            String    @id @default(cuid())
+  dealerId      String
+  officerId     String
   effectiveFrom DateTime
-  effectiveTo   DateTime? // null = open-ended (current)
-  createdAt    DateTime @default(now())
-
-  dealer  Dealer @relation(fields: [dealerId], references: [id])
-  officer User   @relation("OfficerDealers", fields: [officerId], references: [id])
+  effectiveTo   DateTime?
+  createdAt     DateTime  @default(now())
+  dealer        Dealer    @relation(fields: [dealerId], references: [id])
+  officer       User      @relation("OfficerDealers", fields: [officerId], references: [id])
 
   @@index([dealerId])
   @@index([officerId])
@@ -260,15 +207,14 @@ model DealerAssignment {
 /// Time-aware Sales Officer→Regional Manager assignment (explicit from–to ranges).
 /// Absence of a current row = the officer reports directly to the Super Admin.
 model RmAssignment {
-  id           String   @id @default(cuid())
-  officerId    String
-  managerId    String
+  id            String    @id @default(cuid())
+  officerId     String
+  managerId     String
   effectiveFrom DateTime
-  effectiveTo   DateTime? // null = open-ended (current)
-  createdAt    DateTime @default(now())
-
-  officer User @relation("OfficerRm", fields: [officerId], references: [id])
-  manager User @relation("ManagerRm", fields: [managerId], references: [id])
+  effectiveTo   DateTime?
+  createdAt     DateTime  @default(now())
+  manager       User      @relation("ManagerRm", fields: [managerId], references: [id])
+  officer       User      @relation("OfficerRm", fields: [officerId], references: [id])
 
   @@index([officerId])
   @@index([managerId])
@@ -284,76 +230,44 @@ model AuditLog {
   entityId  String?
   summary   String?
   createdAt DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([entity])
   @@index([createdAt])
 }
 
-// =====================================================================
-// PHASE 2 — Planning engine
-// =====================================================================
-
-enum PlanStatus {
-  DRAFT
-  PENDING_RM
-  PENDING_ADMIN
-  APPROVED
-  RETURNED
-  REJECTED
-}
-
-enum ApprovalActionType {
-  SUBMIT
-  RECALL
-  APPROVE
-  RETURN
-  REJECT
-  REQUEST_REVISION
-  AUTHORIZE_REVISION
-}
-
 /// The approvable unit: one Season Plan per officer per season, per version.
 /// A revision creates a new version (v2, v3…) copied from the last approved one;
 /// prior versions remain immutable in history.
 model SeasonPlan {
-  id                String     @id @default(cuid())
+  id                String           @id @default(cuid())
   seasonId          String
   officerId         String
-  // Modular planning (Sales Planning): which planning system this plan belongs to.
-  // "SEASONAL" | "MONTHLY" | "YEARLY". Defaults to SEASONAL so existing rows are unchanged.
-  planningType      String     @default("SEASONAL")
-  version           Int        @default(1)
-  versionName       String?
-  description       String?
-  // How the plan was created: "MANUAL" (default) or "IMPORT" (Seasonal Plan Import).
-  source            String     @default("MANUAL")
-  status            PlanStatus @default(DRAFT)
-  // Lifecycle axis, INDEPENDENT of the approval `status`. "ACTIVE" (normal), "CLOSED" (frozen —
-  // read-only everywhere but still in reports/history), or "DEACTIVATED" (hidden from the Sales
-  // Officer; Admin can still view/restore). Defaults ACTIVE so every existing row and query is
-  // unchanged. The DISPLAYED status is lifecycleState when not ACTIVE, else the approval status.
-  lifecycleState    String     @default("ACTIVE")
-  closedAt          DateTime?
-  deactivatedAt     DateTime?
-  isActiveVersion   Boolean    @default(false)
-  supersedesId      String? // the version this one was revised from
-  revisionRequested Boolean    @default(false)
+  version           Int              @default(1)
+  status            PlanStatus       @default(DRAFT)
+  isActiveVersion   Boolean          @default(false)
+  supersedesId      String?
+  revisionRequested Boolean          @default(false)
   revisionReason    String?
   submittedAt       DateTime?
   approvedAt        DateTime?
-  lastSavedAt       DateTime   @default(now())
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
-
-  season  Season           @relation(fields: [seasonId], references: [id])
-  officer User             @relation("OfficerPlans", fields: [officerId], references: [id])
-  dealers PlanDealer[]
-  actions ApprovalAction[]
-  monthlyPlans MonthlyPlan[]
-  recoveryPlans RecoveryPlan[]
+  lastSavedAt       DateTime         @default(now())
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  description       String?
+  planningType      String           @default("SEASONAL")
+  source            String           @default("MANUAL")
+  versionName       String?
+  lifecycleState    String           @default("ACTIVE")
+  closedAt          DateTime?
+  deactivatedAt     DateTime?
+  actions           ApprovalAction[]
+  monthlyPlans      MonthlyPlan[]
+  dealers           PlanDealer[]
+  recoveryPlans     RecoveryPlan[]
+  officer           User             @relation("OfficerPlans", fields: [officerId], references: [id])
+  season            Season           @relation(fields: [seasonId], references: [id])
 
   @@unique([seasonId, officerId, planningType, version])
   @@index([officerId])
@@ -366,17 +280,16 @@ model SeasonPlan {
 /// Company Onboarding run — the migration report (Section 41). Metadata only; the source
 /// (workbook) is never stored. Downloadable + retained for audit / Import History.
 model OnboardingRecord {
-  id           String       @id @default(cuid())
-  runById      String
-  source       String       @default("EXCEL") // EXCEL | CSV | ERP | API | MANUAL
-  sourceName   String // e.g. the workbook filename
-  seasonId     String?
-  officerId    String?
-  status       ImportStatus @default(COMPLETED)
-  report       String? // JSON: created/matched/skipped/warnings summary
-  createdAt    DateTime     @default(now())
-
-  runBy User @relation("OnboardingRuns", fields: [runById], references: [id])
+  id         String       @id @default(cuid())
+  runById    String
+  source     String       @default("EXCEL")
+  sourceName String
+  seasonId   String?
+  officerId  String?
+  status     ImportStatus @default(COMPLETED)
+  report     String?
+  createdAt  DateTime     @default(now())
+  runBy      User         @relation("OnboardingRuns", fields: [runById], references: [id])
 
   @@index([createdAt])
 }
@@ -393,29 +306,22 @@ model SeasonPlanImportRecord {
   status       ImportStatus @default(COMPLETED)
   summary      String?
   createdAt    DateTime     @default(now())
-
-  importedBy User @relation("PlanImports", fields: [importedById], references: [id])
+  importedBy   User         @relation("PlanImports", fields: [importedById], references: [id])
 
   @@index([createdAt])
 }
 
 /// A dealer grouping inside a Season Plan (dealer-first structure).
 model PlanDealer {
-  id           String @id @default(cuid())
-  seasonPlanId String
-  dealerId     String
-
-  // Dealer completion workflow: a dealer is intentionally skipped ("No Plan") with an
-  // optional reason. "Completed" is derived (has ≥1 saved quantity); "Remaining" = neither.
-  noPlan       Boolean @default(false)
-  noPlanReason String?
-  // A dealer added to this plan from Monthly Planning (new dealer). Flagged so seasonal views
-  // exclude it — the approved Seasonal Plan is never modified by monthly-only additions.
-  fromMonthlyPlan Boolean @default(false)
-
-  seasonPlan SeasonPlan @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
-  dealer     Dealer     @relation(fields: [dealerId], references: [id])
-  lines      PlanLine[]
+  id              String     @id @default(cuid())
+  seasonPlanId    String
+  dealerId        String
+  noPlan          Boolean    @default(false)
+  noPlanReason    String?
+  fromMonthlyPlan Boolean    @default(false)
+  dealer          Dealer     @relation(fields: [dealerId], references: [id])
+  seasonPlan      SeasonPlan @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
+  lines           PlanLine[]
 
   @@unique([seasonPlanId, dealerId])
   @@index([seasonPlanId])
@@ -426,34 +332,19 @@ model PlanDealer {
 /// (see PlanLinePack); rate/NBV% are snapshotted at approval so approved figures
 /// never change.
 model PlanLine {
-  id           String @id @default(cuid())
-  planDealerId String
-  productId    String
-
-  rateSnapshot       Decimal? @db.Decimal(12, 2)
-  nbvPercentSnapshot Decimal? @db.Decimal(6, 4)
-
-  // Planning Configuration (V1). How the officer entered this line's seasonal figure.
-  // null => PACK_SIZE (legacy/default): quantities live in PlanLinePack.
-  // "TOTAL_QUANTITY" | "AMOUNT" | "NBV": the single entered number is stored in inputValue.
-  inputMode  String?
-  inputValue Decimal? @db.Decimal(14, 4)
-
-  // An "Additional Product" planned in Monthly Planning that is NOT part of the approved
-  // Seasonal Plan. Created with zero seasonal quantity, so seasonal views (which filter to
-  // target > 0) never show it; monthly views/reports flag it as ADDITIONAL PRODUCT.
-  isAdditional Boolean @default(false)
-
-  // An "Auto Added / Unplanned" product line created by Sales Upload when a dealer sold a product
-  // that wasn't in the Seasonal Plan. Stored as a NORMAL seasonal line (isAdditional stays false) with
-  // zero planning, so it appears wherever seasonal products appear; this flag only drives an
-  // "Auto Added" badge. Independent of isAdditional — does not change its meaning/behaviour.
-  isAutoAdded Boolean @default(false)
-
-  planDealer     PlanDealer     @relation(fields: [planDealerId], references: [id], onDelete: Cascade)
-  product        Product        @relation(fields: [productId], references: [id])
-  packs          PlanLinePack[]
-  monthlyEntries MonthlyEntry[]
+  id                 String         @id @default(cuid())
+  planDealerId       String
+  productId          String
+  rateSnapshot       Decimal?       @db.Decimal(12, 2)
+  nbvPercentSnapshot Decimal?       @db.Decimal(6, 4)
+  inputMode          String?
+  inputValue         Decimal?       @db.Decimal(14, 4)
+  isAdditional       Boolean        @default(false)
+  isAutoAdded        Boolean        @default(false)
+  monthlyEntries     MonthlyEntry[]
+  planDealer         PlanDealer     @relation(fields: [planDealerId], references: [id], onDelete: Cascade)
+  product            Product        @relation(fields: [productId], references: [id])
+  packs              PlanLinePack[]
 
   @@unique([planDealerId, productId])
   @@index([planDealerId])
@@ -463,13 +354,12 @@ model PlanLine {
 /// The quantity entered for one pack size on a plan line. One row per active pack
 /// size; totals sum all rows (a deactivated pack size never drops stored quantity).
 model PlanLinePack {
-  id         String @id @default(cuid())
+  id         String   @id @default(cuid())
   planLineId String
   packSizeId String
-  quantity   Int    @default(0)
-
-  planLine PlanLine @relation(fields: [planLineId], references: [id], onDelete: Cascade)
-  packSize PackSize @relation(fields: [packSizeId], references: [id])
+  quantity   Int      @default(0)
+  packSize   PackSize @relation(fields: [packSizeId], references: [id])
+  planLine   PlanLine @relation(fields: [planLineId], references: [id], onDelete: Cascade)
 
   @@unique([planLineId, packSizeId])
   @@index([planLineId])
@@ -480,21 +370,18 @@ model PlanLinePack {
 /// month. Entered within an approved Season Plan (no separate approval). Linked
 /// directly to the approved PlanLine for strict referential integrity.
 model MonthlyEntry {
-  id            String   @id @default(cuid())
+  id            String      @id @default(cuid())
   planLineId    String
   seasonMonthId String
-  planQty       Int      @default(0)
-  saleQty       Int      @default(0)
-  // Planning Configuration (V1). null => quantity mode (PACK_SIZE/TOTAL_QUANTITY): use planQty/saleQty.
-  // "AMOUNT" | "NBV": the value is stored in planValue/saleValue (decimals).
+  planQty       Int         @default(0)
+  saleQty       Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
   inputMode     String?
-  planValue     Decimal? @db.Decimal(14, 4)
-  saleValue     Decimal? @db.Decimal(14, 4)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  planLine    PlanLine    @relation(fields: [planLineId], references: [id], onDelete: Cascade)
-  seasonMonth SeasonMonth @relation(fields: [seasonMonthId], references: [id])
+  planValue     Decimal?    @db.Decimal(14, 4)
+  saleValue     Decimal?    @db.Decimal(14, 4)
+  planLine      PlanLine    @relation(fields: [planLineId], references: [id], onDelete: Cascade)
+  seasonMonth   SeasonMonth @relation(fields: [seasonMonthId], references: [id])
 
   @@unique([planLineId, seasonMonthId])
   @@index([planLineId])
@@ -503,26 +390,20 @@ model MonthlyEntry {
 
 /// Immutable log of every workflow action on a Season Plan (status timeline).
 model ApprovalAction {
-  id           String             @id @default(cuid())
-  // Seasonal-plan actions AND monthly-plan actions carry the seasonPlanId (monthly = parent
-  // seasonal plan). Recovery-plan actions have no seasonal parent, so this is nullable.
-  seasonPlanId String?
-  // When this action belongs to a Monthly Plan's lifecycle, monthlyPlanId is set (and
-  // seasonPlanId points at the parent seasonal plan). Null => seasonal-plan action.
-  monthlyPlanId String?
-  // When this action belongs to a Recovery Plan's lifecycle, recoveryPlanId is set.
+  id             String             @id @default(cuid())
+  seasonPlanId   String?
+  actorId        String
+  action         ApprovalActionType
+  fromStatus     PlanStatus?
+  toStatus       PlanStatus?
+  remarks        String?
+  createdAt      DateTime           @default(now())
+  monthlyPlanId  String?
   recoveryPlanId String?
-  actorId      String
-  action       ApprovalActionType
-  fromStatus   PlanStatus?
-  toStatus     PlanStatus?
-  remarks      String?
-  createdAt    DateTime           @default(now())
-
-  seasonPlan   SeasonPlan?   @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
-  monthlyPlan  MonthlyPlan?  @relation(fields: [monthlyPlanId], references: [id], onDelete: Cascade)
-  recoveryPlan RecoveryPlan? @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
-  actor        User          @relation(fields: [actorId], references: [id])
+  actor          User               @relation(fields: [actorId], references: [id])
+  monthlyPlan    MonthlyPlan?       @relation(fields: [monthlyPlanId], references: [id], onDelete: Cascade)
+  recoveryPlan   RecoveryPlan?      @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
+  seasonPlan     SeasonPlan?        @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
 
   @@index([seasonPlanId])
   @@index([monthlyPlanId])
@@ -536,31 +417,25 @@ model ApprovalAction {
 /// no duplicate MonthlyPlanDealer/MonthlyPlanLine store. This entity only tracks the
 /// approval lifecycle (same PlanStatus + ApprovalAction workflow as the seasonal plan).
 model MonthlyPlan {
-  id            String     @id @default(cuid())
-  seasonPlanId  String // the parent APPROVED seasonal plan
-  seasonMonthId String // the one month this plan covers
-  officerId     String
-  status        PlanStatus @default(DRAFT)
-  // Lifecycle axis (see SeasonPlan.lifecycleState). A Monthly Plan can be frozen (CLOSED) or hidden
-  // (DEACTIVATED) on its own, and also follows its parent Seasonal plan's lifecycle.
-  lifecycleState String    @default("ACTIVE")
-  // TRUE when the current non-ACTIVE state came from a PARENT cascade (not a direct admin action).
-  // Reopening the parent only restores children with lifecycleFromParent=true, so a month an admin
-  // closed on purpose stays closed. Reset to false whenever an admin acts on this plan directly.
-  lifecycleFromParent Boolean @default(false)
-  closedAt      DateTime?
-  deactivatedAt DateTime?
-  submittedAt   DateTime?
-  approvedAt    DateTime?
-  lastSavedAt   DateTime   @default(now())
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
-
-  seasonPlan  SeasonPlan          @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
-  seasonMonth SeasonMonth         @relation(fields: [seasonMonthId], references: [id])
-  officer     User                @relation("OfficerMonthlyPlans", fields: [officerId], references: [id])
-  actions     ApprovalAction[]
-  dealerStates MonthlyPlanDealer[]
+  id                  String              @id @default(cuid())
+  seasonPlanId        String
+  seasonMonthId       String
+  officerId           String
+  status              PlanStatus          @default(DRAFT)
+  submittedAt         DateTime?
+  approvedAt          DateTime?
+  lastSavedAt         DateTime            @default(now())
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  lifecycleState      String              @default("ACTIVE")
+  closedAt            DateTime?
+  deactivatedAt       DateTime?
+  lifecycleFromParent Boolean             @default(false)
+  actions             ApprovalAction[]
+  officer             User                @relation("OfficerMonthlyPlans", fields: [officerId], references: [id])
+  seasonMonth         SeasonMonth         @relation(fields: [seasonMonthId], references: [id])
+  seasonPlan          SeasonPlan          @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
+  dealerStates        MonthlyPlanDealer[]
 
   @@unique([seasonPlanId, seasonMonthId])
   @@index([seasonPlanId])
@@ -575,15 +450,14 @@ model MonthlyPlan {
 /// PlanDealer). "Completed"/"Remaining" stay derived from the stored monthly plan values; only
 /// "No Plan" is persisted here.
 model MonthlyPlanDealer {
-  id            String  @id @default(cuid())
+  id            String      @id @default(cuid())
   monthlyPlanId String
   dealerId      String
-  noPlan        Boolean @default(false)
+  noPlan        Boolean     @default(false)
   noPlanReason  String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  monthlyPlan MonthlyPlan @relation(fields: [monthlyPlanId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  monthlyPlan   MonthlyPlan @relation(fields: [monthlyPlanId], references: [id], onDelete: Cascade)
 
   @@unique([monthlyPlanId, dealerId])
   @@index([monthlyPlanId])
@@ -596,16 +470,15 @@ model MonthExtensionRequest {
   seasonId      String
   requestedById String
   monthName     String
-  monthOrder    Int // the intended order (append position) at request time
-  status        String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  monthOrder    Int
+  status        String    @default("PENDING")
   decisionNote  String?
   decidedById   String?
   decidedAt     DateTime?
   createdAt     DateTime  @default(now())
-
-  season      Season @relation(fields: [seasonId], references: [id], onDelete: Cascade)
-  requestedBy User   @relation("ExtensionRequestedBy", fields: [requestedById], references: [id])
-  decidedBy   User?  @relation("ExtensionDecidedBy", fields: [decidedById], references: [id])
+  decidedBy     User?     @relation("ExtensionDecidedBy", fields: [decidedById], references: [id])
+  requestedBy   User      @relation("ExtensionRequestedBy", fields: [requestedById], references: [id])
+  season        Season    @relation(fields: [seasonId], references: [id], onDelete: Cascade)
 
   @@index([seasonId])
   @@index([status])
@@ -622,8 +495,7 @@ model DealerAlias {
   tallyKey       String   @unique
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
-
-  systemDealer Dealer @relation(fields: [systemDealerId], references: [id], onDelete: Cascade)
+  systemDealer   Dealer   @relation(fields: [systemDealerId], references: [id], onDelete: Cascade)
 
   @@index([systemDealerId])
 }
@@ -645,59 +517,41 @@ model SalesUploadRun {
   unknownDealers  Int          @default(0)
   unknownProducts Int          @default(0)
   status          ImportStatus @default(COMPLETED)
-  summary         String? // JSON: full analyze/commit summary for the history detail view
+  summary         String?
   createdAt       DateTime     @default(now())
-
-  uploadedBy User @relation("SalesUploads", fields: [uploadedById], references: [id])
+  uploadedBy      User         @relation("SalesUploads", fields: [uploadedById], references: [id])
 
   @@index([createdAt])
 }
-
-// =====================================================================
-// Recovery Planning — the third planning module (beside Seasonal & Monthly).
-// Reuses PlanStatus + ApprovalAction + the shared approval/progress workflow.
-// Aging is stored NORMALISED (snapshot → dealer aggregate → bills), never as JSON.
-// =====================================================================
 
 /// One Recovery Plan per (season month, officer). The admin uploads the company Aging Report;
 /// it is split by dealer assignment into a Draft RecoveryPlan per officer, who plans monthly &
 /// weekly recovery and submits through the SAME approval workflow as Seasonal/Monthly.
 model RecoveryPlan {
-  id                String     @id @default(cuid())
-  seasonId          String
-  seasonMonthId     String
-  officerId         String
-  // The parent Seasonal plan this recovery belongs to. Recovery must ALWAYS belong to a Seasonal
-  // plan (business rule): it is set at creation and the FK is Restrict, so a seasonal plan cannot be
-  // deleted while recovery plans reference it (the service surfaces a clear error first). Nullable
-  // only to tolerate legacy rows created before this rule; new rows are always linked.
-  seasonPlanId      String?
-  cutoffDate        DateTime
-  // Weekly re-uploads may (default) re-open Week View for officers; Month View is read-only
-  // once approved. This flag is set from the "Allow Sales Officers to edit weekly planning"
-  // toggle on each weekly Aging Report upload.
-  weeklyEditEnabled Boolean    @default(true)
-  status            PlanStatus @default(DRAFT)
-  // Lifecycle axis (see SeasonPlan.lifecycleState). Follows its parent Seasonal plan and can also
-  // be closed/deactivated on its own.
-  lifecycleState    String     @default("ACTIVE")
-  // See MonthlyPlan.lifecycleFromParent — distinguishes cascade-closed from admin-closed.
-  lifecycleFromParent Boolean  @default(false)
-  closedAt          DateTime?
-  deactivatedAt     DateTime?
-  submittedAt       DateTime?
-  approvedAt        DateTime?
-  lastSavedAt       DateTime   @default(now())
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
-
-  season      Season               @relation(fields: [seasonId], references: [id])
-  seasonMonth SeasonMonth          @relation(fields: [seasonMonthId], references: [id])
-  officer     User                 @relation("OfficerRecoveryPlans", fields: [officerId], references: [id])
-  seasonPlan  SeasonPlan?          @relation(fields: [seasonPlanId], references: [id], onDelete: Restrict)
-  dealers     RecoveryPlanDealer[]
-  snapshots   AgingSnapshot[]
-  actions     ApprovalAction[]
+  id                  String               @id @default(cuid())
+  seasonId            String
+  seasonMonthId       String
+  officerId           String
+  cutoffDate          DateTime
+  weeklyEditEnabled   Boolean              @default(true)
+  status              PlanStatus           @default(DRAFT)
+  submittedAt         DateTime?
+  approvedAt          DateTime?
+  lastSavedAt         DateTime             @default(now())
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  lifecycleState      String               @default("ACTIVE")
+  closedAt            DateTime?
+  deactivatedAt       DateTime?
+  seasonPlanId        String?
+  lifecycleFromParent Boolean              @default(false)
+  snapshots           AgingSnapshot[]
+  actions             ApprovalAction[]
+  officer             User                 @relation("OfficerRecoveryPlans", fields: [officerId], references: [id])
+  season              Season               @relation(fields: [seasonId], references: [id])
+  seasonMonth         SeasonMonth          @relation(fields: [seasonMonthId], references: [id])
+  seasonPlan          SeasonPlan?          @relation(fields: [seasonPlanId], references: [id], onDelete: Restrict)
+  dealers             RecoveryPlanDealer[]
 
   @@unique([seasonMonthId, officerId])
   @@index([seasonId])
@@ -711,39 +565,24 @@ model RecoveryPlan {
 /// latest snapshot); the month recovery plan values are editable. Completed/Remaining derive
 /// from the entered plan; only No Plan is stored (monthly analogue of PlanDealer.noPlan).
 model RecoveryPlanDealer {
-  id             String  @id @default(cuid())
-  recoveryPlanId String
-  dealerId       String
-
-  // Imported aging (read-only), mirrored from the newest AgingSnapshotDealer. These REFRESH on every
-  // Update / Replace / Weekly upload.
-  outstanding Decimal @default(0) @db.Decimal(14, 2)
-  overdue     Decimal @default(0) @db.Decimal(14, 2)
-  due         Decimal @default(0) @db.Decimal(14, 2)
-  running     Decimal @default(0) @db.Decimal(14, 2)
-
-  // "Till Date" = OPENING balances for the Recovery month. Set ONCE when this dealer row is first
-  // created (the first successful Recovery import of the month, or when the dealer is onboarded
-  // mid-month). NEVER overwritten by Update / Replace / Weekly Refresh — they change only when a NEW
-  // Recovery month (a new RecoveryPlan) is created. Nullable only to tolerate rows created before this
-  // field existed (back-filled from `outstanding`/`running` at migration time).
-  outstandingTillDate Decimal? @db.Decimal(14, 2)
-  runningTillDate     Decimal? @db.Decimal(14, 2)
-
-  // Additional business columns (columns only for now — Excel mapping / formulas to follow; default 0).
-  srCr         Decimal @default(0) @db.Decimal(14, 2)
-  liveRecovery Decimal @default(0) @db.Decimal(14, 2)
-
-  // Month View — editable by the officer.
-  monthRecoveryPlan    Decimal? @db.Decimal(14, 2)
-  monthRunningRecovery Decimal? @db.Decimal(14, 2)
-
-  noPlan       Boolean @default(false)
-  noPlanReason String?
-
-  recoveryPlan RecoveryPlan       @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
-  dealer       Dealer             @relation(fields: [dealerId], references: [id])
-  weekPlans    RecoveryWeekPlan[]
+  id                   String             @id @default(cuid())
+  recoveryPlanId       String
+  dealerId             String
+  outstanding          Decimal            @default(0) @db.Decimal(14, 2)
+  overdue              Decimal            @default(0) @db.Decimal(14, 2)
+  due                  Decimal            @default(0) @db.Decimal(14, 2)
+  running              Decimal            @default(0) @db.Decimal(14, 2)
+  monthRecoveryPlan    Decimal?           @db.Decimal(14, 2)
+  monthRunningRecovery Decimal?           @db.Decimal(14, 2)
+  noPlan               Boolean            @default(false)
+  noPlanReason         String?
+  outstandingTillDate  Decimal?           @db.Decimal(14, 2)
+  runningTillDate      Decimal?           @db.Decimal(14, 2)
+  srCr                 Decimal            @default(0) @db.Decimal(14, 2)
+  liveRecovery         Decimal            @default(0) @db.Decimal(14, 2)
+  dealer               Dealer             @relation(fields: [dealerId], references: [id])
+  recoveryPlan         RecoveryPlan       @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
+  weekPlans            RecoveryWeekPlan[]
 
   @@unique([recoveryPlanId, dealerId])
   @@index([recoveryPlanId])
@@ -752,13 +591,12 @@ model RecoveryPlanDealer {
 
 /// Week View — one editable row per (recovery dealer, week number 1..5).
 model RecoveryWeekPlan {
-  id                   String   @id @default(cuid())
+  id                   String             @id @default(cuid())
   recoveryPlanDealerId String
   weekNo               Int
-  weekRecoveryPlan     Decimal? @db.Decimal(14, 2)
-  weekRunningRecovery  Decimal? @db.Decimal(14, 2)
-
-  recoveryPlanDealer RecoveryPlanDealer @relation(fields: [recoveryPlanDealerId], references: [id], onDelete: Cascade)
+  weekRecoveryPlan     Decimal?           @db.Decimal(14, 2)
+  weekRunningRecovery  Decimal?           @db.Decimal(14, 2)
+  recoveryPlanDealer   RecoveryPlanDealer @relation(fields: [recoveryPlanDealerId], references: [id], onDelete: Cascade)
 
   @@unique([recoveryPlanDealerId, weekNo])
   @@index([recoveryPlanDealerId])
@@ -769,19 +607,18 @@ model RecoveryWeekPlan {
 /// change-tracking summary vs the previous snapshot is stored as small COUNTS only (not the
 /// aging data — those live in the normalised dealer/bill tables below).
 model AgingSnapshot {
-  id             String   @id @default(cuid())
+  id             String                @id @default(cuid())
   recoveryPlanId String
   weekNo         Int
   cutoffDate     DateTime
   workbookName   String
   uploadedById   String
-  summary        String? // JSON of change-tracking COUNTS only (increased/decreased/new/removed)
-  createdAt      DateTime @default(now())
-
-  recoveryPlan RecoveryPlan          @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
-  uploadedBy   User                  @relation("RecoveryUploads", fields: [uploadedById], references: [id])
-  dealers      AgingSnapshotDealer[]
-  bills        AgingSnapshotBill[]
+  summary        String?
+  createdAt      DateTime              @default(now())
+  recoveryPlan   RecoveryPlan          @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
+  uploadedBy     User                  @relation("RecoveryUploads", fields: [uploadedById], references: [id])
+  bills          AgingSnapshotBill[]
+  dealers        AgingSnapshotDealer[]
 
   @@unique([recoveryPlanId, weekNo])
   @@index([recoveryPlanId])
@@ -789,16 +626,15 @@ model AgingSnapshot {
 
 /// Per-dealer aging aggregate within a snapshot (bucketed by the snapshot's cutoff date).
 model AgingSnapshotDealer {
-  id          String  @id @default(cuid())
+  id          String              @id @default(cuid())
   snapshotId  String
   dealerId    String
-  outstanding Decimal @default(0) @db.Decimal(14, 2)
-  overdue     Decimal @default(0) @db.Decimal(14, 2)
-  due         Decimal @default(0) @db.Decimal(14, 2)
-  running     Decimal @default(0) @db.Decimal(14, 2)
-
-  snapshot AgingSnapshot       @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
-  bills    AgingSnapshotBill[]
+  outstanding Decimal             @default(0) @db.Decimal(14, 2)
+  overdue     Decimal             @default(0) @db.Decimal(14, 2)
+  due         Decimal             @default(0) @db.Decimal(14, 2)
+  running     Decimal             @default(0) @db.Decimal(14, 2)
+  bills       AgingSnapshotBill[]
+  snapshot    AgingSnapshot       @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
 
   @@unique([snapshotId, dealerId])
   @@index([snapshotId])
@@ -808,18 +644,17 @@ model AgingSnapshotDealer {
 /// One normalised bill row within a snapshot — the raw Aging Report data (never JSON). Enables
 /// future features (payment history, actual recovery) without schema changes.
 model AgingSnapshotBill {
-  id               String    @id @default(cuid())
+  id               String              @id @default(cuid())
   snapshotId       String
   snapshotDealerId String
   dealerId         String
   billDate         DateTime?
   refNo            String?
-  amount           Decimal   @db.Decimal(14, 2)
+  amount           Decimal             @db.Decimal(14, 2)
   dueDate          DateTime?
-  bucket           String // OVERDUE | DUE | RUNNING (as of the snapshot's cutoff)
-
-  snapshot       AgingSnapshot       @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
-  snapshotDealer AgingSnapshotDealer @relation(fields: [snapshotDealerId], references: [id], onDelete: Cascade)
+  bucket           String
+  snapshotDealer   AgingSnapshotDealer @relation(fields: [snapshotDealerId], references: [id], onDelete: Cascade)
+  snapshot         AgingSnapshot       @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
 
   @@index([snapshotId])
   @@index([snapshotDealerId])
@@ -829,38 +664,17 @@ model AgingSnapshotBill {
 /// Configurable pack sizes used in planning (replaces the workbook's seven fixed
 /// columns). Managed by the Super Admin like Categories and Brands.
 model PackSize {
-  id           String   @id @default(cuid())
-  name         String   @unique
-  displayOrder Int      @default(0)
-  isActive     Boolean  @default(true)
-  // Business rule: is this pack size part of the Dealer Planning model (a planning column)?
-  // Only the canonical planning pack sizes are true. Non-planning packs (e.g. price-import
-  // sizes like "1 KG") stay in the master but are excluded from Dealer Planning. Default
-  // false so newly imported/created pack sizes never pollute planning until explicitly made
-  // a planning pack.
-  isPlanning   Boolean  @default(false)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
+  id            String         @id @default(cuid())
+  name          String         @unique
+  displayOrder  Int            @default(0)
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  isPlanning    Boolean        @default(false)
   planLinePacks PlanLinePack[]
 
   @@index([isActive])
   @@index([isPlanning])
-}
-
-// =====================================================================
-// PHASE 3 — In-app notifications & announcement read tracking
-// =====================================================================
-
-enum NotificationType {
-  PLAN_SUBMITTED
-  PLAN_APPROVED
-  PLAN_RETURNED
-  REVISION_AUTHORIZED
-  MONTH_EXTENSION_REQUESTED
-  MONTH_EXTENSION_APPROVED
-  ANNOUNCEMENT
-  SYSTEM
 }
 
 /// In-app notification. Created directly by business workflows (no queues/workers).
@@ -874,17 +688,10 @@ model Notification {
   relatedEntityId   String?
   isRead            Boolean          @default(false)
   createdAt         DateTime         @default(now())
-
-  user User @relation(fields: [userId], references: [id])
+  user              User             @relation(fields: [userId], references: [id])
 
   @@index([userId, isRead])
   @@index([createdAt])
-}
-
-enum ImportStatus {
-  COMPLETED
-  FAILED
-  ROLLED_BACK
 }
 
 /// Lightweight audit record for a Dealer Import run. Metadata only — the uploaded
@@ -899,24 +706,69 @@ model DealerImportRecord {
   skippedDealers    Int          @default(0)
   officersCreated   Int          @default(0)
   status            ImportStatus
-  summary           String? // JSON of the full summary for the detail view
+  summary           String?
   createdAt         DateTime     @default(now())
-
-  importedBy User @relation(fields: [importedById], references: [id])
+  importedBy        User         @relation(fields: [importedById], references: [id])
 
   @@index([createdAt])
 }
 
 /// Tracks which users have read which announcements.
 model AnnouncementReadStatus {
-  id             String   @id @default(cuid())
+  id             String       @id @default(cuid())
   announcementId String
   userId         String
-  readAt         DateTime @default(now())
-
-  announcement Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
-  user         User         @relation(fields: [userId], references: [id])
+  readAt         DateTime     @default(now())
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id])
 
   @@unique([announcementId, userId])
   @@index([userId])
+}
+
+enum Role {
+  SUPER_ADMIN
+  REGIONAL_MANAGER
+  SALES_OFFICER
+}
+
+enum SeasonStatus {
+  OPEN
+  CLOSED
+}
+
+enum PlanStatus {
+  DRAFT
+  PENDING_RM
+  PENDING_ADMIN
+  APPROVED
+  RETURNED
+  REJECTED
+}
+
+enum ApprovalActionType {
+  SUBMIT
+  RECALL
+  APPROVE
+  RETURN
+  REJECT
+  REQUEST_REVISION
+  AUTHORIZE_REVISION
+}
+
+enum NotificationType {
+  PLAN_SUBMITTED
+  PLAN_APPROVED
+  PLAN_RETURNED
+  REVISION_AUTHORIZED
+  ANNOUNCEMENT
+  SYSTEM
+  MONTH_EXTENSION_REQUESTED
+  MONTH_EXTENSION_APPROVED
+}
+
+enum ImportStatus {
+  COMPLETED
+  FAILED
+  ROLLED_BACK
 }

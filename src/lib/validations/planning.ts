@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { canonicalSeasonName } from "@/lib/season-name";
 
 const qty = z.coerce.number().int().min(0, "Quantity cannot be negative"); // V1, V2, V30
 const nonNegative = z.coerce.number().min(0, "Value cannot be negative");
@@ -47,7 +48,7 @@ export const createPlanSchema = z.object({
  */
 export const createSeasonalPlanSchema = z.object({
   season: z.object({
-    name: z.string().min(1),
+    name: z.string().trim().min(1).transform(canonicalSeasonName),
     year: z.coerce.number().int().min(2000).max(2100),
     startMonth: z.coerce.number().int().min(1).max(12),
     endMonth: z.coerce.number().int().min(1).max(12),

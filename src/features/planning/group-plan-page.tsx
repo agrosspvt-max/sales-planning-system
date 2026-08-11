@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { CheckCircle2, MinusCircle, Users2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
 import { figuresForMode, nbv as calcNbv, type PlanningMode } from "@/lib/calc";
@@ -19,9 +20,14 @@ interface GroupProductRow {
   actualQty: number; actualAmount: number; actualNbv: number;
   monthly: Record<string, { planInput: number; saleInput: number; saleAmount: number }>;
 }
+interface GroupOfficerBreakdown {
+  total: number; includedCount: number;
+  included: { name: string }[];
+  excluded: { name: string; reason: string }[];
+}
 interface GroupProductPlan {
   groupName: string; seasonName: string; monthlyMode: PlanningMode; seasonalMode: PlanningMode;
-  officerCount: number; planCount: number;
+  officers: GroupOfficerBreakdown; planCount: number;
   months: { id: string; name: string; order: number }[];
   packSizes: { id: string; name: string }[];
   products: GroupProductRow[];
@@ -81,6 +87,72 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
         </div>
       ) : (
         <GroupProductPlan groupId={groupId} seasonId={effectiveSeason} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Compact "Officers: included / total" badge. Click (or hover) reveals which Sales Officers are
+ * contributing to the totals and which are excluded (and why). Transparency only — the numbers it
+ * describes come straight from the aggregation payload, so it re-derives on every season/data change.
+ */
+function OfficersBadge({ officers }: { officers: GroupOfficerBreakdown }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const missing = officers.excluded.length;
+  return (
+    <div ref={ref} className="relative" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1.5 rounded-md border bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80"
+        aria-expanded={open}
+      >
+        <Users2 className="h-3.5 w-3.5" />
+        Officers: {officers.includedCount} / {officers.total}
+        {missing > 0 && <span className="ml-0.5 rounded-full bg-amber-500/15 px-1.5 text-[10px] font-semibold text-amber-600">{missing} missing</span>}
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-20 mt-1 w-64 rounded-md border bg-popover p-3 text-xs shadow-md">
+          <div className="mb-1.5 font-semibold text-foreground">Included ({officers.includedCount})</div>
+          {officers.included.length === 0 ? (
+            <p className="text-muted-foreground">None</p>
+          ) : (
+            <ul className="space-y-0.5">
+              {officers.included.map((o) => (
+                <li key={o.name} className="flex items-center gap-1.5 text-foreground">
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                  <span className="truncate">{o.name}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="mb-1.5 mt-2.5 font-semibold text-foreground">Not Included ({officers.excluded.length})</div>
+          {officers.excluded.length === 0 ? (
+            <p className="text-muted-foreground">None — every officer is contributing.</p>
+          ) : (
+            <ul className="space-y-0.5">
+              {officers.excluded.map((o) => (
+                <li key={o.name} className="flex items-start gap-1.5">
+                  <MinusCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0">
+                    <span className="text-foreground">{o.name}</span>
+                    <span className="text-muted-foreground"> — {o.reason}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );
@@ -146,7 +218,7 @@ function GroupProductPlan({ groupId, seasonId }: { groupId: string; seasonId: st
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-        <Badge variant="secondary">{data.officerCount} officer(s)</Badge>
+        <OfficersBadge officers={data.officers} />
         <Badge variant="secondary">{data.planCount} approved plan(s)</Badge>
         <span>·</span>
         <span>{data.seasonName}</span>

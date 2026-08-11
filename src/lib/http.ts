@@ -21,6 +21,49 @@ export interface AuthContext {
   username: string;
 }
 
+type AuthUserRow = {
+  id: string;
+  role: Role;
+  username: string;
+  isActive: boolean;
+  deletedAt: Date | null;
+  sessionValidAfter: Date | null;
+} | null;
+
+/**
+ * Single-flight de-duplication of the per-request auth lookup.
+ *
+ * Every API request re-verifies the caller via prisma.user.findUnique. Opening one page fires several
+ * API calls at once (e.g. /api/groups + /api/labels + /api/notifications), so WITHOUT this the same
+ * user row is fetched N times simultaneously — N connections held for identical work. During a Neon
+ * cold start (compute waking from auto-suspend) that concurrency is exactly what tips the small pool
+ * into P2024 "timed out fetching a connection" and surfaces P1001. Coalescing collapses a concurrent
+ * burst for the same (userId, iat) into ONE in-flight query.
+ *
+ * This is pure concurrency de-duplication, NOT a cache: the entry is deleted the instant the query
+ * settles, so the very next (non-concurrent) request does a fresh lookup. Deactivation/deletion and
+ * sessionValidAfter therefore still take effect immediately — security semantics are unchanged.
+ */
+const inflightAuthUser = new Map<string, Promise<AuthUserRow>>();
+
+function loadAuthUser(id: string, key: string): Promise<AuthUserRow> {
+  const existing = inflightAuthUser.get(key);
+  if (existing) return existing;
+  const p = withDbRetry(() =>
+    prisma.user.findUnique({
+      where: { id },
+      select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true },
+    }),
+  ) as Promise<AuthUserRow>;
+  inflightAuthUser.set(key, p);
+  // Clear on settle so this is coalescing, not caching. The cleanup branch swallows its own error;
+  // the real error still propagates to awaiters via the returned promise.
+  p.finally(() => {
+    if (inflightAuthUser.get(key) === p) inflightAuthUser.delete(key);
+  }).catch(() => {});
+  return p;
+}
+
 /**
  * Resolve the current session or throw 401. The session id comes from a JWT, which can
  * outlive the database (e.g. after a re-seed/reset the user row is recreated with a new id).
@@ -37,12 +80,9 @@ export async function requireAuth(): Promise<AuthContext> {
   // The auth check itself is unchanged; only the DB read is retried on TRANSIENT connectivity errors
   // (e.g. a Neon connection briefly unavailable during a heavy import) so a momentary P1001 does not
   // turn every request into a 500. Security is not affected — the same user validation still runs.
-  const user = (await withDbRetry(() =>
-    prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true },
-    }),
-  )) as { id: string; role: Role; username: string; isActive: boolean; deletedAt: Date | null; sessionValidAfter: Date | null } | null;
+  // Concurrent requests for the same (user, iat) share a single in-flight lookup (see loadAuthUser).
+  const iat = session.user.iat;
+  const user = await loadAuthUser(session.user.id, `${session.user.id}:${typeof iat === "number" ? iat : "0"}`);
   // Every request re-verifies the DB user: must exist, not be soft-deleted, and be active — so
   // deactivating/deleting a user takes effect immediately, even for an already-issued JWT. The most
   // common cause of "found=false" is a JWT that outlived the database (user row recreated by a
@@ -52,7 +92,6 @@ export async function requireAuth(): Promise<AuthContext> {
     throw new ApiError(401, "Your session is no longer valid. Please sign in again.");
   }
   // Sessions issued before a password change / forced logout are rejected (iat in seconds).
-  const iat = session.user.iat;
   if (user.sessionValidAfter && (typeof iat !== "number" || iat * 1000 < user.sessionValidAfter.getTime())) {
     console.warn(`[requireAuth] 401 — session predates sessionValidAfter (id=${session.user.id})`);
     throw new ApiError(401, "Your session has expired. Please sign in again.");

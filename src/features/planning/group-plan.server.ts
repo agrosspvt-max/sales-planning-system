@@ -32,12 +32,19 @@ export interface GroupProductRow {
   // Per-month plan/sale INPUTS (in the season's monthly unit) for the Specific-Month / Month-Range views.
   monthly: Record<string, { planInput: number; saleInput: number; saleAmount: number }>;
 }
+/** Display-only transparency: who is (and isn't) contributing to the group aggregation. */
+export interface GroupOfficerBreakdown {
+  total: number; // all Sales Officers in the group
+  includedCount: number; // officers with an approved active seasonal plan for this season
+  included: { name: string }[];
+  excluded: { name: string; reason: string }[];
+}
 export interface GroupProductPlan {
   groupName: string;
   seasonName: string;
   monthlyMode: PlanningMode;
   seasonalMode: PlanningMode;
-  officerCount: number;
+  officers: GroupOfficerBreakdown;
   planCount: number;
   months: { id: string; name: string; order: number }[];
   packSizes: { id: string; name: string }[];
@@ -79,17 +86,29 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   const seasonalMode = (season.seasonalMode ?? "PACK_SIZE") as PlanningMode;
   const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthlyMode, seasonalMode, months: season.months, packSizes };
 
-  const officers = (await prisma.user.findMany({ where: { groupId, role: Role.SALES_OFFICER, isActive: true }, select: { id: true } })) as { id: string }[];
+  const officers = (await prisma.user.findMany({
+    where: { groupId, role: Role.SALES_OFFICER, isActive: true },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true },
+  })) as { id: string; name: string }[];
   const officerIds = officers.map((o) => o.id);
-  if (officerIds.length === 0) return { ...base, officerCount: 0, planCount: 0, products: [] };
 
   // The active, approved SEASONAL plan of each officer in this season (the same plans Product Plan uses).
-  const plans = (await prisma.seasonPlan.findMany({
-    where: { seasonId, officerId: { in: officerIds }, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
-    select: { id: true },
-  })) as { id: string }[];
+  const plans = officerIds.length
+    ? ((await prisma.seasonPlan.findMany({
+        where: { seasonId, officerId: { in: officerIds }, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
+        select: { id: true, officerId: true },
+      })) as { id: string; officerId: string }[])
+    : [];
   const planIds = plans.map((p) => p.id);
-  if (planIds.length === 0) return { ...base, officerCount: officerIds.length, planCount: 0, products: [] };
+
+  // Display-only transparency: split officers into those contributing to the totals vs. those excluded.
+  const officersWithPlan = new Set(plans.map((p) => p.officerId));
+  const included = officers.filter((o) => officersWithPlan.has(o.id)).map((o) => ({ name: o.name }));
+  const excluded = officers.filter((o) => !officersWithPlan.has(o.id)).map((o) => ({ name: o.name, reason: "No Approved Seasonal Plan" }));
+  const officersBreakdown: GroupOfficerBreakdown = { total: officers.length, includedCount: included.length, included, excluded };
+
+  if (planIds.length === 0) return { ...base, officers: officersBreakdown, planCount: 0, products: [] };
 
   const planDealers = (await prisma.planDealer.findMany({
     where: { seasonPlanId: { in: planIds }, dealer: { isActive: true } },
@@ -153,5 +172,5 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   }
 
   const products = [...byProduct.values()].sort((a, b) => b.seasonalAmount - a.seasonalAmount);
-  return { ...base, officerCount: officerIds.length, planCount: planIds.length, products };
+  return { ...base, officers: officersBreakdown, planCount: planIds.length, products };
 }

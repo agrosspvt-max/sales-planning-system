@@ -5,7 +5,32 @@ import { seasonSchema } from "@/lib/validations/assignments";
 import { ApiError } from "@/lib/http";
 import { getPlanningConfig } from "@/lib/planning-config";
 import { generateSeasonMonths } from "@/lib/season-months";
+import { canonicalSeasonName } from "@/lib/season-name";
 import type { PlanningMode } from "@/lib/calc";
+
+/**
+ * Case-insensitive lookup of a season by (name, year). Season names are case-insensitive app-wide,
+ * so "Kharif"/"KHARIF"/"kharif" for the same year all resolve to one season. Optionally excludes a
+ * season id (used when renaming, so a season doesn't collide with itself).
+ *
+ * READ-ONLY: this only *finds* a season — it never renames or otherwise modifies existing rows.
+ * Production may still contain historical case-duplicate rows (e.g. both "Kharif" and "KHARIF"); when
+ * more than one variant matches, the EXACT canonical spelling is preferred (then the oldest), so a
+ * variant like "kharif" deterministically resolves to the canonical "Kharif" rather than a stray dup.
+ */
+async function findSeasonByName(name: string, year: number, excludeId?: string): Promise<{ id: string; name: string } | null> {
+  const matches = (await prisma.season.findMany({
+    where: {
+      year,
+      name: { equals: name, mode: "insensitive" },
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true, name: true },
+    orderBy: { createdAt: "asc" },
+  })) as { id: string; name: string }[];
+  if (matches.length === 0) return null;
+  return matches.find((m) => m.name === name) ?? matches[0];
+}
 
 /**
  * A season is "locked" once it holds any operational data — a Season Plan (draft or
@@ -55,6 +80,10 @@ function periodFrom(raw: unknown) {
 
 export async function createSeason(raw: unknown) {
   const { parsed, months } = periodFrom(raw);
+  // Name is already canonical (schema transform); reject a case-insensitive duplicate up front so the
+  // admin sees a clear message instead of a raw unique-constraint error.
+  const dup = await findSeasonByName(parsed.name, parsed.startYear);
+  if (dup) throw new ApiError(409, `A season "${parsed.name} ${parsed.startYear}" already exists.`);
   // The global Planning Configuration supplies DEFAULTS; the season captures its own
   // modes here and uses them for its entire life (independent of later default changes).
   const defaults = await getPlanningConfig();
@@ -89,11 +118,14 @@ export interface SeasonPeriodInput {
  * season-creation business logic lives in exactly one place.
  */
 export async function findOrCreateSeason(input: SeasonPeriodInput): Promise<{ id: string; created: boolean }> {
-  const existing = (await prisma.season.findFirst({
-    where: { name: input.name, year: input.startYear },
-    select: { id: true },
-  })) as { id: string } | null;
-  if (existing) return { id: existing.id, created: false };
+  const name = canonicalSeasonName(input.name);
+  const existing = await findSeasonByName(name, input.startYear);
+  if (existing) {
+    // Resolve to the EXISTING season and never modify it. Historical rows (including case-duplicates
+    // like "KHARIF") are left exactly as they are — entering "kharif"/"KHARIF"/etc. simply maps to the
+    // already-stored season. Canonicalisation applies only to NEWLY created seasons (below).
+    return { id: existing.id, created: false };
+  }
 
   const gen = generateSeasonMonths({
     startMonth: input.startMonth,
@@ -105,7 +137,7 @@ export async function findOrCreateSeason(input: SeasonPeriodInput): Promise<{ id
   const defaults = await getPlanningConfig();
   const s = await prisma.season.create({
     data: {
-      name: input.name,
+      name,
       year: input.startYear,
       startMonth: input.startMonth,
       startYear: input.startYear,
@@ -132,6 +164,10 @@ export async function updateSeason(id: string, raw: unknown) {
 
   const locked = await seasonHasPlans(id);
   const { parsed, months } = periodFrom(raw);
+
+  // Reject a rename that would collide (case-insensitively) with a different season in the same year.
+  const clash = await findSeasonByName(parsed.name, parsed.startYear, id);
+  if (clash) throw new ApiError(409, `A season "${parsed.name} ${parsed.startYear}" already exists.`);
 
   if (locked) {
     // Period and planning modes are frozen once operational data exists; allow only a

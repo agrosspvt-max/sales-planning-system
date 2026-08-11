@@ -1,4 +1,12 @@
 import { z } from "zod";
+import { canonicalSeasonName } from "@/lib/season-name";
+
+/** Season name field: trimmed, required, then normalised to canonical Title Case (case-insensitive). */
+const seasonName = z
+  .string()
+  .trim()
+  .min(1, "Name is required")
+  .transform(canonicalSeasonName);
 
 export const dealerAssignmentSchema = z.object({
   dealerId: z.string().min(1, "Dealer is required"),
@@ -22,7 +30,7 @@ const seasonYear = z.coerce.number().int().min(2000).max(2100);
  * modes are optional (prefilled from the global default when omitted).
  */
 export const seasonSchema = z.object({
-  name: z.string().min(1, "Name is required"),
+  name: seasonName,
   startMonth: monthNumber,
   startYear: seasonYear,
   endMonth: monthNumber,

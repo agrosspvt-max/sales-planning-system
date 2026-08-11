@@ -7,6 +7,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { tightKey } from "@/lib/match-key";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { findOrCreateSeason } from "@/features/seasons/service.server";
+import { canonicalSeasonName } from "@/lib/season-name";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { parseSeasonalWorkbook, commitSeasonalImport } from "@/features/import/seasonal/service.server";
 import { extractExcelMasters, type OnboardingMasters } from "./excel-adapter.server";
@@ -97,7 +98,7 @@ export async function analyzeOnboarding(
 /* --------------------------------- Commit --------------------------------- */
 
 const commitSchema = z.object({
-  seasonName: z.string().min(1),
+  seasonName: z.string().trim().min(1).transform(canonicalSeasonName),
   startMonth: z.coerce.number().int().min(1).max(12),
   startYear: z.coerce.number().int().min(2000).max(2100),
   endMonth: z.coerce.number().int().min(1).max(12),

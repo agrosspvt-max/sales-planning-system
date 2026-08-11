@@ -1,0 +1,15 @@
+-- DISABLED — NOT part of `prisma migrate deploy` (this folder lives outside prisma/migrations).
+--
+-- TODO: Disabled temporarily because production still contains historical case-duplicate seasons
+-- (e.g. KHARIF/Kharif). Enable after production data cleanup.
+--
+-- Enabling later: move this folder back under prisma/migrations/ (keep the timestamped name) ONLY
+-- after the duplicate seasons have been removed/consolidated, otherwise creating the unique index
+-- will fail on the existing duplicate rows.
+--
+-- Season names are case-insensitive: this prevents "KHARIF 2026" and "Kharif 2026" from coexisting
+-- by enforcing uniqueness on (lower(name), year) at the database level. Until it is enabled, this
+-- rule is still enforced at the APPLICATION level (canonicalisation + case-insensitive matching in
+-- findOrCreateSeason/createSeason/updateSeason), which is enough to prevent NEW duplicates.
+--
+-- CREATE UNIQUE INDEX IF NOT EXISTS "Season_name_lower_year_key" ON "Season" (lower("name"), "year");

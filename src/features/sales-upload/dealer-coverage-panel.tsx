@@ -27,7 +27,7 @@ import {
 
 type Filter = "all" | "with" | "without" | "so-created" | "pending";
 interface AliasItem { id: string; tallyName: string }
-interface DealerRow { id: string; name: string; hasAlias: boolean; aliases: AliasItem[]; status: string; soCreated: boolean }
+interface DealerRow { id: string; name: string; hasAlias: boolean; aliases: AliasItem[]; status: string; soCreated: boolean; createdByName: string | null }
 interface Resp { counts: { all: number; with: number; without: number; soCreated: number; pending: number }; dealers: DealerRow[] }
 
 const TABS: { key: Filter; label: string; countKey: keyof Resp["counts"] }[] = [
@@ -144,7 +144,7 @@ export function DealerCoveragePanel() {
                 <TableRow key={d.id}>
                   <TableCell className="font-medium">
                     {d.name}
-                    {d.soCreated && <Badge variant="secondary" className="ml-2 text-[10px]">SO CREATED</Badge>}
+                    {d.soCreated && <Badge variant="secondary" className="ml-2 text-[10px]">SO CREATED{d.createdByName ? ` • ${d.createdByName}` : ""}</Badge>}
                   </TableCell>
                   <TableCell>
                     {d.aliases.length > 0 ? (

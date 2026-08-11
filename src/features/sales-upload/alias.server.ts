@@ -50,10 +50,13 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
     prisma.dealer.findMany({
       where: { isActive: true },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, status: true, createdFrom: true },
+      // createdByUserId = the ORIGINAL creator (immutable; never changes on reassignment).
+      select: { id: true, name: true, status: true, createdFrom: true, createdByUserId: true },
     }),
     prisma.dealerAlias.findMany({ select: { id: true, tallyName: true, systemDealerId: true }, orderBy: { tallyName: "asc" } }),
   ]);
+  const dealerRows = dealers as { id: string; name: string; status: string; createdFrom: string | null; createdByUserId: string | null }[];
+
   // Group every alias under its dealer so the page can show them inline and manage them per dealer.
   const aliasesByDealer = new Map<string, { id: string; tallyName: string }[]>();
   for (const a of aliases as { id: string; tallyName: string; systemDealerId: string }[]) {
@@ -62,15 +65,26 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
     aliasesByDealer.set(a.systemDealerId, list);
   }
 
-  const rows = (dealers as { id: string; name: string; status: string; createdFrom: string | null }[]).map((d) => {
+  // Resolve the ORIGINAL creator's name for SO-created dealers (display-only). One batched query;
+  // legacy rows with no/unknown creator simply show no name.
+  const creatorIds = [...new Set(dealerRows.filter((d) => d.createdFrom === "MONTHLY_PLAN" && d.createdByUserId).map((d) => d.createdByUserId as string))];
+  const creatorNameById = new Map<string, string>();
+  if (creatorIds.length > 0) {
+    const creators = (await prisma.user.findMany({ where: { id: { in: creatorIds } }, select: { id: true, name: true } })) as { id: string; name: string }[];
+    for (const c of creators) creatorNameById.set(c.id, c.name);
+  }
+
+  const rows = dealerRows.map((d) => {
     const dealerAliases = aliasesByDealer.get(d.id) ?? [];
+    const soCreated = d.createdFrom === "MONTHLY_PLAN";
     return {
       id: d.id,
       name: d.name,
       hasAlias: dealerAliases.length > 0,
       aliases: dealerAliases,
       status: d.status,
-      soCreated: d.createdFrom === "MONTHLY_PLAN",
+      soCreated,
+      createdByName: soCreated && d.createdByUserId ? creatorNameById.get(d.createdByUserId) ?? null : null,
     };
   });
 

@@ -46,7 +46,7 @@ export type DealerAliasFilter = "all" | "with" | "without" | "so-created" | "pen
  */
 export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasFilter = "all") {
   assertAdmin(ctx);
-  const [dealers, aliases] = await Promise.all([
+  const [dealers, aliases, assignments] = await Promise.all([
     prisma.dealer.findMany({
       where: { isActive: true },
       orderBy: { name: "asc" },
@@ -54,8 +54,12 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
       select: { id: true, name: true, status: true, createdFrom: true, createdByUserId: true },
     }),
     prisma.dealerAlias.findMany({ select: { id: true, tallyName: true, systemDealerId: true }, orderBy: { tallyName: "asc" } }),
+    // The CURRENT owner of each dealer (open assignment range) — the stored dealer→officer link.
+    prisma.dealerAssignment.findMany({ where: { effectiveTo: null }, select: { dealerId: true, officer: { select: { name: true } } } }),
   ]);
   const dealerRows = dealers as { id: string; name: string; status: string; createdFrom: string | null; createdByUserId: string | null }[];
+  const officerByDealer = new Map<string, string>();
+  for (const a of assignments as { dealerId: string; officer: { name: string } }[]) officerByDealer.set(a.dealerId, a.officer.name);
 
   // Group every alias under its dealer so the page can show them inline and manage them per dealer.
   const aliasesByDealer = new Map<string, { id: string; tallyName: string }[]>();
@@ -85,6 +89,8 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
       status: d.status,
       soCreated,
       createdByName: soCreated && d.createdByUserId ? creatorNameById.get(d.createdByUserId) ?? null : null,
+      // The currently-assigned Sales Officer (owner) for EVERY dealer — from the stored assignment.
+      officerName: officerByDealer.get(d.id) ?? null,
     };
   });
 

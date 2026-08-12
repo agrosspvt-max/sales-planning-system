@@ -24,6 +24,7 @@ import { StatusBadge } from "@/features/planning/status-badge";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "@/features/planning/dealer-completion";
 import { DealerPlanningStatus } from "@/features/planning/dealer-status";
 import { useAutosaveMap } from "@/features/planning/use-autosave-map";
+import { recoveryMonthTotals, recoveryWeekTotals, weekTillDate, weekAll, storedWeek, type RecoveryValue } from "./recovery-calc";
 import { RecoveryActions } from "./recovery-actions";
 import { RecoveryHistory } from "./recovery-history";
 import type { PlanStatus } from "@/features/planning/types";
@@ -248,29 +249,10 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
 
   // Deliberately derived in the client from the live edit map: this makes the summary move with
   // each keystroke, while keeping totals out of the persisted Recovery Plan data.
+  // Reuses the shared roll-up. Behaviour preserved: the workspace keeps summing per-dealer ratios for
+  // Recovery % ("sumOfRatios") and reads the live edit map for each dealer's plan/running.
   const totals = useMemo(
-    () => detail.dealers.reduce(
-      (sum, d) => {
-        const v = values[d.dealerId] ?? { plan: 0, running: 0 };
-        const monthTotal = v.plan + v.running;
-        return {
-          outstanding: sum.outstanding + d.outstanding,
-          outstandingTillDate: sum.outstandingTillDate + d.outstandingTillDate,
-          overdue: sum.overdue + d.overdue,
-          due: sum.due + d.due,
-          recoveryPlan: sum.recoveryPlan + v.plan,
-          runningOs: sum.runningOs + d.running,
-          runningOsTillDate: sum.runningOsTillDate + d.runningTillDate,
-          runningRecoveryPlan: sum.runningRecoveryPlan + v.running,
-          recoveryPct: sum.recoveryPct + (d.running > 0 ? v.running / d.running : 0),
-          srCr: sum.srCr + d.srCr,
-          liveRecovery: sum.liveRecovery + d.liveRecovery,
-          actualRunningRecovery: sum.actualRunningRecovery + d.actualRunningRecovery,
-          monthTotal: sum.monthTotal + monthTotal,
-        };
-      },
-      { outstanding: 0, outstandingTillDate: 0, overdue: 0, due: 0, recoveryPlan: 0, runningOs: 0, runningOsTillDate: 0, runningRecoveryPlan: 0, recoveryPct: 0, srCr: 0, liveRecovery: 0, actualRunningRecovery: 0, monthTotal: 0 },
-    ),
+    () => recoveryMonthTotals(detail.dealers, (d) => values[d.dealerId] ?? { plan: 0, running: 0 }, "sumOfRatios"),
     [detail.dealers, values],
   );
 
@@ -450,24 +432,11 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
     const cur = values[dealerId] ?? { plan: 0, running: 0 };
     update(dealerId, { ...cur, [field]: Math.max(0, Number(raw) || 0) });
   };
-  const allWeeksTotal = (d: RecoveryDealer, dealerId: string) => {
-    let t = 0;
-    for (let w = 1; w <= detail.weekCount; w++) {
-      if (w === weekNo) { const v = values[dealerId] ?? { plan: 0, running: 0 }; t += v.plan + v.running; }
-      else { const wk = d.weeks[w]; if (wk) t += wk.weekRecoveryPlan + wk.weekRunningRecovery; }
-    }
-    return t;
-  };
-  // "Weekly Plan Till Date" — cumulative "This Week Total" from Week 1 up to the SELECTED week.
-  // Read-only/calculated; uses the live edited values for the current week so it updates as you type.
-  const tillDateTotal = (d: RecoveryDealer, dealerId: string) => {
-    let t = 0;
-    for (let w = 1; w <= weekNo; w++) {
-      if (w === weekNo) { const v = values[dealerId] ?? { plan: 0, running: 0 }; t += v.plan + v.running; }
-      else { const wk = d.weeks[w]; if (wk) t += wk.weekRecoveryPlan + wk.weekRunningRecovery; }
-    }
-    return t;
-  };
+  // Live-edit resolver: the SELECTED week uses the edit map (updates as you type); other weeks use the
+  // stored values. The cumulative helpers come from the shared recovery-calc module.
+  const resolveWeek = (d: RecoveryDealer, w: number): RecoveryValue => (w === weekNo ? values[d.dealerId] ?? { plan: 0, running: 0 } : storedWeek(d, w));
+  const allWeeksTotal = (d: RecoveryDealer) => weekAll(d, detail.weekCount, resolveWeek);
+  const tillDateTotal = (d: RecoveryDealer) => weekTillDate(d, weekNo, resolveWeek);
 
   // Week locking: weeks BEFORE the latest cutoff's business week are read-only. Values stay filled;
   // only editing is disabled (the officer adjusts the current/later weeks).
@@ -477,27 +446,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
   // This footer follows the same live values as the inputs. It is a view calculation only and
   // therefore never becomes part of a save request.
   const totals = useMemo(
-    () => detail.dealers.reduce(
-      (sum, d) => {
-        const v = values[d.dealerId] ?? { plan: 0, running: 0 };
-        const weekTotal = v.plan + v.running;
-        const monthTotal = d.monthRecoveryPlan + d.monthRunningRecovery;
-        const weekPlanTillDate = tillDateTotal(d, d.dealerId);
-        const allWeeks = allWeeksTotal(d, d.dealerId);
-        return {
-          outstanding: sum.outstanding + d.outstanding,
-          overdue: sum.overdue + d.overdue,
-          due: sum.due + (d.dueByWeek?.[weekNo] ?? 0),
-          recoveryPlan: sum.recoveryPlan + v.plan,
-          runningMonthPlan: sum.runningMonthPlan + d.monthRunningRecovery,
-          weeklyPlanTillDate: sum.weeklyPlanTillDate + weekPlanTillDate,
-          runningPlanThisWeek: sum.runningPlanThisWeek + v.running,
-          weekTotal: sum.weekTotal + weekTotal,
-          diff: sum.diff + (monthTotal - allWeeks),
-        };
-      },
-      { outstanding: 0, overdue: 0, due: 0, recoveryPlan: 0, runningMonthPlan: 0, weeklyPlanTillDate: 0, runningPlanThisWeek: 0, weekTotal: 0, diff: 0 },
-    ),
+    () => recoveryWeekTotals(detail.dealers, resolveWeek, weekNo, detail.weekCount),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [detail.dealers, values, weekNo],
   );
 
@@ -542,8 +492,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               const v = values[d.dealerId] ?? { plan: 0, running: 0 };
               const weekTotal = v.plan + v.running;
               const monthTotal = d.monthRecoveryPlan + d.monthRunningRecovery;
-              const diff = monthTotal - allWeeksTotal(d, d.dealerId);
-              const tillDate = tillDateTotal(d, d.dealerId);
+              const diff = monthTotal - allWeeksTotal(d);
+              const tillDate = tillDateTotal(d);
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium">{d.dealerName}</TableCell>

@@ -2,7 +2,7 @@ import "server-only";
 import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { assertOfficerInScope, getCurrentDealerIds } from "@/lib/scope";
+import { assertOfficerInScope } from "@/lib/scope";
 import {
   computeFacts,
   sumFacts,
@@ -73,8 +73,11 @@ export async function getOfficerProfile(
     : await getCurrentSeason();
   if (!season) throw new ApiError(404, "No season available");
 
-  // One fact query for this season, then filter to this officer.
-  const [allFacts, assignments, rm, plans, months, imports, products] = await Promise.all([
+  // These reads are independent, but firing all of them at once makes a SINGLE profile request grab a
+  // large share of the (small) connection pool, which is a major contributor to pool exhaustion under
+  // concurrent use. Run them in two bounded batches so one request never monopolises the pool — the
+  // extra round-trip is negligible next to the connection-contention it prevents.
+  const [allFacts, assignments, rm, plans] = await Promise.all([
     computeFacts(ctx, season.id),
     prisma.dealerAssignment.findMany({
       where: { officerId, effectiveTo: null },
@@ -89,6 +92,8 @@ export async function getOfficerProfile(
       select: { id: true, status: true, version: true, versionName: true, source: true, isActiveVersion: true, lifecycleState: true, createdAt: true },
       orderBy: { version: "desc" },
     }),
+  ]);
+  const [months, imports, products] = await Promise.all([
     getSeasonMonthStates(season.id),
     prisma.seasonPlanImportRecord.findMany({
       where: { seasonId: season.id, officerId },

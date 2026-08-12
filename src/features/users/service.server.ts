@@ -3,7 +3,7 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { ApiError, type AuthContext } from "@/lib/http";
+import { ApiError, invalidateAuthCache, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 
 /**
@@ -33,6 +33,7 @@ export async function resetUserPassword(ctx: AuthContext, userId: string, raw: u
   const user = await loadUserOr404(userId);
   const passwordHash = await bcrypt.hash(newPassword, 10);
   await prisma.user.update({ where: { id: userId }, data: { passwordHash, sessionValidAfter: new Date() } });
+  invalidateAuthCache(userId); // security change takes effect immediately, not after the TTL
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Reset password for ${user.name}` });
   return { ok: true };
 }
@@ -48,6 +49,7 @@ export async function changeOwnPassword(ctx: AuthContext, raw: unknown) {
   if (!valid) throw new ApiError(422, "Your current password is incorrect");
   const passwordHash = await bcrypt.hash(newPassword, 10);
   await prisma.user.update({ where: { id: ctx.userId }, data: { passwordHash, sessionValidAfter: new Date() } });
+  invalidateAuthCache(ctx.userId);
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: ctx.userId, summary: "Changed own password" });
   return { ok: true };
 }
@@ -79,6 +81,7 @@ export async function deactivateUser(ctx: AuthContext, userId: string) {
   if (userId === ctx.userId) throw new ApiError(422, "You cannot deactivate your own account");
   const user = await loadUserOr404(userId);
   await prisma.user.update({ where: { id: userId }, data: { isActive: false, sessionValidAfter: new Date() } });
+  invalidateAuthCache(userId);
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Deactivated ${user.name}` });
   return { ok: true };
 }
@@ -88,6 +91,7 @@ export async function activateUser(ctx: AuthContext, userId: string) {
   const user = await loadUserOr404(userId);
   if (user.deletedAt) throw new ApiError(409, "Deleted users cannot be reactivated");
   await prisma.user.update({ where: { id: userId }, data: { isActive: true } });
+  invalidateAuthCache(userId);
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Activated ${user.name}` });
   return { ok: true };
 }
@@ -98,6 +102,7 @@ export async function deleteUser(ctx: AuthContext, userId: string) {
   if (userId === ctx.userId) throw new ApiError(422, "You cannot delete your own account");
   const user = await loadUserOr404(userId);
   await prisma.user.update({ where: { id: userId }, data: { isActive: false, deletedAt: new Date(), sessionValidAfter: new Date() } });
+  invalidateAuthCache(userId);
   await writeAudit({ userId: ctx.userId, action: "DELETE", entity: "user", entityId: userId, summary: `Soft-deleted ${user.name}` });
   return { ok: true };
 }

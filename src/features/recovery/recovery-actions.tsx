@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { TransferRecoveryPlan } from "./transfer-dialog";
 import type { PlanStatus } from "@/features/planning/types";
 
 interface NoPlanDealer { dealerId: string; dealerName: string; noPlanReason: string | null }
@@ -62,11 +63,14 @@ export function RecoveryActions({
       <Button key="reject" variant="destructive" onClick={() => { setError(null); setRemarkKind("reject"); }}>Reject</Button>,
     );
   }
-  if (buttons.length === 0 && !error) return null;
+  // Super Admin can move this Recovery Plan to another Seasonal Plan version (self-contained dialog).
+  const canTransfer = role === Role.SUPER_ADMIN;
+  if (buttons.length === 0 && !error && !canTransfer) return null;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
       {buttons}
+      {canTransfer && <TransferRecoveryPlan id={id} />}
       {error && <span className="text-sm text-destructive">{error}</span>}
 
       <Dialog open={confirmNoPlan} onOpenChange={setConfirmNoPlan}>

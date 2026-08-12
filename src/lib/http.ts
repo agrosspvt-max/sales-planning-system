@@ -31,37 +31,52 @@ type AuthUserRow = {
 } | null;
 
 /**
- * Single-flight de-duplication of the per-request auth lookup.
+ * Per-request auth lookup with single-flight + a short TTL cache.
  *
- * Every API request re-verifies the caller via prisma.user.findUnique. Opening one page fires several
- * API calls at once (e.g. /api/groups + /api/labels + /api/notifications), so WITHOUT this the same
- * user row is fetched N times simultaneously — N connections held for identical work. During a Neon
- * cold start (compute waking from auto-suspend) that concurrency is exactly what tips the small pool
- * into P2024 "timed out fetching a connection" and surfaces P1001. Coalescing collapses a concurrent
- * burst for the same (userId, iat) into ONE in-flight query.
+ * Every API request re-verifies the caller via prisma.user.findUnique. Opening one page fans out to
+ * many API calls at once (page data + /api/labels + /api/notifications), each authenticating — so this
+ * lookup is, by far, the most-repeated query in the app and a prime contributor to pool pressure.
  *
- * This is pure concurrency de-duplication, NOT a cache: the entry is deleted the instant the query
- * settles, so the very next (non-concurrent) request does a fresh lookup. Deactivation/deletion and
- * sessionValidAfter therefore still take effect immediately — security semantics are unchanged.
+ *  - SINGLE-FLIGHT: concurrent lookups for the same (userId, iat) share one in-flight query.
+ *  - SHORT TTL CACHE (AUTH_CACHE_TTL_MS, default 8s): once resolved, the row is reused for a few
+ *    seconds, so a burst of requests (and rapid navigation) issues ONE user query instead of dozens.
+ *
+ * Security note: this caps how quickly a mid-session change is observed to AUTH_CACHE_TTL_MS — a
+ * deactivation / deletion / role change / password-change (sessionValidAfter) takes effect within the
+ * TTL rather than instantly. All of those checks still run every request against the (cached) row; only
+ * the DB read is throttled. Set AUTH_CACHE_TTL_MS=0 to disable the cache and revert to per-request reads.
  */
+const AUTH_TTL_MS = Number(process.env.AUTH_CACHE_TTL_MS ?? 8000);
+const authCache = new Map<string, { at: number; row: AuthUserRow }>();
 const inflightAuthUser = new Map<string, Promise<AuthUserRow>>();
 
 function loadAuthUser(id: string, key: string): Promise<AuthUserRow> {
+  const cached = authCache.get(key);
+  if (cached && Date.now() - cached.at < AUTH_TTL_MS) return Promise.resolve(cached.row);
+
   const existing = inflightAuthUser.get(key);
   if (existing) return existing;
+
   const p = withDbRetry(() =>
     prisma.user.findUnique({
       where: { id },
       select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true },
     }),
-  ) as Promise<AuthUserRow>;
+  ).then((row) => {
+    if (AUTH_TTL_MS > 0) authCache.set(key, { at: Date.now(), row: row as AuthUserRow });
+    return row as AuthUserRow;
+  });
   inflightAuthUser.set(key, p);
-  // Clear on settle so this is coalescing, not caching. The cleanup branch swallows its own error;
-  // the real error still propagates to awaiters via the returned promise.
+  // Clear the in-flight entry on settle; errors still propagate to awaiters via the returned promise.
   p.finally(() => {
     if (inflightAuthUser.get(key) === p) inflightAuthUser.delete(key);
   }).catch(() => {});
   return p;
+}
+
+/** Drop a user's cached auth row immediately (call after deactivate/delete/role or password changes). */
+export function invalidateAuthCache(userId: string): void {
+  for (const k of authCache.keys()) if (k.startsWith(`${userId}:`)) authCache.delete(k);
 }
 
 /**

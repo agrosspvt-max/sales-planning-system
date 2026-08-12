@@ -237,6 +237,38 @@ model AuditLog {
   @@index([createdAt])
 }
 
+/// Field-level history of Super-Admin corrections to APPROVED plans (Admin Override / Edit Mode).
+/// One row per changed INPUT field. Denormalised (dealer/product names captured at edit time) and
+/// FK-free so the trail survives even if a referenced record is later removed. Additive only — it
+/// records history and never affects planning data or the approval workflow.
+model AdminEditAudit {
+  id            String   @id @default(cuid())
+  adminId       String
+  planType      String // "SEASONAL" | "MONTHLY" | "RECOVERY"
+  planId        String
+  version       Int?
+  seasonId      String?
+  seasonMonthId String?
+  dealerId      String
+  dealerName    String
+  productId     String?
+  productName   String?
+  fieldName     String // e.g. "Pack 500 ML", "Planning Value", "This Month Plan", "Month Recovery Plan", "Week 2 Running Recovery"
+  oldValue      Decimal? @db.Decimal(14, 4)
+  newValue      Decimal? @db.Decimal(14, 4)
+  difference    Decimal? @db.Decimal(14, 4)
+  reason        String
+  createdAt     DateTime @default(now())
+
+  @@index([planId])
+  @@index([dealerId])
+  @@index([productId])
+  @@index([seasonId])
+  @@index([seasonMonthId])
+  @@index([adminId])
+  @@index([createdAt])
+}
+
 /// The approvable unit: one Season Plan per officer per season, per version.
 /// A revision creates a new version (v2, v3…) copied from the last approved one;
 /// prior versions remain immutable in history.

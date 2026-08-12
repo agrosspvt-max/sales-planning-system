@@ -7,6 +7,7 @@ import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
 import { amount, PLANNING_MODE_LABELS } from "@/lib/calc";
 import { MONTH_STATUS_LABELS } from "./planning-state";
+import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "./admin-edit-ui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
@@ -37,8 +38,10 @@ const OPTION_COLOR: Record<DealerPlanningStatus, string | undefined> = {
  * and Achievement %).
  */
 export function MonthlyPlanner() {
-  const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush, setAdditionalOpen } = useMonthlyEdit();
+  const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush, setAdditionalOpen,
+    canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave } = useMonthlyEdit();
   const qc = useQueryClient();
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   // First-class Monthly Plan shows the Seasonal-style dealer progress (tick / colour / No Plan).
   const isFirstClass = !!monthlyPlanId;
@@ -51,7 +54,7 @@ export function MonthlyPlanner() {
   const unitLabel = PLANNING_MODE_LABELS[monthlyMode];
   const selMonth = data.months.find((m) => m.id === monthId);
   const editable = monthEditable(monthId);
-  const inputsDisabled = !editable;
+  const inputsDisabled = !(editable || adminMode);
 
   // Dealer completion (Completed = ≥1 monthly plan value; No Plan = flagged; else Remaining) —
   // the same three-state model and progress component as Seasonal Planning.
@@ -90,6 +93,21 @@ export function MonthlyPlanner() {
 
   return (
     <div className="space-y-3">
+      {canAdminEdit && !adminMode && (
+        <div className="flex justify-end"><EditPlanButton onClick={enterAdminMode} /></div>
+      )}
+      {adminMode && <AdminEditBar onDone={() => setReviewOpen(true)} onCancel={cancelAdminMode} disabled={adminSaving} />}
+      <ChangeReviewDialog
+        open={reviewOpen}
+        title={`Monthly Plan · ${data.seasonName}`}
+        subtitle={data.monthName ?? ""}
+        changes={adminMode ? adminChanges() : []}
+        saving={adminSaving}
+        error={adminError}
+        onConfirm={(reason) => { adminSave(reason).then(() => setReviewOpen(false)).catch(() => {}); }}
+        onClose={() => setReviewOpen(false)}
+      />
+
       {/* Planning progress: Green Completed · Purple No Plan · Grey Remaining (same component). */}
       {isFirstClass && <DealerProgressBar counts={counts} />}
 

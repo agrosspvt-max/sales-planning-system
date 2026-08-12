@@ -355,6 +355,12 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
 
   const isOwner = ctx.userId === plan.officerId && ctx.role === Role.SALES_OFFICER;
   const canEdit = isOwner && EDITABLE.includes(plan.status) && plan.season.status === SeasonStatus.OPEN;
+  // Admin Override: a Super Admin may correct the APPROVED, active version (read-only flag only).
+  const canAdminEdit =
+    ctx.role === Role.SUPER_ADMIN &&
+    plan.status === PlanStatus.APPROVED &&
+    plan.isActiveVersion &&
+    ((plan as { lifecycleState?: string }).lifecycleState ?? "ACTIVE") === "ACTIVE";
 
   return {
     id: plan.id,
@@ -374,6 +380,7 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
     revisionReason: plan.revisionReason,
     lastSavedAt: plan.lastSavedAt,
     canEdit,
+    canAdminEdit,
     // Planning mode saved on THIS season (never the current global default) — Section 38.
     seasonalMode: plan.season.seasonalMode as PlanningMode,
     // Columns: canonical planning packs + any pack with stored data in this plan (workbook order).

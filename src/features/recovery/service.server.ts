@@ -455,6 +455,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   // Week View may be re-opened by a weekly upload toggle, even after approval; never while pending.
   const pending = plan.status === PlanStatus.PENDING_RM || plan.status === PlanStatus.PENDING_ADMIN;
   const weekEditable = canManage && plan.weeklyEditEnabled && !pending && isLive;
+  // Admin Override: a Super Admin may correct an APPROVED, live recovery plan (read-only flag only).
+  const canAdminEdit = ctx.role === Role.SUPER_ADMIN && plan.status === PlanStatus.APPROVED && isLive;
   const weekCount = weekCountForCutoff();
 
   // Per-week "This Week's Due": distribute the month's Due across the four business weeks by each
@@ -521,6 +523,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     weeklyEditEnabled: plan.weeklyEditEnabled,
     monthEditable,
     weekEditable,
+    canAdminEdit,
     weekCount,
     currentWeek,
     lastRefresh,

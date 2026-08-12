@@ -34,6 +34,7 @@ import {
   type StatusCounts,
 } from "./dealer-completion";
 import { DealerPlanningStatus } from "./dealer-status";
+import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "./admin-edit-ui";
 
 const fmtNum = (n: number | null) => (n === null ? "—" : Number.isInteger(n) ? String(n) : n.toFixed(2));
 
@@ -43,9 +44,12 @@ const fmtNum = (n: number | null) => (n === null ? "—" : Number.isInteger(n) ?
  * live cells). Autosave and the mode-aware calc engine are reused unchanged.
  */
 export function PlanGrid() {
-  const { detail, mode, packMode, packColumns, editable, saving, lastSaved, cells, setPack, setValue, lineFig, dealerCompleted, flush } =
+  const { detail, mode, packMode, packColumns, editable, saving, lastSaved, setPack, setValue, cellAt, lineFig, dealerCompleted, flush,
+    canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave } =
     usePlanEdit();
   const qc = useQueryClient();
+  const inputsEditable = editable || adminMode;
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   // Default to "Choose Dealer" (no auto-select of the first dealer).
   const [dealerId, setDealerId] = useState("");
@@ -92,7 +96,7 @@ export function PlanGrid() {
     [DealerPlanningStatus.REMAINING]: undefined,
   };
 
-  const cellFor = (productId: string) => cells[`${dealerId}|${productId}`] ?? { packs: {}, value: 0 };
+  const cellFor = (productId: string) => cellAt(dealerId, productId);
 
   const dealerTotal = useMemo<FlexFigures>(() => {
     if (!dealer) return { totalQty: null, amount: null, nbv: null };
@@ -143,6 +147,25 @@ export function PlanGrid() {
 
   return (
     <div className="space-y-3">
+      {/* Admin Override entry point / banner (Super Admin correcting an APPROVED plan). */}
+      {canAdminEdit && !adminMode && (
+        <div className="flex justify-end">
+          <EditPlanButton onClick={enterAdminMode} />
+        </div>
+      )}
+      {adminMode && <AdminEditBar onDone={() => setReviewOpen(true)} onCancel={cancelAdminMode} disabled={adminSaving} />}
+
+      <ChangeReviewDialog
+        open={reviewOpen}
+        title={`Seasonal Plan · ${detail.officerName} · V${detail.version}`}
+        subtitle={detail.seasonName}
+        changes={adminMode ? adminChanges() : []}
+        saving={adminSaving}
+        error={adminError}
+        onConfirm={(reason) => { adminSave(reason).then(() => setReviewOpen(false)).catch(() => {}); }}
+        onClose={() => setReviewOpen(false)}
+      />
+
       {/* Planning progress: Green Completed · Purple No Plan · Grey Remaining. */}
       <DealerProgressBar counts={counts} />
 
@@ -298,7 +321,7 @@ export function PlanGrid() {
                             className="h-8 w-16 text-center"
                             value={cell.packs[p.id] ? cell.packs[p.id] : ""}
                             placeholder="0"
-                            disabled={!editable}
+                            disabled={!inputsEditable}
                             onChange={(e) => onPack(l.productId, p.id, e.target.value)}
                           />
                         </TableCell>
@@ -313,7 +336,7 @@ export function PlanGrid() {
                             className="ml-auto h-8 w-24 text-right"
                             value={cell.value ? cell.value : ""}
                             placeholder="0"
-                            disabled={!editable}
+                            disabled={!inputsEditable}
                             onChange={(e) => onValue(l.productId, e.target.value)}
                           />
                         ) : (
@@ -331,7 +354,7 @@ export function PlanGrid() {
                           className="ml-auto h-8 w-28 text-right"
                           value={cell.value ? cell.value : ""}
                           placeholder="0"
-                          disabled={!editable}
+                          disabled={!inputsEditable}
                           onChange={(e) => onValue(l.productId, e.target.value)}
                         />
                       ) : (
@@ -348,7 +371,7 @@ export function PlanGrid() {
                           className="ml-auto h-8 w-28 text-right"
                           value={cell.value ? cell.value : ""}
                           placeholder="0"
-                          disabled={!editable}
+                          disabled={!inputsEditable}
                           onChange={(e) => onValue(l.productId, e.target.value)}
                         />
                       ) : (

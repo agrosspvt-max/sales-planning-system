@@ -247,6 +247,9 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
   const isLive = mp.lifecycleState === "ACTIVE" && mp.seasonPlan.lifecycleState === "ACTIVE";
   const canEdit = (isOwner || ctx.role === Role.SUPER_ADMIN) && EDITABLE.includes(mp.status) && isLive;
+  // Admin Override: a Super Admin may correct an APPROVED, live monthly plan (read-only flag; the
+  // admin-edit service re-checks the parent seasonal version).
+  const canAdminEdit = ctx.role === Role.SUPER_ADMIN && mp.status === PlanStatus.APPROVED && isLive;
   // Exactly ONE month — shaped as MonthlyData so the existing provider/planner consume it
   // unchanged (no in-page month selector). Editability comes from the monthly plan lifecycle.
   const months = month
@@ -280,6 +283,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
     officerId: mp.officerId,
     status: mp.status,
     canEdit,
+    canAdminEdit,
     seasonName: season ? `${season.name} ${season.year}` : "",
     monthName: month?.name ?? "",
     monthlyMode,

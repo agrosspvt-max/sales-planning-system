@@ -25,6 +25,7 @@ import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "@/features/p
 import { DealerPlanningStatus } from "@/features/planning/dealer-status";
 import { useAutosaveMap } from "@/features/planning/use-autosave-map";
 import { recoveryMonthTotals, recoveryWeekTotals, weekTillDate, weekAll, storedWeek, type RecoveryValue } from "./recovery-calc";
+import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "@/features/planning/admin-edit-ui";
 import { RecoveryActions } from "./recovery-actions";
 import { RecoveryHistory } from "./recovery-history";
 import type { PlanStatus } from "@/features/planning/types";
@@ -78,6 +79,7 @@ interface RecoveryDetail {
   weeklyEditEnabled: boolean;
   monthEditable: boolean;
   weekEditable: boolean;
+  canAdminEdit?: boolean;
   weekCount: number;
   currentWeek: number;
   lastRefresh: LastRefresh | null;
@@ -220,6 +222,13 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
 function MonthView({ detail }: { detail: RecoveryDetail }) {
   const qc = useQueryClient();
   const editable = detail.monthEditable;
+  // Admin Edit Mode: staged overlay, separate from the officer autosave path.
+  const canAdminEdit = !!detail.canAdminEdit;
+  const [adminMode, setAdminMode] = useState(false);
+  const [adminEdits, setAdminEdits] = useState<Record<string, { plan: number; running: number }>>({});
+  const [adminSaving, setAdminSaving] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const initial = useMemo(() => {
     const m: Record<string, { plan: number; running: number }> = {};
@@ -242,9 +251,42 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
     onSuccess: () => { setNoPlanFor(null); qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] }); },
   });
 
+  const valFor = (dealerId: string) => (adminMode ? adminEdits[dealerId] ?? initial[dealerId] ?? { plan: 0, running: 0 } : values[dealerId] ?? { plan: 0, running: 0 });
   const set = (dealerId: string, field: "plan" | "running", raw: string) => {
+    const n = Math.max(0, Number(raw) || 0);
+    if (adminMode) {
+      setAdminEdits((prev) => { const cur = prev[dealerId] ?? initial[dealerId] ?? { plan: 0, running: 0 }; return { ...prev, [dealerId]: { ...cur, [field]: n } }; });
+      return;
+    }
     const cur = values[dealerId] ?? { plan: 0, running: 0 };
-    update(dealerId, { ...cur, [field]: Math.max(0, Number(raw) || 0) });
+    update(dealerId, { ...cur, [field]: n });
+  };
+  const enterAdminMode = () => { setAdminEdits(initial); setAdminError(null); setAdminMode(true); };
+  const cancelAdminMode = () => { setAdminMode(false); setAdminEdits({}); setAdminError(null); };
+  const adminChanges = () => {
+    const out: { dealerName: string; fieldName: string; oldValue: number; newValue: number }[] = [];
+    for (const d of detail.dealers) {
+      const base = initial[d.dealerId] ?? { plan: 0, running: 0 };
+      const cur = adminEdits[d.dealerId] ?? base;
+      if (base.plan !== cur.plan) out.push({ dealerName: d.dealerName, fieldName: "Month Recovery Plan", oldValue: base.plan, newValue: cur.plan });
+      if (base.running !== cur.running) out.push({ dealerName: d.dealerName, fieldName: "Month Running Recovery", oldValue: base.running, newValue: cur.running });
+    }
+    return out;
+  };
+  const adminSave = async (reason: string) => {
+    const entries: { dealerId: string; monthRecoveryPlan: number; monthRunningRecovery: number }[] = [];
+    for (const d of detail.dealers) {
+      const base = initial[d.dealerId] ?? { plan: 0, running: 0 };
+      const cur = adminEdits[d.dealerId] ?? base;
+      if (base.plan !== cur.plan || base.running !== cur.running) entries.push({ dealerId: d.dealerId, monthRecoveryPlan: cur.plan, monthRunningRecovery: cur.running });
+    }
+    setAdminSaving(true); setAdminError(null);
+    try {
+      await api.post(`/api/recovery/plans/${detail.id}/admin-edit`, { view: "month", entries, reason });
+      qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] });
+      setAdminMode(false); setAdminEdits({}); setReviewOpen(false);
+    } catch (e) { setAdminError((e as Error).message); }
+    finally { setAdminSaving(false); }
   };
 
   // Deliberately derived in the client from the live edit map: this makes the summary move with
@@ -252,8 +294,9 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   // Reuses the shared roll-up. Behaviour preserved: the workspace keeps summing per-dealer ratios for
   // Recovery % ("sumOfRatios") and reads the live edit map for each dealer's plan/running.
   const totals = useMemo(
-    () => recoveryMonthTotals(detail.dealers, (d) => values[d.dealerId] ?? { plan: 0, running: 0 }, "sumOfRatios"),
-    [detail.dealers, values],
+    () => recoveryMonthTotals(detail.dealers, (d) => valFor(d.dealerId), "sumOfRatios"),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [detail.dealers, values, adminMode, adminEdits],
   );
 
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
@@ -269,6 +312,20 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
 
   return (
     <div className="space-y-2">
+      {canAdminEdit && !adminMode && (
+        <div className="flex justify-end"><EditPlanButton onClick={enterAdminMode} /></div>
+      )}
+      {adminMode && <AdminEditBar onDone={() => setReviewOpen(true)} onCancel={cancelAdminMode} disabled={adminSaving} />}
+      <ChangeReviewDialog
+        open={reviewOpen}
+        title={`Recovery Plan · ${detail.officerName} · Month`}
+        subtitle={`${detail.seasonName} · ${detail.monthName}`}
+        changes={adminMode ? adminChanges() : []}
+        saving={adminSaving}
+        error={adminError}
+        onConfirm={(reason) => { void adminSave(reason); }}
+        onClose={() => setReviewOpen(false)}
+      />
       {editable && (
         <div className="flex items-center justify-end gap-3 text-sm text-muted-foreground">
           <span>{saving ? "Saving…" : "Saved"}</span>
@@ -302,7 +359,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
           </TableHeader>
           <TableBody>
             {detail.dealers.map((d) => {
-              const v = values[d.dealerId] ?? { plan: 0, running: 0 };
+              const v = valFor(d.dealerId);
               const monthTotal = v.plan + v.running;
               const recPct = d.running > 0 ? v.running / d.running : 0;
               const status = d.noPlan ? DealerPlanningStatus.NO_PLAN : monthTotal > 0 ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING;
@@ -320,13 +377,13 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                   <TableCell className="text-right"><AgingCell value={d.overdue} prev={d.prevAging?.overdue} /></TableCell>
                   <TableCell className="text-right"><AgingCell value={d.due} prev={d.prevAging?.due} /></TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress. Running O/S Till Date is frozen after first import. */}
                   <TableCell className="text-right"><AgingCell value={d.running} prev={d.prevAging?.running} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.runningTillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={!editable || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{pct(recPct)}</TableCell>
                   {/* Daybook-derived business values. Actual Running Recovery is DERIVED (Part 5):
@@ -428,13 +485,54 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
     onSaved();
   };
   const { values, saving, update, flush } = useAutosaveMap<{ plan: number; running: number }>(seed, persist);
+  const qc = useQueryClient();
+  // Admin Edit Mode overlay (staged, separate from the officer autosave path).
+  const canAdminEdit = !!detail.canAdminEdit;
+  const [adminMode, setAdminMode] = useState(false);
+  const [adminEdits, setAdminEdits] = useState<Record<string, { plan: number; running: number }>>({});
+  const [adminSaving, setAdminSaving] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const valFor = (dealerId: string) => (adminMode ? adminEdits[dealerId] ?? initial[dealerId] ?? { plan: 0, running: 0 } : values[dealerId] ?? { plan: 0, running: 0 });
   const set = (dealerId: string, field: "plan" | "running", raw: string) => {
+    const n = Math.max(0, Number(raw) || 0);
+    if (adminMode) {
+      setAdminEdits((prev) => { const cur = prev[dealerId] ?? initial[dealerId] ?? { plan: 0, running: 0 }; return { ...prev, [dealerId]: { ...cur, [field]: n } }; });
+      return;
+    }
     const cur = values[dealerId] ?? { plan: 0, running: 0 };
-    update(dealerId, { ...cur, [field]: Math.max(0, Number(raw) || 0) });
+    update(dealerId, { ...cur, [field]: n });
   };
-  // Live-edit resolver: the SELECTED week uses the edit map (updates as you type); other weeks use the
-  // stored values. The cumulative helpers come from the shared recovery-calc module.
-  const resolveWeek = (d: RecoveryDealer, w: number): RecoveryValue => (w === weekNo ? values[d.dealerId] ?? { plan: 0, running: 0 } : storedWeek(d, w));
+  const enterAdminMode = () => { setAdminEdits(initial); setAdminError(null); setAdminMode(true); };
+  const cancelAdminMode = () => { setAdminMode(false); setAdminEdits({}); setAdminError(null); };
+  const adminChanges = () => {
+    const out: { dealerName: string; fieldName: string; oldValue: number; newValue: number }[] = [];
+    for (const d of detail.dealers) {
+      const base = initial[d.dealerId] ?? { plan: 0, running: 0 };
+      const cur = adminEdits[d.dealerId] ?? base;
+      if (base.plan !== cur.plan) out.push({ dealerName: d.dealerName, fieldName: `Week ${weekNo} Recovery Plan`, oldValue: base.plan, newValue: cur.plan });
+      if (base.running !== cur.running) out.push({ dealerName: d.dealerName, fieldName: `Week ${weekNo} Running Recovery`, oldValue: base.running, newValue: cur.running });
+    }
+    return out;
+  };
+  const adminSave = async (reason: string) => {
+    const entries: { dealerId: string; weekRecoveryPlan: number; weekRunningRecovery: number }[] = [];
+    for (const d of detail.dealers) {
+      const base = initial[d.dealerId] ?? { plan: 0, running: 0 };
+      const cur = adminEdits[d.dealerId] ?? base;
+      if (base.plan !== cur.plan || base.running !== cur.running) entries.push({ dealerId: d.dealerId, weekRecoveryPlan: cur.plan, weekRunningRecovery: cur.running });
+    }
+    setAdminSaving(true); setAdminError(null);
+    try {
+      await api.post(`/api/recovery/plans/${detail.id}/admin-edit`, { view: "week", weekNo, entries, reason });
+      qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] });
+      setAdminMode(false); setAdminEdits({}); setReviewOpen(false);
+    } catch (e) { setAdminError((e as Error).message); }
+    finally { setAdminSaving(false); }
+  };
+  // Live-edit resolver: the SELECTED week uses the (admin overlay or officer) edit map; other weeks use
+  // the stored values. The cumulative helpers come from the shared recovery-calc module.
+  const resolveWeek = (d: RecoveryDealer, w: number): RecoveryValue => (w === weekNo ? valFor(d.dealerId) : storedWeek(d, w));
   const allWeeksTotal = (d: RecoveryDealer) => weekAll(d, detail.weekCount, resolveWeek);
   const tillDateTotal = (d: RecoveryDealer) => weekTillDate(d, weekNo, resolveWeek);
 
@@ -448,7 +546,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
   const totals = useMemo(
     () => recoveryWeekTotals(detail.dealers, resolveWeek, weekNo, detail.weekCount),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [detail.dealers, values, weekNo],
+    [detail.dealers, values, weekNo, adminMode, adminEdits],
   );
 
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
@@ -462,6 +560,20 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
 
   return (
     <div className="space-y-2">
+      {canAdminEdit && !adminMode && (
+        <div className="flex justify-end"><EditPlanButton onClick={enterAdminMode} /></div>
+      )}
+      {adminMode && <AdminEditBar onDone={() => setReviewOpen(true)} onCancel={cancelAdminMode} disabled={adminSaving} />}
+      <ChangeReviewDialog
+        open={reviewOpen}
+        title={`Recovery Plan · ${detail.officerName} · Week ${weekNo}`}
+        subtitle={`${detail.seasonName} · ${detail.monthName}`}
+        changes={adminMode ? adminChanges() : []}
+        saving={adminSaving}
+        error={adminError}
+        onConfirm={(reason) => { void adminSave(reason); }}
+        onClose={() => setReviewOpen(false)}
+      />
       {editable && (
         <div className="flex items-center justify-end gap-3 text-sm text-muted-foreground">
           <span>{saving ? "Saving…" : "Saved"}</span>
@@ -489,7 +601,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
           </TableHeader>
           <TableBody>
             {detail.dealers.map((d) => {
-              const v = values[d.dealerId] ?? { plan: 0, running: 0 };
+              const v = valFor(d.dealerId);
               const weekTotal = v.plan + v.running;
               const monthTotal = d.monthRecoveryPlan + d.monthRunningRecovery;
               const diff = monthTotal - allWeeksTotal(d);
@@ -504,7 +616,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   <TableCell className="text-right"><AgingCell value={d.overdue} prev={d.prevAging?.overdue} /></TableCell>
                   <TableCell className="text-right tabular-nums">{money(d.dueByWeek?.[weekNo] ?? 0)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={!canEditWeek || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress */}
                   {/* "Running Plan Month" is the Month View's Running Recovery Plan. Labels are
@@ -512,7 +624,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRunningRecovery)}</TableCell>
                   <TableCell className="text-right tabular-nums font-medium">{money(tillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={!canEditWeek || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                   </TableCell>
                   {/* Section 4 — Results */}
                   <TableCell className="text-right tabular-nums font-medium">{money(weekTotal)}</TableCell>

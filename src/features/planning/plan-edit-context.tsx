@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { figuresForMode, isQuantityMode, type FlexFigures, type PlanningMode } from "@/lib/calc";
 import { useAutosaveMap } from "./use-autosave-map";
+import type { AdminChange } from "./admin-edit-ui";
 import type { PlanDetail, PlanLineDetail, PackSizeColumn } from "./types";
 
 /**
@@ -49,12 +50,23 @@ export interface PlanEditContextValue {
   setPack: (dealerId: string, productId: string, packSizeId: string, n: number) => void;
   setValue: (dealerId: string, productId: string, n: number) => void;
   flush: () => Promise<void>;
+  /** The active cell for a line (admin overlay when in Admin Edit Mode, else the autosave cell). */
+  cellAt: (dealerId: string, productId: string) => Cell;
   /** Live input (pack sum or single value) for one cell. */
   cellInput: (dealerId: string, productId: string) => number;
   /** Live figures for one line, in the current mode. */
   lineFig: (dealerId: string, l: PlanLineDetail) => FlexFigures;
   /** True when the dealer has ≥1 SAVED quantity (completion is based on save, not typing). */
   dealerCompleted: (dealerId: string) => boolean;
+  // --- Admin Edit Mode (Super Admin correction of an APPROVED plan) ---
+  canAdminEdit: boolean;
+  adminMode: boolean;
+  adminSaving: boolean;
+  adminError: string | null;
+  enterAdminMode: () => void;
+  cancelAdminMode: () => void;
+  adminChanges: () => AdminChange[];
+  adminSave: (reason: string) => Promise<void>;
 }
 
 const Ctx = createContext<PlanEditContextValue | null>(null);
@@ -66,6 +78,15 @@ export function PlanEditProvider({ detail, children }: { detail: PlanDetail; chi
   const packIds = useMemo(() => packColumns.map((p) => p.id), [packColumns]);
   const editable = detail.canEdit;
   const qc = useQueryClient();
+
+  // Admin Edit Mode: staged in a SEPARATE overlay so the officer autosave path is never touched. Cancel
+  // just drops the overlay; nothing is persisted until Confirm Save posts to the dedicated admin endpoint.
+  const canAdminEdit = !!detail.canAdminEdit;
+  const [adminMode, setAdminMode] = useState(false);
+  const [adminEdits, setAdminEdits] = useState<ValueMap>({});
+  const [adminSaving, setAdminSaving] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const packNameById = useMemo(() => new Map(packColumns.map((p) => [p.id, p.name] as const)), [packColumns]);
 
   const initial = useMemo<ValueMap>(() => {
     const map: ValueMap = {};
@@ -121,32 +142,56 @@ export function PlanEditProvider({ detail, children }: { detail: PlanDetail; chi
 
   const { values: cells, saving, update, flush } = useAutosaveMap<Cell>(seed, persist);
 
+  // The active cell for a line: the admin overlay while in Admin Edit Mode, otherwise the autosave cell.
+  const cellAt = useCallback(
+    (dealerId: string, productId: string): Cell => {
+      const k = key(dealerId, productId);
+      if (adminMode) return adminEdits[k] ?? initial[k] ?? { packs: {}, value: 0 };
+      return cells[k] ?? { packs: {}, value: 0 };
+    },
+    [adminMode, adminEdits, cells, initial],
+  );
+
   const setPack = useCallback(
     (dealerId: string, productId: string, packSizeId: string, n: number) => {
-      if (!editable) return;
       const k = key(dealerId, productId);
+      if (adminMode) {
+        setAdminEdits((prev) => {
+          const cell = prev[k] ?? initial[k] ?? { packs: {}, value: 0 };
+          return { ...prev, [k]: { ...cell, packs: { ...cell.packs, [packSizeId]: n } } };
+        });
+        return;
+      }
+      if (!editable) return;
       const cell = cells[k] ?? { packs: {}, value: 0 };
       update(k, { ...cell, packs: { ...cell.packs, [packSizeId]: n } });
     },
-    [editable, cells, update],
+    [adminMode, editable, cells, update, initial],
   );
 
   const setValue = useCallback(
     (dealerId: string, productId: string, n: number) => {
-      if (!editable) return;
       const k = key(dealerId, productId);
+      if (adminMode) {
+        setAdminEdits((prev) => {
+          const cell = prev[k] ?? initial[k] ?? { packs: {}, value: 0 };
+          return { ...prev, [k]: { ...cell, value: n } };
+        });
+        return;
+      }
+      if (!editable) return;
       const cell = cells[k] ?? { packs: {}, value: 0 };
       update(k, { ...cell, value: n });
     },
-    [editable, cells, update],
+    [adminMode, editable, cells, update, initial],
   );
 
   const cellInput = useCallback(
     (dealerId: string, productId: string) => {
-      const cell = cells[key(dealerId, productId)] ?? { packs: {}, value: 0 };
+      const cell = cellAt(dealerId, productId);
       return packMode ? packIds.reduce((s, id) => s + (cell.packs[id] ?? 0), 0) : cell.value;
     },
-    [cells, packMode, packIds],
+    [cellAt, packMode, packIds],
   );
 
   const lineFig = useCallback(
@@ -170,10 +215,66 @@ export function PlanEditProvider({ detail, children }: { detail: PlanDetail; chi
     [detail, packMode, saving], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
+  const enterAdminMode = useCallback(() => { setAdminEdits(initial); setAdminError(null); setAdminMode(true); }, [initial]);
+  const cancelAdminMode = useCallback(() => { setAdminMode(false); setAdminEdits({}); setAdminError(null); }, []);
+
+  // Field-level diff of the overlay vs the approved baseline — drives the review dialog AND the payload.
+  const adminChanges = useCallback((): AdminChange[] => {
+    const out: AdminChange[] = [];
+    for (const d of detail.dealers) {
+      for (const l of d.lines) {
+        const k = key(d.dealerId, l.productId);
+        const cur = adminEdits[k] ?? initial[k];
+        const base = initial[k];
+        if (!cur || !base) continue;
+        if (packMode) {
+          for (const id of packIds) {
+            const oldQ = base.packs[id] ?? 0;
+            const newQ = cur.packs[id] ?? 0;
+            if (oldQ !== newQ) out.push({ dealerName: d.dealerName, productName: l.productName, fieldName: `Pack ${packNameById.get(id) ?? id}`, oldValue: oldQ, newValue: newQ });
+          }
+        } else if (base.value !== cur.value) {
+          out.push({ dealerName: d.dealerName, productName: l.productName, fieldName: `Planning Value (${mode})`, oldValue: base.value, newValue: cur.value });
+        }
+      }
+    }
+    return out;
+  }, [detail, adminEdits, initial, packMode, packIds, packNameById, mode]);
+
+  const adminSave = useCallback(async (reason: string) => {
+    const lines: { dealerId: string; productId: string; mode: string; packs?: { packSizeId: string; quantity: number }[]; value?: number }[] = [];
+    for (const d of detail.dealers) {
+      for (const l of d.lines) {
+        const k = key(d.dealerId, l.productId);
+        const cur = adminEdits[k] ?? initial[k];
+        const base = initial[k];
+        if (!cur || !base) continue;
+        const dirty = packMode ? packIds.some((id) => (base.packs[id] ?? 0) !== (cur.packs[id] ?? 0)) : base.value !== cur.value;
+        if (!dirty) continue;
+        if (packMode) lines.push({ dealerId: d.dealerId, productId: l.productId, mode: "PACK_SIZE", packs: packIds.map((id) => ({ packSizeId: id, quantity: cur.packs[id] ?? 0 })) });
+        else lines.push({ dealerId: d.dealerId, productId: l.productId, mode, value: cur.value });
+      }
+    }
+    setAdminSaving(true);
+    setAdminError(null);
+    try {
+      await api.post(`/api/planning/season-plans/${detail.id}/admin-edit`, { lines, reason });
+      qc.invalidateQueries({ queryKey: ["plan", detail.id] });
+      qc.invalidateQueries({ queryKey: ["group-product-plan"] });
+      setAdminMode(false);
+      setAdminEdits({});
+    } catch (e) {
+      setAdminError((e as Error).message);
+      throw e;
+    } finally {
+      setAdminSaving(false);
+    }
+  }, [detail, adminEdits, initial, packMode, packIds, mode, qc]);
+
   // Memoized so consumers only re-render when a dependency actually changes.
   const value = useMemo<PlanEditContextValue>(
-    () => ({ detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, flush, cellInput, lineFig, dealerCompleted }),
-    [detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, flush, cellInput, lineFig, dealerCompleted],
+    () => ({ detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, flush, cellAt, cellInput, lineFig, dealerCompleted, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave }),
+    [detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, flush, cellAt, cellInput, lineFig, dealerCompleted, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

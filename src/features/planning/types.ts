@@ -79,6 +79,8 @@ export interface PlanDetail {
   revisionReason: string | null;
   lastSavedAt: string;
   canEdit: boolean;
+  /** Super Admin may correct this APPROVED, active plan via Admin Edit Mode (read-only flag). */
+  canAdminEdit?: boolean;
   /** Configured seasonal planning mode for this workspace. */
   seasonalMode: PlanningMode;
   planningType: PlanningType;
@@ -175,7 +177,9 @@ export interface MonthlyDealer {
 export interface MonthlyData {
   planId: string;
   seasonName: string;
+  monthName?: string;
   canEdit: boolean;
+  canAdminEdit?: boolean;
   /** Configured monthly planning mode for this workspace. */
   monthlyMode: PlanningMode;
   months: { id: string; name: string; order: number; status: MonthStatus; editable: boolean }[];

@@ -291,9 +291,12 @@ async function persist(
     async (tx) => {
       for (const w of writes) await w(tx);
       await tx.adminEditAudit.createMany({ data: audits });
-      // The model accessor differs per plan; touch lastSavedAt so completion/read caches refresh.
-      const model = tx[planModel] as { update: (a: { where: { id: string }; data: { lastSavedAt: Date } }) => Promise<unknown> };
-      await model.update({ where: { id: planId }, data: { lastSavedAt: new Date() } });
+      // Touch lastSavedAt so completion/read caches refresh. Explicit per-model branches keep full type
+      // safety (Prisma's generated delegates are not structurally interchangeable).
+      const data = { lastSavedAt: new Date() };
+      if (planModel === "seasonPlan") await tx.seasonPlan.update({ where: { id: planId }, data });
+      else if (planModel === "monthlyPlan") await tx.monthlyPlan.update({ where: { id: planId }, data });
+      else await tx.recoveryPlan.update({ where: { id: planId }, data });
     },
     { timeout: 60000, maxWait: 10000 },
   );

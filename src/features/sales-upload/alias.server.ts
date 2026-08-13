@@ -6,6 +6,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
 import { tightKey } from "@/lib/match-key";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
+import { parseDealerStatus, isActiveForStatus } from "@/lib/dealer-status";
 import { writeAudit } from "@/lib/audit";
 import { createDealerForOfficer } from "@/features/planning/monthly-plan.server";
 
@@ -14,6 +15,9 @@ function assertAdmin(ctx: AuthContext) {
 }
 
 const HEADER = /^(dealer\s*name|dealer\s*alias|system\s*dealer|tally\s*dealer)$/i;
+
+/** A dealer awaiting approval — new "PENDING" plus the legacy "PENDING_APPROVAL" value for un-migrated rows. */
+const isPending = (status: string) => status === "PENDING" || status === "PENDING_APPROVAL";
 
 export async function listDealerAliases(ctx: AuthContext) {
   assertAdmin(ctx);
@@ -140,14 +144,14 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
     with: rows.filter((r) => r.hasAlias).length,
     without: rows.filter((r) => !r.hasAlias).length,
     soCreated: rows.filter((r) => r.soCreated).length,
-    pending: rows.filter((r) => r.status === "PENDING_APPROVAL").length,
+    pending: rows.filter((r) => isPending(r.status)).length,
   };
 
   const filtered = rows.filter((r) => {
     if (filter === "with") return r.hasAlias;
     if (filter === "without") return !r.hasAlias;
     if (filter === "so-created") return r.soCreated;
-    if (filter === "pending") return r.status === "PENDING_APPROVAL";
+    if (filter === "pending") return isPending(r.status);
     return true;
   });
   return { counts, dealers: filtered.slice(0, 500) };
@@ -186,6 +190,7 @@ export interface AliasUploadResult {
   createdDealers: number;
   existingDealers: number;
   aliasesAdded: number;
+  statusUpdated: number;
   addedToSeasonalPlans: number;
   skipped: number;
   errors: number;
@@ -202,13 +207,16 @@ const truthy = (v: string) => /^(y|yes|true|1)$/i.test(v.trim());
 
 /**
  * Upload a Dealer + Alias workbook. Columns:
- *   Dealer Name | Dealer Alias | Group | Sales Officer | Territory (optional) | Add To Active Seasonal Plan (Yes/No)
+ *   Dealer Name | Dealer Alias (optional) | Group | Sales Officer | Territory (optional) |
+ *   Dealer Status (Pending/Active/Inactive/Defaulter — default Pending) | Add To Active Seasonal Plan (Yes/No)
  *
  * Rules (no matching/creation logic is duplicated — it reuses the central resolver + the shared
  * `createDealerForOfficer` used by the Dealers module):
- *   - Dealer already exists (resolver match on Dealer Name) → create the Alias only; creation columns ignored.
- *   - Dealer does NOT exist → create + assign group/officer + territory + alias (+ optionally add to the
- *     officer's active seasonal plan), all via the SAME service the Dealers module uses.
+ *   - Dealer already exists (resolver match on Dealer Name) → add the Alias (if provided) and/or update
+ *     the Status (if provided); group/officer/territory columns are ignored.
+ *   - Dealer does NOT exist → create with the given Status (default Pending) + assign group/officer +
+ *     territory + alias (if provided; else aliased by name). Added to the officer's active seasonal plan
+ *     ONLY when "Add To Active Seasonal Plan" is Yes AND the status is Active. Same service as the Dealers module.
  */
 export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Promise<AliasUploadResult> {
   assertAdmin(ctx);
@@ -228,7 +236,7 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
   const officerByGroupName = new Map(officers.map((o) => [`${o.groupId ?? ""}|${norm(o.name)}`, o.id] as const));
 
   const r: AliasUploadResult = {
-    createdDealers: 0, existingDealers: 0, aliasesAdded: 0, addedToSeasonalPlans: 0, skipped: 0, errors: 0, errorDetails: [],
+    createdDealers: 0, existingDealers: 0, aliasesAdded: 0, statusUpdated: 0, addedToSeasonalPlans: 0, skipped: 0, errors: 0, errorDetails: [],
     totalRows: 0, created: 0, updated: 0, unmatchedSystemDealers: [], duplicateRows: 0,
   };
 
@@ -238,32 +246,53 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
     const groupName = String(row[2] ?? "").trim();
     const officerName = String(row[3] ?? "").trim();
     const territory = String(row[4] ?? "").trim();
-    const addToPlan = truthy(String(row[5] ?? ""));
+    const statusCell = String(row[5] ?? "").trim();
+    const addToPlan = truthy(String(row[6] ?? ""));
     if (!dealerName && !aliasName) continue;
     if (HEADER.test(dealerName) || HEADER.test(aliasName)) continue; // header row
     r.totalRows += 1;
-    if (!dealerName || !aliasName) { r.skipped += 1; continue; }
+    // A dealer name is required (alias is now optional — it can be blank to only set the status).
+    if (!dealerName) { r.skipped += 1; continue; }
+
+    // Validate the optional Dealer Status label up front.
+    const parsedStatus = parseDealerStatus(statusCell);
+    if (statusCell && !parsedStatus) {
+      r.errors += 1;
+      r.errorDetails.push(`Row "${dealerName}": unknown Dealer Status "${statusCell}" (use Pending/Active/Inactive/Defaulter)`);
+      continue;
+    }
 
     try {
       const match = resolver.resolveWithReason(dealerName);
       if (match) {
-        // Existing dealer → create the alias only (idempotent by tallyKey).
-        const tallyKey = tightKey(aliasName);
-        if (!tallyKey) { r.skipped += 1; continue; }
+        // Existing dealer → add the alias (if provided) and/or update the status (if provided).
         r.existingDealers += 1;
-        const exists = await prisma.dealerAlias.findUnique({ where: { tallyKey }, select: { id: true } });
-        if (exists) { r.skipped += 1; continue; }
-        await prisma.dealerAlias.create({ data: { systemDealerId: match.dealer.id, tallyName: aliasName, tallyKey } });
-        r.aliasesAdded += 1;
+        let touched = false;
+        if (parsedStatus) {
+          await prisma.dealer.update({ where: { id: match.dealer.id }, data: { status: parsedStatus, isActive: isActiveForStatus(parsedStatus) } });
+          r.statusUpdated += 1;
+          touched = true;
+        }
+        if (aliasName) {
+          const tallyKey = tightKey(aliasName);
+          if (tallyKey) {
+            const exists = await prisma.dealerAlias.findUnique({ where: { tallyKey }, select: { id: true } });
+            if (!exists) { await prisma.dealerAlias.create({ data: { systemDealerId: match.dealer.id, tallyName: aliasName, tallyKey } }); r.aliasesAdded += 1; touched = true; }
+          }
+        }
+        if (!touched) r.skipped += 1; // nothing to add/update for this existing dealer
       } else {
-        // New dealer → reuse the shared create service (assign + alias + optional plan).
+        // New dealer → reuse the shared create service (assign + alias + optional plan). Default Pending.
         const groupId = groupByName.get(norm(groupName));
         if (!groupId) { r.errors += 1; r.errorDetails.push(`Row "${dealerName}": unknown group "${groupName}"`); continue; }
         const officerId = officerByGroupName.get(`${groupId}|${norm(officerName)}`);
         if (!officerId) { r.errors += 1; r.errorDetails.push(`Row "${dealerName}": officer "${officerName}" not in group "${groupName}"`); continue; }
-        const outcome = await createDealerForOfficer(ctx, { name: dealerName, aliasName, officerId, groupId, town: territory || undefined, addToSeasonalPlan: addToPlan, force: true });
+        const outcome = await createDealerForOfficer(ctx, {
+          name: dealerName, aliasName: aliasName || undefined, officerId, groupId, town: territory || undefined,
+          status: parsedStatus ?? "PENDING", addToSeasonalPlan: addToPlan, force: true,
+        });
         r.createdDealers += 1;
-        r.aliasesAdded += 1;
+        if (aliasName) r.aliasesAdded += 1;
         if (outcome.addedToPlan) r.addedToSeasonalPlans += 1;
       }
     } catch (e) {
@@ -279,7 +308,7 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
     userId: ctx.userId,
     action: "CREATE",
     entity: "dealerAlias",
-    summary: `Dealer+Alias import — ${r.createdDealers} dealers created, ${r.aliasesAdded} aliases added, ${r.addedToSeasonalPlans} added to plans, ${r.errors} errors`,
+    summary: `Dealer+Alias import — ${r.createdDealers} created, ${r.aliasesAdded} aliases added, ${r.statusUpdated} status updated, ${r.addedToSeasonalPlans} added to plans, ${r.errors} errors`,
   });
 
   return r;
@@ -326,9 +355,9 @@ export async function exportMissingAliases(ctx: AuthContext, groupId?: string, o
 /** Build the sample Dealer+Alias workbook as an .xlsx buffer. */
 export function buildAliasSampleWorkbook(): Buffer {
   const data = [
-    ["Dealer Name", "Dealer Alias", "Group", "Sales Officer", "Territory", "Add To Active Seasonal Plan"],
-    ["ABC Seeds", "ABC SEEDS MP", "MP", "Rajesh Kundu", "Bhopal", "No"],
-    ["XYZ Traders", "XYZ TRADERS CG", "CG", "Chittaranjan", "Raipur", "Yes"],
+    ["Dealer Name", "Dealer Alias", "Group", "Sales Officer", "Territory", "Dealer Status", "Add To Active Seasonal Plan"],
+    ["ABC Seeds", "ABC SEEDS MP", "MP", "Rajesh Kundu", "Bhopal", "Pending", "No"],
+    ["XYZ Traders", "XYZ TRADERS CG", "CG", "Chittaranjan", "Raipur", "Active", "Yes"],
   ];
   const ws = XLSX.utils.aoa_to_sheet(data);
   const wb = XLSX.utils.book_new();

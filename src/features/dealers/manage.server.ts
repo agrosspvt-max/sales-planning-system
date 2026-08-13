@@ -7,6 +7,7 @@ import { tightKey } from "@/lib/match-key";
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { addDealerToActiveSeasonalPlan } from "@/features/planning/monthly-plan.server";
+import { DEALER_STATUSES, isActiveForStatus, type DealerStatus } from "@/lib/dealer-status";
 
 /**
  * Dealer management (Admin). Reuses the existing Dealer / DealerAlias models. Deactivate & Delete
@@ -18,9 +19,9 @@ function assertAdmin(ctx: AuthContext) {
   if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can manage dealers");
 }
 async function loadDealerOr404(id: string) {
-  const d = await prisma.dealer.findUnique({ where: { id }, select: { id: true, name: true, isActive: true, deletedAt: true } });
+  const d = await prisma.dealer.findUnique({ where: { id }, select: { id: true, name: true, isActive: true, status: true, deletedAt: true } });
   if (!d) throw new ApiError(404, "Dealer not found");
-  return d as { id: string; name: string; isActive: boolean; deletedAt: Date | null };
+  return d as { id: string; name: string; isActive: boolean; status: string; deletedAt: Date | null };
 }
 
 const editSchema = z.object({
@@ -35,7 +36,10 @@ const editSchema = z.object({
   // Optional edit-mode extras (Dealer Alias page). Absent → unchanged (backward-compatible).
   officerId: z.string().optional(), // reassign the owning Sales Officer
   groupId: z.string().optional(), // validate the officer belongs to this group
-  isActive: z.boolean().optional(), // Active / Inactive status
+  // 4-status approval lifecycle (Dealer Alias → Edit). Admin can freely set any status; isActive is
+  // derived (only INACTIVE = isActive:false). Legacy `isActive` boolean still accepted for compatibility.
+  status: z.enum(DEALER_STATUSES).optional(),
+  isActive: z.boolean().optional(),
   addToSeasonalPlan: z.boolean().optional(), // add (never removes) to the officer's active seasonal plan
 });
 
@@ -55,7 +59,15 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
     if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) throw new ApiError(422, "The selected Sales Officer is missing or inactive");
     if (data.groupId && officer.groupId !== data.groupId) throw new ApiError(422, "The selected Sales Officer does not belong to the selected group");
   }
-  if (data.isActive === true && dealer.deletedAt) throw new ApiError(409, "Deleted dealers cannot be reactivated");
+  // Resolve the requested status → the 4-way `status` wins; a legacy `isActive` boolean maps to
+  // ACTIVE/INACTIVE. `isActive` is always derived from status (only INACTIVE = inactive).
+  const nextStatus: DealerStatus | undefined =
+    data.status ?? (data.isActive !== undefined ? (data.isActive ? "ACTIVE" : "INACTIVE") : undefined);
+  const nextIsActive = nextStatus !== undefined ? isActiveForStatus(nextStatus) : undefined;
+  // Effective status after this edit (what it will be, defaulting to the current stored status).
+  const effectiveStatus = nextStatus ?? (dealer.status as DealerStatus);
+
+  if (nextIsActive === true && dealer.deletedAt) throw new ApiError(409, "Deleted dealers cannot be reactivated");
   // Current owner — so an unchanged officer never opens a duplicate assignment range, and so an
   // "add to plan" without reassignment still knows whose active plan to target.
   const currentOwner = data.officerId || data.addToSeasonalPlan
@@ -73,7 +85,7 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
         district: data.district?.trim() || null,
         address: data.address?.trim() || null,
         town: data.town?.trim() || null,
-        ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
+        ...(nextStatus !== undefined ? { status: nextStatus, isActive: nextIsActive } : {}),
       },
     });
     // Reassign the owning officer ONLY when it actually changes — reuses the time-aware assignment
@@ -92,8 +104,9 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
     }
     // Optionally ADD to the selected officer's active seasonal plan — idempotent (never creates a
     // duplicate PlanDealer, never removes). Only adds when an active plan exists and the dealer stays active.
+    // Only ACTIVE dealers are plan-eligible — never add a Pending/Inactive/Defaulter dealer to a plan.
     const targetOfficerId = data.officerId ?? currentOwner?.officerId;
-    if (data.addToSeasonalPlan && data.isActive !== false && targetOfficerId) {
+    if (data.addToSeasonalPlan && effectiveStatus === "ACTIVE" && targetOfficerId) {
       await addDealerToActiveSeasonalPlan(tx, targetOfficerId, dealerId);
     }
   });
@@ -104,7 +117,8 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
 export async function deactivateDealer(ctx: AuthContext, dealerId: string) {
   assertAdmin(ctx);
   const d = await loadDealerOr404(dealerId);
-  await prisma.dealer.update({ where: { id: dealerId }, data: { isActive: false } });
+  // status is the source of truth; INACTIVE ⇔ isActive:false.
+  await prisma.dealer.update({ where: { id: dealerId }, data: { status: "INACTIVE", isActive: false } });
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Deactivated dealer ${d.name}` });
   return { ok: true };
 }
@@ -113,7 +127,7 @@ export async function activateDealer(ctx: AuthContext, dealerId: string) {
   assertAdmin(ctx);
   const d = await loadDealerOr404(dealerId);
   if (d.deletedAt) throw new ApiError(409, "Deleted dealers cannot be reactivated");
-  await prisma.dealer.update({ where: { id: dealerId }, data: { isActive: true } });
+  await prisma.dealer.update({ where: { id: dealerId }, data: { status: "ACTIVE", isActive: true } });
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Activated dealer ${d.name}` });
   return { ok: true };
 }
@@ -122,7 +136,7 @@ export async function activateDealer(ctx: AuthContext, dealerId: string) {
 export async function deleteDealer(ctx: AuthContext, dealerId: string) {
   assertAdmin(ctx);
   const d = await loadDealerOr404(dealerId);
-  await prisma.dealer.update({ where: { id: dealerId }, data: { isActive: false, deletedAt: new Date() } });
+  await prisma.dealer.update({ where: { id: dealerId }, data: { status: "INACTIVE", isActive: false, deletedAt: new Date() } });
   await writeAudit({ userId: ctx.userId, action: "DELETE", entity: "dealer", entityId: dealerId, summary: `Soft-deleted dealer ${d.name}` });
   return { ok: true };
 }

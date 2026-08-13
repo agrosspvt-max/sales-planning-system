@@ -217,7 +217,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     const planIds = [...repPlanBucket.keys()];
     if (planIds.length > 0) {
       const planDealers = (await prisma.planDealer.findMany({
-        where: { seasonPlanId: { in: planIds }, dealer: { isActive: true } },
+        where: { seasonPlanId: { in: planIds }, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
         select: {
           seasonPlanId: true,
           dealer: { select: { id: true, name: true } },
@@ -302,7 +302,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
 
       if (mpBucket.size > 0) {
         const planDealers = (await prisma.planDealer.findMany({
-          where: { seasonPlanId: { in: allPlanIds }, dealer: { isActive: true } },
+          where: { seasonPlanId: { in: allPlanIds }, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
           select: {
             seasonPlanId: true,
             dealer: { select: { id: true, name: true } },

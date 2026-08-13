@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { NativeSelect } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DEALER_STATUSES, type DealerStatus } from "@/lib/dealer-status";
 
 interface GroupOpt { id: string; name: string }
 interface OfficerOpt { id: string; name: string }
@@ -23,10 +24,17 @@ export interface EditDealer {
   officerId: string | null;
   groupId: string | null;
   town: string | null;
-  isActive: boolean;
+  status: string; // PENDING | ACTIVE | INACTIVE | DEFAULTER
   inActivePlan: boolean; // already a member of the owning officer's active seasonal plan (via PlanDealer)
   aliases: { id: string; tallyName: string }[];
 }
+
+const STATUS_OPTIONS: { value: DealerStatus; label: string; note?: string }[] = [
+  { value: "PENDING", label: "Pending", note: "Awaiting approval. Participates in uploads, matching and recovery, but is not eligible for planning until set Active." },
+  { value: "ACTIVE", label: "Active", note: "Fully eligible everywhere, including planning." },
+  { value: "INACTIVE", label: "Inactive", note: "Hidden from active dropdowns and new plans; stays in historical plans, recovery and reports." },
+  { value: "DEFAULTER", label: "Defaulter", note: "Blocked from every planning screen (Dealer Plan, Product Summary, Territory Plan/Recovery). Uploads, recovery history, reports and audit are unaffected." },
+];
 
 /**
  * ONE dealer dialog — Create Mode and Edit Mode. Create reuses POST /api/dealers (the Dealers module
@@ -41,7 +49,7 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
   const [groupId, setGroupId] = useState("");
   const [officerId, setOfficerId] = useState("");
   const [town, setTown] = useState("");
-  const [isActive, setIsActive] = useState(true);
+  const [status, setStatus] = useState<DealerStatus>("ACTIVE");
   const [addToPlan, setAddToPlan] = useState(false);
   const [phase, setPhase] = useState<"form" | "duplicates">("form");
   const [duplicates, setDuplicates] = useState<Probable[]>([]);
@@ -55,7 +63,8 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
     setGroupId(edit?.groupId ?? "");
     setOfficerId(edit?.officerId ?? "");
     setTown(edit?.town ?? "");
-    setIsActive(edit?.isActive ?? true);
+    const s = (DEALER_STATUSES as readonly string[]).includes(edit?.status ?? "") ? (edit!.status as DealerStatus) : "ACTIVE";
+    setStatus(s);
     // Create defaults ON (new dealers usually participate in planning); Edit reflects current membership.
     setAddToPlan(edit ? edit.inActivePlan : true);
     setPhase("form");
@@ -81,7 +90,7 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
     mutationFn: (force?: boolean) => {
       if (isEdit && edit) {
         return api.patch<CreateResult>(`/api/dealers/${edit.id}`, {
-          name: name.trim(), alias: aliasName.trim() || undefined, officerId, groupId, town: town.trim() || undefined, isActive, addToSeasonalPlan: addToPlan,
+          name: name.trim(), alias: aliasName.trim() || undefined, officerId, groupId, town: town.trim() || undefined, status, addToSeasonalPlan: addToPlan,
         });
       }
       return api.post<CreateResult>("/api/dealers", {
@@ -161,27 +170,36 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
             {isEdit && (
               <div className="space-y-1.5">
                 <Label>Status</Label>
-                <div className="flex items-center gap-4 text-sm">
-                  <label className="flex items-center gap-1.5"><input type="radio" name="dealer-status" checked={isActive} onChange={() => setIsActive(true)} /> Active</label>
-                  <label className="flex items-center gap-1.5"><input type="radio" name="dealer-status" checked={!isActive} onChange={() => setIsActive(false)} /> Inactive</label>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm">
+                  {STATUS_OPTIONS.map((o) => (
+                    <label key={o.value} className="flex items-center gap-1.5">
+                      <input type="radio" name="dealer-status" checked={status === o.value} onChange={() => setStatus(o.value)} /> {o.label}
+                    </label>
+                  ))}
                 </div>
-                {!isActive && <p className="text-xs text-warning">Inactive dealers disappear from active dropdowns and can’t be added to new plans, but stay in historical plans, recovery and reports.</p>}
+                {STATUS_OPTIONS.find((o) => o.value === status)?.note && (
+                  <p className={`text-xs ${status === "ACTIVE" ? "text-muted-foreground" : "text-warning"}`}>
+                    {STATUS_OPTIONS.find((o) => o.value === status)!.note}
+                  </p>
+                )}
               </div>
             )}
 
             {/* Active Seasonal Plan membership. Create: default ON. Edit: reflects current membership and
-                is DISABLED once already included (removal is a separate, dedicated workflow). */}
+                is DISABLED once already included (removal is a separate workflow) or when the dealer is not
+                Active (only Active dealers are plan-eligible). */}
             <label className="flex items-start gap-2 text-sm">
               <input
                 type="checkbox"
                 className="mt-0.5 h-4 w-4"
-                checked={addToPlan}
-                disabled={isEdit && !!edit?.inActivePlan}
+                checked={addToPlan && (!isEdit || status === "ACTIVE")}
+                disabled={isEdit && (!!edit?.inActivePlan || status !== "ACTIVE")}
                 onChange={(e) => setAddToPlan(e.target.checked)}
               />
               <span>
                 Automatically add this dealer to the officer&apos;s Active Seasonal Plan
                 {isEdit && edit?.inActivePlan && <span className="mt-0.5 block text-xs text-muted-foreground">Already included in the Active Seasonal Plan.</span>}
+                {isEdit && !edit?.inActivePlan && status !== "ACTIVE" && <span className="mt-0.5 block text-xs text-muted-foreground">Only Active dealers can be added to a plan.</span>}
               </span>
             </label>
 

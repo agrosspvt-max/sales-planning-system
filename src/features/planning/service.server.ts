@@ -172,7 +172,8 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
   await assertSeasonOpen(input.seasonId);
   const dealerIds = await getCurrentDealerIds(officerId); // V4 — assigned dealers
   const [activeDealers, products, packSizes] = await Promise.all([
-    prisma.dealer.findMany({ where: { id: { in: dealerIds }, isActive: true }, orderBy: { name: "asc" } }),
+    // Defaulters are blocked from planning — never seed them into a new seasonal plan.
+    prisma.dealer.findMany({ where: { id: { in: dealerIds }, isActive: true, status: { not: "DEFAULTER" } }, orderBy: { name: "asc" } }),
     prisma.product.findMany({ where: { isActive: true }, orderBy: { name: "asc" } }), // V3
     getPlanningPackSizes(),
   ]);
@@ -302,10 +303,11 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
       include: {
         season: { select: { name: true, year: true, status: true, seasonalMode: true } },
         officer: { select: { name: true } },
-        // Exclude monthly-only additions (fromMonthlyPlan) and deactivated/deleted dealers
-        // (isActive=false) so the seasonal view shows only ACTIVE, seasonal dealers.
+        // Exclude monthly-only additions (fromMonthlyPlan), deactivated/deleted dealers
+        // (isActive=false) and Defaulters (blocked from planning) so the seasonal view shows
+        // only plan-eligible seasonal dealers. Existing PlanDealer rows are preserved on disk.
         dealers: {
-          where: { fromMonthlyPlan: false, dealer: { isActive: true } },
+          where: { fromMonthlyPlan: false, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
           include: {
             dealer: { select: { name: true, isActive: true } },
             lines: {

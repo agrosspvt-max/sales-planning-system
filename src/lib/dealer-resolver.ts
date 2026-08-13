@@ -49,9 +49,10 @@ export interface DealerResolver {
 
 export async function loadDealerResolver(): Promise<DealerResolver> {
   const [dealerRows, aliasRows] = await Promise.all([
-    // Only ACTIVE dealers participate in matching. Pending (created in Monthly Planning, not yet
-    // approved) and Rejected dealers are excluded from every importer/resolver.
-    prisma.dealer.findMany({ where: { status: "ACTIVE", isActive: true }, select: { id: true, name: true } }),
+    // Matching gates on isActive (source of truth: status !== "INACTIVE"). Pending, Active AND
+    // Defaulter dealers all participate in uploads/matching/recovery; only Inactive is excluded.
+    // (Planning eligibility is enforced separately — see the DEFAULTER exclusions in planning queries.)
+    prisma.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
     prisma.dealerAlias.findMany({ select: { tallyKey: true, systemDealerId: true } }),
   ]);
   const dealers: DealerMatch[] = decorate(dealerRows as { id: string; name: string }[]).map((dealer) => ({

@@ -30,6 +30,7 @@ interface UploadResult {
   createdDealers: number;
   existingDealers: number;
   aliasesAdded: number;
+  statusUpdated: number;
   addedToSeasonalPlans: number;
   skipped: number;
   errors: number;
@@ -91,7 +92,7 @@ export function DealerAliasPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Columns: <span className="font-medium">Dealer Name</span>, <span className="font-medium">Dealer Alias</span>, <span className="font-medium">Group</span>, <span className="font-medium">Sales Officer</span>, <span className="font-medium">Territory</span> (optional), <span className="font-medium">Add To Active Seasonal Plan</span> (Yes/No). Existing dealers get the alias only; new dealers are created, assigned, and aliased.
+            Columns: <span className="font-medium">Dealer Name</span>, <span className="font-medium">Dealer Alias</span> (optional), <span className="font-medium">Group</span>, <span className="font-medium">Sales Officer</span>, <span className="font-medium">Territory</span> (optional), <span className="font-medium">Dealer Status</span> (Pending/Active/Inactive/Defaulter — default Pending), <span className="font-medium">Add To Active Seasonal Plan</span> (Yes/No). Existing dealers get the alias and/or an updated status; new dealers are created with the given status (default Pending), assigned, and aliased. Only Active dealers are added to a plan.
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <Button asChild variant="outline">
@@ -115,6 +116,7 @@ export function DealerAliasPage() {
                 <span>Created Dealers: <span className="font-medium">{result.createdDealers}</span></span>
                 <span>Existing Dealers: <span className="font-medium">{result.existingDealers}</span></span>
                 <span>Aliases Added: <span className="font-medium">{result.aliasesAdded}</span></span>
+                <span>Status Updated: <span className="font-medium">{result.statusUpdated}</span></span>
                 <span>Added To Seasonal Plans: <span className="font-medium">{result.addedToSeasonalPlans}</span></span>
                 <span>Skipped: <span className="font-medium">{result.skipped}</span></span>
                 <span className={result.errors > 0 ? "text-destructive" : undefined}>Errors: <span className="font-medium">{result.errors}</span></span>

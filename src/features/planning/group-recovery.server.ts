@@ -103,7 +103,9 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
       officerId: true,
       status: true,
       dealers: {
-        where: { dealer: { isActive: true } },
+        // Territory Recovery planning excludes Defaulters (blocked from planning). Per-officer recovery
+        // history/detail (getRecoveryPlan) keeps them, so operational recovery is unaffected.
+        where: { dealer: { isActive: true, status: { not: "DEFAULTER" } } },
         orderBy: { dealer: { name: "asc" } },
         select: {
           dealerId: true,

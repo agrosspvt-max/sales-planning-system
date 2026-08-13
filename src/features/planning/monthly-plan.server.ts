@@ -9,6 +9,7 @@ import { saveMonthlySchema } from "@/lib/validations/planning";
 import { isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { tightKey } from "@/lib/match-key";
 import { findProbableDealers } from "@/lib/dealer-resolver";
+import { DEALER_STATUSES, isActiveForStatus } from "@/lib/dealer-status";
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { buildMonthlyDealers } from "./monthly.server";
@@ -225,9 +226,9 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const [season, planDealers, month, noPlanRows] = await Promise.all([
     prisma.season.findUnique({ where: { id: seasonId }, select: { name: true, year: true, monthlyMode: true } }),
     prisma.planDealer.findMany({
-      // Only ACTIVE dealers (isActive) appear: excludes deactivated/deleted/rejected (all
-      // isActive=false). Pending monthly-created dealers stay visible to their creator (isActive=true).
-      where: { seasonPlanId: mp.seasonPlanId, dealer: { isActive: true } },
+      // Only isActive dealers appear (excludes Inactive/deleted). Defaulters are blocked from every
+      // planning screen. Pending monthly-created dealers stay visible to their creator (isActive=true).
+      where: { seasonPlanId: mp.seasonPlanId, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
       include: {
         dealer: { select: { name: true, mobile: true, village: true, tehsil: true, district: true, address: true } },
         lines: {
@@ -575,9 +576,10 @@ export interface DealerCreateOutcome {
 }
 
 /**
- * Create a dealer from Monthly Planning (Sales Officer). PENDING_APPROVAL until the Monthly Plan
- * is approved; appears ONLY in this officer's monthly plan (PlanDealer `fromMonthlyPlan`), never
- * in matching/recovery/seasonal until then. Reused by the Admin path via `createDealerForOfficer`.
+ * Create a dealer from Monthly Planning (Sales Officer). Created PENDING and stays PENDING until an
+ * admin sets it Active (dealer approval is decoupled from plan approval). It participates in
+ * matching/recovery (isActive) but is not planning-eligible while Pending. Appears in this officer's
+ * monthly plan (PlanDealer `fromMonthlyPlan`). Reused by the Admin path via `createDealerForOfficer`.
  * Runs the shared duplicate check first (unless `force`).
  */
 export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: string, raw: unknown): Promise<DealerCreateOutcome> {
@@ -594,7 +596,7 @@ export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
   }
 
   const dealer = await prisma.dealer.create({
-    data: { ...dealerData(data), status: "PENDING_APPROVAL", createdByUserId: ctx.userId, createdFrom: "MONTHLY_PLAN" },
+    data: { ...dealerData(data), status: "PENDING", createdByUserId: ctx.userId, createdFrom: "MONTHLY_PLAN" },
   });
   await prisma.planDealer.create({ data: { seasonPlanId: mp.seasonPlanId, dealerId: dealer.id, fromMonthlyPlan: true } });
   return { dealerId: dealer.id, dealerName: dealer.name };
@@ -606,6 +608,9 @@ const adminCreateSchema = dealerFieldsSchema.extend({
   groupId: z.string().optional(), // validate the officer belongs to this group
   aliasName: z.string().max(200).optional(), // Tally alias (defaults to the dealer name)
   addToSeasonalPlan: z.boolean().optional(),
+  // Approval status to create with. Admin create form omits it → ACTIVE (unchanged). The Excel import
+  // passes the parsed "Dealer Status" column (defaults PENDING there). isActive is derived from it.
+  status: z.enum(DEALER_STATUSES).optional(),
 });
 
 /**
@@ -637,16 +642,18 @@ export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Pr
     }
   }
 
+  const status = data.status ?? "ACTIVE";
   const created = await prisma.$transaction(
     async (tx: Tx) => {
       const dealer = await tx.dealer.create({
-        data: { ...dealerData(data), status: "ACTIVE", createdByUserId: ctx.userId, createdFrom: "ADMIN" },
+        data: { ...dealerData(data), status, isActive: isActiveForStatus(status), createdByUserId: ctx.userId, createdFrom: "ADMIN" },
       });
       await applyDealerAssignment(tx, dealer.id, data.officerId, new Date());
       // Save the alias automatically (the supplied Tally name, else the dealer name).
       await ensureDealerAlias(tx, dealer.id, aliasName || dealer.name);
       let plan: { added: boolean; warning?: string } = { added: false };
-      if (data.addToSeasonalPlan) plan = await addDealerToActiveSeasonalPlan(tx, data.officerId, dealer.id);
+      // Only ACTIVE dealers are plan-eligible; never auto-add a Pending/Inactive/Defaulter dealer.
+      if (data.addToSeasonalPlan && status === "ACTIVE") plan = await addDealerToActiveSeasonalPlan(tx, data.officerId, dealer.id);
       return { id: dealer.id, name: dealer.name, plan };
     },
     { timeout: 60000, maxWait: 10000 },
@@ -689,7 +696,7 @@ export async function updateMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
   })) as { fromMonthlyPlan: boolean } | null;
   if (!pd?.fromMonthlyPlan) throw new ApiError(403, "Only a dealer created here can be edited");
   const dealer = (await prisma.dealer.findUnique({ where: { id: dealerId }, select: { status: true } })) as { status: string } | null;
-  if (dealer?.status !== "PENDING_APPROVAL") throw new ApiError(409, "This dealer is no longer editable");
+  if (dealer?.status !== "PENDING") throw new ApiError(409, "This dealer is no longer editable");
   const data = dealerFieldsSchema.parse(raw);
   await prisma.dealer.update({ where: { id: dealerId }, data: dealerData(data) });
   return { dealerId };
@@ -809,26 +816,10 @@ export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.APPROVED, approvedAt: new Date() } });
   await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_ADMIN, PlanStatus.APPROVED);
 
-  // On FINAL approval, dealers created from this monthly plan become permanent: activate them
-  // and assign them to the officer (reusing the existing assignment service). Idempotent — the
-  // PENDING_APPROVAL guard means already-active dealers are skipped.
-  const newDealers = (await prisma.planDealer.findMany({
-    where: { seasonPlanId: mp.seasonPlanId, fromMonthlyPlan: true, dealer: { status: "PENDING_APPROVAL", createdByUserId: mp.officerId } },
-    select: { dealerId: true, dealer: { select: { name: true } } },
-  })) as { dealerId: string; dealer: { name: string } }[];
-  if (newDealers.length > 0) {
-    await prisma.$transaction(
-      async (tx: Tx) => {
-        const now = new Date();
-        for (const nd of newDealers) {
-          await tx.dealer.updateMany({ where: { id: nd.dealerId, status: "PENDING_APPROVAL" }, data: { status: "ACTIVE" } });
-          await applyDealerAssignment(tx, nd.dealerId, mp.officerId, now);
-          await ensureDealerAlias(tx, nd.dealerId, nd.dealer.name);
-        }
-      },
-      { timeout: 60000, maxWait: 10000 },
-    );
-  }
+  // NOTE: Dealer approval is fully DECOUPLED from plan approval. Approving a monthly plan must never
+  // change a dealer's status — SO-created dealers stay PENDING until an admin activates them from the
+  // Dealer Alias → Edit dialog. (Previously this block flipped them to ACTIVE + assigned + aliased; that
+  // coupling has been removed intentionally.)
 
   await createNotification({
     userId: mp.officerId,
@@ -865,17 +856,9 @@ export async function rejectMonthlyPlan(ctx: AuthContext, monthlyPlanId: string,
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.REJECTED } });
   await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.REJECT, mp.status, PlanStatus.REJECTED, remarks);
 
-  // Rejection is terminal for dealers created in this plan: mark them REJECTED + inactive so they
-  // never participate in matching, recovery, seasonal planning or reports (proper rejected
-  // lifecycle — no permanently-pending strays).
-  await prisma.dealer.updateMany({
-    where: {
-      status: "PENDING_APPROVAL",
-      createdByUserId: mp.officerId,
-      planDealers: { some: { seasonPlanId: mp.seasonPlanId, fromMonthlyPlan: true } },
-    },
-    data: { status: "REJECTED", isActive: false },
-  });
+  // Dealer status is DECOUPLED from plan workflow: rejecting a monthly plan no longer changes the
+  // status of dealers created in it. They remain PENDING for an admin to triage (activate, mark
+  // Inactive, or Defaulter) from the Dealer Alias → Edit dialog — an independent admin action.
   await createNotification({
     userId: mp.officerId,
     type: NotificationType.PLAN_RETURNED,

@@ -37,6 +37,19 @@ const TABS: { key: Filter; label: string; countKey: keyof Resp["counts"] }[] = [
 interface GroupOpt { id: string; name: string }
 interface OfficerOpt { id: string; name: string }
 
+/** 4-status approval badge (PENDING_APPROVAL kept as a fallback for un-migrated rows). */
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; variant: "muted" | "success" | "warning" | "destructive" }> = {
+    PENDING: { label: "Pending", variant: "muted" },
+    PENDING_APPROVAL: { label: "Pending", variant: "muted" },
+    ACTIVE: { label: "Active", variant: "success" },
+    INACTIVE: { label: "Inactive", variant: "warning" },
+    DEFAULTER: { label: "Defaulter", variant: "destructive" },
+  };
+  const s = map[status] ?? { label: status, variant: "muted" as const };
+  return <Badge variant={s.variant}>{s.label}</Badge>;
+}
+
 export function DealerCoveragePanel() {
   const [filter, setFilter] = useState<Filter>("without");
   const [search, setSearch] = useState("");
@@ -61,7 +74,7 @@ export function DealerCoveragePanel() {
   // The dealer being edited is derived from LIVE data so the dialog reflects alias add/remove at once.
   const editRow = data?.dealers.find((d) => d.id === editId) ?? null;
   const editDealer: EditDealer | null = editRow
-    ? { id: editRow.id, name: editRow.name, officerId: editRow.officerId, groupId: editRow.groupId, town: editRow.town, isActive: editRow.isActive, inActivePlan: editRow.inActivePlan, aliases: editRow.aliases }
+    ? { id: editRow.id, name: editRow.name, officerId: editRow.officerId, groupId: editRow.groupId, town: editRow.town, status: editRow.status, inActivePlan: editRow.inActivePlan, aliases: editRow.aliases }
     : null;
 
   // Client-side search across the loaded dealers: matches the System Dealer name OR any alias name
@@ -157,7 +170,7 @@ export function DealerCoveragePanel() {
                       <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
-                  <TableCell>{d.status === "PENDING_APPROVAL" ? <Badge variant="muted">Pending</Badge> : <span className="text-muted-foreground">Active</span>}</TableCell>
+                  <TableCell><StatusBadge status={d.status} /></TableCell>
                   <TableCell className="text-right">
                     <Button size="sm" variant="outline" onClick={() => setEditId(d.id)}>Edit</Button>
                   </TableCell>

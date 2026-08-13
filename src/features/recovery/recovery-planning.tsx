@@ -104,7 +104,7 @@ export function RecoveryPlanning({ role, mode }: { role: Role; mode: RecoveryMod
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl max-h-[90vh]">
           <DialogHeader><DialogTitle>Import Recovery from Aging Report</DialogTitle></DialogHeader>
           <RecoveryImportWizard officerOptions={options?.officers ?? []} title="Recovery from Aging Report" onDone={() => setOpen(false)} />
         </DialogContent>

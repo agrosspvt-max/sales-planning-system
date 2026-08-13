@@ -271,7 +271,7 @@ export function OfficerPlansManagement({ officerId, role }: { officerId: string;
 
       {/* Recovery import (Create / Update / Replace) scoped to THIS officer — officer already known. */}
       <Dialog open={recoveryImport} onOpenChange={setRecoveryImport}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl max-h-[90vh]">
           <DialogHeader><DialogTitle>Recovery Import (this officer)</DialogTitle></DialogHeader>
           <RecoveryImportWizard fixedScope={{ kind: "SINGLE", officerId }} onDone={() => { setRecoveryImport(false); invalidate(); }} />
         </DialogContent>

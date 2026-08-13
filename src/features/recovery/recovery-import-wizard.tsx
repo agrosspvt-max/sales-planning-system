@@ -149,9 +149,11 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
   const anyExisting = useMemo(() => analysis?.officers.some((o) => o.existingRecovery) ?? false, [analysis]);
 
   return (
-    <Card>
-      <CardHeader><CardTitle className="text-base">{title}</CardTitle></CardHeader>
-      <CardContent className="space-y-4">
+    // Height-capped flex column: header stays fixed, only the body scrolls, per-step action rows stay
+    // pinned at the bottom (see the `sticky bottom-0` footers below). Layout only — no logic changes.
+    <Card className="flex max-h-[calc(90vh-7rem)] flex-col">
+      <CardHeader className="shrink-0"><CardTitle className="text-base">{title}</CardTitle></CardHeader>
+      <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto">
         {error && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-2 text-sm text-destructive">{error}</div>}
 
         {step === "upload" && (
@@ -197,7 +199,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
               <Label>Aging Report (Bills Receivable .xlsx)</Label>
               <input type="file" accept=".xlsx,.xls" className="block text-sm" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setError(null); }} />
             </div>
-            <div className="flex justify-end">
+            <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-end border-t bg-card px-6 py-3">
               <Button onClick={() => analyzeMut.mutate()} disabled={!file || !monthId || !cutoff || !scopeReady || analyzeMut.isPending}>
                 {analyzeMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Analyzing…</> : <><ArrowRight className="h-4 w-4" /> Analyze</>}
               </Button>
@@ -298,7 +300,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
               </div>
             )}
 
-            <div className="flex justify-between">
+            <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-between border-t bg-card px-6 py-3">
               <Button variant="outline" onClick={() => setStep("upload")}><ArrowLeft className="h-4 w-4" /> Back</Button>
               <Button onClick={() => { setRetryIds(null); commitMut.mutate(); }} disabled={commitMut.isPending || !mode || analysis.summary.accepted === 0}>
                 {commitMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Working…</> : <>{mode === "UPDATE" ? <RefreshCw className="h-4 w-4" /> : <Check className="h-4 w-4" />} {mode === "UPDATE" ? "Update Recovery" : mode === "REPLACE" ? "Replace Recovery" : "Create Recovery"}</>}
@@ -335,7 +337,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
               </div>
             )}
 
-            <div className="flex flex-wrap gap-2">
+            <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex flex-wrap justify-end gap-2 border-t bg-card px-6 py-3">
               {result.recoveryPlanIds.length === 1 && <Button asChild><Link href={`/planning/recovery/${result.recoveryPlanIds[0]}`}>Open Recovery Plan</Link></Button>}
               <Button variant="outline" onClick={() => onDone?.()}>Done</Button>
             </div>

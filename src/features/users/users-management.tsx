@@ -20,6 +20,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { NativeSelect } from "@/components/ui/select";
 import { UsersTablePanel } from "./user-table";
 
 type View = "group" | "all";
@@ -43,8 +44,83 @@ export function UsersManagement() {
           </button>
         ))}
       </div>
-      {view === "group" ? <GroupCards onOpen={setGroup} /> : <UsersTablePanel />}
+      {view === "group" ? <GroupCards onOpen={setGroup} /> : <AllUsersPanel />}
     </div>
+  );
+}
+
+/* -------------------------------- All Users ------------------------------- */
+
+/** All Users (Sales Officers + Regional Managers) with a Create User action and role badges/actions. */
+function AllUsersPanel() {
+  const [createOpen, setCreateOpen] = useState(false);
+  return (
+    <>
+      <UsersTablePanel
+        includeManagers
+        headerRight={<Button size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" /> Create User</Button>}
+        emptyMessage="No users yet."
+      />
+      <CreateUserDialog open={createOpen} onOpenChange={setCreateOpen} />
+    </>
+  );
+}
+
+function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<"SALES_OFFICER" | "REGIONAL_MANAGER">("SALES_OFFICER");
+  const [groupId, setGroupId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const { data: groups } = useQuery<Group[]>({ queryKey: ["groups"], queryFn: () => api.get<Group[]>("/api/groups"), enabled: open });
+
+  const createMut = useMutation({
+    mutationFn: () => api.post("/api/users", { name: name.trim(), username: username.trim(), password, role, groupId: groupId || undefined }),
+    onSuccess: () => {
+      setName(""); setUsername(""); setPassword(""); setRole("SALES_OFFICER"); setGroupId(""); setError(null);
+      onOpenChange(false);
+      qc.invalidateQueries({ queryKey: ["officers"] });
+      qc.invalidateQueries({ queryKey: ["groups"] });
+    },
+    onError: (e) => setError((e as Error).message),
+  });
+
+  // A Regional Manager must belong to a group (one RM per group).
+  const canSubmit = name.trim() && username.trim().length >= 3 && password.length >= 6 && (role === "SALES_OFFICER" || !!groupId) && !createMut.isPending;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Create User</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5"><Label>Full name *</Label><Input value={name} onChange={(e) => setName(e.target.value)} /></div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5"><Label>Username *</Label><Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="letters, numbers, . _ -" /></div>
+            <div className="space-y-1.5"><Label>Password *</Label><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" /></div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Role *</Label>
+              <NativeSelect value={role} onChange={(e) => setRole(e.target.value as "SALES_OFFICER" | "REGIONAL_MANAGER")}
+                options={[{ value: "SALES_OFFICER", label: "Sales Officer" }, { value: "REGIONAL_MANAGER", label: "Regional Manager" }]} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Group {role === "REGIONAL_MANAGER" ? "*" : "(optional)"}</Label>
+              <NativeSelect value={groupId} onChange={(e) => setGroupId(e.target.value)}
+                options={[{ value: "", label: "No group" }, ...(groups ?? []).map((g) => ({ value: g.id, label: g.name }))]} />
+            </div>
+          </div>
+          {role === "REGIONAL_MANAGER" && <p className="text-xs text-muted-foreground">A group may have only one Regional Manager.</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={() => createMut.mutate()} disabled={!canSubmit}>Create</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -126,7 +202,8 @@ function GroupDetail({ group, onBack }: { group: { id: string; name: string }; o
       />
       <UsersTablePanel
         groupId={group.id}
-        emptyMessage="No Sales Officers in this group."
+        includeManagers
+        emptyMessage="No users in this group."
         emptyAction={<Button size="sm" onClick={() => setAddOpen(true)}><Plus className="h-4 w-4" /> Add Sales Officer</Button>}
       />
       <AddOfficersDialog groupId={group.id} open={addOpen} onOpenChange={setAddOpen} />

@@ -7,7 +7,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { loadDealerResolver, type MatchType } from "@/lib/dealer-resolver";
 import { tightKey } from "@/lib/match-key";
 import { createAndAssignDealer } from "@/features/assignments/service.server";
-import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
+import { getOfficerScope, assertOfficerInScope, isPlanOwner } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
@@ -385,15 +385,13 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
 
 /* -------------------------------- Lists ----------------------------------- */
 
-export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[]) {
+export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[], mine = false) {
   const scope = await getOfficerScope(ctx);
-  //Temp test fixxxxx
-  console.log("ROLE:", ctx.role);
-  console.log("USER:", ctx.userId);
-  console.log("SCOPE:", scope);
+  // "My Plans" narrows to the caller's own recovery plans (used by RMs).
+  const officerWhere = mine ? ctx.userId : scope.all ? undefined : { in: scope.ids };
   const rows = await prisma.recoveryPlan.findMany({
     where: {
-      officerId: scope.all ? undefined : { in: scope.ids },
+      officerId: officerWhere,
       status: statuses ? { in: statuses } : undefined,
       // Deactivated recovery plans — and any under a deactivated SEASONAL plan — are hidden from the
       // Sales Officer; Admin/RM still see them. (seasonPlanId null tolerated for legacy rows.)
@@ -447,7 +445,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   }
   await assertOfficerInScope(ctx, plan.officerId);
 
-  const isOwner = ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, plan.officerId);
   const canManage = isOwner || ctx.role === Role.SUPER_ADMIN;
   // A closed/deactivated recovery (or parent seasonal) plan is frozen — no month/week editing.
   const isLive = ((plan as { lifecycleState?: string }).lifecycleState ?? "ACTIVE") === "ACTIVE" && (parentLifecycle ?? "ACTIVE") === "ACTIVE";
@@ -587,7 +585,7 @@ async function loadEditablePlan(ctx: AuthContext, id: string) {
     select: { id: true, officerId: true, status: true, weeklyEditEnabled: true, lifecycleState: true, seasonPlan: { select: { lifecycleState: true } } },
   });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
-  const isOwner = ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, plan.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot edit this recovery plan");
   return plan as typeof plan & { lifecycleState: string; seasonPlan: { lifecycleState: string } | null };
 }

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { auth } from "@/auth";
+import { requireAuth } from "@/lib/http";
 import { ROLE_LABELS } from "@/lib/rbac";
 import { PageHeader } from "@/components/layout/page-header";
 import { getDashboard } from "@/features/dashboard/service.server";
@@ -19,11 +20,8 @@ import type { RankRow } from "@/features/reports/types";
 
 export default async function DashboardPage() {
   const session = await auth();
-  const ctx = {
-    userId: session!.user.id,
-    role: session!.user.role,
-    username: session!.user.username,
-  };
+  // requireAuth resolves the full context (incl. groupId) from the DB — needed for RM group scoping.
+  const ctx = await requireAuth();
   const data = await getDashboard(ctx);
 
   return (

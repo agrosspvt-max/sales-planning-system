@@ -68,10 +68,12 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
   const qc = useQueryClient();
   const isAdmin = role === Role.SUPER_ADMIN;
   const isOfficer = role === Role.SALES_OFFICER;
+  const isManager = role === Role.REGIONAL_MANAGER;
   const isCreate = mode === "create";
 
   const [tab, setTab] = useState<Tab>("SEASONAL");
   const [officerFilter, setOfficerFilter] = useState(""); // admin: "" = all officers
+  const [myPlansOnly, setMyPlansOnly] = useState(false); // RM: "My Plans" vs the whole group
   const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("ACTIVE");
   const [open, setOpen] = useState(false);
 
@@ -86,8 +88,8 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
   const [error, setError] = useState<string | null>(null);
 
   const { data: plans, isLoading } = useQuery<PlanListItem[]>({
-    queryKey: ["plans"],
-    queryFn: () => api.get<PlanListItem[]>("/api/planning/season-plans"),
+    queryKey: ["plans", isManager && myPlansOnly ? "mine" : "scope"],
+    queryFn: () => api.get<PlanListItem[]>(`/api/planning/season-plans${isManager && myPlansOnly ? "?mine=true" : ""}`),
   });
   const { data: options } = useQuery<Options>({
     queryKey: ["import-options"],
@@ -142,7 +144,8 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
   }
 
   const years = Array.from({ length: 5 }, (_, i) => now.getFullYear() + i);
-  const canCreateSeasonal = isCreate && tab === "SEASONAL" && (isAdmin || isOfficer);
+  // RM can create their OWN seasonal plan (My Plans), same self-owned flow as a Sales Officer.
+  const canCreateSeasonal = isCreate && tab === "SEASONAL" && (isAdmin || isOfficer || isManager);
 
   return (
     <div className="space-y-5">
@@ -197,6 +200,20 @@ export function SalesPlanning({ role, mode }: { role: Role; mode: SalesMode }) {
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {/* My Plans vs the whole group — Regional Manager only. */}
+          {isManager && (
+            <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
+              {[{ v: false, l: "Group Plans" }, { v: true, l: "My Plans" }].map((o) => (
+                <button
+                  key={o.l}
+                  onClick={() => setMyPlansOnly(o.v)}
+                  className={cn("rounded px-2.5 py-1 font-medium", myPlansOnly === o.v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
+                >
+                  {o.l}
+                </button>
+              ))}
+            </div>
+          )}
           {/* Lifecycle filter — Active (default) / Closed / Deactivated / All. */}
           <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
             {LIFECYCLE_FILTERS.map((f) => (

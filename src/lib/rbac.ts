@@ -55,6 +55,9 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
     planImport: ["read", "create"],
     onboarding: ["read", "create"],
   },
+  // Regional Manager — planning/recovery WRITE within their own group (scope enforced separately in
+  // getOfficerScope / group checks), plus scoped reads of master data. NOT master-data writes, user
+  // management, Sales Upload or Dealer Alias (those stay Super-Admin-only).
   [Role.REGIONAL_MANAGER]: {
     products: ["read"],
     categories: ["read"],
@@ -65,8 +68,8 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
     announcements: ["read"],
     dealerAssignments: ["read"],
     rmAssignments: ["read"],
-    salesPlanning: ["read"],
-    recoveryPlanning: ["read"],
+    salesPlanning: ["read", "create", "update"],
+    recoveryPlanning: ["read", "create", "update"],
     schemePlanning: ["read"],
     partyPlanning: ["read"],
   },

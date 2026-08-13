@@ -7,7 +7,8 @@ export async function GET(req: NextRequest) {
   return handle(async () => {
     const ctx = await requireAuth();
     const seasonId = req.nextUrl.searchParams.get("seasonId") ?? undefined;
-    return ok(await listPlans(ctx, seasonId));
+    const mine = req.nextUrl.searchParams.get("mine") === "true";
+    return ok(await listPlans(ctx, seasonId, mine));
   });
 }
 

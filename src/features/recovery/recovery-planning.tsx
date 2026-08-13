@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { Upload } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { formatDate } from "@/lib/utils";
+import { formatDate, cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
@@ -40,12 +40,14 @@ const VIEW_STATUSES = "APPROVED";
 export function RecoveryPlanning({ role, mode }: { role: Role; mode: RecoveryMode }) {
   const isAdmin = role === Role.SUPER_ADMIN;
   const isOfficer = role === Role.SALES_OFFICER;
+  const isManager = role === Role.REGIONAL_MANAGER;
   const isCreate = mode === "create";
   const statuses = isCreate ? CREATE_STATUSES : VIEW_STATUSES;
+  const [myPlansOnly, setMyPlansOnly] = useState(false); // RM: "My Plans" vs the whole group
 
   const { data: plans, isLoading } = useQuery<RecoveryPlanRow[]>({
-    queryKey: ["recovery-plans", statuses],
-    queryFn: () => api.get<RecoveryPlanRow[]>(`/api/recovery/plans?status=${statuses}`),
+    queryKey: ["recovery-plans", statuses, isManager && myPlansOnly ? "mine" : "scope"],
+    queryFn: () => api.get<RecoveryPlanRow[]>(`/api/recovery/plans?status=${statuses}${isManager && myPlansOnly ? "&mine=true" : ""}`),
   });
 
   const [open, setOpen] = useState(false);
@@ -67,6 +69,21 @@ export function RecoveryPlanning({ role, mode }: { role: Role; mode: RecoveryMod
           ) : undefined
         }
       />
+
+      {/* My Plans vs the whole group — Regional Manager only. */}
+      {isManager && (
+        <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
+          {[{ v: false, l: "Group Plans" }, { v: true, l: "My Plans" }].map((o) => (
+            <button
+              key={o.l}
+              onClick={() => setMyPlansOnly(o.v)}
+              className={cn("rounded px-2.5 py-1 font-medium", myPlansOnly === o.v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
+            >
+              {o.l}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="rounded-lg border bg-background">
         <Table>

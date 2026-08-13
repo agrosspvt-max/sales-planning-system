@@ -67,6 +67,10 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
   if (ctx.role !== Role.SUPER_ADMIN && ctx.role !== Role.REGIONAL_MANAGER) {
     throw new ApiError(403, "Only an admin or manager can view group recovery");
   }
+  // A Regional Manager may only view their OWN group's recovery.
+  if (ctx.role === Role.REGIONAL_MANAGER && ctx.groupId !== groupId) {
+    throw new ApiError(403, "You can only view your own group's recovery");
+  }
   const buckets = bucketsIn.length ? bucketsIn : (["approved"] as StatusBucket[]);
   const selected = new Set(buckets);
 

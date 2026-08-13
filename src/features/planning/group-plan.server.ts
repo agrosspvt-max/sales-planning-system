@@ -116,6 +116,10 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   if (ctx.role !== Role.SUPER_ADMIN && ctx.role !== Role.REGIONAL_MANAGER) {
     throw new ApiError(403, "Only an admin or manager can view group planning");
   }
+  // A Regional Manager may only view their OWN group's planning.
+  if (ctx.role === Role.REGIONAL_MANAGER && ctx.groupId !== groupId) {
+    throw new ApiError(403, "You can only view your own group's planning");
+  }
   const buckets = filter.buckets.length ? filter.buckets : (["approved"] as StatusBucket[]);
   const selected = new Set(buckets);
 

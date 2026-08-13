@@ -7,6 +7,7 @@ import {
   getCurrentDealerIds,
   getCurrentManagerId,
   getOfficerScope,
+  isPlanOwner,
 } from "@/lib/scope";
 import { saveLinesSchema, remarksSchema, revisionRequestSchema } from "@/lib/validations/planning";
 import { NotificationType } from "@prisma/client";
@@ -141,16 +142,22 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
   let officerId: string;
   if (ctx.role === Role.SALES_OFFICER) {
     officerId = ctx.userId;
+  } else if (ctx.role === Role.REGIONAL_MANAGER) {
+    // An RM creates plans only for THEMSELVES (My Plans) — same self-owned flow as a Sales Officer.
+    officerId = ctx.userId;
   } else if (ctx.role === Role.SUPER_ADMIN) {
     if (!input.officerId) throw new ApiError(422, "Select a Sales Officer for this plan");
     officerId = input.officerId;
   } else {
-    throw new ApiError(403, "Only a Sales Officer or Super Admin can create a plan");
+    throw new ApiError(403, "You are not allowed to create a plan");
   }
 
   const officer = await prisma.user.findUnique({ where: { id: officerId } });
-  if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) {
-    throw new ApiError(422, "The selected Sales Officer is missing or inactive");
+  // The owner must be an active Sales Officer, OR the Regional Manager creating their own plan.
+  const ownerOk = officer && officer.isActive &&
+    (officer.role === Role.SALES_OFFICER || (officer.role === Role.REGIONAL_MANAGER && officer.id === ctx.userId));
+  if (!ownerOk) {
+    throw new ApiError(422, "The selected plan owner is missing or inactive");
   }
 
   const existing = await prisma.seasonPlan.findMany({
@@ -221,7 +228,7 @@ export async function setDealerNoPlan(
   reason?: string,
 ): Promise<{ noPlan: boolean; noPlanReason: string | null }> {
   const plan = await loadPlanOr404(planId);
-  const isOwner = ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, plan.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this plan");
   if (!EDITABLE.includes(plan.status)) throw new ApiError(409, "This plan is not editable");
   assertLifecycleEditable(plan.lifecycleState);
@@ -263,7 +270,8 @@ export async function createSeasonalPlans(
   });
 
   let officerIds: string[];
-  if (ctx.role === Role.SALES_OFFICER) {
+  if (ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER) {
+    // Sales Officer and Regional Manager both create only their OWN plan (My Plans).
     officerIds = [ctx.userId];
   } else if (ctx.role === Role.SUPER_ADMIN) {
     if (input.officerScope === "all") {
@@ -355,7 +363,7 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
     : [];
   const columnPacks = [...planningPacks, ...extraPacks].sort((a, b) => a.displayOrder - b.displayOrder);
 
-  const isOwner = ctx.userId === plan.officerId && ctx.role === Role.SALES_OFFICER;
+  const isOwner = isPlanOwner(ctx, plan.officerId);
   const canEdit = isOwner && EDITABLE.includes(plan.status) && plan.season.status === SeasonStatus.OPEN;
   // Admin Override: a Super Admin may correct the APPROVED, active version (read-only flag only).
   const canAdminEdit =
@@ -542,7 +550,7 @@ export async function saveLines(ctx: AuthContext, planId: string, raw: unknown) 
   const { lines } = saveLinesSchema.parse(raw);
   const plan = await loadPlanOr404(planId);
 
-  if (!(ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId)) {
+  if (!(isPlanOwner(ctx, plan.officerId))) {
     throw new ApiError(403, "Only the owning Sales Officer can edit this plan"); // V11
   }
   if (!EDITABLE.includes(plan.status)) {
@@ -604,7 +612,7 @@ export async function saveLines(ctx: AuthContext, planId: string, raw: unknown) 
 
 export async function submitPlan(ctx: AuthContext, planId: string) {
   const plan = await loadPlanOr404(planId);
-  if (!(ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId)) {
+  if (!(isPlanOwner(ctx, plan.officerId))) {
     throw new ApiError(403, "Only the owning Sales Officer can submit this plan");
   }
   if (!EDITABLE.includes(plan.status)) {
@@ -677,7 +685,7 @@ export async function submitPlan(ctx: AuthContext, planId: string) {
 
 export async function recallPlan(ctx: AuthContext, planId: string) {
   const plan = await loadPlanOr404(planId);
-  if (!(ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId)) {
+  if (!(isPlanOwner(ctx, plan.officerId))) {
     throw new ApiError(403, "Only the owning Sales Officer can recall this plan");
   }
   if (!PENDING.includes(plan.status)) {
@@ -796,7 +804,7 @@ export async function rejectPlan(ctx: AuthContext, planId: string, raw: unknown)
 export async function requestRevision(ctx: AuthContext, planId: string, raw: unknown) {
   const { reason } = revisionRequestSchema.parse(raw);
   const plan = await loadPlanOr404(planId);
-  if (!(ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId)) {
+  if (!(isPlanOwner(ctx, plan.officerId))) {
     throw new ApiError(403, "Only the owning Sales Officer can request a revision");
   }
   if (!(plan.status === PlanStatus.APPROVED && plan.isActiveVersion)) {
@@ -919,12 +927,14 @@ export async function getPlanHistory(ctx: AuthContext, planId: string) {
   };
 }
 
-export async function listPlans(ctx: AuthContext, seasonId?: string) {
+export async function listPlans(ctx: AuthContext, seasonId?: string, mine = false) {
   const scope = await getOfficerScope(ctx);
+  // "My Plans" narrows to the caller's own plans (used by RMs, who otherwise see the whole group).
+  const officerWhere = mine ? ctx.userId : scope.all ? undefined : { in: scope.ids };
   const plans = await prisma.seasonPlan.findMany({
     where: {
       seasonId: seasonId || undefined,
-      officerId: scope.all ? undefined : { in: scope.ids },
+      officerId: officerWhere,
       // Deactivated plans are hidden from the Sales Officer; Admin/RM still see them.
       ...officerVisibilityWhere(ctx),
     },
@@ -959,7 +969,7 @@ export async function listPlans(ctx: AuthContext, seasonId?: string) {
 function canManagePlan(ctx: AuthContext, plan: { officerId: string }): boolean {
   return (
     ctx.role === Role.SUPER_ADMIN ||
-    (ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId)
+    (isPlanOwner(ctx, plan.officerId))
   );
 }
 

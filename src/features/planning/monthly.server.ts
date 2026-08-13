@@ -2,7 +2,7 @@ import "server-only";
 import { PlanStatus, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { assertOfficerInScope } from "@/lib/scope";
+import { assertOfficerInScope, isPlanOwner } from "@/lib/scope";
 import { saveMonthlySchema } from "@/lib/validations/planning";
 import { figuresForMode, isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { getEditableMonthMap, assertMonthOpen } from "./planning-state.server";
@@ -57,7 +57,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
     prisma.seasonMonth.findMany({ where: { seasonId: plan.seasonId }, orderBy: { order: "asc" } }),
   ]);
 
-  const isOwner = ctx.userId === plan.officerId && ctx.role === Role.SALES_OFFICER;
+  const isOwner = isPlanOwner(ctx, plan.officerId);
   // Mode saved on THIS season, never the current global default.
   const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
 
@@ -181,7 +181,7 @@ export async function saveMonthly(ctx: AuthContext, planId: string, raw: unknown
   // The owning Sales Officer enters plan & actuals for their own plan; a Super Admin may
   // also enter actuals (manual Actual Sales entry) on any plan. Manual entry and the future
   // Tally Import write to the SAME MonthlyEntry records — one actual-sales store.
-  const isOwner = ctx.role === Role.SALES_OFFICER && plan.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, plan.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) {
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can enter monthly figures");
   }

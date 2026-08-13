@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Trash2, UserX, UserCheck, UserMinus } from "lucide-react";
+import { KeyRound, Trash2, UserX, UserCheck, UserMinus, ShieldCheck, ArrowUpCircle, ArrowDownCircle } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -32,6 +32,8 @@ export interface Officer {
   id: string;
   name: string;
   username: string;
+  role?: string; // "SALES_OFFICER" | "REGIONAL_MANAGER" (present when the list includes managers)
+  isManager?: boolean;
   isActive: boolean;
   deleted: boolean;
   groupId: string | null;
@@ -55,6 +57,7 @@ export function UserTable({
   onRefresh,
   onRemoveFromGroup,
   showGroupColumn = true,
+  showRoleActions = false,
 }: {
   users: Officer[];
   isLoading?: boolean;
@@ -63,6 +66,7 @@ export function UserTable({
   onRefresh: () => void;
   onRemoveFromGroup?: (officer: Officer) => void;
   showGroupColumn?: boolean;
+  showRoleActions?: boolean; // show RM badge + promote/demote (Users page only)
 }) {
   const [resetFor, setResetFor] = useState<Officer | null>(null);
   const statusMut = useMutation({
@@ -70,6 +74,11 @@ export function UserTable({
     onSuccess: onRefresh,
   });
   const deleteMut = useMutation({ mutationFn: (id: string) => api.del(`/api/users/${id}`), onSuccess: onRefresh });
+  const roleMut = useMutation({
+    mutationFn: (v: { id: string; role: "SALES_OFFICER" | "REGIONAL_MANAGER" }) => api.post(`/api/users/${v.id}/role`, { role: v.role }),
+    onSuccess: onRefresh,
+    onError: (e) => alert((e as Error).message),
+  });
   const colSpan = showGroupColumn ? 6 : 5;
 
   return (
@@ -102,6 +111,9 @@ export function UserTable({
               <TableRow key={o.id}>
                 <TableCell className="font-medium">
                   <Link href={`/masters/users/${o.id}`} className="hover:underline" title="View profile">{o.name}</Link>
+                  {showRoleActions && o.isManager && (
+                    <Badge variant="default" className="ml-2 gap-1"><ShieldCheck className="h-3 w-3" /> RM</Badge>
+                  )}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{o.username}</TableCell>
                 {showGroupColumn && <TableCell>{o.groupName ? <Badge variant="secondary">{o.groupName}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>}
@@ -111,6 +123,19 @@ export function UserTable({
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex justify-end gap-1">
+                    {showRoleActions && !o.deleted && o.isActive && (
+                      o.isManager ? (
+                        <Button size="sm" variant="ghost" title="Demote to Sales Officer" disabled={roleMut.isPending}
+                          onClick={() => { if (confirm(`Demote ${o.name} to Sales Officer?`)) roleMut.mutate({ id: o.id, role: "SALES_OFFICER" }); }}>
+                          <ArrowDownCircle className="h-4 w-4" />
+                        </Button>
+                      ) : (
+                        <Button size="sm" variant="ghost" title={o.groupId ? "Promote to Regional Manager" : "Assign a group before promoting"} disabled={roleMut.isPending || !o.groupId}
+                          onClick={() => { if (confirm(`Promote ${o.name} to Regional Manager for ${o.groupName}?`)) roleMut.mutate({ id: o.id, role: "REGIONAL_MANAGER" }); }}>
+                          <ArrowUpCircle className="h-4 w-4" />
+                        </Button>
+                      )
+                    )}
                     {onRemoveFromGroup && !o.deleted && (
                       <Button size="sm" variant="ghost" title="Remove from group" onClick={() => onRemoveFromGroup(o)}><UserMinus className="h-4 w-4" /></Button>
                     )}
@@ -172,18 +197,20 @@ export function UsersTablePanel({
   headerRight,
   emptyMessage,
   emptyAction,
+  includeManagers = false,
 }: {
   groupId?: string;
   headerRight?: React.ReactNode;
   emptyMessage?: string;
   emptyAction?: React.ReactNode;
+  includeManagers?: boolean; // also list Regional Managers + show role badge/promote/demote
 }) {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<UserFilter>("active");
   const [search, setSearch] = useState("");
-  const url = `/api/users/officers?filter=${filter}${groupId ? `&groupId=${groupId}` : ""}`;
+  const url = `/api/users/officers?filter=${filter}${groupId ? `&groupId=${groupId}` : ""}${includeManagers ? "&roles=all" : ""}`;
   const { data, isLoading } = useQuery<Officer[]>({
-    queryKey: ["officers", filter, groupId ?? "all"],
+    queryKey: ["officers", filter, groupId ?? "all", includeManagers ? "with-rm" : "so"],
     queryFn: () => api.get<Officer[]>(url),
   });
   const refresh = () => qc.invalidateQueries({ queryKey: ["officers"] });
@@ -220,6 +247,7 @@ export function UsersTablePanel({
         emptyAction={emptyAction}
         onRefresh={refresh}
         showGroupColumn={!groupId}
+        showRoleActions={includeManagers}
         onRemoveFromGroup={groupId ? (o) => removeMut.mutate(o.id) : undefined}
       />
     </div>

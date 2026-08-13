@@ -3,7 +3,7 @@ import { z } from "zod";
 import { PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { assertOfficerInScope, getCurrentManagerId, getOfficerScope } from "@/lib/scope";
+import { assertOfficerInScope, getCurrentManagerId, getOfficerScope, isPlanOwner } from "@/lib/scope";
 import { createNotification, notifyMany, getSuperAdminIds } from "@/features/notifications/service.server";
 import { saveMonthlySchema } from "@/lib/validations/planning";
 import { isQuantityMode, type PlanningMode } from "@/lib/calc";
@@ -105,7 +105,7 @@ export async function createMonthlyPlan(
     throw new ApiError(409, "Monthly plans can only be created from an approved seasonal plan");
   }
   assertLifecycleEditable((seasonPlan as { lifecycleState?: string }).lifecycleState, "The seasonal plan");
-  const isOwner = ctx.role === Role.SALES_OFFICER && seasonPlan.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, seasonPlan.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) {
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can create a monthly plan");
   }
@@ -244,7 +244,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
     prisma.monthlyPlanDealer.findMany({ where: { monthlyPlanId: mp.id, noPlan: true }, select: { dealerId: true, noPlanReason: true } }),
   ]);
 
-  const isOwner = ctx.userId === mp.officerId && ctx.role === Role.SALES_OFFICER;
+  const isOwner = isPlanOwner(ctx, mp.officerId);
   const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
   const isLive = mp.lifecycleState === "ACTIVE" && mp.seasonPlan.lifecycleState === "ACTIVE";
   const canEdit = (isOwner || ctx.role === Role.SUPER_ADMIN) && EDITABLE.includes(mp.status) && isLive;
@@ -306,7 +306,7 @@ export async function setMonthlyDealerNoPlan(
   reason?: string,
 ): Promise<{ noPlan: boolean; noPlanReason: string | null }> {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, mp.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
@@ -367,7 +367,7 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
 export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: string, raw: unknown) {
   const { entries } = saveMonthlySchema.parse(raw);
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, mp.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) {
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can enter monthly figures");
   }
@@ -475,7 +475,7 @@ export async function getAdditionalProductCandidates(
  */
 export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: string, dealerId: string, productId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, mp.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
@@ -584,7 +584,7 @@ export interface DealerCreateOutcome {
  */
 export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: string, raw: unknown): Promise<DealerCreateOutcome> {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, mp.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
@@ -686,7 +686,7 @@ export async function assignExistingDealer(ctx: AuthContext, dealerId: string, o
  */
 export async function updateMonthlyDealer(ctx: AuthContext, monthlyPlanId: string, dealerId: string, raw: unknown) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  const isOwner = ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId;
+  const isOwner = isPlanOwner(ctx, mp.officerId);
   if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "Dealer info is read-only once the plan is submitted");
   assertMonthlyLive(mp);
@@ -706,7 +706,7 @@ export async function updateMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
 
 export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  if (!(ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId)) {
+  if (!(isPlanOwner(ctx, mp.officerId))) {
     throw new ApiError(403, "Only the owning Sales Officer can submit this monthly plan");
   }
   if (!EDITABLE.includes(mp.status)) {
@@ -774,7 +774,7 @@ export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
 
 export async function recallMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  if (!(ctx.role === Role.SALES_OFFICER && mp.officerId === ctx.userId)) {
+  if (!(isPlanOwner(ctx, mp.officerId))) {
     throw new ApiError(403, "Only the owning Sales Officer can recall this monthly plan");
   }
   if (!PENDING.includes(mp.status)) throw new ApiError(409, "Only a submitted monthly plan can be recalled");

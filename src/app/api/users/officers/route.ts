@@ -7,6 +7,9 @@ export async function GET(req: NextRequest) {
     const auth = await requireAuth();
     const filter = (req.nextUrl.searchParams.get("filter") ?? "active") as UserFilter;
     const groupId = req.nextUrl.searchParams.get("groupId") ?? undefined;
-    return ok(await listOfficers(auth, filter, groupId));
+    // roles=all also lists Regional Managers (Users page). Default (omitted) = Sales Officers only,
+    // so planning officer-selectors that reuse this endpoint are unaffected.
+    const includeManagers = req.nextUrl.searchParams.get("roles") === "all";
+    return ok(await listOfficers(auth, filter, groupId, includeManagers));
   });
 }

@@ -8,6 +8,7 @@ export async function GET(req: NextRequest) {
     const auth = await requireAuth();
     const statusParam = req.nextUrl.searchParams.get("status");
     const statuses = statusParam ? (statusParam.split(",").filter(Boolean) as PlanStatus[]) : undefined;
-    return ok(await listRecoveryPlans(auth, statuses));
+    const mine = req.nextUrl.searchParams.get("mine") === "true";
+    return ok(await listRecoveryPlans(auth, statuses, mine));
   });
 }

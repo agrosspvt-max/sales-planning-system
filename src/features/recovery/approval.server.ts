@@ -2,7 +2,7 @@ import "server-only";
 import { PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { assertOfficerInScope, getCurrentManagerId } from "@/lib/scope";
+import { assertOfficerInScope, getCurrentManagerId, isPlanOwner } from "@/lib/scope";
 import { createNotification, notifyMany, getSuperAdminIds } from "@/features/notifications/service.server";
 import { assertLifecycleEditable } from "@/features/planning/lifecycle.server";
 
@@ -57,7 +57,7 @@ async function record(p: { id: string }, actorId: string, action: ApprovalAction
 
 export async function submitRecoveryPlan(ctx: AuthContext, id: string) {
   const p = await loadOr404(id);
-  if (!(ctx.role === Role.SALES_OFFICER && p.officerId === ctx.userId)) throw new ApiError(403, "Only the owning Sales Officer can submit this recovery plan");
+  if (!(isPlanOwner(ctx, p.officerId))) throw new ApiError(403, "Only the owning Sales Officer can submit this recovery plan");
   if (!EDITABLE.includes(p.status)) throw new ApiError(409, "This recovery plan cannot be submitted in its current state");
   assertRecoveryLive(p);
 
@@ -87,7 +87,7 @@ export async function submitRecoveryPlan(ctx: AuthContext, id: string) {
 
 export async function recallRecoveryPlan(ctx: AuthContext, id: string) {
   const p = await loadOr404(id);
-  if (!(ctx.role === Role.SALES_OFFICER && p.officerId === ctx.userId)) throw new ApiError(403, "Only the owning Sales Officer can recall this recovery plan");
+  if (!(isPlanOwner(ctx, p.officerId))) throw new ApiError(403, "Only the owning Sales Officer can recall this recovery plan");
   if (!PENDING.includes(p.status)) throw new ApiError(409, "Only a submitted recovery plan can be recalled");
   assertRecoveryLive(p);
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.DRAFT } });

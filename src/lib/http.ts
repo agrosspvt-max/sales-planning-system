@@ -19,6 +19,7 @@ export interface AuthContext {
   userId: string;
   role: Role;
   username: string;
+  groupId: string | null; // the caller's group (drives Regional-Manager group scoping)
 }
 
 type AuthUserRow = {
@@ -28,6 +29,7 @@ type AuthUserRow = {
   isActive: boolean;
   deletedAt: Date | null;
   sessionValidAfter: Date | null;
+  groupId: string | null;
 } | null;
 
 /**
@@ -60,7 +62,7 @@ function loadAuthUser(id: string, key: string): Promise<AuthUserRow> {
   const p = withDbRetry(() =>
     prisma.user.findUnique({
       where: { id },
-      select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true },
+      select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true, groupId: true },
     }),
   ).then((row) => {
     if (AUTH_TTL_MS > 0) authCache.set(key, { at: Date.now(), row: row as AuthUserRow });
@@ -111,7 +113,7 @@ export async function requireAuth(): Promise<AuthContext> {
     console.warn(`[requireAuth] 401 — session predates sessionValidAfter (id=${session.user.id})`);
     throw new ApiError(401, "Your session has expired. Please sign in again.");
   }
-  return { userId: user.id, role: user.role, username: user.username };
+  return { userId: user.id, role: user.role, username: user.username, groupId: user.groupId };
 }
 
 /** Resolve the session and assert a permission, or throw 401/403. */

@@ -544,7 +544,7 @@ function dealerData(d: DealerFields) {
  * (skips if the PlanDealer already exists). If the officer has no active approved seasonal plan, it does
  * nothing and returns a warning (the caller still creates the dealer). Reused by the create form + Excel.
  */
-async function addDealerToActiveSeasonalPlan(tx: Tx, officerId: string, dealerId: string): Promise<{ added: boolean; warning?: string }> {
+export async function addDealerToActiveSeasonalPlan(tx: Tx, officerId: string, dealerId: string): Promise<{ added: boolean; warning?: string }> {
   const plan = await tx.seasonPlan.findFirst({
     where: { officerId, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
     select: { id: true },

@@ -6,6 +6,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { tightKey } from "@/lib/match-key";
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
+import { addDealerToActiveSeasonalPlan } from "@/features/planning/monthly-plan.server";
 
 /**
  * Dealer management (Admin). Reuses the existing Dealer / DealerAlias models. Deactivate & Delete
@@ -35,6 +36,7 @@ const editSchema = z.object({
   officerId: z.string().optional(), // reassign the owning Sales Officer
   groupId: z.string().optional(), // validate the officer belongs to this group
   isActive: z.boolean().optional(), // Active / Inactive status
+  addToSeasonalPlan: z.boolean().optional(), // add (never removes) to the officer's active seasonal plan
 });
 
 /**
@@ -54,8 +56,9 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
     if (data.groupId && officer.groupId !== data.groupId) throw new ApiError(422, "The selected Sales Officer does not belong to the selected group");
   }
   if (data.isActive === true && dealer.deletedAt) throw new ApiError(409, "Deleted dealers cannot be reactivated");
-  // Current owner — so an unchanged officer never opens a duplicate assignment range.
-  const currentOwner = data.officerId
+  // Current owner — so an unchanged officer never opens a duplicate assignment range, and so an
+  // "add to plan" without reassignment still knows whose active plan to target.
+  const currentOwner = data.officerId || data.addToSeasonalPlan
     ? ((await prisma.dealerAssignment.findFirst({ where: { dealerId, effectiveTo: null }, select: { officerId: true } })) as { officerId: string } | null)
     : null;
 
@@ -86,6 +89,12 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
         const existing = await tx.dealerAlias.findUnique({ where: { tallyKey: key }, select: { id: true } });
         if (!existing) await tx.dealerAlias.create({ data: { systemDealerId: dealerId, tallyName: aliasName, tallyKey: key } });
       }
+    }
+    // Optionally ADD to the selected officer's active seasonal plan — idempotent (never creates a
+    // duplicate PlanDealer, never removes). Only adds when an active plan exists and the dealer stays active.
+    const targetOfficerId = data.officerId ?? currentOwner?.officerId;
+    if (data.addToSeasonalPlan && data.isActive !== false && targetOfficerId) {
+      await addDealerToActiveSeasonalPlan(tx, targetOfficerId, dealerId);
     }
   });
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Edited dealer ${data.name}` });

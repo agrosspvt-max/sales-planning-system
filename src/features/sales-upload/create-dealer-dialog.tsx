@@ -24,6 +24,7 @@ export interface EditDealer {
   groupId: string | null;
   town: string | null;
   isActive: boolean;
+  inActivePlan: boolean; // already a member of the owning officer's active seasonal plan (via PlanDealer)
   aliases: { id: string; tallyName: string }[];
 }
 
@@ -55,7 +56,8 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
     setOfficerId(edit?.officerId ?? "");
     setTown(edit?.town ?? "");
     setIsActive(edit?.isActive ?? true);
-    setAddToPlan(false);
+    // Create defaults ON (new dealers usually participate in planning); Edit reflects current membership.
+    setAddToPlan(edit ? edit.inActivePlan : true);
     setPhase("form");
     setDuplicates([]);
     setError(null);
@@ -79,7 +81,7 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
     mutationFn: (force?: boolean) => {
       if (isEdit && edit) {
         return api.patch<CreateResult>(`/api/dealers/${edit.id}`, {
-          name: name.trim(), alias: aliasName.trim() || undefined, officerId, groupId, town: town.trim() || undefined, isActive,
+          name: name.trim(), alias: aliasName.trim() || undefined, officerId, groupId, town: town.trim() || undefined, isActive, addToSeasonalPlan: addToPlan,
         });
       }
       return api.post<CreateResult>("/api/dealers", {
@@ -156,7 +158,7 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
             </div>
             <div className="space-y-1.5"><Label>Territory</Label><Input value={town} onChange={(e) => setTown(e.target.value)} placeholder="Optional" /></div>
 
-            {isEdit ? (
+            {isEdit && (
               <div className="space-y-1.5">
                 <Label>Status</Label>
                 <div className="flex items-center gap-4 text-sm">
@@ -165,12 +167,23 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
                 </div>
                 {!isActive && <p className="text-xs text-warning">Inactive dealers disappear from active dropdowns and can’t be added to new plans, but stay in historical plans, recovery and reports.</p>}
               </div>
-            ) : (
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" className="h-4 w-4" checked={addToPlan} onChange={(e) => setAddToPlan(e.target.checked)} />
-                Automatically add this dealer to the officer&apos;s Active Seasonal Plan
-              </label>
             )}
+
+            {/* Active Seasonal Plan membership. Create: default ON. Edit: reflects current membership and
+                is DISABLED once already included (removal is a separate, dedicated workflow). */}
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4"
+                checked={addToPlan}
+                disabled={isEdit && !!edit?.inActivePlan}
+                onChange={(e) => setAddToPlan(e.target.checked)}
+              />
+              <span>
+                Automatically add this dealer to the officer&apos;s Active Seasonal Plan
+                {isEdit && edit?.inActivePlan && <span className="mt-0.5 block text-xs text-muted-foreground">Already included in the Active Seasonal Plan.</span>}
+              </span>
+            </label>
 
             {error && <p className="text-sm text-destructive">{error}</p>}
             <DialogFooter>

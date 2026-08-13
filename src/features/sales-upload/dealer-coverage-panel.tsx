@@ -22,7 +22,7 @@ import { DealerDialog, type EditDealer } from "./create-dealer-dialog";
 
 type Filter = "all" | "with" | "without" | "so-created" | "pending";
 interface AliasItem { id: string; tallyName: string }
-interface DealerRow { id: string; name: string; hasAlias: boolean; aliases: AliasItem[]; status: string; soCreated: boolean; createdByName: string | null; officerName: string | null; officerId: string | null; groupId: string | null; town: string | null; isActive: boolean }
+interface DealerRow { id: string; name: string; hasAlias: boolean; aliases: AliasItem[]; status: string; soCreated: boolean; createdByName: string | null; officerName: string | null; officerId: string | null; groupId: string | null; town: string | null; isActive: boolean; inActivePlan: boolean }
 interface Resp { counts: { all: number; with: number; without: number; soCreated: number; pending: number }; dealers: DealerRow[] }
 
 const TABS: { key: Filter; label: string; countKey: keyof Resp["counts"] }[] = [
@@ -61,7 +61,7 @@ export function DealerCoveragePanel() {
   // The dealer being edited is derived from LIVE data so the dialog reflects alias add/remove at once.
   const editRow = data?.dealers.find((d) => d.id === editId) ?? null;
   const editDealer: EditDealer | null = editRow
-    ? { id: editRow.id, name: editRow.name, officerId: editRow.officerId, groupId: editRow.groupId, town: editRow.town, isActive: editRow.isActive, aliases: editRow.aliases }
+    ? { id: editRow.id, name: editRow.name, officerId: editRow.officerId, groupId: editRow.groupId, town: editRow.town, isActive: editRow.isActive, inActivePlan: editRow.inActivePlan, aliases: editRow.aliases }
     : null;
 
   // Client-side search across the loaded dealers: matches the System Dealer name OR any alias name

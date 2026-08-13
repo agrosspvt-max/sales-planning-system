@@ -1,6 +1,6 @@
 import "server-only";
 import * as XLSX from "xlsx";
-import { Role } from "@prisma/client";
+import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
@@ -72,6 +72,29 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
     officerByDealer.set(a.dealerId, { name: a.officer.name, officerId: a.officerId, groupId: a.officer.groupId });
   }
 
+  // Active Seasonal Plan membership — detected ONLY via the PlanDealer relation (never inferred from the
+  // dealer assignment or aliases). Batched: each owner's active approved seasonal plan + its PlanDealers.
+  const ownerOfficerIds = [...new Set([...officerByDealer.values()].map((o) => o.officerId))];
+  const inActivePlan = new Set<string>();
+  if (ownerOfficerIds.length > 0) {
+    const activePlans = (await prisma.seasonPlan.findMany({
+      where: { officerId: { in: ownerOfficerIds }, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
+      select: { id: true, officerId: true },
+    })) as { id: string; officerId: string }[];
+    const planByOfficer = new Map(activePlans.map((p) => [p.officerId, p.id] as const));
+    const planIds = activePlans.map((p) => p.id);
+    if (planIds.length > 0) {
+      const pds = (await prisma.planDealer.findMany({ where: { seasonPlanId: { in: planIds } }, select: { seasonPlanId: true, dealerId: true } })) as { seasonPlanId: string; dealerId: string }[];
+      const dealersByPlan = new Map<string, Set<string>>();
+      for (const pd of pds) { const s = dealersByPlan.get(pd.seasonPlanId) ?? new Set<string>(); s.add(pd.dealerId); dealersByPlan.set(pd.seasonPlanId, s); }
+      for (const d of dealerRows) {
+        const owner = officerByDealer.get(d.id);
+        const planId = owner ? planByOfficer.get(owner.officerId) : undefined;
+        if (planId && dealersByPlan.get(planId)?.has(d.id)) inActivePlan.add(d.id);
+      }
+    }
+  }
+
   // Group every alias under its dealer so the page can show them inline and manage them per dealer.
   const aliasesByDealer = new Map<string, { id: string; tallyName: string }[]>();
   for (const a of aliases as { id: string; tallyName: string; systemDealerId: string }[]) {
@@ -107,6 +130,8 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
       groupId: officerByDealer.get(d.id)?.groupId ?? null,
       town: d.town,
       isActive: d.isActive,
+      // Whether the dealer is a member of its owning officer's ACTIVE seasonal plan (via PlanDealer).
+      inActivePlan: inActivePlan.has(d.id),
     };
   });
 

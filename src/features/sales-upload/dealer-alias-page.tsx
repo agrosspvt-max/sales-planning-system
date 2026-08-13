@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, Loader2, Trash2, AlertTriangle } from "lucide-react";
+import { Download, Loader2, Trash2, AlertTriangle, Plus } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { DealerCoveragePanel } from "./dealer-coverage-panel";
+import { DealerDialog } from "./create-dealer-dialog";
 
 interface AliasRow {
   id: string;
@@ -26,10 +27,13 @@ interface AliasRow {
   updatedAt: string;
 }
 interface UploadResult {
-  created: number;
-  updated: number;
-  unmatchedSystemDealers: string[];
-  duplicateRows: number;
+  createdDealers: number;
+  existingDealers: number;
+  aliasesAdded: number;
+  addedToSeasonalPlans: number;
+  skipped: number;
+  errors: number;
+  errorDetails: string[];
   totalRows: number;
 }
 
@@ -41,6 +45,7 @@ export function DealerAliasPage() {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const { data, isLoading } = useQuery<AliasRow[]>({
     queryKey: ["dealer-alias"],
@@ -79,12 +84,14 @@ export function DealerAliasPage() {
       {error && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">{error}</div>}
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
           <CardTitle className="text-base">Upload alias mapping</CardTitle>
+          <Button variant="outline" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" /> Create Dealer</Button>
+          <DealerDialog open={createOpen} onOpenChange={setCreateOpen} />
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Two columns: <span className="font-medium">System Dealer</span> and <span className="font-medium">Tally Dealer</span>. The system dealer is matched to the master; the Tally name is stored verbatim.
+            Columns: <span className="font-medium">Dealer Name</span>, <span className="font-medium">Dealer Alias</span>, <span className="font-medium">Group</span>, <span className="font-medium">Sales Officer</span>, <span className="font-medium">Territory</span> (optional), <span className="font-medium">Add To Active Seasonal Plan</span> (Yes/No). Existing dealers get the alias only; new dealers are created, assigned, and aliased.
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <Button asChild variant="outline">
@@ -103,13 +110,20 @@ export function DealerAliasPage() {
             {uploadMut.isPending && <span className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Saving…</span>}
           </div>
           {result && (
-            <div className="rounded-md border bg-muted/30 p-3 text-sm">
-              Saved: <span className="font-medium">{result.created}</span> new, <span className="font-medium">{result.updated}</span> updated ({result.totalRows} rows).
-              {result.duplicateRows > 0 && <span className="ml-1 text-warning">{result.duplicateRows} duplicate Tally name(s) — last kept.</span>}
-              {result.unmatchedSystemDealers.length > 0 && (
+            <div className="space-y-1 rounded-md border bg-muted/30 p-3 text-sm">
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                <span>Created Dealers: <span className="font-medium">{result.createdDealers}</span></span>
+                <span>Existing Dealers: <span className="font-medium">{result.existingDealers}</span></span>
+                <span>Aliases Added: <span className="font-medium">{result.aliasesAdded}</span></span>
+                <span>Added To Seasonal Plans: <span className="font-medium">{result.addedToSeasonalPlans}</span></span>
+                <span>Skipped: <span className="font-medium">{result.skipped}</span></span>
+                <span className={result.errors > 0 ? "text-destructive" : undefined}>Errors: <span className="font-medium">{result.errors}</span></span>
+                <span className="text-muted-foreground">({result.totalRows} rows)</span>
+              </div>
+              {result.errorDetails.length > 0 && (
                 <div className="mt-1 flex items-start gap-1 text-warning">
                   <AlertTriangle className="mt-0.5 h-4 w-4" />
-                  <span>{result.unmatchedSystemDealers.length} system dealer(s) not matched: {result.unmatchedSystemDealers.slice(0, 20).join(", ")}</span>
+                  <span>{result.errorDetails.slice(0, 15).join(" · ")}{result.errorDetails.length > 15 ? ` … (+${result.errorDetails.length - 15} more)` : ""}</span>
                 </div>
               )}
             </div>

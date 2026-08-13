@@ -520,6 +520,7 @@ const dealerFieldsSchema = z.object({
   tehsil: z.string().max(120).optional(),
   district: z.string().max(120).optional(),
   address: z.string().max(400).optional(),
+  town: z.string().max(120).optional(), // "Territory" on the Dealer Alias create form
   // When true, skip the "possible existing dealer" duplicate warning and create anyway.
   force: z.boolean().optional(),
 });
@@ -533,7 +534,28 @@ function dealerData(d: DealerFields) {
     tehsil: d.tehsil?.trim() || null,
     district: d.district?.trim() || null,
     address: d.address?.trim() || null,
+    town: d.town?.trim() || null,
   };
+}
+
+/**
+ * Add an EXISTING dealer to the officer's ACTIVE APPROVED seasonal plan as a real seasonal dealer:
+ * one PlanDealer + one zero-quantity PlanLine per active product (no PlanLinePack rows = 0). Idempotent
+ * (skips if the PlanDealer already exists). If the officer has no active approved seasonal plan, it does
+ * nothing and returns a warning (the caller still creates the dealer). Reused by the create form + Excel.
+ */
+async function addDealerToActiveSeasonalPlan(tx: Tx, officerId: string, dealerId: string): Promise<{ added: boolean; warning?: string }> {
+  const plan = await tx.seasonPlan.findFirst({
+    where: { officerId, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
+    select: { id: true },
+  });
+  if (!plan) return { added: false, warning: "No active approved seasonal plan for this officer — the dealer was created but not added to a plan." };
+  const existing = await tx.planDealer.findUnique({ where: { seasonPlanId_dealerId: { seasonPlanId: plan.id, dealerId } }, select: { id: true } });
+  if (existing) return { added: true }; // no duplicate PlanDealer
+  const pd = await tx.planDealer.create({ data: { seasonPlanId: plan.id, dealerId, fromMonthlyPlan: false }, select: { id: true } });
+  const products = (await tx.product.findMany({ where: { isActive: true }, select: { id: true } })) as { id: string }[];
+  if (products.length > 0) await tx.planLine.createMany({ data: products.map((p) => ({ planDealerId: pd.id, productId: p.id })) });
+  return { added: true };
 }
 
 /** Create the first DealerAlias from the dealer name (idempotent on the unique tallyKey). */
@@ -548,6 +570,8 @@ export interface DealerCreateOutcome {
   dealerId?: string;
   dealerName?: string;
   duplicates?: Awaited<ReturnType<typeof findProbableDealers>>;
+  addedToPlan?: boolean;
+  planWarning?: string;
 }
 
 /**
@@ -576,23 +600,41 @@ export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
   return { dealerId: dealer.id, dealerName: dealer.name };
 }
 
-const adminCreateSchema = dealerFieldsSchema.extend({ officerId: z.string().min(1, "Select a Sales Officer") });
+const adminCreateSchema = dealerFieldsSchema.extend({
+  officerId: z.string().min(1, "Select a Sales Officer"),
+  // Optional extras used by the Dealer Alias create form (the Dealers module omits them = unchanged):
+  groupId: z.string().optional(), // validate the officer belongs to this group
+  aliasName: z.string().max(200).optional(), // Tally alias (defaults to the dealer name)
+  addToSeasonalPlan: z.boolean().optional(),
+});
 
 /**
- * Admin creates a dealer for a Sales Officer from the User Details page. No approval: the dealer
- * is ACTIVE, permanently assigned immediately (reusing `applyDealerAssignment`), and gets its
- * first DealerAlias — so it appears at once in matching/recovery/sales-upload/future seasonal.
- * Same Dealer model + duplicate check as the Monthly path.
+ * Admin creates a dealer for a Sales Officer. No approval: the dealer is ACTIVE, permanently assigned
+ * immediately (reusing `applyDealerAssignment`), and gets its DealerAlias — so it appears at once in
+ * matching/recovery/sales-upload/future seasonal. Same Dealer model + duplicate check as the Monthly
+ * path. Shared by the User Details page (Dealers module) AND the Dealer Alias create form; the latter
+ * passes a Tally alias, a group to validate against, and an optional "add to active seasonal plan".
  */
 export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Promise<DealerCreateOutcome> {
   if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can create a dealer for an officer");
   const data = adminCreateSchema.parse(raw);
-  const officer = await prisma.user.findUnique({ where: { id: data.officerId }, select: { role: true, isActive: true } });
+  const officer = await prisma.user.findUnique({ where: { id: data.officerId }, select: { role: true, isActive: true, groupId: true } });
   if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) throw new ApiError(422, "The selected Sales Officer is missing or inactive");
+  if (data.groupId && officer.groupId !== data.groupId) throw new ApiError(422, "The selected Sales Officer does not belong to the selected group");
 
+  // Duplicate-dealer guard (unchanged) …
   if (!data.force) {
     const duplicates = await findProbableDealers(data.name);
     if (duplicates.length > 0) return { duplicates };
+  }
+  // … and a duplicate-ALIAS guard when an explicit Tally alias was supplied.
+  const aliasName = data.aliasName?.trim();
+  if (aliasName) {
+    const aliasKey = tightKey(aliasName);
+    if (aliasKey) {
+      const clash = await prisma.dealerAlias.findUnique({ where: { tallyKey: aliasKey }, select: { id: true } });
+      if (clash) throw new ApiError(409, `An alias "${aliasName}" already exists`);
+    }
   }
 
   const created = await prisma.$transaction(
@@ -601,13 +643,16 @@ export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Pr
         data: { ...dealerData(data), status: "ACTIVE", createdByUserId: ctx.userId, createdFrom: "ADMIN" },
       });
       await applyDealerAssignment(tx, dealer.id, data.officerId, new Date());
-      await ensureDealerAlias(tx, dealer.id, dealer.name);
-      return { id: dealer.id, name: dealer.name };
+      // Save the alias automatically (the supplied Tally name, else the dealer name).
+      await ensureDealerAlias(tx, dealer.id, aliasName || dealer.name);
+      let plan: { added: boolean; warning?: string } = { added: false };
+      if (data.addToSeasonalPlan) plan = await addDealerToActiveSeasonalPlan(tx, data.officerId, dealer.id);
+      return { id: dealer.id, name: dealer.name, plan };
     },
     { timeout: 60000, maxWait: 10000 },
   );
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "dealer", entityId: created.id, summary: `Admin created & assigned dealer "${created.name}" to a Sales Officer` });
-  return { dealerId: created.id, dealerName: created.name };
+  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "dealer", entityId: created.id, summary: `Admin created & assigned dealer "${created.name}" to a Sales Officer${created.plan.added ? " (added to active seasonal plan)" : ""}` });
+  return { dealerId: created.id, dealerName: created.name, addedToPlan: created.plan.added, planWarning: created.plan.warning };
 }
 
 /** Admin shortcut: assign an EXISTING dealer to a Sales Officer (from the duplicate dialog). */

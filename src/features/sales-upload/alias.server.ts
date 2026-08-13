@@ -7,15 +7,13 @@ import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
 import { tightKey } from "@/lib/match-key";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { writeAudit } from "@/lib/audit";
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Tx = any;
+import { createDealerForOfficer } from "@/features/planning/monthly-plan.server";
 
 function assertAdmin(ctx: AuthContext) {
   if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can manage dealer aliases");
 }
 
-const HEADER = /system\s*dealer|tally\s*dealer/i;
+const HEADER = /^(dealer\s*name|dealer\s*alias|system\s*dealer|tally\s*dealer)$/i;
 
 export async function listDealerAliases(ctx: AuthContext) {
   assertAdmin(ctx);
@@ -61,16 +59,18 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
     prisma.dealer.findMany({
       where: { isActive: true, ...assignmentScope(groupId, officerId) },
       orderBy: { name: "asc" },
-      // createdByUserId = the ORIGINAL creator (immutable; never changes on reassignment).
-      select: { id: true, name: true, status: true, createdFrom: true, createdByUserId: true },
+      // createdByUserId = the ORIGINAL creator (immutable; never changes on reassignment). town = Territory.
+      select: { id: true, name: true, status: true, createdFrom: true, createdByUserId: true, town: true, isActive: true },
     }),
     prisma.dealerAlias.findMany({ select: { id: true, tallyName: true, systemDealerId: true }, orderBy: { tallyName: "asc" } }),
-    // The CURRENT owner of each dealer (open assignment range) — the stored dealer→officer link.
-    prisma.dealerAssignment.findMany({ where: { effectiveTo: null }, select: { dealerId: true, officer: { select: { name: true } } } }),
+    // The CURRENT owner of each dealer (open assignment range) — the stored dealer→officer link (+ group).
+    prisma.dealerAssignment.findMany({ where: { effectiveTo: null }, select: { dealerId: true, officerId: true, officer: { select: { name: true, groupId: true } } } }),
   ]);
-  const dealerRows = dealers as { id: string; name: string; status: string; createdFrom: string | null; createdByUserId: string | null }[];
-  const officerByDealer = new Map<string, string>();
-  for (const a of assignments as { dealerId: string; officer: { name: string } }[]) officerByDealer.set(a.dealerId, a.officer.name);
+  const dealerRows = dealers as { id: string; name: string; status: string; createdFrom: string | null; createdByUserId: string | null; town: string | null; isActive: boolean }[];
+  const officerByDealer = new Map<string, { name: string; officerId: string; groupId: string | null }>();
+  for (const a of assignments as { dealerId: string; officerId: string; officer: { name: string; groupId: string | null } }[]) {
+    officerByDealer.set(a.dealerId, { name: a.officer.name, officerId: a.officerId, groupId: a.officer.groupId });
+  }
 
   // Group every alias under its dealer so the page can show them inline and manage them per dealer.
   const aliasesByDealer = new Map<string, { id: string; tallyName: string }[]>();
@@ -101,7 +101,12 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
       soCreated,
       createdByName: soCreated && d.createdByUserId ? creatorNameById.get(d.createdByUserId) ?? null : null,
       // The currently-assigned Sales Officer (owner) for EVERY dealer — from the stored assignment.
-      officerName: officerByDealer.get(d.id) ?? null,
+      officerName: officerByDealer.get(d.id)?.name ?? null,
+      // Prefill fields for the Edit modal (owning officer + their group, territory, status).
+      officerId: officerByDealer.get(d.id)?.officerId ?? null,
+      groupId: officerByDealer.get(d.id)?.groupId ?? null,
+      town: d.town,
+      isActive: d.isActive,
     };
   });
 
@@ -153,17 +158,32 @@ export async function updateSingleAlias(ctx: AuthContext, id: string, tallyName:
 }
 
 export interface AliasUploadResult {
+  createdDealers: number;
+  existingDealers: number;
+  aliasesAdded: number;
+  addedToSeasonalPlans: number;
+  skipped: number;
+  errors: number;
+  errorDetails: string[];
+  totalRows: number;
+  // Back-compat fields (older UI); mirror the new counts.
   created: number;
   updated: number;
   unmatchedSystemDealers: string[];
   duplicateRows: number;
-  totalRows: number;
 }
 
+const truthy = (v: string) => /^(y|yes|true|1)$/i.test(v.trim());
+
 /**
- * Upload an alias mapping workbook (columns: System Dealer | Tally Dealer). The System Dealer is
- * matched to the Dealer master through the central resolver (Alias → exact → loose → fuzzy); the Tally name is
- * stored verbatim with a unique tightKey. Existing tally keys are updated, new ones inserted.
+ * Upload a Dealer + Alias workbook. Columns:
+ *   Dealer Name | Dealer Alias | Group | Sales Officer | Territory (optional) | Add To Active Seasonal Plan (Yes/No)
+ *
+ * Rules (no matching/creation logic is duplicated — it reuses the central resolver + the shared
+ * `createDealerForOfficer` used by the Dealers module):
+ *   - Dealer already exists (resolver match on Dealer Name) → create the Alias only; creation columns ignored.
+ *   - Dealer does NOT exist → create + assign group/officer + territory + alias (+ optionally add to the
+ *     officer's active seasonal plan), all via the SAME service the Dealers module uses.
  */
 export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Promise<AliasUploadResult> {
   assertAdmin(ctx);
@@ -173,72 +193,71 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
   const rows = sheetRows(wb, sheet);
 
   const resolver = await loadDealerResolver();
+  // Name → id lookups for the creation columns (loaded once — no per-row queries).
+  const [groups, officers] = (await Promise.all([
+    prisma.userGroup.findMany({ select: { id: true, name: true } }),
+    prisma.user.findMany({ where: { role: Role.SALES_OFFICER, isActive: true }, select: { id: true, name: true, groupId: true } }),
+  ])) as [{ id: string; name: string }[], { id: string; name: string; groupId: string | null }[]];
+  const norm = (s: string) => s.trim().toLowerCase();
+  const groupByName = new Map(groups.map((g) => [norm(g.name), g.id] as const));
+  const officerByGroupName = new Map(officers.map((o) => [`${o.groupId ?? ""}|${norm(o.name)}`, o.id] as const));
 
-  // Parse rows → { systemName, tallyName }, skipping the header.
-  const parsed: { systemName: string; tallyName: string }[] = [];
+  const r: AliasUploadResult = {
+    createdDealers: 0, existingDealers: 0, aliasesAdded: 0, addedToSeasonalPlans: 0, skipped: 0, errors: 0, errorDetails: [],
+    totalRows: 0, created: 0, updated: 0, unmatchedSystemDealers: [], duplicateRows: 0,
+  };
+
   for (const row of rows) {
-    const a = String(row[0] ?? "").trim();
-    const b = String(row[1] ?? "").trim();
-    if (!a && !b) continue;
-    if (HEADER.test(a) || HEADER.test(b)) continue;
-    if (!a || !b) continue;
-    parsed.push({ systemName: a, tallyName: b });
-  }
+    const dealerName = String(row[0] ?? "").trim();
+    const aliasName = String(row[1] ?? "").trim();
+    const groupName = String(row[2] ?? "").trim();
+    const officerName = String(row[3] ?? "").trim();
+    const territory = String(row[4] ?? "").trim();
+    const addToPlan = truthy(String(row[5] ?? ""));
+    if (!dealerName && !aliasName) continue;
+    if (HEADER.test(dealerName) || HEADER.test(aliasName)) continue; // header row
+    r.totalRows += 1;
+    if (!dealerName || !aliasName) { r.skipped += 1; continue; }
 
-  const unmatched: string[] = [];
-  const seenTallyKeys = new Set<string>();
-  let duplicateRows = 0;
-  const wanted = new Map<string, { systemDealerId: string; tallyName: string; tallyKey: string }>();
-  for (const p of parsed) {
-    const match = resolver.resolveWithReason(p.systemName);
-    if (!match) {
-      unmatched.push(p.systemName);
-      continue;
-    }
-    const tallyKey = tightKey(p.tallyName);
-    if (!tallyKey) continue;
-    if (seenTallyKeys.has(tallyKey)) duplicateRows += 1; // same Tally dealer twice in the sheet — last wins
-    seenTallyKeys.add(tallyKey);
-    wanted.set(tallyKey, { systemDealerId: match.dealer.id, tallyName: p.tallyName, tallyKey });
-  }
-
-  const keys = [...wanted.keys()];
-  const existing = (await prisma.dealerAlias.findMany({
-    where: { tallyKey: { in: keys } },
-    select: { id: true, tallyKey: true },
-  })) as { id: string; tallyKey: string }[];
-  const existingByKey = new Map(existing.map((e) => [e.tallyKey, e.id]));
-
-  const creates: { systemDealerId: string; tallyName: string; tallyKey: string }[] = [];
-  const updates: { id: string; systemDealerId: string; tallyName: string }[] = [];
-  for (const [key, w] of wanted) {
-    const id = existingByKey.get(key);
-    if (id) updates.push({ id, systemDealerId: w.systemDealerId, tallyName: w.tallyName });
-    else creates.push(w);
-  }
-
-  await prisma.$transaction(
-    async (tx: Tx) => {
-      if (creates.length > 0) await tx.dealerAlias.createMany({ data: creates, skipDuplicates: true });
-      const CHUNK = 100;
-      for (let i = 0; i < updates.length; i += CHUNK) {
-        const slice = updates.slice(i, i + CHUNK);
-        await Promise.all(
-          slice.map((u) => tx.dealerAlias.update({ where: { id: u.id }, data: { systemDealerId: u.systemDealerId, tallyName: u.tallyName } })),
-        );
+    try {
+      const match = resolver.resolveWithReason(dealerName);
+      if (match) {
+        // Existing dealer → create the alias only (idempotent by tallyKey).
+        const tallyKey = tightKey(aliasName);
+        if (!tallyKey) { r.skipped += 1; continue; }
+        r.existingDealers += 1;
+        const exists = await prisma.dealerAlias.findUnique({ where: { tallyKey }, select: { id: true } });
+        if (exists) { r.skipped += 1; continue; }
+        await prisma.dealerAlias.create({ data: { systemDealerId: match.dealer.id, tallyName: aliasName, tallyKey } });
+        r.aliasesAdded += 1;
+      } else {
+        // New dealer → reuse the shared create service (assign + alias + optional plan).
+        const groupId = groupByName.get(norm(groupName));
+        if (!groupId) { r.errors += 1; r.errorDetails.push(`Row "${dealerName}": unknown group "${groupName}"`); continue; }
+        const officerId = officerByGroupName.get(`${groupId}|${norm(officerName)}`);
+        if (!officerId) { r.errors += 1; r.errorDetails.push(`Row "${dealerName}": officer "${officerName}" not in group "${groupName}"`); continue; }
+        const outcome = await createDealerForOfficer(ctx, { name: dealerName, aliasName, officerId, groupId, town: territory || undefined, addToSeasonalPlan: addToPlan, force: true });
+        r.createdDealers += 1;
+        r.aliasesAdded += 1;
+        if (outcome.addedToPlan) r.addedToSeasonalPlans += 1;
       }
-    },
-    { timeout: 60000, maxWait: 10000 },
-  );
+    } catch (e) {
+      r.errors += 1;
+      r.errorDetails.push(`Row "${dealerName}": ${(e as Error).message}`);
+    }
+  }
+
+  r.created = r.createdDealers;
+  r.updated = r.aliasesAdded;
 
   await writeAudit({
     userId: ctx.userId,
     action: "CREATE",
     entity: "dealerAlias",
-    summary: `Dealer Alias import — +${creates.length} new, ${updates.length} updated, ${unmatched.length} unmatched`,
+    summary: `Dealer+Alias import — ${r.createdDealers} dealers created, ${r.aliasesAdded} aliases added, ${r.addedToSeasonalPlans} added to plans, ${r.errors} errors`,
   });
 
-  return { created: creates.length, updated: updates.length, unmatchedSystemDealers: unmatched, duplicateRows, totalRows: parsed.length };
+  return r;
 }
 
 /**
@@ -279,13 +298,12 @@ export async function exportMissingAliases(ctx: AuthContext, groupId?: string, o
   return { buffer, filename: `Missing_Dealer_Alias_${date}.xlsx` };
 }
 
-/** Build the sample alias workbook (System Dealer | Tally Dealer) as an .xlsx buffer. */
+/** Build the sample Dealer+Alias workbook as an .xlsx buffer. */
 export function buildAliasSampleWorkbook(): Buffer {
   const data = [
-    ["System Dealer", "Tally Dealer"],
-    ["ABC Seeds", "ABC SEEDS MP"],
-    ["XYZ Traders", "XYZ TRADERS CG"],
-    ["AARADHYA BEEJ AGENCY", "AARADHYA BEEJ AGENCY (NAGLA SADU) UP"],
+    ["Dealer Name", "Dealer Alias", "Group", "Sales Officer", "Territory", "Add To Active Seasonal Plan"],
+    ["ABC Seeds", "ABC SEEDS MP", "MP", "Rajesh Kundu", "Bhopal", "No"],
+    ["XYZ Traders", "XYZ TRADERS CG", "CG", "Chittaranjan", "Raipur", "Yes"],
   ];
   const ws = XLSX.utils.aoa_to_sheet(data);
   const wb = XLSX.utils.book_new();

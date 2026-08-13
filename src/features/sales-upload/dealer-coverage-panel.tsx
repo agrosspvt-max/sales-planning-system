@@ -1,10 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import { Download, Plus, Trash2, Check, Search } from "lucide-react";
+import { Download, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
@@ -18,17 +18,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { DealerDialog, type EditDealer } from "./create-dealer-dialog";
 
 type Filter = "all" | "with" | "without" | "so-created" | "pending";
 interface AliasItem { id: string; tallyName: string }
-interface DealerRow { id: string; name: string; hasAlias: boolean; aliases: AliasItem[]; status: string; soCreated: boolean; createdByName: string | null; officerName: string | null }
+interface DealerRow { id: string; name: string; hasAlias: boolean; aliases: AliasItem[]; status: string; soCreated: boolean; createdByName: string | null; officerName: string | null; officerId: string | null; groupId: string | null; town: string | null; isActive: boolean }
 interface Resp { counts: { all: number; with: number; without: number; soCreated: number; pending: number }; dealers: DealerRow[] }
 
 const TABS: { key: Filter; label: string; countKey: keyof Resp["counts"] }[] = [
@@ -44,15 +38,11 @@ interface GroupOpt { id: string; name: string }
 interface OfficerOpt { id: string; name: string }
 
 export function DealerCoveragePanel() {
-  const qc = useQueryClient();
   const [filter, setFilter] = useState<Filter>("without");
   const [search, setSearch] = useState("");
   const [groupId, setGroupId] = useState(""); // "" = All Groups
   const [officerId, setOfficerId] = useState(""); // "" = All Sales Officers
-  const [manageId, setManageId] = useState<string | null>(null);
-  const [newTally, setNewTally] = useState("");
-  const [edits, setEdits] = useState<Record<string, string>>({});
-  const [error, setError] = useState<string | null>(null);
+  const [editId, setEditId] = useState<string | null>(null); // the dealer open in the Edit dialog
 
   // Dropdown sources — reuse the existing Groups + Officers endpoints (officers depend on the group).
   const { data: groups } = useQuery<GroupOpt[]>({ queryKey: ["groups"], queryFn: () => api.get("/api/groups") });
@@ -68,31 +58,11 @@ export function DealerCoveragePanel() {
     queryFn: () => api.get<Resp>(`/api/dealer-alias/dealers?filter=${filter}${scope}`),
   });
 
-  // The dealer being managed is derived from live data so the dialog reflects add/edit/delete at once.
-  const manageDealer = data?.dealers.find((d) => d.id === manageId) ?? null;
-
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: ["dealer-coverage"] });
-    qc.invalidateQueries({ queryKey: ["dealer-alias"] });
-  };
-  const addMut = useMutation({
-    mutationFn: () => api.post("/api/dealer-alias/single", { systemDealerId: manageId, tallyName: newTally.trim() }),
-    onSuccess: () => { setNewTally(""); setError(null); refresh(); },
-    onError: (e) => setError((e as Error).message),
-  });
-  const editMut = useMutation({
-    mutationFn: (v: { id: string; tallyName: string }) => api.patch(`/api/dealer-alias/${v.id}`, { tallyName: v.tallyName }),
-    onSuccess: () => { setError(null); refresh(); },
-    onError: (e) => setError((e as Error).message),
-  });
-  const delMut = useMutation({
-    mutationFn: (id: string) => api.del(`/api/dealer-alias/${id}`),
-    onSuccess: () => { setError(null); refresh(); },
-    onError: (e) => setError((e as Error).message),
-  });
-
-  const openManage = (d: DealerRow) => { setManageId(d.id); setNewTally(""); setEdits({}); setError(null); };
-  const closeManage = () => { setManageId(null); setNewTally(""); setEdits({}); setError(null); };
+  // The dealer being edited is derived from LIVE data so the dialog reflects alias add/remove at once.
+  const editRow = data?.dealers.find((d) => d.id === editId) ?? null;
+  const editDealer: EditDealer | null = editRow
+    ? { id: editRow.id, name: editRow.name, officerId: editRow.officerId, groupId: editRow.groupId, town: editRow.town, isActive: editRow.isActive, aliases: editRow.aliases }
+    : null;
 
   // Client-side search across the loaded dealers: matches the System Dealer name OR any alias name
   // (case-insensitive, partial). Filter tabs and search compose.
@@ -189,9 +159,7 @@ export function DealerCoveragePanel() {
                   </TableCell>
                   <TableCell>{d.status === "PENDING_APPROVAL" ? <Badge variant="muted">Pending</Badge> : <span className="text-muted-foreground">Active</span>}</TableCell>
                   <TableCell className="text-right">
-                    <Button size="sm" variant="outline" onClick={() => openManage(d)}>
-                      {d.hasAlias ? "Edit Alias" : "Add Alias"}
-                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setEditId(d.id)}>Edit</Button>
                   </TableCell>
                 </TableRow>
               ))
@@ -200,48 +168,8 @@ export function DealerCoveragePanel() {
         </Table>
       </div>
 
-      <Dialog open={!!manageId} onOpenChange={(o) => !o && closeManage()}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Aliases for “{manageDealer?.name}”</DialogTitle></DialogHeader>
-          <div className="space-y-3">
-            <p className="text-sm text-muted-foreground">Tally dealer name(s) that should resolve to this system dealer. Add, edit, or remove aliases below.</p>
-
-            {/* Existing aliases — editable + deletable. */}
-            {manageDealer && manageDealer.aliases.length > 0 && (
-              <div className="space-y-1.5">
-                {manageDealer.aliases.map((a) => {
-                  const value = edits[a.id] ?? a.tallyName;
-                  const changed = value.trim() !== a.tallyName && value.trim().length > 0;
-                  return (
-                    <div key={a.id} className="flex items-center gap-2">
-                      <Input value={value} onChange={(e) => setEdits((m) => ({ ...m, [a.id]: e.target.value }))} className="h-9" />
-                      <Button size="sm" variant="outline" disabled={!changed || editMut.isPending} onClick={() => editMut.mutate({ id: a.id, tallyName: value.trim() })} title="Save">
-                        <Check className="h-4 w-4" />
-                      </Button>
-                      <Button size="sm" variant="ghost" className="text-destructive" disabled={delMut.isPending} onClick={() => delMut.mutate(a.id)} title="Delete">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Add a new alias. */}
-            <div className="flex items-center gap-2">
-              <Input placeholder="Add a Tally dealer name…" value={newTally} onChange={(e) => setNewTally(e.target.value)} className="h-9" />
-              <Button size="sm" disabled={!newTally.trim() || addMut.isPending} onClick={() => addMut.mutate()}>
-                <Plus className="h-4 w-4" /> Add
-              </Button>
-            </div>
-
-            {error && <p className="text-sm text-destructive">{error}</p>}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={closeManage}>Done</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* The ONE dealer dialog, in Edit Mode (same component as Create). */}
+      <DealerDialog open={!!editId} onOpenChange={(o) => !o && setEditId(null)} edit={editDealer} />
     </div>
   );
 }

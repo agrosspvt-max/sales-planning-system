@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { Download, Plus, Trash2, Check, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -39,18 +40,32 @@ const TABS: { key: Filter; label: string; countKey: keyof Resp["counts"] }[] = [
 ];
 
 /** Dealer coverage: filter dealers by alias status, see/manage each dealer's aliases inline. */
+interface GroupOpt { id: string; name: string }
+interface OfficerOpt { id: string; name: string }
+
 export function DealerCoveragePanel() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<Filter>("without");
   const [search, setSearch] = useState("");
+  const [groupId, setGroupId] = useState(""); // "" = All Groups
+  const [officerId, setOfficerId] = useState(""); // "" = All Sales Officers
   const [manageId, setManageId] = useState<string | null>(null);
   const [newTally, setNewTally] = useState("");
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
+  // Dropdown sources — reuse the existing Groups + Officers endpoints (officers depend on the group).
+  const { data: groups } = useQuery<GroupOpt[]>({ queryKey: ["groups"], queryFn: () => api.get("/api/groups") });
+  const { data: officers } = useQuery<OfficerOpt[]>({
+    queryKey: ["officers", groupId],
+    queryFn: () => api.get(`/api/users/officers${groupId ? `?groupId=${groupId}` : ""}`),
+  });
+
+  // Group → Sales Officer → tab → search. Group/officer are server-side (SQL); counts reflect them.
+  const scope = `${groupId ? `&group=${groupId}` : ""}${officerId ? `&officer=${officerId}` : ""}`;
   const { data, isLoading } = useQuery<Resp>({
-    queryKey: ["dealer-coverage", filter],
-    queryFn: () => api.get<Resp>(`/api/dealer-alias/dealers?filter=${filter}`),
+    queryKey: ["dealer-coverage", filter, groupId, officerId],
+    queryFn: () => api.get<Resp>(`/api/dealer-alias/dealers?filter=${filter}${scope}`),
   });
 
   // The dealer being managed is derived from live data so the dialog reflects add/edit/delete at once.
@@ -94,7 +109,20 @@ export function DealerCoveragePanel() {
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold">Dealer coverage</h3>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Group → Sales Officer. Changing the group resets the officer to All. */}
+          <NativeSelect
+            className="h-9 w-40"
+            value={groupId}
+            onChange={(e) => { setGroupId(e.target.value); setOfficerId(""); }}
+            options={[{ value: "", label: "All Groups" }, ...(groups ?? []).map((g) => ({ value: g.id, label: g.name }))]}
+          />
+          <NativeSelect
+            className="h-9 w-48"
+            value={officerId}
+            onChange={(e) => setOfficerId(e.target.value)}
+            options={[{ value: "", label: "All Sales Officers" }, ...(officers ?? []).map((o) => ({ value: o.id, label: o.name }))]}
+          />
           <div className="relative">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -107,7 +135,7 @@ export function DealerCoveragePanel() {
           {filter === "without" && (
             <Button asChild variant="outline" size="sm">
               {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- API file-download endpoint, not a page route */}
-              <a href="/api/dealer-alias/export-missing"><Download className="h-4 w-4" /> Export Missing Alias List</a>
+              <a href={`/api/dealer-alias/export-missing?${scope.replace(/^&/, "")}`}><Download className="h-4 w-4" /> Export Missing Alias List</a>
             </Button>
           )}
         </div>

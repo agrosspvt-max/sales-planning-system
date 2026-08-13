@@ -5,7 +5,10 @@ import { listDealersForAlias, type DealerAliasFilter } from "@/features/sales-up
 export async function GET(req: NextRequest) {
   return handle(async () => {
     const auth = await requireAuth();
-    const filter = (req.nextUrl.searchParams.get("filter") ?? "all") as DealerAliasFilter;
-    return ok(await listDealersForAlias(auth, filter));
+    const q = req.nextUrl.searchParams;
+    const filter = (q.get("filter") ?? "all") as DealerAliasFilter;
+    const groupId = q.get("group") || undefined;
+    const officerId = q.get("officer") || undefined;
+    return ok(await listDealersForAlias(auth, filter, groupId, officerId));
   });
 }

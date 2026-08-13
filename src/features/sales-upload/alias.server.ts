@@ -44,11 +44,22 @@ export type DealerAliasFilter = "all" | "with" | "without" | "so-created" | "pen
  * Dealers annotated with their alias status for the Dealer Alias page filters, plus the counts
  * for each tab. Reuses the existing Dealer + DealerAlias models (no new tables).
  */
-export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasFilter = "all") {
+/**
+ * SQL-level dealer→officer/group scope, applied via the existing `Dealer.assignments` relation (the
+ * CURRENT owner = the open assignment range). Officer takes precedence over group; empty = no scope.
+ * This reuses the stored dealer→officer link and the officer's `groupId` — no new relation/logic.
+ */
+function assignmentScope(groupId?: string, officerId?: string) {
+  if (officerId) return { assignments: { some: { effectiveTo: null, officerId } } };
+  if (groupId) return { assignments: { some: { effectiveTo: null, officer: { groupId } } } };
+  return {};
+}
+
+export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasFilter = "all", groupId?: string, officerId?: string) {
   assertAdmin(ctx);
   const [dealers, aliases, assignments] = await Promise.all([
     prisma.dealer.findMany({
-      where: { isActive: true },
+      where: { isActive: true, ...assignmentScope(groupId, officerId) },
       orderBy: { name: "asc" },
       // createdByUserId = the ORIGINAL creator (immutable; never changes on reassignment).
       select: { id: true, name: true, status: true, createdFrom: true, createdByUserId: true },
@@ -237,10 +248,10 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
  * The Sales Officer is the CURRENT assigned officer (DealerAssignment.effectiveTo = null — the one
  * assignment source of truth used everywhere), or "Unassigned". Ownership is never inferred from plans.
  */
-export async function exportMissingAliases(ctx: AuthContext): Promise<{ buffer: Buffer; filename: string }> {
+export async function exportMissingAliases(ctx: AuthContext, groupId?: string, officerId?: string): Promise<{ buffer: Buffer; filename: string }> {
   assertAdmin(ctx);
   const [dealers, aliases, assignments] = await Promise.all([
-    prisma.dealer.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+    prisma.dealer.findMany({ where: { isActive: true, ...assignmentScope(groupId, officerId) }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.dealerAlias.findMany({ select: { systemDealerId: true } }),
     prisma.dealerAssignment.findMany({ where: { effectiveTo: null }, select: { dealerId: true, officer: { select: { name: true } } } }),
   ]);

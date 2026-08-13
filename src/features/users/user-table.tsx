@@ -58,6 +58,7 @@ export function UserTable({
   onRemoveFromGroup,
   showGroupColumn = true,
   showRoleActions = false,
+  readOnly = false,
 }: {
   users: Officer[];
   isLoading?: boolean;
@@ -67,6 +68,7 @@ export function UserTable({
   onRemoveFromGroup?: (officer: Officer) => void;
   showGroupColumn?: boolean;
   showRoleActions?: boolean; // show RM badge + promote/demote (Users page only)
+  readOnly?: boolean; // hide ALL mutating actions + profile link (Regional Manager's scoped view)
 }) {
   const [resetFor, setResetFor] = useState<Officer | null>(null);
   const statusMut = useMutation({
@@ -79,7 +81,7 @@ export function UserTable({
     onSuccess: onRefresh,
     onError: (e) => alert((e as Error).message),
   });
-  const colSpan = showGroupColumn ? 6 : 5;
+  const colSpan = (showGroupColumn ? 5 : 4) + (readOnly ? 0 : 1);
 
   return (
     <div className="rounded-lg border bg-background">
@@ -91,7 +93,7 @@ export function UserTable({
             {showGroupColumn && <TableHead>Group</TableHead>}
             <TableHead className="text-right">Dealers</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead className="text-right">Actions</TableHead>
+            {!readOnly && <TableHead className="text-right">Actions</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -110,7 +112,7 @@ export function UserTable({
             users.map((o) => (
               <TableRow key={o.id}>
                 <TableCell className="font-medium">
-                  <Link href={`/masters/users/${o.id}`} className="hover:underline" title="View profile">{o.name}</Link>
+                  {readOnly ? o.name : <Link href={`/masters/users/${o.id}`} className="hover:underline" title="View profile">{o.name}</Link>}
                   {showRoleActions && o.isManager && (
                     <Badge variant="default" className="ml-2 gap-1"><ShieldCheck className="h-3 w-3" /> RM</Badge>
                   )}
@@ -121,7 +123,7 @@ export function UserTable({
                 <TableCell>
                   {o.deleted ? <Badge variant="destructive">Deleted</Badge> : o.isActive ? <Badge variant="success">Active</Badge> : <Badge variant="muted">Inactive</Badge>}
                 </TableCell>
-                <TableCell className="text-right">
+                {!readOnly && <TableCell className="text-right">
                   <div className="flex justify-end gap-1">
                     {showRoleActions && !o.deleted && o.isActive && (
                       o.isManager ? (
@@ -147,7 +149,7 @@ export function UserTable({
                     ))}
                     {!o.deleted && <Button size="sm" variant="ghost" title="Delete" onClick={() => { if (confirm(`Soft-delete ${o.name}? History is kept.`)) deleteMut.mutate(o.id); }}><Trash2 className="h-4 w-4" /></Button>}
                   </div>
-                </TableCell>
+                </TableCell>}
               </TableRow>
             ))
           )}
@@ -198,12 +200,14 @@ export function UsersTablePanel({
   emptyMessage,
   emptyAction,
   includeManagers = false,
+  readOnly = false,
 }: {
   groupId?: string;
   headerRight?: React.ReactNode;
   emptyMessage?: string;
   emptyAction?: React.ReactNode;
   includeManagers?: boolean; // also list Regional Managers + show role badge/promote/demote
+  readOnly?: boolean; // scoped, read-only listing (Regional Manager) — no mutating actions
 }) {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<UserFilter>("active");
@@ -248,6 +252,7 @@ export function UsersTablePanel({
         onRefresh={refresh}
         showGroupColumn={!groupId}
         showRoleActions={includeManagers}
+        readOnly={readOnly}
         onRemoveFromGroup={groupId ? (o) => removeMut.mutate(o.id) : undefined}
       />
     </div>

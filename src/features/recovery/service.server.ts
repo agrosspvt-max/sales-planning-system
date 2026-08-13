@@ -400,7 +400,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
         ? { OR: [{ seasonPlanId: null }, { lifecycleFromParent: false }, { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } }] }
         : {}),
     },
-    include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true } }, officer: { select: { name: true } } },
+    include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true } }, officer: { select: { name: true, group: { select: { name: true } } } } },
     orderBy: [{ updatedAt: "desc" }],
   });
   return rows.map((r) => ({
@@ -409,6 +409,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
     monthName: r.seasonMonth.name,
     officerId: r.officerId,
     officerName: r.officer.name,
+    groupName: r.officer.group?.name ?? null,
     status: r.status as PlanStatus,
     lifecycleState: (r as { lifecycleState?: string }).lifecycleState ?? "ACTIVE",
     cutoffDate: r.cutoffDate,

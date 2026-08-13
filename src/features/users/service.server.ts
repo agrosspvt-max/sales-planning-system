@@ -192,7 +192,15 @@ export type UserFilter = "active" | "inactive" | "deleted" | "all";
  *  to one group. `includeManagers` defaults FALSE so planning officer-selectors that reuse this stay
  *  Sales-Officer-only; only the Users page opts in to also list RMs. Server-side filtering. */
 export async function listOfficers(ctx: AuthContext, filter: UserFilter = "active", groupId?: string, includeManagers = false) {
-  assertAdmin(ctx);
+  // Super Admin: full access. Regional Manager: READ-ONLY, always restricted to their OWN group and to
+  // Sales Officers (they cannot list managers or other groups). Anyone else is forbidden.
+  if (ctx.role === Role.REGIONAL_MANAGER) {
+    if (!ctx.groupId) return []; // an RM with no group has no officers to show
+    groupId = ctx.groupId; // force own-group scope, ignoring any requested group
+    includeManagers = false; // Sales Officers only
+  } else {
+    assertAdmin(ctx);
+  }
   const where: Record<string, unknown> = includeManagers
     ? { role: { in: [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] } }
     : { role: Role.SALES_OFFICER };

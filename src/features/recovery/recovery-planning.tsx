@@ -13,6 +13,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/features/planning/status-badge";
+import { Badge } from "@/components/ui/badge";
 import type { PlanStatus } from "@/features/planning/types";
 import { RecoveryImportWizard } from "@/features/recovery/recovery-import-wizard";
 
@@ -24,6 +25,7 @@ interface RecoveryPlanRow {
   monthName: string;
   officerId: string;
   officerName: string;
+  groupName: string | null;
   status: PlanStatus;
   cutoffDate: string;
   updatedAt: string;
@@ -92,6 +94,7 @@ export function RecoveryPlanning({ role, mode }: { role: Role; mode: RecoveryMod
               <TableHead>Season</TableHead>
               <TableHead>Month</TableHead>
               {!isOfficer && <TableHead>Sales Officer</TableHead>}
+              {!isOfficer && <TableHead>Group</TableHead>}
               <TableHead>Cutoff</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Open</TableHead>
@@ -99,15 +102,16 @@ export function RecoveryPlanning({ role, mode }: { role: Role; mode: RecoveryMod
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+              <TableRow><TableCell colSpan={isOfficer ? 5 : 7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
             ) : (plans?.length ?? 0) === 0 ? (
-              <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">{isCreate ? "No draft or returned recovery plans." : "No approved recovery plans."}</TableCell></TableRow>
+              <TableRow><TableCell colSpan={isOfficer ? 5 : 7} className="py-10 text-center text-muted-foreground">{isCreate ? "No draft or returned recovery plans." : "No approved recovery plans."}</TableCell></TableRow>
             ) : (
               plans!.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell className="font-medium">{p.seasonName}</TableCell>
                   <TableCell>{p.monthName}</TableCell>
                   {!isOfficer && <TableCell>{p.officerName}</TableCell>}
+                  {!isOfficer && <TableCell>{p.groupName ? <Badge variant="secondary">{p.groupName}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>}
                   <TableCell className="text-muted-foreground">{formatDate(p.cutoffDate)}</TableCell>
                   <TableCell><StatusBadge status={p.status} /></TableCell>
                   <TableCell className="text-right">

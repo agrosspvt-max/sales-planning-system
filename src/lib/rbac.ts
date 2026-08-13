@@ -59,6 +59,7 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
   // getOfficerScope / group checks), plus scoped reads of master data. NOT master-data writes, user
   // management, Sales Upload or Dealer Alias (those stay Super-Admin-only).
   [Role.REGIONAL_MANAGER]: {
+    users: ["read"], // scoped, read-only Users page for their own group (enforced in listOfficers)
     products: ["read"],
     categories: ["read"],
     brands: ["read"],

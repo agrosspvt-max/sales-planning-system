@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { auth } from "@/auth";
+import { requireAuth } from "@/lib/http";
 import { can, type Resource } from "@/lib/rbac";
 import { getResourceConfig } from "@/features/resources/config";
 import { ResourcePage } from "@/features/resources/resource-page";
@@ -21,7 +22,11 @@ export default async function MasterResourcePage({
   if (!can(role, key, "read")) return <Forbidden />;
 
   // The flat Users page is replaced by the Group View | All Users management screen.
-  if (resource === "users") return <UsersManagement />;
+  // A Regional Manager sees a scoped, read-only variant (their group's officers only).
+  if (resource === "users") {
+    const ctx = await requireAuth();
+    return <UsersManagement role={role} groupId={ctx.groupId} />;
+  }
 
   return <ResourcePage config={config} canWrite={can(role, key, "create")} />;
 }

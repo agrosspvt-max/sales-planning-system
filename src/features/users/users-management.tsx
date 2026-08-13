@@ -20,16 +20,41 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Role } from "@prisma/client";
 import { NativeSelect } from "@/components/ui/select";
 import { UsersTablePanel } from "./user-table";
 
 type View = "group" | "all";
 interface Group { id: string; name: string; description: string | null; memberCount: number }
 
-/** Users page: Group View (default, cards → group detail) | All Users. Both reuse UsersTablePanel. */
-export function UsersManagement() {
+/**
+ * Users page. Super Admin: Group View (cards → group detail) | All Users. Regional Manager: a scoped,
+ * read-only variant — NO Group View, only the Sales Officers of their own group, plus the same
+ * Territory Plan button (opening their group's plan). Both reuse UsersTablePanel.
+ */
+export function UsersManagement({ role = Role.SUPER_ADMIN, groupId = null }: { role?: Role; groupId?: string | null }) {
   const [view, setView] = useState<View>("group");
   const [group, setGroup] = useState<{ id: string; name: string } | null>(null);
+
+  // Regional Manager: no Group View, no user management — just their group's officer list (read-only).
+  if (role === Role.REGIONAL_MANAGER) {
+    return (
+      <div className="space-y-5">
+        <PageHeader
+          title="Users"
+          subtitle="Sales Officers in your group."
+          actions={
+            groupId ? (
+              <Button variant="outline" size="sm" asChild>
+                <Link href={`/planning/group/${groupId}`}><BarChart3 className="h-4 w-4" /> Territory Plan</Link>
+              </Button>
+            ) : undefined
+          }
+        />
+        <UsersTablePanel readOnly emptyMessage="No Sales Officers in your group." />
+      </div>
+    );
+  }
 
   // Group detail replaces the page content (breadcrumb: Masters > Users > <Group>).
   if (group) return <GroupDetail group={group} onBack={() => setGroup(null)} />;

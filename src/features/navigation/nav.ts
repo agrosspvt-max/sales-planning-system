@@ -81,7 +81,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Brands", href: "/masters/brands", icon: Boxes, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Pack Sizes", href: "/masters/packSizes", icon: Ruler, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Dealers", href: "/masters/dealers", icon: Store, roles: ADMIN_ONLY, group: "Master Data" },
-  { label: "Users", href: "/masters/users", icon: Users, roles: ADMIN_ONLY, group: "Master Data" },
+  { label: "Users", href: "/masters/users", icon: Users, roles: [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER], group: "Master Data" },
   { label: "Seasons", href: "/seasons", icon: CalendarRange, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Announcements", href: "/masters/announcements", icon: Megaphone, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Settings", href: "/masters/settings", icon: Settings, roles: ADMIN_ONLY, group: "Master Data" },

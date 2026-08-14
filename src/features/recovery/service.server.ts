@@ -163,6 +163,10 @@ export interface OfficerPreviewSection {
   duplicates: SkipLine[];
   totals: { outstanding: number; overdue: number; due: number; running: number };
   existingRecovery: { id: string; status: PlanStatus; lifecycleState: string } | null;
+  // Reconciliation summary (item 5): Aging Dealers | Existing (already in the plan) | New (to be added).
+  agingDealerCount: number;
+  existingDealerCount: number;
+  newDealerCount: number;
 }
 export interface RecoveryImportPreview {
   officers: OfficerPreviewSection[];
@@ -192,9 +196,11 @@ function buildRecoveryImportPreview(
   scopeOfficerIds: string[],
   officerNameById: Map<string, string>,
   existingByOfficer: Map<string, { id: string; status: PlanStatus; lifecycleState: string }>,
+  existingDealerIdsByOfficer: Map<string, Set<string>> = new Map(),
 ): RecoveryImportPreview {
   const inScope = new Set(scopeOfficerIds);
   const sections = new Map<string, OfficerPreviewSection>();
+  const acceptedDealerIds = new Map<string, Set<string>>(); // officerId → aging dealer ids accepted
   for (const oid of scopeOfficerIds) {
     sections.set(oid, {
       officerId: oid,
@@ -203,7 +209,11 @@ function buildRecoveryImportPreview(
       duplicates: [],
       totals: zeroTotals(),
       existingRecovery: existingByOfficer.get(oid) ?? null,
+      agingDealerCount: 0,
+      existingDealerCount: 0,
+      newDealerCount: 0,
     });
+    acceptedDealerIds.set(oid, new Set());
   }
   const unknown: SkipLine[] = [];
   const inactive: SkipLine[] = [];
@@ -229,10 +239,23 @@ function buildRecoveryImportPreview(
       continue;
     }
     sec.accepted.push({ name: r.dealerName ?? r.rawName, outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running, matchType: r.matchType, score: r.score });
+    acceptedDealerIds.get(r.officerId)?.add(r.dealerId);
     sec.totals.outstanding += r.aging.outstanding;
     sec.totals.overdue += r.aging.overdue;
     sec.totals.due += r.aging.due;
     sec.totals.running += r.aging.running;
+  }
+
+  // Reconciliation counts (item 5): of the aging dealers for each officer, how many already exist in
+  // the recovery plan vs are new and will be inserted on apply.
+  for (const sec of sections.values()) {
+    const acceptedIds = acceptedDealerIds.get(sec.officerId) ?? new Set<string>();
+    const existingIds = existingDealerIdsByOfficer.get(sec.officerId) ?? new Set<string>();
+    let existingCount = 0;
+    for (const id of acceptedIds) if (existingIds.has(id)) existingCount += 1;
+    sec.agingDealerCount = acceptedIds.size;
+    sec.existingDealerCount = existingCount;
+    sec.newDealerCount = acceptedIds.size - existingCount;
   }
 
   const officers = [...sections.values()];
@@ -767,9 +790,20 @@ async function writeRefreshSnapshot(
         data: r.aging.bills.map((b) => ({ snapshotId: snapshot.id, snapshotDealerId: sd.id, dealerId: r.dealerId, billDate: b.billDate, refNo: b.refNo, amount: b.amount, dueDate: b.dueDate, bucket: b.bucket })),
       });
     }
-    await tx.recoveryPlanDealer.updateMany({
-      where: { recoveryPlanId: planId, dealerId: r.dealerId },
-      data: { outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running },
+    // UPSERT (not updateMany): an aging dealer that isn't yet in the plan must be INSERTED, not dropped.
+    // This is the reconciliation fix — a refresh (UPDATE/REPLACE/weekly) now adds every aging dealer for
+    // the officer that is missing from the plan, under the correct officer (this plan is theirs), while
+    // an EXISTING dealer only has its read-only aging fields refreshed — manual recovery inputs, weekly
+    // plans, approvals, no-plan flags and Till Date opening balances are all preserved untouched.
+    await tx.recoveryPlanDealer.upsert({
+      where: { recoveryPlanId_dealerId: { recoveryPlanId: planId, dealerId: r.dealerId } },
+      update: { outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running },
+      // First appearance in this month → seed the OPENING balances (Till Date) exactly like onboarding.
+      create: {
+        recoveryPlanId: planId, dealerId: r.dealerId,
+        outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running,
+        outstandingTillDate: r.aging.outstanding, runningTillDate: r.aging.running,
+      },
     });
   }
   return snapshot.id;
@@ -1231,7 +1265,25 @@ export async function analyzeRecoveryImport(ctx: AuthContext, buffer: Buffer, fi
   })) as { id: string; officerId: string; status: PlanStatus; lifecycleState: string }[];
   const existingByOfficer = new Map(existingRows.map((e) => [e.officerId, { id: e.id, status: e.status, lifecycleState: e.lifecycleState }]));
 
-  const preview = buildRecoveryImportPreview(res.rows, scopeOfficerIds, officerNameById, existingByOfficer);
+  // Existing recovery-plan dealers per officer → lets the preview split aging dealers into
+  // "already in the plan" vs "new (to be added)" for the reconciliation summary (item 5).
+  const planIdToOfficer = new Map(existingRows.map((e) => [e.id, e.officerId]));
+  const existingDealerIdsByOfficer = new Map<string, Set<string>>();
+  if (existingRows.length > 0) {
+    const planDealers = (await prisma.recoveryPlanDealer.findMany({
+      where: { recoveryPlanId: { in: existingRows.map((e) => e.id) } },
+      select: { recoveryPlanId: true, dealerId: true },
+    })) as { recoveryPlanId: string; dealerId: string }[];
+    for (const pd of planDealers) {
+      const officerId = planIdToOfficer.get(pd.recoveryPlanId);
+      if (!officerId) continue;
+      const set = existingDealerIdsByOfficer.get(officerId) ?? new Set<string>();
+      set.add(pd.dealerId);
+      existingDealerIdsByOfficer.set(officerId, set);
+    }
+  }
+
+  const preview = buildRecoveryImportPreview(res.rows, scopeOfficerIds, officerNameById, existingByOfficer, existingDealerIdsByOfficer);
   return { ...preview, context: { seasonName: `${month.season.name} ${month.season.year}`, monthName: month.name, scopeKind: input.scope.kind } };
 }
 

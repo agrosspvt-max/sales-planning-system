@@ -24,6 +24,9 @@ interface OfficerSection {
   duplicates: SkipLine[];
   totals: { outstanding: number; overdue: number; due: number; running: number };
   existingRecovery: { id: string; status: string; lifecycleState: string } | null;
+  agingDealerCount: number;
+  existingDealerCount: number;
+  newDealerCount: number;
 }
 interface Analysis {
   officers: OfficerSection[];
@@ -229,9 +232,12 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
                 <div key={o.officerId} className="rounded-md border">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 p-2 text-sm">
                     <span className="font-medium">{o.officerName}</span>
-                    <span className="text-xs text-muted-foreground">
-                      Accepted {o.accepted.length} · O/S {fmt(o.totals.outstanding)} · Overdue {fmt(o.totals.overdue)} · Due {fmt(o.totals.due)}
-                      {o.existingRecovery ? " · existing plan" : ""}
+                    <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      {/* Reconciliation summary (item 5): Aging | Existing | New dealers to be added. */}
+                      <span>Aging <span className="font-medium text-foreground">{o.agingDealerCount}</span></span>
+                      <span>Existing <span className="font-medium text-foreground">{o.existingDealerCount}</span></span>
+                      <span>New <span className={`font-medium ${o.newDealerCount > 0 ? "text-success" : "text-foreground"}`}>+{o.newDealerCount}</span></span>
+                      <span className="text-muted-foreground/70">· O/S {fmt(o.totals.outstanding)} · Overdue {fmt(o.totals.overdue)} · Due {fmt(o.totals.due)}{o.existingRecovery ? " · existing plan" : ""}</span>
                     </span>
                   </div>
                   <div className="space-y-1 p-2">

@@ -73,7 +73,7 @@ const weekCols = (weekNo: number, weekCount: number): Col<RecoveryWeekTotals>[] 
  * totals are computed by the SHARED recovery-calc (same math as the per-officer Recovery table); the
  * drawer shows the same dealers un-aggregated, so its numbers always equal the row.
  */
-export function GroupRecovery({ groupId, seasonId }: { groupId: string; seasonId: string }) {
+export function GroupRecovery({ groupId, seasonId, officerId = "" }: { groupId: string; seasonId: string; officerId?: string }) {
   const [month, setMonth] = useState("");
   const [view, setView] = useState<RView>("month");
   const [weekNo, setWeekNo] = useState(1);
@@ -82,8 +82,8 @@ export function GroupRecovery({ groupId, seasonId }: { groupId: string; seasonId
 
   const bucketsKey = [...buckets].sort().join(",");
   const { data, isLoading, isFetching } = useQuery<GroupRecoveryData>({
-    queryKey: ["group-recovery", groupId, seasonId, month, bucketsKey],
-    queryFn: () => api.get(`/api/planning/groups/${groupId}/recovery?seasonId=${seasonId}&month=${month}&buckets=${bucketsKey || "approved"}`),
+    queryKey: ["group-recovery", groupId, seasonId, month, bucketsKey, officerId],
+    queryFn: () => api.get(`/api/planning/groups/${groupId}/recovery?seasonId=${seasonId}&month=${month}&buckets=${bucketsKey || "approved"}${officerId ? `&officerId=${officerId}` : ""}`),
     enabled: !!seasonId,
     placeholderData: keepPreviousData,
   });

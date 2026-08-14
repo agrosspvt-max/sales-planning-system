@@ -46,6 +46,7 @@ export interface GroupPlanFilter {
   buckets: StatusBucket[];
   view: "total" | "month" | "range";
   monthIds: string[];
+  officerId?: string; // optional: restrict the whole aggregation to ONE Sales Officer in the group
 }
 
 export interface Contribution {
@@ -143,8 +144,10 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   const monthNameById = new Map(season.months.map((m) => [m.id, m.name] as const));
   const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthlyMode, seasonalMode, months: season.months, packSizes, filter: { ...filter, buckets } };
 
+  // Optional single-officer filter. The groupId constraint stays, so an officerId outside this group
+  // (or an RM probing another group's officer) simply matches nothing — no cross-group leakage.
   const officers = (await prisma.user.findMany({
-    where: { groupId, role: Role.SALES_OFFICER, isActive: true },
+    where: { groupId, role: Role.SALES_OFFICER, isActive: true, ...(filter.officerId ? { id: filter.officerId } : {}) },
     orderBy: { name: "asc" },
     select: { id: true, name: true },
   })) as OfficerRef[];

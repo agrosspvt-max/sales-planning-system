@@ -57,11 +57,20 @@ const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n
  * the group. All numbers come from ONE server aggregation (getGroupProductPlan); the client never
  * re-computes totals — it only renders and slices them (so the drawer breakdown always sums to the grid).
  */
+interface OfficerOpt { id: string; name: string }
+
 export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupName: string }) {
   const [tab, setTab] = useState<Tab>("product");
   const [seasonId, setSeasonId] = useState("");
+  const [officerId, setOfficerId] = useState(""); // "" = all officers in the group
 
   const { data: seasons } = useQuery<Season[]>({ queryKey: ["seasons"], queryFn: () => api.get("/api/seasons") });
+  // Officers of THIS group. The endpoint is group-scoped for RMs (their own group only), so the
+  // dropdown can never list officers outside the viewed group.
+  const { data: officers } = useQuery<OfficerOpt[]>({
+    queryKey: ["officers", groupId, "group-territory"],
+    queryFn: () => api.get<OfficerOpt[]>(`/api/users/officers?groupId=${groupId}&filter=active`),
+  });
   const effectiveSeason = seasonId || seasons?.[0]?.id || "";
 
   return (
@@ -71,7 +80,14 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
         title={`${groupName} — Territory Plan`}
         subtitle="Read-only analytics aggregated across every Sales Officer in this group. Nothing here is editable."
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-muted-foreground">Sales Officer</span>
+            <NativeSelect
+              className="w-52"
+              options={[{ value: "", label: "All Sales Officers" }, ...(officers ?? []).map((o) => ({ value: o.id, label: o.name }))]}
+              value={officerId}
+              onChange={(e) => setOfficerId(e.target.value)}
+            />
             <span className="text-sm text-muted-foreground">Season</span>
             <NativeSelect
               className="w-56"
@@ -101,9 +117,9 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
           Territory Plan — coming soon. This will mirror the Dealer Plan for the whole territory.
         </div>
       ) : tab === "product" ? (
-        <GroupProductPlan groupId={groupId} seasonId={effectiveSeason} />
+        <GroupProductPlan groupId={groupId} seasonId={effectiveSeason} officerId={officerId} />
       ) : (
-        <GroupRecovery groupId={groupId} seasonId={effectiveSeason} />
+        <GroupRecovery groupId={groupId} seasonId={effectiveSeason} officerId={officerId} />
       )}
     </div>
   );
@@ -111,7 +127,7 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
 
 /* ------------------------------ Product Plan ------------------------------ */
 
-function GroupProductPlan({ groupId, seasonId }: { groupId: string; seasonId: string }) {
+function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: string; seasonId: string; officerId?: string }) {
   const [view, setView] = useState<View>("total");
   const [monthA, setMonthA] = useState("");
   const [monthB, setMonthB] = useState("");
@@ -136,8 +152,8 @@ function GroupProductPlan({ groupId, seasonId }: { groupId: string; seasonId: st
   const bucketsKey = [...buckets].sort().join(",");
   const monthsKey = selectedMonthIds.join(",");
   const { data, isLoading, isFetching } = useQuery<GroupProductPlan>({
-    queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey],
-    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey || "approved"}&view=${view}&months=${monthsKey}`),
+    queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey, officerId],
+    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey || "approved"}&view=${view}&months=${monthsKey}${officerId ? `&officerId=${officerId}` : ""}`),
     enabled: !!seasonId,
     placeholderData: keepPreviousData,
   });

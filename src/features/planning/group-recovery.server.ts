@@ -63,7 +63,7 @@ type PlanDealerRow = {
   weekPlans: { weekNo: number; weekRecoveryPlan: unknown; weekRunningRecovery: unknown }[];
 };
 
-export async function getGroupRecovery(ctx: AuthContext, groupId: string, seasonId: string, seasonMonthId: string, bucketsIn: StatusBucket[]): Promise<GroupRecovery> {
+export async function getGroupRecovery(ctx: AuthContext, groupId: string, seasonId: string, seasonMonthId: string, bucketsIn: StatusBucket[], officerId?: string): Promise<GroupRecovery> {
   if (ctx.role !== Role.SUPER_ADMIN && ctx.role !== Role.REGIONAL_MANAGER) {
     throw new ApiError(403, "Only an admin or manager can view group recovery");
   }
@@ -84,8 +84,9 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
   const monthId = month?.id ?? "";
   const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthName: month?.name ?? "", seasonMonthId: monthId, weekCount: BUSINESS_WEEK_COUNT, months: season.months, filter: { buckets, seasonMonthId: monthId } };
 
+  // Optional single-officer filter — the groupId constraint prevents any cross-group access.
   const officers = (await prisma.user.findMany({
-    where: { groupId, role: Role.SALES_OFFICER, isActive: true },
+    where: { groupId, role: Role.SALES_OFFICER, isActive: true, ...(officerId ? { id: officerId } : {}) },
     orderBy: { name: "asc" },
     select: { id: true, name: true },
   })) as OfficerRef[];

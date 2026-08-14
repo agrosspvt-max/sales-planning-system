@@ -21,6 +21,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ groupId: st
       .split(",")
       .map((s) => s.trim())
       .filter((s): s is StatusBucket => (ALL_BUCKETS as string[]).includes(s));
-    return ok(await getGroupRecovery(auth, groupId, seasonId, seasonMonthId, buckets.length ? buckets : ["approved"]));
+    const officerId = q.get("officerId")?.trim() || undefined;
+    return ok(await getGroupRecovery(auth, groupId, seasonId, seasonMonthId, buckets.length ? buckets : ["approved"], officerId));
   });
 }

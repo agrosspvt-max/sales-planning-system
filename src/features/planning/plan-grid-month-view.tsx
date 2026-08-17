@@ -35,7 +35,7 @@ interface ApprovedMonthly {
   dealers: AMDealer[];
 }
 
-const fmtNum = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
+const fmtNum = (n: number) => String(Math.round(n));
 
 export function PlanGridMonthView({
   seasonPlanId,

@@ -43,9 +43,17 @@ async function seasonHasPlans(seasonId: string): Promise<boolean> {
   return count > 0;
 }
 
-export async function listSeasons(search: string) {
+/**
+ * Seasons for the management page (all statuses) or, with `activeOnly`, ONLY OPEN seasons — the single
+ * central rule that keeps CLOSED seasons out of every active planning/recovery/import selector app-wide.
+ * Closed seasons stay in the DB and historical reports; they are just not offered for new operations.
+ */
+export async function listSeasons(search: string, activeOnly = false) {
   const seasons = await prisma.season.findMany({
-    where: search ? { name: { contains: search, mode: "insensitive" } } : undefined,
+    where: {
+      ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
+      ...(activeOnly ? { status: SeasonStatus.OPEN } : {}),
+    },
     include: { months: { orderBy: { order: "asc" } }, _count: { select: { plans: true } } },
     orderBy: [{ year: "desc" }, { name: "asc" }],
   });

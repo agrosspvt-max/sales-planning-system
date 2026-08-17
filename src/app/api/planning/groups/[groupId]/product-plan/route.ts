@@ -26,7 +26,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ groupId: st
     const view: GroupPlanFilter["view"] = rawView === "month" || rawView === "range" ? rawView : "total";
     const monthIds = (q.get("months") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     const officerId = q.get("officerId")?.trim() || undefined;
+    const seasonMetrics = q.get("seasonMetrics") === "filters" ? "filters" : "approved"; // default: Approved Baseline
 
-    return ok(await getGroupProductPlan(auth, groupId, seasonId, { buckets: buckets.length ? buckets : ["approved"], view, monthIds, officerId }));
+    return ok(await getGroupProductPlan(auth, groupId, seasonId, { buckets: buckets.length ? buckets : ["approved"], view, monthIds, officerId, seasonMetrics }));
   });
 }

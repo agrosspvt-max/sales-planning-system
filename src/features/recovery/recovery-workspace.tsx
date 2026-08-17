@@ -88,7 +88,7 @@ interface RecoveryDetail {
 
 type Tab = "month" | "week" | "history";
 const money = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n));
-const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+const pct = (n: number) => `${Math.round(n * 100)}%`;
 
 /**
  * Business-aware change delta for receivables: a DECREASE is good (green), an increase is bad (red).

@@ -27,9 +27,12 @@ interface Contribution {
 interface BucketTotal { qty: number; amount: number; nbv: number; officerCount: number }
 interface GroupProductRow {
   productId: string; productName: string; technicalName: string | null; rate: number; nbvPercent: number;
-  packSums: Record<string, number>;
-  total: { qty: number; amount: number; nbv: number };
-  actual: { qty: number; amount: number; nbv: number };
+  // Season Baseline (always the complete season; APPROVED by default). Qty + amount (Show Amounts).
+  seasonQty: number; plannedAllMonths: number; remaining: number; seasonSales: number; pendingSales: number;
+  seasonAmount: number; plannedAllMonthsAmount: number; remainingAmount: number; seasonSalesAmount: number; pendingAmount: number;
+  // Period-level (respond to Seasonal Total / Specific Month / Month Range).
+  total: { qty: number; amount: number; nbv: number };   // This Period Plan (qty) + Plan Amount/NBV
+  actual: { qty: number; amount: number; nbv: number };  // This Period Sold (qty) + Actual Amount/NBV
   byBucket: Record<StatusBucket, BucketTotal>;
   contributions: Contribution[];
 }
@@ -64,7 +67,8 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
   const [seasonId, setSeasonId] = useState("");
   const [officerId, setOfficerId] = useState(""); // "" = all officers in the group
 
-  const { data: seasons } = useQuery<Season[]>({ queryKey: ["seasons"], queryFn: () => api.get("/api/seasons") });
+  // Active (OPEN) seasons only — a CLOSED season must not be selectable for Territory planning/recovery.
+  const { data: seasons } = useQuery<Season[]>({ queryKey: ["seasons", "active"], queryFn: () => api.get("/api/seasons?active=true") });
   // Officers of THIS group. The endpoint is group-scoped for RMs (their own group only), so the
   // dropdown can never list officers outside the viewed group.
   const { data: officers } = useQuery<OfficerOpt[]>({
@@ -133,6 +137,18 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   const [monthB, setMonthB] = useState("");
   const [buckets, setBuckets] = useState<StatusBucket[]>(["approved"]);
   const [drawerProduct, setDrawerProduct] = useState<GroupProductRow | null>(null);
+  // Season Baseline mode (default Approved). Show Amounts is a persisted per-user UI preference.
+  const [seasonMetrics, setSeasonMetrics] = useState<"approved" | "filters">("approved");
+  const [showAmounts, setShowAmounts] = useState(false);
+  useEffect(() => {
+    try { setShowAmounts(localStorage.getItem("territory-plan-show-amounts") === "1"); } catch { /* ignore */ }
+  }, []);
+  const toggleAmounts = () =>
+    setShowAmounts((v) => {
+      const next = !v;
+      try { localStorage.setItem("territory-plan-show-amounts", next ? "1" : "0"); } catch { /* ignore */ }
+      return next;
+    });
 
   // Month options come from the payload (stable per season). keepPreviousData keeps them during refetch.
   const monthsRef = useRef<{ id: string; name: string; order: number }[]>([]);
@@ -152,8 +168,8 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   const bucketsKey = [...buckets].sort().join(",");
   const monthsKey = selectedMonthIds.join(",");
   const { data, isLoading, isFetching } = useQuery<GroupProductPlan>({
-    queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey, officerId],
-    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey || "approved"}&view=${view}&months=${monthsKey}${officerId ? `&officerId=${officerId}` : ""}`),
+    queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey, officerId, seasonMetrics],
+    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey || "approved"}&view=${view}&months=${monthsKey}${officerId ? `&officerId=${officerId}` : ""}&seasonMetrics=${seasonMetrics}`),
     enabled: !!seasonId,
     placeholderData: keepPreviousData,
   });
@@ -161,8 +177,6 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
 
   const months = data?.months ?? monthsRef.current;
   const monthOpts = months.map((m) => ({ value: m.id, label: m.name }));
-  const packMode = (data?.seasonalMode ?? "PACK_SIZE") === "PACK_SIZE";
-  const showPackCols = view === "total" && packMode && (data?.packSizes.length ?? 0) > 0;
 
   const toggleBucket = (b: StatusBucket) =>
     setBuckets((prev) => {
@@ -173,11 +187,30 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   if (!seasonId) return <p className="rounded-md border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground">Choose a season to view the group Product Plan.</p>;
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
 
-  const packCols = data.packSizes;
-  const gtotal = data.products.reduce(
-    (a, r) => ({ qty: a.qty + r.total.qty, amount: a.amount + r.total.amount, nbv: a.nbv + r.total.nbv }),
-    { qty: 0, amount: 0, nbv: 0 },
+  // Column totals across every product (Season Baseline qty+amount, and period).
+  const T = data.products.reduce(
+    (a, r) => ({
+      seasonQty: a.seasonQty + r.seasonQty,
+      plannedAllMonths: a.plannedAllMonths + r.plannedAllMonths,
+      remaining: a.remaining + r.remaining,
+      seasonSales: a.seasonSales + r.seasonSales,
+      pendingSales: a.pendingSales + r.pendingSales,
+      seasonAmount: a.seasonAmount + r.seasonAmount,
+      plannedAllMonthsAmount: a.plannedAllMonthsAmount + r.plannedAllMonthsAmount,
+      remainingAmount: a.remainingAmount + r.remainingAmount,
+      seasonSalesAmount: a.seasonSalesAmount + r.seasonSalesAmount,
+      pendingAmount: a.pendingAmount + r.pendingAmount,
+      periodPlan: a.periodPlan + r.total.qty,
+      periodSold: a.periodSold + r.actual.qty,
+      plannedAmount: a.plannedAmount + r.total.amount,
+      plannedNbv: a.plannedNbv + r.total.nbv,
+      actualAmount: a.actualAmount + r.actual.amount,
+      actualNbv: a.actualNbv + r.actual.nbv,
+    }),
+    { seasonQty: 0, plannedAllMonths: 0, remaining: 0, seasonSales: 0, pendingSales: 0, seasonAmount: 0, plannedAllMonthsAmount: 0, remainingAmount: 0, seasonSalesAmount: 0, pendingAmount: 0, periodPlan: 0, periodSold: 0, plannedAmount: 0, plannedNbv: 0, actualAmount: 0, actualNbv: 0 },
   );
+  const periodLabel = view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range";
+  const seasonSpan = showAmounts ? 10 : 5; // Season Baseline column count (qty [+ amount] × 5 metrics)
 
   return (
     <div className="space-y-3">
@@ -212,21 +245,54 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
         </span>
       </div>
 
+      <div className="flex flex-wrap items-center gap-3">
+        {/* Season Baseline mode — Approved (management default) vs Follow the selected status filters. */}
+        <div className="inline-flex items-center gap-2 text-sm">
+          <span className="font-medium text-muted-foreground">Season Metrics</span>
+          <NativeSelect
+            className="w-52"
+            value={seasonMetrics}
+            onChange={(e) => setSeasonMetrics(e.target.value as "approved" | "filters")}
+            options={[{ value: "approved", label: "Approved Baseline" }, { value: "filters", label: "Follow Selected Filters" }]}
+          />
+        </div>
+        <label className="flex cursor-pointer items-center gap-1.5 text-sm">
+          <input type="checkbox" className="h-4 w-4" checked={showAmounts} onChange={toggleAmounts} />
+          Show Amounts
+        </label>
+      </div>
+
       {data.products.length === 0 ? (
         <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">No plan data for this group, season and selected states.</div>
       ) : (
         <div className="overflow-auto rounded-lg border bg-background">
           <Table stickyFirstColumn>
             <TableHeader>
+              {/* Grouping row: SEASON BASELINE never changes with the period; THIS PERIOD + FINANCIALS do. */}
+              <TableRow className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                <TableHead className="min-w-[170px]" />
+                <TableHead className="border-l text-center" colSpan={seasonSpan}>Season Baseline · {seasonMetrics === "approved" ? "Approved" : "Filters"}</TableHead>
+                <TableHead className="border-l text-center" colSpan={2}>This Period · {periodLabel}</TableHead>
+                <TableHead className="border-l text-center" colSpan={4}>Financials · {periodLabel}</TableHead>
+              </TableRow>
               <TableRow>
-                <TableHead className="min-w-[180px]">Product</TableHead>
-                {showPackCols && packCols.map((p) => <TableHead key={p.id} className="text-center">{p.name}</TableHead>)}
-                <TableHead className="text-right">Total Qty</TableHead>
-                <TableHead className="text-right">Total Amount</TableHead>
-                <TableHead className="text-right">Planned NBV</TableHead>
-                <TableHead className="text-right text-muted-foreground">{view === "total" ? "Actual Qty" : "Sold Qty"}</TableHead>
-                <TableHead className="text-right text-muted-foreground">{view === "total" ? "Actual Amount" : "Sold Amount"}</TableHead>
-                <TableHead className="text-right text-muted-foreground">{view === "total" ? "Actual NBV" : "Sold NBV"}</TableHead>
+                <TableHead className="min-w-[170px]">Product</TableHead>
+                <TableHead className="border-l text-right" title="Total seasonal quantity planned (Approved seasonal plan by default)">Season Qty</TableHead>
+                {showAmounts && <TableHead className="text-right" title="Amount for Season Qty">Season Amt</TableHead>}
+                <TableHead className="text-right" title="Quantity distributed into monthly plans across ALL months">Planned (All Mo.)</TableHead>
+                {showAmounts && <TableHead className="text-right" title="Amount for Planned (All Months)">Planned Amt</TableHead>}
+                <TableHead className="text-right" title="Season Qty − Planned (All Months)">Remaining</TableHead>
+                {showAmounts && <TableHead className="text-right" title="Season Amount − Planned Amount">Remaining Amt</TableHead>}
+                <TableHead className="text-right" title="Actual sales quantity for the complete season">Season Sales</TableHead>
+                {showAmounts && <TableHead className="text-right" title="Amount for Season Sales">Sales Amt</TableHead>}
+                <TableHead className="text-right" title="Pending Sales = Season Qty − Season Sales">Pending</TableHead>
+                {showAmounts && <TableHead className="text-right" title="Season Amount − Sales Amount">Pending Amt</TableHead>}
+                <TableHead className="border-l text-right" title="Plan for the selected period (season / month / range)">Period Plan</TableHead>
+                <TableHead className="text-right" title="Sold in the selected period">Period Sold</TableHead>
+                <TableHead className="border-l text-right" title="Planned Amount for This Period Plan">Plan Amt</TableHead>
+                <TableHead className="text-right" title="Planned NBV for This Period Plan">Plan NBV</TableHead>
+                <TableHead className="text-right text-muted-foreground" title="Actual Amount for This Period Sold">Act. Amt</TableHead>
+                <TableHead className="text-right text-muted-foreground" title="Actual NBV for This Period Sold">Act. NBV</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -237,11 +303,20 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
                       {r.productName} <ChevronRight className="h-3.5 w-3.5" />
                     </button>
                   </TableCell>
-                  {showPackCols && packCols.map((p) => <TableCell key={p.id} className="text-center tabular-nums">{qtyFmt(r.packSums[p.id] ?? 0)}</TableCell>)}
-                  <TableCell className="text-right tabular-nums">{qtyFmt(r.total.qty)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatCurrency(r.total.amount)}</TableCell>
+                  <TableCell className="border-l text-right tabular-nums">{qtyFmt(r.seasonQty)}</TableCell>
+                  {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.seasonAmount)}</TableCell>}
+                  <TableCell className="text-right tabular-nums">{qtyFmt(r.plannedAllMonths)}</TableCell>
+                  {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.plannedAllMonthsAmount)}</TableCell>}
+                  <TableCell className={cn("text-right tabular-nums", r.remaining < 0 && "text-destructive")}>{qtyFmt(r.remaining)}</TableCell>
+                  {showAmounts && <TableCell className={cn("text-right tabular-nums", r.remainingAmount < 0 && "text-destructive")}>{formatCurrency(r.remainingAmount)}</TableCell>}
+                  <TableCell className="text-right tabular-nums">{qtyFmt(r.seasonSales)}</TableCell>
+                  {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.seasonSalesAmount)}</TableCell>}
+                  <TableCell className={cn("text-right tabular-nums", r.pendingSales < 0 && "text-destructive")}>{qtyFmt(r.pendingSales)}</TableCell>
+                  {showAmounts && <TableCell className={cn("text-right tabular-nums", r.pendingAmount < 0 && "text-destructive")}>{formatCurrency(r.pendingAmount)}</TableCell>}
+                  <TableCell className="border-l text-right tabular-nums">{qtyFmt(r.total.qty)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{qtyFmt(r.actual.qty)}</TableCell>
+                  <TableCell className="border-l text-right tabular-nums">{formatCurrency(r.total.amount)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.total.nbv)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{qtyFmt(r.actual.qty)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actual.amount)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actual.nbv)}</TableCell>
                 </TableRow>
@@ -250,13 +325,22 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
             <tfoot>
               <TableRow className="bg-muted/40 font-semibold">
                 <TableCell>Total</TableCell>
-                {showPackCols && packCols.map((p) => <TableCell key={p.id} className="text-center tabular-nums">{qtyFmt(data.products.reduce((s, r) => s + (r.packSums[p.id] ?? 0), 0))}</TableCell>)}
-                <TableCell className="text-right tabular-nums">{qtyFmt(gtotal.qty)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(gtotal.amount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(gtotal.nbv)}</TableCell>
-                <TableCell className="text-right tabular-nums">{qtyFmt(data.products.reduce((s, r) => s + r.actual.qty, 0))}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(data.products.reduce((s, r) => s + r.actual.amount, 0))}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(data.products.reduce((s, r) => s + r.actual.nbv, 0))}</TableCell>
+                <TableCell className="border-l text-right tabular-nums">{qtyFmt(T.seasonQty)}</TableCell>
+                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.seasonAmount)}</TableCell>}
+                <TableCell className="text-right tabular-nums">{qtyFmt(T.plannedAllMonths)}</TableCell>
+                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.plannedAllMonthsAmount)}</TableCell>}
+                <TableCell className="text-right tabular-nums">{qtyFmt(T.remaining)}</TableCell>
+                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.remainingAmount)}</TableCell>}
+                <TableCell className="text-right tabular-nums">{qtyFmt(T.seasonSales)}</TableCell>
+                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.seasonSalesAmount)}</TableCell>}
+                <TableCell className="text-right tabular-nums">{qtyFmt(T.pendingSales)}</TableCell>
+                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.pendingAmount)}</TableCell>}
+                <TableCell className="border-l text-right tabular-nums">{qtyFmt(T.periodPlan)}</TableCell>
+                <TableCell className="text-right tabular-nums">{qtyFmt(T.periodSold)}</TableCell>
+                <TableCell className="border-l text-right tabular-nums">{formatCurrency(T.plannedAmount)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatCurrency(T.plannedNbv)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatCurrency(T.actualAmount)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatCurrency(T.actualNbv)}</TableCell>
               </TableRow>
             </tfoot>
           </Table>

@@ -31,7 +31,7 @@ interface GroupRecoveryData {
 
 type RView = "month" | "week";
 const money = (n: number) => formatCurrency(n);
-const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+const pct = (n: number) => `${Math.round(n * 100)}%`;
 
 /* Column configs — reused for the table header/footer AND the drawer. Values come ONLY from the shared
  * recovery-calc, so a dealer's numbers and the officer total are the same math the Recovery table uses. */

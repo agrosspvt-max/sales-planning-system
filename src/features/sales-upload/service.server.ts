@@ -1,6 +1,6 @@
 import "server-only";
 import { z } from "zod";
-import { Role, ImportStatus, PlanStatus, type Prisma } from "@prisma/client";
+import { Role, ImportStatus, PlanStatus, SeasonStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { decorate, matchByName, similarity, type Keyed } from "@/lib/match-key";
@@ -591,6 +591,7 @@ export async function commitSalesUpload(
 export async function listTargetMonths(ctx: AuthContext) {
   assertAdmin(ctx);
   const seasons = await prisma.season.findMany({
+    where: { status: SeasonStatus.OPEN }, // CLOSED seasons disappear from Sales Upload / Aging import selectors
     orderBy: [{ year: "desc" }, { name: "asc" }],
     select: { name: true, year: true, months: { orderBy: { order: "asc" }, select: { id: true, name: true, order: true } } },
   });

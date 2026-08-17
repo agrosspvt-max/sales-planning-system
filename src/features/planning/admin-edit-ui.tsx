@@ -16,7 +16,7 @@ export interface AdminChange {
   newValue: number;
 }
 
-const numFmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
+const numFmt = (n: number) => String(Math.round(n));
 const diffFmt = (d: number) => `${d > 0 ? "+" : ""}${numFmt(d)}`;
 
 /** The persistent "ADMIN EDIT MODE" banner with Done / Cancel. */

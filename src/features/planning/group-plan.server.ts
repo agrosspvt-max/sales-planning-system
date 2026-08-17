@@ -47,6 +47,10 @@ export interface GroupPlanFilter {
   view: "total" | "month" | "range";
   monthIds: string[];
   officerId?: string; // optional: restrict the whole aggregation to ONE Sales Officer in the group
+  // Season Baseline mode. "approved" (default) → the 5 Season columns always use APPROVED seasonal +
+  // APPROVED monthly plans regardless of the selected buckets. "filters" → they follow the selected buckets.
+  // Either way the period columns (This Period / Financials) always follow the selected buckets + view.
+  seasonMetrics?: "approved" | "filters";
 }
 
 export interface Contribution {
@@ -77,9 +81,23 @@ export interface GroupProductRow {
   technicalName: string | null;
   rate: number;
   nbvPercent: number;
-  packSums: Record<string, number>; // seasonal view only
-  total: { qty: number; amount: number; nbv: number }; // = Σ contributions (PLAN figures)
-  actual: { qty: number; amount: number; nbv: number }; // seasonal: all-months sold; month: sold over selected months
+  // SEASON BASELINE (complete season; respects season+officer+scope; uses APPROVED plans by default, or
+  // the selected buckets when seasonMetrics="filters"). NEVER changes with the period selector.
+  seasonQty: number; // total seasonal plan qty
+  plannedAllMonths: number; // qty distributed into monthly plans across ALL months (gated per month)
+  remaining: number; // seasonQty − plannedAllMonths
+  seasonSales: number; // all-months sold qty for the season
+  pendingSales: number; // seasonQty − seasonSales
+  // Season Baseline amounts (for the "Show Amounts" toggle) — same source, amount instead of qty.
+  seasonAmount: number;
+  plannedAllMonthsAmount: number;
+  remainingAmount: number;
+  seasonSalesAmount: number;
+  pendingAmount: number;
+  // PERIOD-LEVEL (respond to Seasonal Total / Specific Month / Month Range). `total` = This Period Plan
+  // (qty/amount/nbv → Planned Amount/NBV); `actual` = This Period Sold (qty/amount/nbv → Actual Amount/NBV).
+  total: { qty: number; amount: number; nbv: number };
+  actual: { qty: number; amount: number; nbv: number };
   byBucket: Record<StatusBucket, BucketTotal>;
   contributions: Contribution[];
 }
@@ -185,6 +203,14 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     const b = key.split(":")[1] as StatusBucket;
     if (selected.has(b)) repPlanBucket.set(p.id, b);
   }
+  // Season Baseline buckets: APPROVED by default (management baseline), or the selected buckets when the
+  // caller chose "Follow Selected Filters". These drive ONLY the 5 Season Baseline columns (+ amounts).
+  const baselineBuckets: Set<StatusBucket> = filter.seasonMetrics === "filters" ? selected : new Set<StatusBucket>(["approved"]);
+  const baselineRepIds = new Set<string>(); // representative seasonal plan ids for the baseline buckets
+  for (const [key, p] of repByOfficerBucket) {
+    const b = key.split(":")[1] as StatusBucket;
+    if (baselineBuckets.has(b)) baselineRepIds.add(p.id);
+  }
 
   const productRows = new Map<string, GroupProductRow>();
   const contributions: Contribution[] = [];
@@ -197,7 +223,16 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         technicalName: l.product.technicalName,
         rate: num(l.product.rate),
         nbvPercent: num(l.product.nbvPercent),
-        packSums: {},
+        seasonQty: 0,
+        plannedAllMonths: 0,
+        remaining: 0,
+        seasonSales: 0,
+        pendingSales: 0,
+        seasonAmount: 0,
+        plannedAllMonthsAmount: 0,
+        remainingAmount: 0,
+        seasonSalesAmount: 0,
+        pendingAmount: 0,
         total: { qty: 0, amount: 0, nbv: 0 },
         actual: { qty: 0, amount: 0, nbv: 0 },
         byBucket: emptyBucketTotals(),
@@ -219,23 +254,112 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     bt.nbv += c.nbv;
   };
 
-  if (filter.view === "total") {
-    // ----- SEASONAL TOTAL: representative seasonal plans of the selected buckets. -----
-    const planIds = [...repPlanBucket.keys()];
-    if (planIds.length > 0) {
+  const valueMonthly = !isQuantityMode(monthlyMode);
+  const selectedMonthSet = new Set(filter.monthIds.filter((id) => monthNameById.has(id)));
+  const isTotal = filter.view === "total";
+
+  // ===== SEASONAL pass (ALWAYS runs). Loads BOTH the Season-Baseline representative plans and the
+  // period (Seasonal-Total) representative plans in ONE query. Baseline plans feed Season Qty / Season
+  // Sales (+ amounts); period plans feed the period columns via addContribution. Reuses figuresForMode.
+  const repIds = [...new Set([...baselineRepIds, ...repPlanBucket.keys()])];
+  if (repIds.length > 0) {
+    const planDealers = (await prisma.planDealer.findMany({
+      where: { seasonPlanId: { in: repIds }, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
+      select: {
+        seasonPlanId: true,
+        dealer: { select: { id: true, name: true } },
+        lines: {
+          select: {
+            productId: true,
+            inputMode: true,
+            inputValue: true,
+            product: { select: { name: true, technicalName: true, rate: true, nbvPercent: true } },
+            packs: { select: { quantity: true } },
+            monthlyEntries: { select: { saleQty: true, saleValue: true } },
+          },
+        },
+      },
+    })) as {
+      seasonPlanId: string;
+      dealer: { id: string; name: string };
+      lines: {
+        productId: string;
+        inputMode: string | null;
+        inputValue: unknown;
+        product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
+        packs: { quantity: number }[];
+        monthlyEntries: { saleQty: number; saleValue: unknown }[];
+      }[];
+    }[];
+
+    for (const pd of planDealers) {
+      const plan = planById.get(pd.seasonPlanId);
+      if (!plan) continue;
+      const isBaseline = baselineRepIds.has(pd.seasonPlanId);
+      const periodBucket = repPlanBucket.get(pd.seasonPlanId); // set only for period (selected) reps
+      for (const l of pd.lines) {
+        const row = ensureRow(l);
+        const nbvPct = row.nbvPercent;
+        const lineMode = (l.inputMode as PlanningMode | null) ?? "PACK_SIZE";
+        const input = lineMode === "PACK_SIZE" ? l.packs.reduce((s, pk) => s + pk.quantity, 0) : l.inputValue !== null ? num(l.inputValue) : 0;
+        const fig = figuresForMode(lineMode, input, row.rate, nbvPct);
+        let soldQty = 0, soldAmt = 0;
+        for (const e of l.monthlyEntries) { soldQty += e.saleQty; soldAmt += num(e.saleValue ?? 0); }
+        // Season Baseline (qty + amount) — from the baseline representative plans.
+        if (isBaseline) {
+          row.seasonQty += fig.totalQty ?? 0;
+          row.seasonAmount += fig.amount ?? 0;
+          row.seasonSales += soldQty;
+          row.seasonSalesAmount += soldAmt;
+        }
+        // Period columns (Seasonal-Total view) — from the selected-bucket representative plans.
+        if (isTotal && periodBucket) {
+          row.actual.qty += soldQty;
+          row.actual.amount += soldAmt;
+          row.actual.nbv += calcNbv(soldAmt, nbvPct);
+          addContribution(row, {
+            bucket: periodBucket, officerId: plan.officerId, officerName: officerName.get(plan.officerId) ?? plan.officerId,
+            dealerId: pd.dealer.id, dealerName: pd.dealer.name, planId: plan.id, planType: "SEASONAL",
+            version: plan.version, status: plan.status, monthId: null, monthName: null,
+            qty: fig.totalQty ?? 0, amount: fig.amount ?? 0, nbv: fig.nbv ?? 0,
+          });
+        }
+      }
+    }
+  }
+
+  // ===== SEASON-LEVEL · MONTHLY pass (ALWAYS runs). Every month's MonthlyPlan gated by its OWN status
+  // bucket → Planned (All Months) for every product (sum across ALL months). In Month/Range view this
+  // SAME pass also emits the period columns from the SELECTED months. Reuses figuresForMode / calcNbv.
+  const allPlanIds = seasonPlans.map((p) => p.id);
+  if (allPlanIds.length > 0) {
+    const monthlyPlans = (await prisma.monthlyPlan.findMany({
+      where: { seasonPlanId: { in: allPlanIds } },
+      select: { seasonPlanId: true, seasonMonthId: true, status: true },
+    })) as { seasonPlanId: string; seasonMonthId: string; status: string }[];
+    // Two month gates: `mpBucket` = months in a SELECTED bucket (period columns); `mpBaseline` = months in
+    // a BASELINE bucket (Planned All Months). Both keyed by (seasonPlanId:monthId).
+    const mpBucket = new Map<string, { bucket: StatusBucket; status: string }>();
+    const mpBaseline = new Set<string>();
+    for (const mp of monthlyPlans) {
+      const b = bucketOfStatus(mp.status);
+      if (!b) continue;
+      const key = `${mp.seasonPlanId}:${mp.seasonMonthId}`;
+      if (selected.has(b)) mpBucket.set(key, { bucket: b, status: mp.status });
+      if (baselineBuckets.has(b)) mpBaseline.add(key);
+    }
+
+    if (mpBucket.size > 0 || mpBaseline.size > 0) {
       const planDealers = (await prisma.planDealer.findMany({
-        where: { seasonPlanId: { in: planIds }, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
+        where: { seasonPlanId: { in: allPlanIds }, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
         select: {
           seasonPlanId: true,
           dealer: { select: { id: true, name: true } },
           lines: {
             select: {
               productId: true,
-              inputMode: true,
-              inputValue: true,
               product: { select: { name: true, technicalName: true, rate: true, nbvPercent: true } },
-              packs: { select: { packSizeId: true, quantity: true } },
-              monthlyEntries: { select: { saleQty: true, saleValue: true } },
+              monthlyEntries: { select: { seasonMonthId: true, planQty: true, saleQty: true, planValue: true, saleValue: true } },
             },
           },
         },
@@ -244,130 +368,54 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         dealer: { id: string; name: string };
         lines: {
           productId: string;
-          inputMode: string | null;
-          inputValue: unknown;
           product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
-          packs: { packSizeId: string; quantity: number }[];
-          monthlyEntries: { saleQty: number; saleValue: unknown }[];
+          monthlyEntries: { seasonMonthId: string; planQty: number; saleQty: number; planValue: unknown; saleValue: unknown }[];
         }[];
       }[];
 
       for (const pd of planDealers) {
         const plan = planById.get(pd.seasonPlanId);
-        const bucket = repPlanBucket.get(pd.seasonPlanId);
-        if (!plan || !bucket) continue;
+        if (!plan) continue;
         for (const l of pd.lines) {
           const row = ensureRow(l);
-          const rate = row.rate;
           const nbvPct = row.nbvPercent;
-          const lineMode = (l.inputMode as PlanningMode | null) ?? "PACK_SIZE";
-          const input = lineMode === "PACK_SIZE" ? l.packs.reduce((s, pk) => s + pk.quantity, 0) : l.inputValue !== null ? num(l.inputValue) : 0;
-          const fig = figuresForMode(lineMode, input, rate, nbvPct);
-          for (const pk of l.packs) row.packSums[pk.packSizeId] = (row.packSums[pk.packSizeId] ?? 0) + pk.quantity;
-          // Seasonal actuals = all-months sold for this line.
           for (const e of l.monthlyEntries) {
-            const sold = num(e.saleValue ?? 0);
-            row.actual.qty += e.saleQty;
-            row.actual.amount += sold;
-            row.actual.nbv += calcNbv(sold, nbvPct);
-          }
-          addContribution(row, {
-            bucket,
-            officerId: plan.officerId,
-            officerName: officerName.get(plan.officerId) ?? plan.officerId,
-            dealerId: pd.dealer.id,
-            dealerName: pd.dealer.name,
-            planId: plan.id,
-            planType: "SEASONAL",
-            version: plan.version,
-            status: plan.status,
-            monthId: null,
-            monthName: null,
-            qty: fig.totalQty ?? 0,
-            amount: fig.amount ?? 0,
-            nbv: fig.nbv ?? 0,
-          });
-        }
-      }
-    }
-  } else {
-    // ----- SPECIFIC MONTH / MONTH RANGE: filter by MonthlyPlan.status per (seasonPlan, month). -----
-    const allPlanIds = seasonPlans.map((p) => p.id);
-    const monthIds = filter.monthIds.filter((id) => monthNameById.has(id));
-    if (allPlanIds.length > 0 && monthIds.length > 0) {
-      const monthlyPlans = (await prisma.monthlyPlan.findMany({
-        where: { seasonPlanId: { in: allPlanIds }, seasonMonthId: { in: monthIds } },
-        select: { seasonPlanId: true, seasonMonthId: true, status: true },
-      })) as { seasonPlanId: string; seasonMonthId: string; status: string }[];
-      // (seasonPlanId:monthId) -> bucket, but only for months whose MonthlyPlan is in a SELECTED bucket.
-      const mpBucket = new Map<string, { bucket: StatusBucket; status: string }>();
-      for (const mp of monthlyPlans) {
-        const b = bucketOfStatus(mp.status);
-        if (b && selected.has(b)) mpBucket.set(`${mp.seasonPlanId}:${mp.seasonMonthId}`, { bucket: b, status: mp.status });
-      }
-      const valueMonthly = !isQuantityMode(monthlyMode);
-
-      if (mpBucket.size > 0) {
-        const planDealers = (await prisma.planDealer.findMany({
-          where: { seasonPlanId: { in: allPlanIds }, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
-          select: {
-            seasonPlanId: true,
-            dealer: { select: { id: true, name: true } },
-            lines: {
-              select: {
-                productId: true,
-                product: { select: { name: true, technicalName: true, rate: true, nbvPercent: true } },
-                monthlyEntries: { where: { seasonMonthId: { in: monthIds } }, select: { seasonMonthId: true, planQty: true, saleQty: true, planValue: true, saleValue: true } },
-              },
-            },
-          },
-        })) as {
-          seasonPlanId: string;
-          dealer: { id: string; name: string };
-          lines: {
-            productId: string;
-            product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
-            monthlyEntries: { seasonMonthId: string; planQty: number; saleQty: number; planValue: unknown; saleValue: unknown }[];
-          }[];
-        }[];
-
-        for (const pd of planDealers) {
-          const plan = planById.get(pd.seasonPlanId);
-          if (!plan) continue;
-          for (const l of pd.lines) {
-            const row = ensureRow(l);
-            const rate = row.rate;
-            const nbvPct = row.nbvPercent;
-            for (const e of l.monthlyEntries) {
-              const mp = mpBucket.get(`${pd.seasonPlanId}:${e.seasonMonthId}`);
-              if (!mp) continue; // month's MonthlyPlan not in a selected bucket
-              const planInput = valueMonthly ? num(e.planValue ?? 0) : e.planQty;
-              const fig = figuresForMode(monthlyMode, planInput, rate, nbvPct);
+            const key = `${pd.seasonPlanId}:${e.seasonMonthId}`;
+            const inBaseline = mpBaseline.has(key);
+            const mp = mpBucket.get(key);
+            if (!inBaseline && !mp) continue; // this month is in neither the baseline nor a selected bucket
+            const planInput = valueMonthly ? num(e.planValue ?? 0) : e.planQty;
+            const fig = figuresForMode(monthlyMode, planInput, row.rate, nbvPct);
+            // Planned (All Months) baseline — qty + amount — every baseline-gated month, always.
+            if (inBaseline) {
+              row.plannedAllMonths += fig.totalQty ?? 0;
+              row.plannedAllMonthsAmount += fig.amount ?? 0;
+            }
+            // Period columns (Month/Range view) — only the SELECTED months in a selected bucket.
+            if (mp && !isTotal && selectedMonthSet.has(e.seasonMonthId)) {
               const sold = num(e.saleValue ?? 0);
               row.actual.qty += e.saleQty;
               row.actual.amount += sold;
               row.actual.nbv += calcNbv(sold, nbvPct);
               addContribution(row, {
-                bucket: mp.bucket,
-                officerId: plan.officerId,
-                officerName: officerName.get(plan.officerId) ?? plan.officerId,
-                dealerId: pd.dealer.id,
-                dealerName: pd.dealer.name,
-                planId: plan.id,
-                planType: "MONTHLY",
-                version: plan.version,
-                status: mp.status,
-                monthId: e.seasonMonthId,
-                monthName: monthNameById.get(e.seasonMonthId) ?? null,
-                qty: fig.totalQty ?? 0,
-                amount: fig.amount ?? 0,
-                nbv: fig.nbv ?? 0,
+                bucket: mp.bucket, officerId: plan.officerId, officerName: officerName.get(plan.officerId) ?? plan.officerId,
+                dealerId: pd.dealer.id, dealerName: pd.dealer.name, planId: plan.id, planType: "MONTHLY",
+                version: plan.version, status: mp.status, monthId: e.seasonMonthId, monthName: monthNameById.get(e.seasonMonthId) ?? null,
+                qty: fig.totalQty ?? 0, amount: fig.amount ?? 0, nbv: fig.nbv ?? 0,
               });
             }
           }
         }
       }
     }
+  }
+
+  // Derived Season Baseline columns (qty + amount) — reuse the app's conceptual definitions.
+  for (const row of productRows.values()) {
+    row.remaining = row.seasonQty - row.plannedAllMonths;
+    row.pendingSales = row.seasonQty - row.seasonSales;
+    row.remainingAmount = row.seasonAmount - row.plannedAllMonthsAmount;
+    row.pendingAmount = row.seasonAmount - row.seasonSalesAmount;
   }
 
   // Officer breakdown — derived from the SAME contributions (no separate logic).
@@ -389,6 +437,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     excluded: officers.filter((o) => !includedOfficerIds.has(o.id)).map((o) => ({ name: o.name, reason: "No plan in the selected states" })),
   };
 
-  const products = [...productRows.values()].sort((a, b) => b.total.amount - a.total.amount);
+  // Season-stable ordering so products don't disappear/reorder when only the period selection changes.
+  const products = [...productRows.values()].sort((a, b) => b.seasonQty - a.seasonQty || b.total.amount - a.total.amount);
   return { ...base, officers: officerBreakdown, products };
 }

@@ -55,6 +55,22 @@ export async function applyRmAssignment(
     data: { effectiveTo: effectiveFrom },
   });
   await tx.rmAssignment.create({ data: { officerId, managerId, effectiveFrom } });
+
+  // Keep the group-based approval scope fed: RM data scope + approval routing key off `User.groupId`,
+  // not this RmAssignment table. So if this manager is an RM without a group yet, adopt the officer's
+  // group here — otherwise the RM would see none of the group's approvals. Guarded by one-RM-per-group:
+  // only adopt when the group has no other active RM. (No-op when the RM already has a group.)
+  const [officer, manager] = (await Promise.all([
+    tx.user.findUnique({ where: { id: officerId }, select: { groupId: true } }),
+    tx.user.findUnique({ where: { id: managerId }, select: { groupId: true, role: true } }),
+  ])) as [{ groupId: string | null } | null, { groupId: string | null; role: Role } | null];
+  if (manager?.role === Role.REGIONAL_MANAGER && !manager.groupId && officer?.groupId) {
+    const clash = await tx.user.findFirst({
+      where: { role: Role.REGIONAL_MANAGER, groupId: officer.groupId, isActive: true, deletedAt: null, id: { not: managerId } },
+      select: { id: true },
+    });
+    if (!clash) await tx.user.update({ where: { id: managerId }, data: { groupId: officer.groupId } });
+  }
 }
 
 /* ---------------------------- Dealer → Officer ---------------------------- */

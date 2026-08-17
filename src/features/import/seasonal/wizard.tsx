@@ -99,9 +99,10 @@ export function SeasonalImportWizard() {
   const [recovery, setRecovery] = useState<"offer" | "import" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Active (OPEN) seasons only — a CLOSED season cannot be imported into.
   const { data: seasons } = useQuery<SeasonOption[]>({
-    queryKey: ["seasons"],
-    queryFn: () => api.get<SeasonOption[]>("/api/seasons"),
+    queryKey: ["seasons", "active"],
+    queryFn: () => api.get<SeasonOption[]>("/api/seasons?active=true"),
   });
   const { data: options } = useQuery<Options>({
     queryKey: ["import-options"],

@@ -36,7 +36,7 @@ import {
 import { DealerPlanningStatus } from "./dealer-status";
 import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "./admin-edit-ui";
 
-const fmtNum = (n: number | null) => (n === null ? "—" : Number.isInteger(n) ? String(n) : n.toFixed(2));
+const fmtNum = (n: number | null) => (n === null ? "—" : String(Math.round(n)));
 
 /**
  * Dealer Plan — the ONE editable page. It reads/writes the shared plan-edit context, so

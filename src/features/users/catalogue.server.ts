@@ -347,7 +347,7 @@ export async function applyPriceRefresh(ctx: AuthContext, groupId: string, produ
 
   // Draft + Returned are the editable buckets; Submitted is protected-unless-selected; Approved only for
   // the chosen seasons. Build the seasonPlan status/season filter explicitly.
-  const statusFilters: unknown[] = [];
+  const statusFilters: Prisma.SeasonPlanWhereInput[] = [];
   if (sel.draft) statusFilters.push({ status: { in: [PlanStatus.DRAFT, PlanStatus.RETURNED] } });
   if (sel.submitted) statusFilters.push({ status: { in: [PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN] } });
   if (sel.approved && sel.seasonIds && sel.seasonIds.length > 0) statusFilters.push({ status: PlanStatus.APPROVED, seasonId: { in: sel.seasonIds } });

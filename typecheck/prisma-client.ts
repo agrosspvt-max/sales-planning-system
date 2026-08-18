@@ -65,6 +65,7 @@ export namespace Prisma {
   export type PrismaClientKnownRequestError = any;
   // Model input types are permissive in the stub; the real generated client supplies exact types.
   export type PlanLineCreateManyInput = any;
+  export type SeasonPlanWhereInput = any;
   export type Decimal = any;
 }
 

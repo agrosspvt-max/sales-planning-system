@@ -1,7 +1,7 @@
 import "server-only";
 import * as XLSX from "xlsx";
 import { z } from "zod";
-import { Role, PlanStatus } from "@prisma/client";
+import { Role, PlanStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
@@ -204,7 +204,7 @@ export async function initializeFromMaster(ctx: AuthContext, groupId: string) {
   const [master, existing] = (await Promise.all([
     prisma.product.findMany({ where: { isActive: true }, select: { id: true, rate: true } }),
     prisma.groupProductCatalogue.findMany({ where: { groupId }, select: { productId: true } }),
-  ])) as [{ id: string; rate: unknown }[], { productId: string }[]];
+  ])) as [{ id: string; rate: Prisma.Decimal }[], { productId: string }[]];
   const have = new Set(existing.map((e) => e.productId));
   const toCreate = master.filter((m) => !have.has(m.id));
   if (toCreate.length > 0) {

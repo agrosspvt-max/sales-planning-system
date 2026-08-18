@@ -6,6 +6,8 @@ import { Save, Ban } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { PlanGridMonthView } from "./plan-grid-month-view";
 import { formatCurrency } from "@/lib/utils";
+import { ProductName } from "@/components/ui/product-name";
+import { useCategories } from "@/lib/use-categories";
 import {
   sumFlex,
   amount as calcAmount,
@@ -48,6 +50,7 @@ export function PlanGrid() {
     canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave } =
     usePlanEdit();
   const qc = useQueryClient();
+  const categories = useCategories();
   const inputsEditable = editable || adminMode;
   const [reviewOpen, setReviewOpen] = useState(false);
 
@@ -306,8 +309,9 @@ export function PlanGrid() {
                 return (
                   <TableRow key={l.productId}>
                     <TableCell className="font-medium">
-                      {l.productName}
-                      {l.isAutoAdded && <span className="ml-1.5 rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info" title="Added by Sales Upload for an unplanned sold product">Auto Added</span>}
+                      <ProductName name={l.productName} nbvPercent={l.nbvPercent} categories={categories} isClearance={l.isClearance} clearanceQty={l.clearanceQty}>
+                        {l.isAutoAdded && <span className="ml-1.5 rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info" title="Added by Sales Upload for an unplanned sold product">Auto Added</span>}
+                      </ProductName>
                       {/* Technical/scientific name — hidden on phones to keep the frozen column narrow. */}
                       <div className="hidden text-xs text-muted-foreground sm:block">{l.technicalName}</div>
                     </TableCell>

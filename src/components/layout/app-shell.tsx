@@ -27,6 +27,8 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
   // Groups the user has manually collapsed. The active section is always forced open
   // regardless of this set, so navigation never hides the current page.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Second-level (nested parent) collapse state, keyed by the parent item's href.
+  const [collapsedSub, setCollapsedSub] = useState<Set<string>>(new Set());
   const pathname = usePathname();
   const items = navForRole(user.role);
 
@@ -60,6 +62,14 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
       return next;
     });
 
+  const toggleSub = (key: string) =>
+    setCollapsedSub((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
   const leaf = (item: (typeof items)[number]) => {
     const Icon = item.icon;
     const active = item.href === navState.activeHref;
@@ -82,6 +92,32 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
     );
   };
 
+  // A nav item with `children` renders as an expandable parent (a toggle, not a link). It auto-expands
+  // when one of its children is the active page.
+  const renderItem = (item: (typeof items)[number]) => {
+    if (!item.children || item.children.length === 0) return leaf(item);
+    const Icon = item.icon;
+    const childActive = item.children.some((c) => c.href === navState.activeHref);
+    const subExpanded = childActive || !collapsedSub.has(item.href);
+    return (
+      <div key={`sub:${item.href}`} className="space-y-1">
+        <button
+          type="button"
+          onClick={() => toggleSub(item.href)}
+          aria-expanded={subExpanded}
+          className={cn(
+            "flex w-full items-center justify-between rounded-md px-2 py-2 text-sm font-medium transition-colors",
+            childActive ? "text-foreground" : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          )}
+        >
+          <span className="flex items-center gap-2"><Icon className="h-4 w-4" /> {item.label}</span>
+          <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", subExpanded ? "" : "-rotate-90")} />
+        </button>
+        {subExpanded && <div className="ml-3 space-y-1 border-l border-sidebar-border pl-2">{item.children.map(leaf)}</div>}
+      </div>
+    );
+  };
+
   const sidebar = (
     <nav className="flex min-h-full flex-col gap-3 p-4">
       <div className="px-2 py-1 text-sm font-bold tracking-tight text-primary">
@@ -92,7 +128,7 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
         if (!group) {
           return (
             <div key="__root" className="space-y-1">
-              {groupItems.map(leaf)}
+              {groupItems.map(renderItem)}
             </div>
           );
         }
@@ -120,7 +156,7 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
                 )}
               />
             </button>
-            {expanded && <div className="space-y-1">{groupItems.map(leaf)}</div>}
+            {expanded && <div className="space-y-1">{groupItems.map(renderItem)}</div>}
           </div>
         );
       })}

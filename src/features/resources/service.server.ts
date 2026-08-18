@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { buildPage, type PageParams, type Paginated } from "@/lib/pagination";
 import type { Resource } from "@/lib/rbac";
 import { announcementRecipientIds, notifyMany } from "@/features/notifications/service.server";
+import { categoryIdForNbv, resyncAllProductCategories } from "@/features/products/categories.server";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -18,6 +19,8 @@ interface ServerResource {
   updateSchema: ZodTypeAny;
   transform?: (data: any, mode: "create" | "update") => Promise<any> | any;
   afterCreate?: (id: string) => Promise<void>;
+  afterUpdate?: (id: string) => Promise<void>;
+  afterSetActive?: (id: string, isActive: boolean) => Promise<void>;
 }
 
 const optionalString = z.preprocess(
@@ -36,11 +39,17 @@ const roleEnum = z.nativeEnum(Role);
 const SERVER: Partial<Record<Resource, ServerResource>> = {
   categories: {
     model: "category",
-    searchFields: ["name"],
+    searchFields: ["name", "notation"],
     orderBy: { name: "asc" },
     softDelete: true,
-    createSchema: z.object({ name: z.string().min(1) }),
-    updateSchema: z.object({ name: z.string().min(1) }),
+    // NBV% arrives from the form as a PERCENT (35) and is stored as a fraction (0.35) to match Product.nbvPercent.
+    createSchema: z.object({ name: z.string().min(1), nbvPercent: z.coerce.number().min(0), notation: optionalString, color: optionalString }),
+    updateSchema: z.object({ name: z.string().min(1), nbvPercent: z.coerce.number().min(0), notation: optionalString, color: optionalString }),
+    transform: (data) => ({ ...data, nbvPercent: data.nbvPercent / 100 }),
+    // Any category mutation re-derives every product's category from its NBV% (auto-mapping).
+    afterCreate: resyncAllProductCategories,
+    afterUpdate: resyncAllProductCategories,
+    afterSetActive: resyncAllProductCategories,
   },
   brands: {
     model: "brand",
@@ -63,22 +72,22 @@ const SERVER: Partial<Record<Resource, ServerResource>> = {
     searchFields: ["name", "technicalName"],
     orderBy: { name: "asc" },
     softDelete: true,
+    // categoryId/brandId are NOT form fields: category is auto-derived from NBV% (below); brandId is left
+    // untouched on update (not in the payload) so existing Brand links / Reports are preserved.
     createSchema: z.object({
       name: z.string().min(1),
       technicalName: optionalString,
       rate: z.coerce.number().min(0),
       nbvPercent: z.coerce.number().min(0),
-      categoryId: optionalString,
-      brandId: optionalString,
     }),
     updateSchema: z.object({
       name: z.string().min(1),
       technicalName: optionalString,
       rate: z.coerce.number().min(0),
       nbvPercent: z.coerce.number().min(0),
-      categoryId: optionalString,
-      brandId: optionalString,
     }),
+    // Auto-place the product in the category matching its NBV% (fraction). No manual mapping.
+    transform: async (data) => ({ ...data, categoryId: await categoryIdForNbv(data.nbvPercent) }),
   },
   dealers: {
     model: "dealer",
@@ -217,6 +226,7 @@ export async function updateResource(
   const parsed = r.updateSchema.parse(raw);
   const data = r.transform ? await r.transform(parsed, "update") : parsed;
   const updated = await delegate(r.model).update({ where: { id }, data });
+  if (r.afterUpdate) await r.afterUpdate(updated.id);
   return { id: updated.id };
 }
 
@@ -232,6 +242,7 @@ export async function setResourceActive(
     return;
   }
   await delegate(r.model).update({ where: { id }, data: { isActive } });
+  if (r.afterSetActive) await r.afterSetActive(id, isActive);
 }
 
 export async function loadOptions(): Promise<Record<string, { value: string; label: string }[]>> {

@@ -11,6 +11,10 @@ import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "./admin-edit-u
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
+import { ProductName } from "@/components/ui/product-name";
+import { CategoryFilter } from "@/components/ui/category-filter";
+import { useCategories } from "@/lib/use-categories";
+import { matchesCategoryFilter } from "@/lib/product-category";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -41,7 +45,9 @@ export function MonthlyPlanner() {
   const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush, setAdditionalOpen,
     canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave } = useMonthlyEdit();
   const qc = useQueryClient();
+  const categories = useCategories();
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState("");
 
   // First-class Monthly Plan shows the Seasonal-style dealer progress (tick / colour / No Plan).
   const isFirstClass = !!monthlyPlanId;
@@ -184,6 +190,7 @@ export function MonthlyPlanner() {
           {selMonth && data.months.length > 1 && (
             <Badge variant={selMonth.status === "OPEN" ? "success" : "muted"}>{MONTH_STATUS_LABELS[selMonth.status]}</Badge>
           )}
+          <CategoryFilter categories={categories} value={categoryFilter} onChange={setCategoryFilter} />
         </div>
         {data.canEdit && (
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
@@ -224,14 +231,14 @@ export function MonthlyPlanner() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {!dealer || dealer.products.length === 0 ? (
+            {!dealer || dealer.products.filter((p) => matchesCategoryFilter(p.nbvPercent, categoryFilter, categories)).length === 0 ? (
               <TableRow>
                 <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
                   Nothing planned for this dealer in the approved season plan.
                 </TableCell>
               </TableRow>
             ) : (
-              dealer.products.map((p) => {
+              dealer.products.filter((p) => matchesCategoryFilter(p.nbvPercent, categoryFilter, categories)).map((p) => {
                 const totalPlanned = data.months.reduce((s, m) => s + cellFor(p.planLineId, m.id).plan, 0);
                 const remaining = p.target - totalPlanned;
                 const excess = Math.max(0, totalPlanned - p.target);
@@ -243,9 +250,10 @@ export function MonthlyPlanner() {
                 return (
                   <TableRow key={p.planLineId} className={cn(isOver && "bg-warning/10")}>
                     <TableCell className="font-medium">
-                      {p.productName}
-                      {p.isAdditional && <Badge variant="secondary" className="ml-2 align-middle text-[10px]">ADDITIONAL PRODUCT</Badge>}
-                      {p.isAutoAdded && <Badge variant="default" className="ml-2 align-middle bg-info text-info-foreground text-[10px]">AUTO ADDED</Badge>}
+                      <ProductName name={p.productName} nbvPercent={p.nbvPercent} categories={categories} isClearance={p.isClearance} clearanceQty={p.clearanceQty}>
+                        {p.isAdditional && <Badge variant="secondary" className="ml-2 align-middle text-[10px]">ADDITIONAL PRODUCT</Badge>}
+                        {p.isAutoAdded && <Badge variant="default" className="ml-2 align-middle bg-info text-info-foreground text-[10px]">AUTO ADDED</Badge>}
+                      </ProductName>
                     </TableCell>
                     <TableCell className="text-right">{fmtUnit(p.target)}</TableCell>
                     <TableCell className="text-right">

@@ -58,10 +58,24 @@ export const RESOURCE_CONFIG: Partial<Record<Resource, ResourceClientConfig>> = 
     searchPlaceholder: "Search categories…",
     columns: [
       { key: "name", label: "Name" },
+      { key: "nbvPercent", label: "NBV %", format: "percent" },
+      { key: "notation", label: "Notation" },
+      { key: "color", label: "Color" },
       { key: "isActive", label: "Active", format: "boolean" },
-      { key: "createdAt", label: "Created", format: "date" },
     ],
-    fields: [{ name: "name", label: "Name", type: "text", required: true }],
+    fields: [
+      { name: "name", label: "Name", type: "text", required: true },
+      {
+        name: "nbvPercent",
+        label: "NBV %",
+        type: "number",
+        required: true,
+        step: "0.01",
+        helpText: "Enter as a percent, e.g. 35 for 35%. Every product with this NBV% is auto-placed in this category.",
+      },
+      { name: "notation", label: "Notation", type: "text", helpText: "Short badge label, e.g. P for Premium." },
+      { name: "color", label: "Color", type: "text", helpText: "Badge color as a hex code, e.g. #2563eb." },
+    ],
   },
   brands: {
     key: "brands",
@@ -130,10 +144,8 @@ export const RESOURCE_CONFIG: Partial<Record<Resource, ResourceClientConfig>> = 
         type: "number",
         required: true,
         step: "0.0001",
-        helpText: "Stored as a fraction — 0.25 means 25%.",
+        helpText: "Stored as a fraction — 0.25 means 25%. The product's Category is set automatically from this NBV%.",
       },
-      { name: "categoryId", label: "Category", type: "select", optionsKey: "categories" },
-      { name: "brandId", label: "Brand", type: "select", optionsKey: "brands" },
     ],
   },
   dealers: {

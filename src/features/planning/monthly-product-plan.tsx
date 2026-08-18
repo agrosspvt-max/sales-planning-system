@@ -4,6 +4,10 @@ import { useMemo, useState } from "react";
 import { formatCurrency } from "@/lib/utils";
 import { figuresForMode } from "@/lib/calc";
 import { Badge } from "@/components/ui/badge";
+import { ProductName } from "@/components/ui/product-name";
+import { CategoryFilter } from "@/components/ui/category-filter";
+import { useCategories } from "@/lib/use-categories";
+import { matchesCategoryFilter } from "@/lib/product-category";
 import {
   Table,
   TableBody,
@@ -20,16 +24,18 @@ const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n
 /** Monthly Product Plan — read-only, live from the monthly-edit context, filterable, with TOTALS. */
 export function MonthlyProductPlan() {
   const { data, monthlyMode, cellFor } = useMonthlyEdit();
+  const categories = useCategories();
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [filter, setFilter] = useState<MonthFilterState>(() => defaultMonthFilter(data.months));
   const monthIds = useMemo(() => resolveFilteredMonths(data.months, filter), [data.months, filter]);
 
   const rows = useMemo(() => {
-    const byProduct = new Map<string, { name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number; additional: boolean }>();
+    const byProduct = new Map<string, { name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number; additional: boolean; isClearance: boolean; clearanceQty: number | null }>();
     for (const d of data.dealers) {
       for (const p of d.products) {
         let r = byProduct.get(p.productId);
         if (!r) {
-          r = { name: p.productName, rate: p.rate, nbvPercent: p.nbvPercent, planInput: 0, saleInput: 0, additional: false };
+          r = { name: p.productName, rate: p.rate, nbvPercent: p.nbvPercent, planInput: 0, saleInput: 0, additional: false, isClearance: p.isClearance ?? false, clearanceQty: p.clearanceQty ?? null };
           byProduct.set(p.productId, r);
         }
         if (p.isAdditional) r.additional = true;
@@ -46,7 +52,10 @@ export function MonthlyProductPlan() {
       return {
         productId,
         name: r.name,
+        nbvPercent: r.nbvPercent,
         additional: r.additional,
+        isClearance: r.isClearance,
+        clearanceQty: r.clearanceQty,
         planQty: plan.totalQty ?? 0,
         planAmount: plan.amount ?? 0,
         planNbv: plan.nbv ?? 0,
@@ -67,7 +76,10 @@ export function MonthlyProductPlan() {
 
   return (
     <div className="space-y-3">
-      <MonthFilter months={data.months} state={filter} onChange={setFilter} />
+      <div className="flex flex-wrap items-center gap-2">
+        <MonthFilter months={data.months} state={filter} onChange={setFilter} />
+        <CategoryFilter categories={categories} value={categoryFilter} onChange={setCategoryFilter} />
+      </div>
       <div className="overflow-auto rounded-lg border bg-background">
         <Table stickyFirstColumn>
           <TableHeader>
@@ -82,14 +94,15 @@ export function MonthlyProductPlan() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.length === 0 ? (
+            {rows.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)).length === 0 ? (
               <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">Nothing planned.</TableCell></TableRow>
             ) : (
-              rows.map((r) => (
+              rows.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)).map((r) => (
                 <TableRow key={r.productId}>
                   <TableCell className="font-medium">
-                    {r.name}
-                    {r.additional && <Badge variant="secondary" className="ml-2 text-[10px]">ADDITIONAL</Badge>}
+                    <ProductName name={r.name} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty}>
+                      {r.additional && <Badge variant="secondary" className="ml-2 text-[10px]">ADDITIONAL</Badge>}
+                    </ProductName>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{qtyFmt(r.planQty)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>

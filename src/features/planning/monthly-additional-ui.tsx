@@ -5,10 +5,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ChevronDown, ChevronRight, UserPlus, Pencil } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { ClearanceTag } from "@/components/ui/clearance-tag";
+import { CategoryBadge } from "@/components/ui/category-badge";
+import { CategoryFilter } from "@/components/ui/category-filter";
+import { useCategories } from "@/lib/use-categories";
+import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
 import { DealerFormDialog, type DealerFields } from "./dealer-form-dialog";
 import { useMonthlyEdit } from "./monthly-edit-context";
 
-interface Candidate { productId: string; productName: string; rate: number; nbvPercent: number }
+interface Candidate { productId: string; productName: string; rate: number; nbvPercent: number; isClearance?: boolean; clearanceQty?: number | null; clearanceRemaining?: number | null }
 
 /** "+ Create Dealer" in Monthly Planning — opens the shared Dealer dialog (PENDING_APPROVAL). */
 export function CreateDealerButton({ monthlyPlanId, onCreated }: { monthlyPlanId: string; onCreated: (dealerId: string) => void }) {
@@ -51,6 +56,8 @@ export function EditDealerButton({ monthlyPlanId, dealerId, initial }: { monthly
  */
 export function AdditionalProductsSection({ monthlyPlanId, dealerId, canEdit }: { monthlyPlanId: string; dealerId: string; canEdit: boolean }) {
   const qc = useQueryClient();
+  const categories = useCategories();
+  const [categoryFilter, setCategoryFilter] = useState("");
   // Open-state is shared via the Monthly edit context so the mobile FAB / sticky bar can open this
   // section (and trigger the auto-scroll below) without the user hunting at the bottom of the page.
   const { additionalOpen: open, setAdditionalOpen: setOpen } = useMonthlyEdit();
@@ -90,13 +97,18 @@ export function AdditionalProductsSection({ monthlyPlanId, dealerId, canEdit }: 
           ) : (data?.length ?? 0) === 0 ? (
             <p className="text-sm text-muted-foreground">No additional products available.</p>
           ) : (
-            <div className="flex max-h-72 flex-wrap gap-2 overflow-auto">
-              {data!.map((c) => (
-                <Button key={c.productId} variant="outline" size="sm" disabled={addMut.isPending} onClick={() => addMut.mutate(c.productId)}>
-                  <Plus className="h-3.5 w-3.5" /> {c.productName}
-                </Button>
-              ))}
-            </div>
+            <>
+              <div className="mb-2"><CategoryFilter categories={categories} value={categoryFilter} onChange={setCategoryFilter} /></div>
+              <div className="flex max-h-72 flex-wrap gap-2 overflow-auto">
+                {data!.filter((c) => matchesCategoryFilter(c.nbvPercent, categoryFilter, categories)).map((c) => (
+                  <Button key={c.productId} variant="outline" size="sm" disabled={addMut.isPending} onClick={() => addMut.mutate(c.productId)}>
+                    <Plus className="h-3.5 w-3.5" /> <span className={c.isClearance ? "text-warning" : undefined}>{c.productName}</span>
+                    {c.isClearance && <ClearanceTag qty={c.clearanceQty} remaining={c.clearanceRemaining} />}
+                    <CategoryBadge category={categoryForNbv(c.nbvPercent, categories)} />
+                  </Button>
+                ))}
+              </div>
+            </>
           )}
           <p className="mt-2 text-xs text-muted-foreground">Adding a product places it in the table above for this dealer and month. The approved Seasonal Plan is not changed.</p>
         </div>

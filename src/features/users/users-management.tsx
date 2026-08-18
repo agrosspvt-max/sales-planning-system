@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Users2, ArrowLeft, BarChart3 } from "lucide-react";
+import { Plus, Users2, ArrowLeft, BarChart3, PackageCheck } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -220,6 +220,9 @@ function GroupDetail({ group, onBack }: { group: { id: string; name: string }; o
             <Button variant="outline" size="sm" onClick={onBack}><ArrowLeft className="h-4 w-4" /> Back</Button>
             <Button variant="outline" size="sm" asChild>
               <Link href={`/planning/group/${group.id}`}><BarChart3 className="h-4 w-4" /> Territory Plan</Link>
+            </Button>
+            <Button variant="outline" size="sm" asChild>
+              <Link href={`/groups/${group.id}/catalogue`}><PackageCheck className="h-4 w-4" /> State Catalogue</Link>
             </Button>
             <Button size="sm" onClick={() => setAddOpen(true)}><Plus className="h-4 w-4" /> Add Sales Officer</Button>
           </div>

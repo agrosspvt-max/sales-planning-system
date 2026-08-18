@@ -37,6 +37,10 @@ interface ResolvedRow {
 interface Resolution {
   targetMonth: { id: string; name: string; seasonId: string; seasonName: string };
   rows: ResolvedRow[];
+  // Matched dealer + matched product that has sales but no PlanLine yet, and whose dealer HAS an active
+  // seasonal PlanDealer — i.e. exactly the rows the commit auto-adds as AUTO ADDED lines. Always built
+  // (independent of the report) so the import path can create them without the admin toggling anything.
+  unplannedPairs: { planDealerId: string; productId: string }[];
   unknownDealers: string[];
   unknownProducts: string[];
   dealersWithoutPlan: string[]; // matched dealer but no approved plan / assignment for this season
@@ -62,6 +66,9 @@ export interface ReportProduct {
   amount: number;
   rate: number;
   status: ReportProductStatus;
+  // Non-blocking warning: product matched in Master but NOT active in the dealer's group catalogue.
+  // Never affects the import — sales are still recorded — it only flags a catalogue gap to fix later.
+  groupUnavailable?: boolean;
 }
 export interface ReportDealer {
   dealerName: string;
@@ -165,6 +172,7 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
       dealer: { status: "ACTIVE" },
     },
     select: {
+      id: true,
       dealerId: true,
       dealer: { select: { name: true } },
       seasonPlan: { select: { officer: { select: { id: true, name: true } } } },
@@ -173,16 +181,19 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
   });
   const planLineByKey = new Map<string, string>();
   const dealersWithPlan = new Set<string>();
+  const planDealerIdByDealer = new Map<string, string>(); // dealerId → active seasonal PlanDealer id
   const officerByDealer = new Map<string, { officerId: string; officerName: string }>();
   const dealerNameById = new Map<string, string>();
   const planLinesAll: { dealerId: string; productId: string; planLineId: string }[] = [];
   for (const pd of plans as {
+    id: string;
     dealerId: string;
     dealer: { name: string };
     seasonPlan: { officer: { id: string; name: string } | null } | null;
     lines: { id: string; productId: string }[];
   }[]) {
     dealersWithPlan.add(pd.dealerId);
+    planDealerIdByDealer.set(pd.dealerId, pd.id);
     dealerNameById.set(pd.dealerId, pd.dealer.name);
     if (pd.seasonPlan?.officer) officerByDealer.set(pd.dealerId, { officerId: pd.seasonPlan.officer.id, officerName: pd.seasonPlan.officer.name });
     for (const l of pd.lines) {
@@ -201,7 +212,33 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
     for (const e of entries) plannedQtyByLine.set(e.planLineId, e.planQty);
   }
 
+  // Group-catalogue availability (report warning only — never blocks import). Maps each matched dealer to
+  // its officer's group and the set of ACTIVE (groupId|productId) catalogue entries; groups with NO
+  // catalogue are treated as "everything available" (Master fallback), so they never warn.
+  const groupByDealer = new Map<string, string>();
+  const activeCatalogue = new Set<string>(); // `${groupId}|${productId}`
+  const groupsWithCatalogue = new Set<string>();
+  if (withReport && officerByDealer.size > 0) {
+    const offIds = [...new Set([...officerByDealer.values()].map((o) => o.officerId))];
+    const officers = (await prisma.user.findMany({ where: { id: { in: offIds } }, select: { id: true, groupId: true } })) as { id: string; groupId: string | null }[];
+    const groupByOfficer = new Map(officers.map((o) => [o.id, o.groupId] as const));
+    for (const [dealerId, o] of officerByDealer) { const g = groupByOfficer.get(o.officerId); if (g) groupByDealer.set(dealerId, g); }
+    const groupIds = [...new Set([...groupByDealer.values()])];
+    if (groupIds.length > 0) {
+      const cat = (await prisma.groupProductCatalogue.findMany({ where: { groupId: { in: groupIds } }, select: { groupId: true, productId: true, isActive: true } })) as { groupId: string; productId: string; isActive: boolean }[];
+      for (const c of cat) { groupsWithCatalogue.add(c.groupId); if (c.isActive) activeCatalogue.add(`${c.groupId}|${c.productId}`); }
+    }
+  }
+  const groupUnavailableFor = (dealerId: string, productId: string): boolean => {
+    const g = groupByDealer.get(dealerId);
+    if (!g || !groupsWithCatalogue.has(g)) return false; // no catalogue → Master fallback → available
+    return !activeCatalogue.has(`${g}|${productId}`);
+  };
+
   const rows: ResolvedRow[] = [];
+  // Matched-but-unplanned sales whose dealer has an active seasonal PlanDealer — the commit turns these
+  // into AUTO ADDED lines. De-duped by (planDealerId|productId). Built regardless of `withReport`.
+  const unplannedByKey = new Map<string, { planDealerId: string; productId: string }>();
   const unknownDealers: string[] = [];
   const unknownProducts = new Set<string>();
   const dealersWithoutPlan: string[] = [];
@@ -254,15 +291,20 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
       const planLineId = planLineByKey.get(`${dealer.id}|${product.id}`);
       if (!planLineId) {
         // Dealer matched + product matched, but this dealer never planned this product this season.
+        // If this dealer has an active seasonal PlanDealer, queue an AUTO ADDED line so the commit can
+        // create it and post the actual — regardless of catalogue availability (actuals capture any
+        // Master product). Dealers without an approved plan can't receive a line, so they're skipped.
+        const pdId = planDealerIdByDealer.get(dealer.id);
+        if (pdId) unplannedByKey.set(`${pdId}|${product.id}`, { planDealerId: pdId, productId: product.id });
         if (withReport) {
           const officer = officerByDealer.get(dealer.id);
-          repDealer?.products.push({ productName: product.name, plannedQty: 0, importedQty: p.qty, amount: p.amount, rate, status: "No Plan Found" });
+          repDealer?.products.push({ productName: product.name, plannedQty: 0, importedQty: p.qty, amount: p.amount, rate, status: "No Plan Found", groupUnavailable: groupUnavailableFor(dealer.id, product.id) });
           matchedNotPlanned.push({ officerId: officer?.officerId ?? "", officerName: officer?.officerName ?? NO_PLAN_OFFICER, dealerName: dealer.name, productId: product.id, productName: product.name, salesQty: p.qty, amount: p.amount, rate, matchedBy });
         }
         continue; // unchanged: not importable
       }
       rows.push({ planLineId, dealerId: dealer.id, productId: product.id, qty: p.qty, amount: p.amount });
-      if (withReport) repDealer?.products.push({ productName: product.name, plannedQty: plannedQtyByLine.get(planLineId) ?? 0, importedQty: p.qty, amount: p.amount, rate, status: "Imported" });
+      if (withReport) repDealer?.products.push({ productName: product.name, plannedQty: plannedQtyByLine.get(planLineId) ?? 0, importedQty: p.qty, amount: p.amount, rate, status: "Imported", groupUnavailable: groupUnavailableFor(dealer.id, product.id) });
     }
   }
 
@@ -303,6 +345,7 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
   return {
     targetMonth: { id: month.id, name: month.name, seasonId: month.season.id, seasonName: `${month.season.name} ${month.season.year}` },
     rows,
+    unplannedPairs: [...unplannedByKey.values()],
     unknownDealers,
     unknownProducts: [...unknownProducts],
     dealersWithoutPlan: [...new Set(dealersWithoutPlan)],
@@ -369,6 +412,33 @@ export interface SalesUploadResult {
   unknownDealers: number;
   unknownProducts: number;
   autoAddedLines: number;
+}
+
+/**
+ * Automatic AUTO ADDED lines — the dealer-specific counterpart to `autoAddUnplannedProducts`. For every
+ * (PlanDealer, product) that had actual sales but no PlanLine (from `resolveWorkbook().unplannedPairs`),
+ * create ONE normal seasonal PlanLine flagged `isAutoAdded` (isAdditional stays FALSE) on THAT dealer
+ * only — so the sold product shows as AUTO ADDED with Season/Plan 0 and the actual can then post. This is
+ * intentionally unconditional on the Group Catalogue: catalogue governs PLANNING availability, but actual
+ * sales must be captured for any Master product. `skipDuplicates` on (planDealerId, productId) →
+ * idempotent/retry-safe. No rate/NBV snapshot is written; planning amounts read `rateSnapshot ?? live`.
+ * Returns the number of PlanLines created.
+ */
+async function autoAddUnplannedLines(pairs: { planDealerId: string; productId: string }[]): Promise<number> {
+  if (pairs.length === 0) return 0;
+  const creates: Prisma.PlanLineCreateManyInput[] = pairs.map((p) => ({
+    planDealerId: p.planDealerId,
+    productId: p.productId,
+    isAutoAdded: true,
+  }));
+  let created = 0;
+  const CHUNK = 500;
+  for (let i = 0; i < creates.length; i += CHUNK) {
+    const slice = creates.slice(i, i + CHUNK);
+    const r = (await withDbRetry(() => prisma.planLine.createMany({ data: slice, skipDuplicates: true }))) as { count: number };
+    created += r.count;
+  }
+  return created;
 }
 
 /**
@@ -457,10 +527,18 @@ export async function commitSalesUpload(
   const input = commitInputSchema.parse(raw);
   const parsed = parseSalesWorkbook(buffer);
   if (parsed.dealers.length === 0) throw new ApiError(422, "No dealer rows were found in the workbook");
-  // Auto-add selected unplanned products FIRST, so resolveWorkbook then sees their new PlanLines and
-  // imports their actuals through the normal path (no separate import pipeline).
-  const autoAddedLines = await autoAddUnplannedProducts(ctx, input.seasonMonthId, input.autoAddUnplanned);
-  const res = await resolveWorkbook(parsed, input.seasonMonthId);
+  // Resolve once to discover both importable rows AND matched-but-unplanned sales (unplannedPairs).
+  const first = await resolveWorkbook(parsed, input.seasonMonthId);
+  // AUTO ADDED lines are created BEFORE the import so the actuals post through the normal path:
+  //  1. Automatic + dealer-specific — every sold product missing from that dealer's plan (the reported
+  //     regression: these used to vanish; now they always become AUTO ADDED rows).
+  //  2. Selection-based + officer-wide — the admin's explicit "add this product across the plan" choices
+  //     from the Import Preview (kept for backward compatibility; skipDuplicates avoids double-creates).
+  const autoLines = await autoAddUnplannedLines(first.unplannedPairs);
+  const selectionLines = await autoAddUnplannedProducts(ctx, input.seasonMonthId, input.autoAddUnplanned);
+  const autoAddedLines = autoLines + selectionLines;
+  // Re-resolve only if new lines exist, so their (dealer, product) now map to a PlanLine and import.
+  const res = autoAddedLines > 0 ? await resolveWorkbook(parsed, input.seasonMonthId) : first;
   const monthId = res.targetMonth.id;
 
   // One actual per (planLine, month) — the parser already merged duplicates per dealer, but a

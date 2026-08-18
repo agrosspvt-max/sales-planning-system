@@ -31,8 +31,15 @@ function matchesPath(pathname: string, href: string): boolean {
  * Longest matching href wins, so only one leaf is ever active.
  */
 export function resolveNavState(pathname: string, items: NavItem[]): NavState {
-  let best: NavItem | null = null;
+  // Flatten to leaves: an item with children is an expandable parent (a toggle, never a selectable
+  // leaf), so its children participate in matching instead of the parent.
+  const leaves: NavItem[] = [];
   for (const item of items) {
+    if (item.children && item.children.length) leaves.push(...item.children);
+    else leaves.push(item);
+  }
+  let best: NavItem | null = null;
+  for (const item of leaves) {
     if (!matchesPath(pathname, item.href)) continue;
     if (!best || item.href.length > best.href.length) best = item;
   }

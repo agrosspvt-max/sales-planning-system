@@ -10,6 +10,11 @@ import { PageHeader } from "@/components/layout/page-header";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ClearanceTag } from "@/components/ui/clearance-tag";
+import { CategoryBadge } from "@/components/ui/category-badge";
+import { CategoryFilter } from "@/components/ui/category-filter";
+import { useCategories } from "@/lib/use-categories";
+import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
 import { GroupRecovery } from "./group-recovery-page";
 
 /* ------------------------------- Shared types ----------------------------- */
@@ -27,6 +32,7 @@ interface Contribution {
 interface BucketTotal { qty: number; amount: number; nbv: number; officerCount: number }
 interface GroupProductRow {
   productId: string; productName: string; technicalName: string | null; rate: number; nbvPercent: number;
+  isClearance?: boolean; clearanceQty?: number | null;
   // Season Baseline (always the complete season; APPROVED by default). Qty + amount (Show Amounts).
   seasonQty: number; plannedAllMonths: number; remaining: number; seasonSales: number; pendingSales: number;
   seasonAmount: number; plannedAllMonthsAmount: number; remainingAmount: number; seasonSalesAmount: number; pendingAmount: number;
@@ -137,6 +143,8 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   const [monthB, setMonthB] = useState("");
   const [buckets, setBuckets] = useState<StatusBucket[]>(["approved"]);
   const [drawerProduct, setDrawerProduct] = useState<GroupProductRow | null>(null);
+  const categories = useCategories();
+  const [categoryFilter, setCategoryFilter] = useState("");
   // Season Baseline mode (default Approved). Show Amounts is a persisted per-user UI preference.
   const [seasonMetrics, setSeasonMetrics] = useState<"approved" | "filters">("approved");
   const [showAmounts, setShowAmounts] = useState(false);
@@ -260,6 +268,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
           <input type="checkbox" className="h-4 w-4" checked={showAmounts} onChange={toggleAmounts} />
           Show Amounts
         </label>
+        <CategoryFilter categories={categories} value={categoryFilter} onChange={setCategoryFilter} />
       </div>
 
       {data.products.length === 0 ? (
@@ -296,11 +305,12 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.products.map((r) => (
+              {data.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)).map((r) => (
                 <TableRow key={r.productId}>
                   <TableCell className="font-medium">
-                    <button className="inline-flex items-center gap-1 text-left text-primary hover:underline" onClick={() => setDrawerProduct(r)}>
-                      {r.productName} <ChevronRight className="h-3.5 w-3.5" />
+                    <button className="inline-flex flex-wrap items-center gap-1 text-left hover:underline" onClick={() => setDrawerProduct(r)}>
+                      <span className={r.isClearance ? "text-warning" : "text-primary"}>{r.productName}</span>{r.isClearance && <ClearanceTag qty={r.clearanceQty} />}
+                      <CategoryBadge category={categoryForNbv(r.nbvPercent, categories)} /> <ChevronRight className="h-3.5 w-3.5 text-primary" />
                     </button>
                   </TableCell>
                   <TableCell className="border-l text-right tabular-nums">{qtyFmt(r.seasonQty)}</TableCell>

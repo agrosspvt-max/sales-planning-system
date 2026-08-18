@@ -9,6 +9,7 @@ import {
   getOfficerScope,
   isPlanOwner,
 } from "@/lib/scope";
+import { planningProductsForOfficer, clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { saveLinesSchema, remarksSchema, revisionRequestSchema } from "@/lib/validations/planning";
 import { NotificationType } from "@prisma/client";
 import { findOrCreateSeason } from "@/features/seasons/service.server";
@@ -181,7 +182,9 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
   const [activeDealers, products, packSizes] = await Promise.all([
     // Defaulters are blocked from planning — never seed them into a new seasonal plan.
     prisma.dealer.findMany({ where: { id: { in: dealerIds }, isActive: true, status: { not: "DEFAULTER" } }, orderBy: { name: "asc" } }),
-    prisma.product.findMany({ where: { isActive: true }, orderBy: { name: "asc" } }), // V3
+    // Products come from the officer's GROUP catalogue (active, at the group price); Master fallback when
+    // the group has no catalogue. The group price is SNAPSHOTTED onto each line so the plan is price-stable.
+    planningProductsForOfficer(officerId),
     getPlanningPackSizes(),
   ]);
 
@@ -199,7 +202,9 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
           dealerId: d.id,
           lines: {
             create: products.map((p) => ({
-              productId: p.id,
+              productId: p.productId,
+              rateSnapshot: p.rate,
+              nbvPercentSnapshot: p.nbvPercent,
               packs: { create: packSizes.map((ps) => ({ packSizeId: ps.id })) },
             })),
           },
@@ -310,7 +315,7 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
       where: { id: planId },
       include: {
         season: { select: { name: true, year: true, status: true, seasonalMode: true } },
-        officer: { select: { name: true } },
+        officer: { select: { name: true, groupId: true } },
         // Exclude monthly-only additions (fromMonthlyPlan), deactivated/deleted dealers
         // (isActive=false) and Defaulters (blocked from planning) so the seasonal view shows
         // only plan-eligible seasonal dealers. Existing PlanDealer rows are preserved on disk.
@@ -344,6 +349,8 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
   // A deactivated plan is invisible to the Sales Officer (Admin/RM can still open it).
   if (isHiddenFromOfficer(ctx, (plan as { lifecycleState?: string }).lifecycleState)) throw new ApiError(404, "Plan not found");
   await assertOfficerInScope(ctx, plan.officerId);
+  // Clearance flags (group-specific, by the plan officer's group + productId) — display-only tag.
+  const clearance = await clearanceMapForGroup((plan.officer as { groupId: string | null }).groupId);
 
   // Grid columns = canonical PLANNING packs UNION every pack that already holds a stored
   // quantity in THIS plan. `isPlanning` governs which columns NEW plans get, but it must
@@ -412,11 +419,14 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
             productName: l.product.name,
             technicalName: l.product.technicalName,
             productActive: l.product.isActive,
+            isClearance: clearance.has(l.productId),
+            clearanceQty: clearance.get(l.productId)?.clearanceQty ?? null,
             // Auto-added by Sales Upload (unplanned sold product) — drives the "Auto Added" badge.
             isAutoAdded: (l as { isAutoAdded?: boolean }).isAutoAdded ?? false,
-            // Planning pricing always comes from the live Master Price List.
-            rate: num(l.product.rate),
-            nbvPercent: num(l.product.nbvPercent),
+            // Planning pricing is the price FROZEN on the line (rateSnapshot), set from the Group
+            // Catalogue at creation; falls back to the live Master price for legacy/unset lines.
+            rate: num((l as { rateSnapshot?: unknown }).rateSnapshot ?? l.product.rate),
+            nbvPercent: num((l as { nbvPercentSnapshot?: unknown }).nbvPercentSnapshot ?? l.product.nbvPercent),
             // Planning Configuration: how this line was stored (null => PACK_SIZE).
             inputMode: (l.inputMode as PlanningMode | null) ?? null,
             inputValue: l.inputValue !== null ? num(l.inputValue) : null,
@@ -488,8 +498,9 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
   const pd = plan.dealers.find((d) => d.dealerId === selectedDealerId);
   const rows = (pd?.lines ?? [])
     .map((l) => {
-      const rate = num(l.product.rate);
-      const nbvPct = num(l.product.nbvPercent);
+      // Snapshot-first (frozen at creation) with live-Master fallback.
+      const rate = num((l as { rateSnapshot?: unknown }).rateSnapshot ?? l.product.rate);
+      const nbvPct = num((l as { nbvPercentSnapshot?: unknown }).nbvPercentSnapshot ?? l.product.nbvPercent);
       const lineMode = (l.inputMode as PlanningMode | null) ?? "PACK_SIZE";
       const seasonalInput =
         lineMode === "PACK_SIZE"

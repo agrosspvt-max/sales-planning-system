@@ -51,21 +51,51 @@ model User {
 
 /// A group of Sales Officers (e.g. MP / UP / WB / CG). One officer belongs to one group.
 model UserGroup {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  members     User[]
+  id               String                  @id @default(cuid())
+  name             String                  @unique
+  description      String?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  members          User[]
+  productCatalogue GroupProductCatalogue[]
 }
 
+/// Group-wise Product Catalogue: which Master Products are available in a group, at what group price,
+/// and whether they are active for that group's planning. The Master Product remains the single product
+/// identity (no product duplication); this is a per-(group, product) overlay. Plans SNAPSHOT the price
+/// they use (PlanLine.rateSnapshot) at creation, so changing a group price never alters historical plans.
+model GroupProductCatalogue {
+  id            String    @id @default(cuid())
+  groupId       String
+  productId     String
+  price         Decimal   @db.Decimal(12, 2) // group price (initially copied from Master, then editable)
+  isActive      Boolean   @default(true) // available for THIS group's planning/product selection
+  priceIsInitial Boolean  @default(true) // still the copied Master price (not yet edited for the group)
+  isClearance   Boolean   @default(false) // group-specific clearance flag (display-only; never affects calc)
+  clearanceQty  Int? // clearance quantity to move (nullable)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  group         UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  product       Product   @relation(fields: [productId], references: [id])
+
+  @@unique([groupId, productId])
+  @@index([groupId])
+  @@index([productId])
+}
+
+/// Product Category. A category owns an NBV% (stored as a fraction, e.g. 0.35 = 35%); every Product whose
+/// nbvPercent matches adopts it automatically — there is NO manual product↔category mapping. `notation`
+/// is a short code (e.g. "P") and `color` a hex string, both used only for the display badge/filter.
 model Category {
-  id        String    @id @default(cuid())
-  name      String    @unique
-  isActive  Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  products  Product[]
+  id         String    @id @default(cuid())
+  name       String    @unique
+  nbvPercent Decimal?  @unique @db.Decimal(6, 4) // the NBV% (fraction) that maps products into this category
+  notation   String? // short badge label, e.g. "P"
+  color      String? // badge color, hex e.g. "#2563eb"
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  products   Product[]
 }
 
 model Brand {
@@ -93,6 +123,7 @@ model Product {
   planLines     PlanLine[]
   brand         Brand?     @relation(fields: [brandId], references: [id])
   category      Category?  @relation(fields: [categoryId], references: [id])
+  groupCatalogues GroupProductCatalogue[]
 
   @@index([categoryId])
   @@index([brandId])

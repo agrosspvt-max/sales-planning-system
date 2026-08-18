@@ -15,6 +15,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Th } from "@/features/labels/label-ui";
+import { ProductName } from "@/components/ui/product-name";
+import { useCategories } from "@/lib/use-categories";
 
 const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n));
 
@@ -23,6 +25,8 @@ interface AMProduct {
   productName: string;
   rate: number;
   nbvPercent: number;
+  isClearance?: boolean;
+  clearanceQty?: number | null;
   monthly: Record<string, { plan: number; sale: number; saleAmount: number }>;
 }
 interface AMDealer {
@@ -41,6 +45,9 @@ type View = "total" | "month" | "range";
 interface AggRow {
   id: string;
   name: string;
+  nbvPercent?: number; // set only when grouped by product (drives the category badge)
+  isClearance?: boolean;
+  clearanceQty?: number | null;
   planQty: number;
   planAmount: number;
   planNbv: number;
@@ -69,6 +76,7 @@ export function SeasonalMonthlyView({
   const [view, setView] = useState<View>("total");
   const [monthA, setMonthA] = useState("");
   const [monthB, setMonthB] = useState("");
+  const categories = useCategories();
 
   const { data, isLoading } = useQuery<ApprovedMonthly>({
     queryKey: ["approved-monthly", seasonPlanId],
@@ -103,6 +111,7 @@ export function SeasonalMonthlyView({
         let row = acc.get(key);
         if (!row) {
           row = { id: key, name, planQty: 0, planAmount: 0, planNbv: 0, soldQty: 0, soldAmount: 0, soldNbv: 0 };
+          if (groupBy === "product") { row.nbvPercent = p.nbvPercent; row.isClearance = p.isClearance ?? false; row.clearanceQty = p.clearanceQty ?? null; }
           acc.set(key, row);
         }
         let planInput = 0;
@@ -195,7 +204,11 @@ export function SeasonalMonthlyView({
             <TableBody>
               {rows.map((r) => (
                 <TableRow key={r.id}>
-                  <TableCell className="font-medium">{r.name}</TableCell>
+                  <TableCell className="font-medium">
+                    {groupBy === "product"
+                      ? <ProductName name={r.name} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty} />
+                      : r.name}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{qtyFmt(r.planQty)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.planNbv)}</TableCell>

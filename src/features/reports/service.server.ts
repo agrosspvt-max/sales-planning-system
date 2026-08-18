@@ -98,9 +98,10 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
     const rm = rmByOfficer.get(plan.officerId) as { id: string; name: string } | undefined;
     for (const pd of plan.dealers) {
       for (const l of pd.lines) {
-        // All planning calculations use the current Product Master values.
-        const rate = num(l.product.rate);
-        const nbvPct = num(l.product.nbvPercent);
+        // Snapshot-first pricing (frozen on the line at creation) with live-Master fallback, so an
+        // approved plan's Amount/NBV never changes when catalogue/master prices change afterwards.
+        const rate = num((l as { rateSnapshot?: unknown }).rateSnapshot ?? l.product.rate);
+        const nbvPct = num((l as { nbvPercentSnapshot?: unknown }).nbvPercentSnapshot ?? l.product.nbvPercent);
 
         // Planned figures come from the line's OWN seasonal mode (null => PACK_SIZE),
         // via the centralized calc — so amount/NBV are correct in every mode.

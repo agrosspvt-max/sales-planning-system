@@ -39,6 +39,8 @@ export interface PlanLineDetail {
   technicalName: string | null;
   productActive: boolean;
   isAutoAdded?: boolean;
+  isClearance?: boolean;
+  clearanceQty?: number | null;
   rate: number;
   nbvPercent: number;
   /** How this line was stored (null => PACK_SIZE). */
@@ -147,6 +149,8 @@ export interface MonthlyProductRow {
   isAdditional?: boolean;
   /** True for an Auto-Added / Unplanned product created by Sales Upload. */
   isAutoAdded?: boolean;
+  isClearance?: boolean;
+  clearanceQty?: number | null;
   rate: number;
   nbvPercent: number;
   /** Approved season target expressed in the active monthly unit (qty / amount / nbv). */

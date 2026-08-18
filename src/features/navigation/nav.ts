@@ -3,7 +3,6 @@ import {
   LayoutDashboard,
   Package,
   Tags,
-  Boxes,
   Ruler,
   Store,
   Users,
@@ -24,6 +23,7 @@ import {
   FileInput,
   Rocket,
   Upload,
+  PackageCheck,
   type LucideIcon,
 } from "lucide-react";
 
@@ -33,6 +33,8 @@ export interface NavItem {
   icon: LucideIcon;
   roles: Role[];
   group?: string;
+  /** Optional nested items — renders the item as an expandable parent (a toggle, not a link). */
+  children?: NavItem[];
 }
 
 const ADMIN_ONLY = [Role.SUPER_ADMIN];
@@ -76,9 +78,18 @@ export const NAV_ITEMS: NavItem[] = [
     group: "Insights",
   },
 
-  { label: "Products", href: "/masters/products", icon: Package, roles: ADMIN_ONLY, group: "Master Data" },
+  {
+    label: "Products and Catalogues",
+    href: "/masters/products",
+    icon: Package,
+    roles: ADMIN_ONLY,
+    group: "Master Data",
+    children: [
+      { label: "Product Master", href: "/masters/products", icon: Package, roles: ADMIN_ONLY, group: "Master Data" },
+      { label: "State Catalogue", href: "/masters/product-catalogue", icon: PackageCheck, roles: ADMIN_ONLY, group: "Master Data" },
+    ],
+  },
   { label: "Categories", href: "/masters/categories", icon: Tags, roles: ADMIN_ONLY, group: "Master Data" },
-  { label: "Brands", href: "/masters/brands", icon: Boxes, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Pack Sizes", href: "/masters/packSizes", icon: Ruler, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Dealers", href: "/masters/dealers", icon: Store, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Users", href: "/masters/users", icon: Users, roles: [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER], group: "Master Data" },
@@ -95,5 +106,7 @@ export const NAV_ITEMS: NavItem[] = [
 ];
 
 export function navForRole(role: Role): NavItem[] {
-  return NAV_ITEMS.filter((item) => item.roles.includes(role));
+  return NAV_ITEMS.filter((item) => item.roles.includes(role)).map((item) =>
+    item.children ? { ...item, children: item.children.filter((c) => c.roles.includes(role)) } : item,
+  );
 }

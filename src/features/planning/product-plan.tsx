@@ -12,6 +12,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Th } from "@/features/labels/label-ui";
+import { ProductName } from "@/components/ui/product-name";
+import { useCategories } from "@/lib/use-categories";
 import { usePlanEdit } from "./plan-edit-context";
 import { SeasonalMonthlyView } from "./seasonal-monthly-view";
 
@@ -21,6 +23,9 @@ interface ProductRow {
   productId: string;
   name: string;
   technicalName: string | null;
+  nbvPercent: number;
+  isClearance: boolean;
+  clearanceQty: number | null;
   packSums: Record<string, number>;
   planQty: number;
   planAmount: number;
@@ -37,6 +42,7 @@ interface ProductRow {
  */
 export function ProductPlan() {
   const { detail, packMode, packColumns, cells, lineFig } = usePlanEdit();
+  const categories = useCategories();
 
   const rows = useMemo<ProductRow[]>(() => {
     const byProduct = new Map<string, ProductRow>();
@@ -48,6 +54,9 @@ export function ProductPlan() {
             productId: l.productId,
             name: l.productName,
             technicalName: l.technicalName,
+            nbvPercent: l.nbvPercent,
+            isClearance: l.isClearance ?? false,
+            clearanceQty: l.clearanceQty ?? null,
             packSums: {},
             planQty: 0,
             planAmount: 0,
@@ -119,7 +128,7 @@ export function ProductPlan() {
             rows.map((r) => (
               <TableRow key={r.productId}>
                 <TableCell className="font-medium">
-                  {r.name}
+                  <ProductName name={r.name} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty} />
                   {/* Technical/scientific name — hidden on phones to keep the frozen column narrow. */}
                   {r.technicalName && <div className="hidden text-xs text-muted-foreground sm:block">{r.technicalName}</div>}
                 </TableCell>

@@ -10,6 +10,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
 import { SectionColgroup } from "@/components/ui/table-group";
 import { Th, LabelSectionHeaderRow, type LabelSection } from "@/features/labels/label-ui";
+import { ProductName } from "@/components/ui/product-name";
+import { useCategories } from "@/lib/use-categories";
 
 /**
  * Read-only MONTH VIEW of an approved Seasonal Plan's Dealer Plan. It is a VIEW only — it never
@@ -25,6 +27,8 @@ interface AMProduct {
   productName: string;
   rate: number;
   nbvPercent: number;
+  isClearance?: boolean;
+  clearanceQty?: number | null;
   target: number;
   monthly: Record<string, { plan: number; sale: number; saleAmount: number }>;
 }
@@ -52,6 +56,7 @@ export function PlanGridMonthView({
     queryKey: ["approved-monthly", seasonPlanId],
     queryFn: () => api.get(`/api/planning/season-plans/${seasonPlanId}/approved-monthly`),
   });
+  const categories = useCategories();
 
   // The month has monthly data only if an APPROVED monthly plan exists for it.
   const monthApproved = !!data?.months.some((m) => m.id === monthId);
@@ -72,6 +77,9 @@ export function PlanGridMonthView({
       return {
         productId: p.productId,
         productName: p.productName,
+        nbvPercent: p.nbvPercent,
+        isClearance: p.isClearance ?? false,
+        clearanceQty: p.clearanceQty ?? null,
         monthlyPlannedQty: planFig.totalQty ?? 0,
         amount: planFig.amount,
         nbv: planFig.nbv,
@@ -156,7 +164,7 @@ export function PlanGridMonthView({
             ) : (
               rows.map((r) => (
                 <TableRow key={r.productId}>
-                  <TableCell className="font-medium">{r.productName}</TableCell>
+                  <TableCell className="font-medium"><ProductName name={r.productName} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty} /></TableCell>
                   <TableCell className="text-right">{qtyMode ? fmtNum(r.monthlyPlannedQty) : (r.amount === null ? "—" : formatCurrency(r.amount))}</TableCell>
                   <TableCell className="text-right">{r.amount === null ? "—" : formatCurrency(r.amount)}</TableCell>
                   <TableCell className="text-right">{r.nbv === null ? "—" : formatCurrency(r.nbv)}</TableCell>

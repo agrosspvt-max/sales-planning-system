@@ -3,6 +3,7 @@ import { PlanStatus, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope, isPlanOwner } from "@/lib/scope";
+import { clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { saveMonthlySchema } from "@/lib/validations/planning";
 import { figuresForMode, isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { getEditableMonthMap, assertMonthOpen } from "./planning-state.server";
@@ -60,6 +61,9 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
   const isOwner = isPlanOwner(ctx, plan.officerId);
   // Mode saved on THIS season, never the current global default.
   const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
+  // Clearance flags (group-specific, by the plan officer's group + productId) — display-only.
+  const officer = (await prisma.user.findUnique({ where: { id: plan.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
+  const clearance = await clearanceMapForGroup(officer?.groupId ?? null);
 
   return {
     planId: plan.id,
@@ -70,7 +74,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
       const status = ((m as { status?: string }).status as MonthStatus) ?? "OPEN";
       return { id: m.id, name: m.name, order: m.order, status, editable: isMonthEditable(status) };
     }),
-    dealers: buildMonthlyDealers(planDealers, months, monthlyMode),
+    dealers: buildMonthlyDealers(planDealers, months, monthlyMode, clearance),
   };
 }
 
@@ -84,6 +88,7 @@ export function buildMonthlyDealers(
   planDealers: MonthlyPlanDealerRow[],
   months: { id: string }[],
   monthlyMode: PlanningMode,
+  clearance?: Map<string, { clearanceQty: number | null }>, // group-specific clearance (by productId), display-only
 ) {
   const valueMode = !isQuantityMode(monthlyMode);
   return planDealers
@@ -96,9 +101,9 @@ export function buildMonthlyDealers(
       isNewDealer: pd.fromMonthlyPlan ?? false,
       products: pd.lines
         .map((line) => {
-          // Monthly planning always prices against the current Master Price List.
-          const rate = num(line.product.rate);
-          const nbvPercent = num(line.product.nbvPercent);
+          // Snapshot-first pricing (frozen on the line at creation) with live-Master fallback.
+          const rate = num(line.rateSnapshot ?? line.product.rate);
+          const nbvPercent = num(line.nbvPercentSnapshot ?? line.product.nbvPercent);
           // The season target comes from the line's OWN stored seasonal mode,
           // re-expressed in the active monthly unit.
           const seasonalMode: PlanningMode = (line.inputMode as PlanningMode | null) ?? "PACK_SIZE";
@@ -132,6 +137,8 @@ export function buildMonthlyDealers(
             productName: line.product.name,
             isAdditional: line.isAdditional ?? false,
             isAutoAdded: line.isAutoAdded ?? false,
+            isClearance: clearance?.has(line.productId) ?? false,
+            clearanceQty: clearance?.get(line.productId)?.clearanceQty ?? null,
             rate,
             nbvPercent,
             target,
@@ -161,6 +168,8 @@ interface MonthlyLineRow {
   id: string;
   productId: string;
   product: { name: string; rate: unknown; nbvPercent: unknown };
+  rateSnapshot?: unknown;
+  nbvPercentSnapshot?: unknown;
   inputMode: string | null;
   inputValue: unknown;
   isAdditional?: boolean;

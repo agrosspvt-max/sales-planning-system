@@ -10,6 +10,7 @@ import { isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { tightKey } from "@/lib/match-key";
 import { findProbableDealers } from "@/lib/dealer-resolver";
 import { DEALER_STATUSES, isActiveForStatus } from "@/lib/dealer-status";
+import { planningProductsForOfficer, catalogueEntryForOfficerProduct, clearanceMapForGroup, clearanceSoldForGroup } from "@/features/users/catalogue.server";
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { buildMonthlyDealers } from "./monthly.server";
@@ -268,9 +269,12 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
       { mobile: pd.dealer.mobile, village: pd.dealer.village, tehsil: pd.dealer.tehsil, district: pd.dealer.district, address: pd.dealer.address },
     ]),
   );
+  // Clearance flags (group-specific, by the plan officer's group + productId) — display-only.
+  const clearanceOfficer = (await prisma.user.findUnique({ where: { id: mp.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
+  const clearance = await clearanceMapForGroup(clearanceOfficer?.groupId ?? null);
   // Attach per-dealer completion (≥1 monthly plan value entered — the SAME "has a value" concept
   // Seasonal Planning uses) and the stored monthly No Plan state.
-  const dealers = buildMonthlyDealers(planDealers, months, monthlyMode).map((d) => ({
+  const dealers = buildMonthlyDealers(planDealers, months, monthlyMode, clearance).map((d) => ({
     ...d,
     noPlan: noPlanByDealer.has(d.dealerId),
     noPlanReason: noPlanByDealer.get(d.dealerId) ?? null,
@@ -359,7 +363,9 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
     }),
   ]);
 
-  return { monthlyMode, months, dealers: buildMonthlyDealers(planDealers, months, monthlyMode) };
+  const clOfficer = (await prisma.user.findUnique({ where: { id: seasonPlan.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
+  const clearance = await clearanceMapForGroup(clOfficer?.groupId ?? null);
+  return { monthlyMode, months, dealers: buildMonthlyDealers(planDealers, months, monthlyMode, clearance) };
 }
 
 /* -------------------------------- Saving ---------------------------------- */
@@ -442,30 +448,29 @@ export async function getAdditionalProductCandidates(
   });
   const alreadyInMonth = new Set(existing.map((line) => line.productId));
 
-  const products = (await prisma.product.findMany({
-    where: { isActive: true },
+  // Candidates come from the officer's GROUP catalogue (active), at the group price (Master fallback when
+  // the group has no catalogue). Names are joined from the Master. Products already in this month excluded.
+  const catalogue = await planningProductsForOfficer(mp.officerId);
+  const byId = new Map(catalogue.map((c) => [c.productId, c] as const));
+  const names = (await prisma.product.findMany({
+    where: { id: { in: catalogue.map((c) => c.productId) } },
     orderBy: { name: "asc" },
-    select: {
-      id: true,
-      name: true,
-      rate: true,
-      nbvPercent: true,
-    },
-  })) as {
-    id: string;
-    name: string;
-    rate: unknown;
-    nbvPercent: unknown;
-  }[];
+    select: { id: true, name: true },
+  })) as { id: string; name: string }[];
 
-  return products
+  // Group-specific clearance (isClearance/clearanceQty already come from the group catalogue). Remaining
+  // = clearanceQty − actual sold in THIS group only. Clearance is NEVER read from the Product Master.
+  const officer = (await prisma.user.findUnique({ where: { id: mp.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
+  const clearanceIds = catalogue.filter((c) => c.isClearance).map((c) => c.productId);
+  const sold = await clearanceSoldForGroup(officer?.groupId ?? null, clearanceIds);
+
+  return names
     .filter((p) => !alreadyInMonth.has(p.id))
-    .map((p) => ({
-      productId: p.id,
-      productName: p.name,
-      rate: num(p.rate),
-      nbvPercent: num(p.nbvPercent),
-    }));
+    .map((p) => {
+      const c = byId.get(p.id)!;
+      const clearanceRemaining = c.isClearance && c.clearanceQty != null ? Math.max(0, c.clearanceQty - (sold.get(p.id) ?? 0)) : null;
+      return { productId: p.id, productName: p.name, rate: c.rate, nbvPercent: c.nbvPercent, isClearance: c.isClearance ?? false, clearanceQty: c.clearanceQty ?? null, clearanceRemaining };
+    });
 }
 
 /**
@@ -480,11 +485,9 @@ export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: stri
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
 
-  const product = await prisma.product.findUnique({
-    where: { id: productId },
-    select: { isActive: true },
-  });
-  if (!product || !product.isActive) throw new ApiError(422, "Product not found or inactive");
+  // Availability + price come from the officer's GROUP catalogue (Master fallback). Null => not available.
+  const entry = await catalogueEntryForOfficerProduct(mp.officerId, productId);
+  if (!entry) throw new ApiError(422, "Product is not available in this group's catalogue");
 
   let pd = await prisma.planDealer.findUnique({
     where: { seasonPlanId_dealerId: { seasonPlanId: mp.seasonPlanId, dealerId } },
@@ -501,8 +504,9 @@ export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: stri
     },
     select: { id: true },
   });
+  // Snapshot the group price onto the new line so it stays price-stable like every other line.
   const line = existingLine ?? await prisma.planLine.create({
-    data: { planDealerId: pd.id, productId, isAdditional: true },
+    data: { planDealerId: pd.id, productId, isAdditional: true, rateSnapshot: entry.rate, nbvPercentSnapshot: entry.nbvPercent },
     select: { id: true },
   });
   await prisma.monthlyEntry.upsert({
@@ -554,8 +558,13 @@ export async function addDealerToActiveSeasonalPlan(tx: Tx, officerId: string, d
   const existing = await tx.planDealer.findUnique({ where: { seasonPlanId_dealerId: { seasonPlanId: plan.id, dealerId } }, select: { id: true } });
   if (existing) return { added: true }; // no duplicate PlanDealer
   const pd = await tx.planDealer.create({ data: { seasonPlanId: plan.id, dealerId, fromMonthlyPlan: false }, select: { id: true } });
-  const products = (await tx.product.findMany({ where: { isActive: true }, select: { id: true } })) as { id: string }[];
-  if (products.length > 0) await tx.planLine.createMany({ data: products.map((p) => ({ planDealerId: pd.id, productId: p.id })) });
+  // Seed lines from the officer's GROUP catalogue (active, group price snapshotted); Master fallback.
+  const products = await planningProductsForOfficer(officerId, tx);
+  if (products.length > 0) {
+    await tx.planLine.createMany({
+      data: products.map((p) => ({ planDealerId: pd.id, productId: p.productId, rateSnapshot: p.rate, nbvPercentSnapshot: p.nbvPercent })),
+    });
+  }
   return { added: true };
 }
 

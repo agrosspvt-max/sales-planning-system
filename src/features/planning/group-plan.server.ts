@@ -3,6 +3,7 @@ import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { figuresForMode, nbv as calcNbv, isQuantityMode, type PlanningMode } from "@/lib/calc";
+import { clearanceMapForGroup } from "@/features/users/catalogue.server";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -81,6 +82,8 @@ export interface GroupProductRow {
   technicalName: string | null;
   rate: number;
   nbvPercent: number;
+  isClearance: boolean; // group-specific clearance flag (this group's catalogue)
+  clearanceQty: number | null;
   // SEASON BASELINE (complete season; respects season+officer+scope; uses APPROVED plans by default, or
   // the selected buckets when seasonMetrics="filters"). NEVER changes with the period selector.
   seasonQty: number; // total seasonal plan qty
@@ -223,6 +226,8 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         technicalName: l.product.technicalName,
         rate: num(l.product.rate),
         nbvPercent: num(l.product.nbvPercent),
+        isClearance: false,
+        clearanceQty: null,
         seasonQty: 0,
         plannedAllMonths: 0,
         remaining: 0,
@@ -273,6 +278,8 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
             productId: true,
             inputMode: true,
             inputValue: true,
+            rateSnapshot: true,
+            nbvPercentSnapshot: true,
             product: { select: { name: true, technicalName: true, rate: true, nbvPercent: true } },
             packs: { select: { quantity: true } },
             monthlyEntries: { select: { saleQty: true, saleValue: true } },
@@ -286,6 +293,8 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         productId: string;
         inputMode: string | null;
         inputValue: unknown;
+        rateSnapshot: unknown;
+        nbvPercentSnapshot: unknown;
         product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
         packs: { quantity: number }[];
         monthlyEntries: { saleQty: number; saleValue: unknown }[];
@@ -299,10 +308,12 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       const periodBucket = repPlanBucket.get(pd.seasonPlanId); // set only for period (selected) reps
       for (const l of pd.lines) {
         const row = ensureRow(l);
-        const nbvPct = row.nbvPercent;
+        // Snapshot-first pricing (frozen on the line) with live-Master fallback.
+        const rate = num(l.rateSnapshot ?? l.product.rate);
+        const nbvPct = num(l.nbvPercentSnapshot ?? l.product.nbvPercent);
         const lineMode = (l.inputMode as PlanningMode | null) ?? "PACK_SIZE";
         const input = lineMode === "PACK_SIZE" ? l.packs.reduce((s, pk) => s + pk.quantity, 0) : l.inputValue !== null ? num(l.inputValue) : 0;
-        const fig = figuresForMode(lineMode, input, row.rate, nbvPct);
+        const fig = figuresForMode(lineMode, input, rate, nbvPct);
         let soldQty = 0, soldAmt = 0;
         for (const e of l.monthlyEntries) { soldQty += e.saleQty; soldAmt += num(e.saleValue ?? 0); }
         // Season Baseline (qty + amount) — from the baseline representative plans.
@@ -358,6 +369,8 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
           lines: {
             select: {
               productId: true,
+              rateSnapshot: true,
+              nbvPercentSnapshot: true,
               product: { select: { name: true, technicalName: true, rate: true, nbvPercent: true } },
               monthlyEntries: { select: { seasonMonthId: true, planQty: true, saleQty: true, planValue: true, saleValue: true } },
             },
@@ -368,6 +381,8 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         dealer: { id: string; name: string };
         lines: {
           productId: string;
+          rateSnapshot: unknown;
+          nbvPercentSnapshot: unknown;
           product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
           monthlyEntries: { seasonMonthId: string; planQty: number; saleQty: number; planValue: unknown; saleValue: unknown }[];
         }[];
@@ -378,14 +393,16 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         if (!plan) continue;
         for (const l of pd.lines) {
           const row = ensureRow(l);
-          const nbvPct = row.nbvPercent;
+          // Snapshot-first pricing (frozen on the line) with live-Master fallback.
+          const rate = num(l.rateSnapshot ?? l.product.rate);
+          const nbvPct = num(l.nbvPercentSnapshot ?? l.product.nbvPercent);
           for (const e of l.monthlyEntries) {
             const key = `${pd.seasonPlanId}:${e.seasonMonthId}`;
             const inBaseline = mpBaseline.has(key);
             const mp = mpBucket.get(key);
             if (!inBaseline && !mp) continue; // this month is in neither the baseline nor a selected bucket
             const planInput = valueMonthly ? num(e.planValue ?? 0) : e.planQty;
-            const fig = figuresForMode(monthlyMode, planInput, row.rate, nbvPct);
+            const fig = figuresForMode(monthlyMode, planInput, rate, nbvPct);
             // Planned (All Months) baseline — qty + amount — every baseline-gated month, always.
             if (inBaseline) {
               row.plannedAllMonths += fig.totalQty ?? 0;
@@ -436,6 +453,13 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     byBucket: { approved: refs(officersByBucket.approved), submitted: refs(officersByBucket.submitted), draft: refs(officersByBucket.draft) },
     excluded: officers.filter((o) => !includedOfficerIds.has(o.id)).map((o) => ({ name: o.name, reason: "No plan in the selected states" })),
   };
+
+  // Annotate clearance (group-specific, by groupId + productId) — display-only.
+  const clearance = await clearanceMapForGroup(groupId);
+  for (const row of productRows.values()) {
+    const c = clearance.get(row.productId);
+    if (c) { row.isClearance = true; row.clearanceQty = c.clearanceQty; }
+  }
 
   // Season-stable ordering so products don't disappear/reorder when only the period selection changes.
   const products = [...productRows.values()].sort((a, b) => b.seasonQty - a.seasonQty || b.total.amount - a.total.amount);

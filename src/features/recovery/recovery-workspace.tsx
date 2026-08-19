@@ -3,11 +3,10 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Ban, Save } from "lucide-react";
+import { Ban, Save, Lock, Unlock } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { NativeSelect } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
@@ -68,6 +67,14 @@ interface LastRefresh {
   removedDealers: number;
   outstandingDelta: number;
 }
+interface WeekLock {
+  weekNo: number;
+  startDay: number;
+  endDay: number;
+  auto: boolean; // date-based lock (this week has ended)
+  overridden: boolean; // admin has set a manual override
+  locked: boolean; // EFFECTIVE state (override wins over date rule)
+}
 interface RecoveryDetail {
   id: string;
   status: PlanStatus;
@@ -82,6 +89,7 @@ interface RecoveryDetail {
   canAdminEdit?: boolean;
   weekCount: number;
   currentWeek: number;
+  weekLocks: WeekLock[];
   lastRefresh: LastRefresh | null;
   dealers: RecoveryDealer[];
 }
@@ -157,10 +165,12 @@ function GuidancePanel({ data }: { data: RecoveryDetail }) {
   const recovered = data.dealers.reduce((s, d) => s + d.monthRunningRecovery, 0);
   const remaining = Math.max(0, commitment - recovered);
   const lr = data.lastRefresh;
-  if (!lr && data.currentWeek <= 1) return null; // nothing to guide at month start, no refresh yet
+  const lockedWeeks = data.weekLocks.filter((w) => w.locked).map((w) => w.weekNo);
+  const editableWeeks = data.weekLocks.filter((w) => !w.locked).map((w) => w.weekNo);
+  if (!lr && lockedWeeks.length === 0) return null; // nothing to guide at month start, no refresh yet
   const lockNote =
-    data.currentWeek > 1
-      ? `Weeks 1–${data.currentWeek - 1} locked · Weeks ${data.currentWeek}–${data.weekCount} editable`
+    lockedWeeks.length > 0
+      ? `Locked week(s): ${lockedWeeks.join(", ")} · Editable: ${editableWeeks.length ? editableWeeks.join(", ") : "none"}`
       : `All weeks (1–${data.weekCount}) editable`;
   return (
     <div className="rounded-lg border bg-muted/20 p-3 text-sm">
@@ -244,7 +254,7 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
       </div>
 
       {tab === "month" && <MonthView key={data.id + data.status} detail={data} />}
-      {tab === "week" && <WeekView key={data.id + data.status} detail={data} />}
+      {tab === "week" && <WeekView key={data.id + data.status} detail={data} isAdmin={role === Role.SUPER_ADMIN} />}
       {tab === "history" && <RecoveryHistory id={id} role={role} />}
     </div>
   );
@@ -491,26 +501,75 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
 
 /* -------------------------------- Week View ------------------------------- */
 
-function WeekView({ detail }: { detail: RecoveryDetail }) {
+function WeekView({ detail, isAdmin }: { detail: RecoveryDetail; isAdmin: boolean }) {
   const qc = useQueryClient();
   const editable = detail.weekEditable;
-  // Open on the current business week (later refreshes lock earlier weeks).
+  // Open on the current (first editable) business week.
   const [weekNo, setWeekNo] = useState(Math.min(Math.max(detail.currentWeek, 1), detail.weekCount));
-  const weekOptions = Array.from({ length: detail.weekCount }, (_, i) => ({
-    value: String(i + 1),
-    label: i + 1 < detail.currentWeek ? `Week ${i + 1} 🔒` : `Week ${i + 1}`,
-  }));
+  const lockByWeek = useMemo(() => new Map(detail.weekLocks.map((w) => [w.weekNo, w])), [detail.weekLocks]);
+
+  // Admin-only: toggle a week's manual lock override (persisted globally on the plan).
+  const toggleMut = useMutation({
+    mutationFn: (wk: number) => api.post(`/api/recovery/plans/${detail.id}/week-lock`, { weekNo: wk }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] }),
+  });
+
+  const selectedLock = lockByWeek.get(weekNo);
+  const selectedLocked = selectedLock?.locked ?? false;
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">Week:</span>
-        <NativeSelect className="w-36" options={weekOptions} value={String(weekNo)} onChange={(e) => setWeekNo(Number(e.target.value))} />
-        {!editable && <span className="text-xs text-muted-foreground">Week View is locked in this state.</span>}
-        {editable && weekNo < detail.currentWeek && (
-          <span className="text-xs text-warning">Week {weekNo} is locked — read-only after the Week {detail.currentWeek} refresh. Values are preserved.</span>
-        )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-sm font-medium">Week:</span>
+        {Array.from({ length: detail.weekCount }, (_, i) => i + 1).map((wk) => {
+          const lock = lockByWeek.get(wk);
+          const locked = lock?.locked ?? false;
+          const selected = wk === weekNo;
+          // Tooltip differs by role + state (admin can act; users only see why).
+          const tip = isAdmin
+            ? "Click to unlock/lock this week"
+            : locked
+              ? (lock?.overridden ? "Locked by Admin override" : "Locked because this week has ended")
+              : (lock?.overridden ? "Unlocked by Admin override" : "Editable — this week has not ended");
+          return (
+            <span
+              key={wk}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-sm",
+                selected ? "border-primary bg-accent" : "border-input hover:bg-muted/60",
+              )}
+            >
+              <button type="button" className="font-medium" onClick={() => setWeekNo(wk)}>Week {wk}</button>
+              {isAdmin ? (
+                <button
+                  type="button"
+                  title={tip}
+                  aria-label={tip}
+                  disabled={toggleMut.isPending}
+                  onClick={() => toggleMut.mutate(wk)}
+                  className={cn("cursor-pointer", locked ? "text-warning" : "text-success")}
+                >
+                  {locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />}
+                </button>
+              ) : (
+                <span title={tip} aria-label={tip} className={cn("cursor-default", locked ? "text-warning" : "text-success")}>
+                  {locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />}
+                </span>
+              )}
+            </span>
+          );
+        })}
       </div>
+      {!editable ? (
+        <p className="text-xs text-muted-foreground">Week View is locked in this state.</p>
+      ) : selectedLocked ? (
+        <p className="text-xs text-warning">
+          Week {weekNo} is locked{selectedLock?.overridden ? " by an Admin override" : " — this week has ended"} — read-only. Values are preserved.
+          {isAdmin ? " Click its lock icon to unlock." : ""}
+        </p>
+      ) : (
+        selectedLock?.overridden && <p className="text-xs text-success">Week {weekNo} was manually unlocked by an Admin.</p>
+      )}
       <WeekGrid key={weekNo} detail={detail} weekNo={weekNo} editable={editable} onSaved={() => qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] })} />
     </div>
   );
@@ -585,9 +644,9 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
   const allWeeksTotal = (d: RecoveryDealer) => weekAll(d, detail.weekCount, resolveWeek);
   const tillDateTotal = (d: RecoveryDealer) => weekTillDate(d, weekNo, resolveWeek);
 
-  // Week locking: weeks BEFORE the latest cutoff's business week are read-only. Values stay filled;
-  // only editing is disabled (the officer adjusts the current/later weeks).
-  const weekLocked = weekNo < detail.currentWeek;
+  // Week locking is date-based with admin override (server-computed in `weekLocks`): a locked week is
+  // read-only. Values stay filled; only editing is disabled.
+  const weekLocked = detail.weekLocks.find((w) => w.weekNo === weekNo)?.locked ?? false;
   const canEditWeek = editable && !weekLocked;
 
   // This footer follows the same live values as the inputs. It is a view calculation only and

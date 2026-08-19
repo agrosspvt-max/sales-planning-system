@@ -615,6 +615,7 @@ model RecoveryPlan {
   seasonMonth         SeasonMonth          @relation(fields: [seasonMonthId], references: [id])
   seasonPlan          SeasonPlan?          @relation(fields: [seasonPlanId], references: [id], onDelete: Restrict)
   dealers             RecoveryPlanDealer[]
+  weekLocks           RecoveryWeekLock[]
 
   @@unique([seasonMonthId, officerId])
   @@index([seasonId])
@@ -622,6 +623,22 @@ model RecoveryPlan {
   @@index([status])
   @@index([lifecycleState])
   @@index([seasonPlanId])
+}
+
+/// Admin manual lock/unlock override for ONE business week of a recovery plan. A row means an admin has
+/// explicitly set the week's editability (`locked`), which takes priority over the automatic date-based
+/// lock. No row → the week follows automatic date-based locking. Global to the plan (all users see it).
+model RecoveryWeekLock {
+  id             String       @id @default(cuid())
+  recoveryPlanId String
+  weekNo         Int
+  locked         Boolean
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  recoveryPlan   RecoveryPlan @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
+
+  @@unique([recoveryPlanId, weekNo])
+  @@index([recoveryPlanId])
 }
 
 /// A dealer inside a Recovery Plan. Imported aging figures are READ-ONLY (refreshed from the

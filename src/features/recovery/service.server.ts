@@ -46,6 +46,81 @@ export function businessWeekOfMonth(d: Date): 1 | 2 | 3 | 4 {
   return 4;
 }
 
+/* ------------------------- Week locking (date-based) ---------------------- */
+// Business-week day ranges within the plan's calendar month (matching businessWeekOfMonth):
+//   Week 1 = 1–7 · Week 2 = 8–14 · Week 3 = 15–22 · Week 4 = 23–end of month.
+const WEEK_START_DAY: Record<number, number> = { 1: 1, 2: 8, 3: 15, 4: 23 };
+const weekEndDay = (weekNo: number, year: number, month0: number): number =>
+  weekNo === 1 ? 7 : weekNo === 2 ? 14 : weekNo === 3 ? 22 : new Date(year, month0 + 1, 0).getDate();
+
+/**
+ * The plan's CALENDAR month as { year, month0 }. Derived from the season start month + the month's order
+ * (Season 1st month + order−1), falling back to the cutoff date's month when the season has no start set.
+ */
+function planCalendar(season: { startMonth: number | null; startYear: number | null }, order: number, cutoff: Date): { year: number; month0: number } {
+  if (season.startMonth != null && season.startYear != null) {
+    const idx = season.startMonth - 1 + (order - 1); // 0-based month index from Jan of startYear
+    return { year: season.startYear + Math.floor(idx / 12), month0: ((idx % 12) + 12) % 12 };
+  }
+  return { year: cutoff.getFullYear(), month0: cutoff.getMonth() };
+}
+
+/** A week is AUTO-locked once it has COMPLETELY ended (today is past its last day). Current + future weeks stay editable. */
+function weekAutoLocked(weekNo: number, year: number, month0: number, now: Date): boolean {
+  const end = new Date(year, month0, weekEndDay(weekNo, year, month0), 23, 59, 59, 999);
+  return now.getTime() > end.getTime();
+}
+
+export interface WeekLockInfo {
+  weekNo: number;
+  startDay: number;
+  endDay: number;
+  auto: boolean; // date-based lock (week ended)
+  overridden: boolean; // admin has set a manual override
+  locked: boolean; // EFFECTIVE state: override wins over auto
+}
+
+/**
+ * Effective lock state for all four business weeks. Priority: an admin manual override (if present) wins
+ * over the automatic date-based lock; otherwise the date-based rule applies.
+ */
+function computeWeekLocks(
+  cal: { year: number; month0: number },
+  overrides: Map<number, boolean>,
+  now: Date,
+): WeekLockInfo[] {
+  const out: WeekLockInfo[] = [];
+  for (let w = 1; w <= BUSINESS_WEEK_COUNT; w++) {
+    const auto = weekAutoLocked(w, cal.year, cal.month0, now);
+    const overridden = overrides.has(w);
+    out.push({
+      weekNo: w,
+      startDay: WEEK_START_DAY[w],
+      endDay: weekEndDay(w, cal.year, cal.month0),
+      auto,
+      overridden,
+      locked: overridden ? (overrides.get(w) as boolean) : auto,
+    });
+  }
+  return out;
+}
+
+/** EFFECTIVE lock for one week (admin override wins, else date-based). Used to guard saves + drive toggles. */
+async function effectiveWeekLocked(planId: string, weekNo: number): Promise<boolean> {
+  const override = (await prisma.recoveryWeekLock.findUnique({
+    where: { recoveryPlanId_weekNo: { recoveryPlanId: planId, weekNo } },
+    select: { locked: true },
+  })) as { locked: boolean } | null;
+  if (override) return override.locked;
+  const meta = (await prisma.recoveryPlan.findUnique({
+    where: { id: planId },
+    select: { cutoffDate: true, seasonMonth: { select: { order: true } }, season: { select: { startMonth: true, startYear: true } } },
+  })) as { cutoffDate: Date; seasonMonth: { order: number }; season: { startMonth: number | null; startYear: number | null } } | null;
+  if (!meta) return false;
+  const cal = planCalendar(meta.season, meta.seasonMonth.order, meta.cutoffDate);
+  return weekAutoLocked(weekNo, cal.year, cal.month0, new Date());
+}
+
 interface ResolvedDealer {
   dealerId: string;
   dealerName: string;
@@ -453,10 +528,11 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   const plan = await prisma.recoveryPlan.findUnique({
     where: { id },
     include: {
-      season: { select: { name: true, year: true } },
-      seasonMonth: { select: { name: true } },
+      season: { select: { name: true, year: true, startMonth: true, startYear: true } },
+      seasonMonth: { select: { name: true, order: true } },
       officer: { select: { name: true } },
       seasonPlan: { select: { lifecycleState: true } },
+      weekLocks: { select: { weekNo: true, locked: true } },
       dealers: {
         // Only ACTIVE dealers appear in Recovery (deactivated/deleted are hidden; history kept).
         where: { dealer: { isActive: true } },
@@ -530,14 +606,23 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     ? new Set(((await prisma.agingSnapshotDealer.findMany({ where: { snapshotId: latestSnapshot.id }, select: { dealerId: true } })) as { dealerId: string }[]).map((d) => d.dealerId))
     : new Set<string>();
 
-  // Week locking follows the REFRESH SEQUENCE, matching the business rule: the initial upload =
-  // Week 1 (nothing locked), and each Update Recovery advances the current week by one, locking the
-  // earlier weeks. currentWeek = latest snapshot sequence + 1, capped at 4. Values are always
-  // preserved — locking only disables editing of the past weeks.
-  const currentWeek = Math.min(((latestSnapshot?.weekNo as number | undefined) ?? 0) + 1, BUSINESS_WEEK_COUNT);
+  // Week locking is DATE-BASED: a week is locked once it has completely ended; the current + future weeks
+  // stay editable. An admin manual override (RecoveryWeekLock) takes priority over the date rule. Values
+  // are always preserved — locking only disables editing.
+  const cal = planCalendar(
+    { startMonth: (plan.season as { startMonth: number | null }).startMonth, startYear: (plan.season as { startYear: number | null }).startYear },
+    (plan.seasonMonth as { order: number }).order,
+    plan.cutoffDate,
+  );
+  const overrides = new Map<number, boolean>(
+    ((plan as { weekLocks?: { weekNo: number; locked: boolean }[] }).weekLocks ?? []).map((w) => [w.weekNo, w.locked]),
+  );
+  const weekLocks = computeWeekLocks(cal, overrides, new Date());
+  // First EDITABLE week (for the default selected week + guidance); if all locked, the last week.
+  const currentWeek = (weekLocks.find((w) => !w.locked)?.weekNo ?? BUSINESS_WEEK_COUNT);
   const lastRefresh =
     latestSnapshot && latestSnapshot.weekNo > 0 && latestSnapshot.summary
-      ? { at: latestSnapshot.createdAt, businessWeek: currentWeek, ...(JSON.parse(latestSnapshot.summary) as AgingChangeSummary) }
+      ? { at: latestSnapshot.createdAt, businessWeek: Math.min(((latestSnapshot.weekNo as number) ?? 0) + 1, BUSINESS_WEEK_COUNT), ...(JSON.parse(latestSnapshot.summary) as AgingChangeSummary) }
       : null;
 
   return {
@@ -554,6 +639,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     canAdminEdit,
     weekCount,
     currentWeek,
+    weekLocks,
     lastRefresh,
     dealers: plan.dealers.map((d) => {
       const weeks: Record<number, { weekRecoveryPlan: number; weekRunningRecovery: number }> = {};
@@ -655,12 +741,34 @@ export async function saveRecoveryMonth(ctx: AuthContext, id: string, raw: unkno
   return { saved: true, lastSavedAt: saved.lastSavedAt };
 }
 
+/**
+ * ADMIN manual lock/unlock toggle for one business week. Flips the EFFECTIVE state (override wins, else
+ * date-based) and PERSISTS it as an override on the plan — so it holds across refresh/login and for every
+ * user until an admin toggles again. Admin (Super Admin) only.
+ */
+export async function toggleRecoveryWeekLock(ctx: AuthContext, id: string, raw: unknown): Promise<{ weekNo: number; locked: boolean }> {
+  assertAdmin(ctx);
+  const { weekNo } = z.object({ weekNo: z.coerce.number().int().min(1).max(BUSINESS_WEEK_COUNT) }).parse(raw);
+  const plan = (await prisma.recoveryPlan.findUnique({ where: { id }, select: { id: true } })) as { id: string } | null;
+  if (!plan) throw new ApiError(404, "Recovery plan not found");
+  const next = !(await effectiveWeekLocked(id, weekNo)); // flip whatever the week currently resolves to
+  await prisma.recoveryWeekLock.upsert({
+    where: { recoveryPlanId_weekNo: { recoveryPlanId: id, weekNo } },
+    create: { recoveryPlanId: id, weekNo, locked: next },
+    update: { locked: next },
+  });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "recoveryPlan", entityId: id, summary: `Week ${weekNo} manually ${next ? "locked" : "unlocked"} (admin override)` });
+  return { weekNo, locked: next };
+}
+
 export async function saveRecoveryWeek(ctx: AuthContext, id: string, raw: unknown) {
   const { weekNo, entries } = weekSchema.parse(raw);
   const plan = await loadEditablePlan(ctx, id);
   const pending = plan.status === PlanStatus.PENDING_RM || plan.status === PlanStatus.PENDING_ADMIN;
   if (pending || !plan.weeklyEditEnabled) throw new ApiError(409, "Week View is locked");
   assertRecoveryLive(plan);
+  // Per-week lock (date-based, admin override wins) — a locked week is read-only; an admin must unlock it.
+  if (await effectiveWeekLocked(id, weekNo)) throw new ApiError(409, "This week is locked — ask an admin to unlock it before editing.");
   const dealerRows = await prisma.recoveryPlanDealer.findMany({ where: { recoveryPlanId: id }, select: { id: true, dealerId: true } });
   const byDealer = new Map(dealerRows.map((d) => [d.dealerId, d.id]));
   await prisma.$transaction(

@@ -166,10 +166,11 @@ function LabelHeaderContent({ labelKey, stack = true }: { labelKey: LabelKey; st
  * Shared planning column header — the ONE header renderer. Reads its text from the label dictionary,
  * stacks words (keeping the passed alignment), and is admin-editable in label edit mode.
  */
-export function Th({ labelKey, className, colSpan }: { labelKey: LabelKey; className?: string; colSpan?: number }) {
+export function Th({ labelKey, className, colSpan, suffix }: { labelKey: LabelKey; className?: string; colSpan?: number; suffix?: React.ReactNode }) {
   return (
     <TableHead className={className} colSpan={colSpan}>
       <LabelHeaderContent labelKey={labelKey} />
+      {suffix}
     </TableHead>
   );
 }

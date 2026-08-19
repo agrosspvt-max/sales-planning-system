@@ -55,7 +55,9 @@ export const DEFAULT_LABELS = {
 
   // ---- Recovery: Month View columns ----
   "recovery.currentOutstanding": "Current Outstanding",
-  "recovery.outstandingTillDate": "Outstanding Till Date",
+  // The trailing dd/mm date is appended dynamically in the view (aging cutoff / month opening),
+  // so the base label omits the word "Date".
+  "recovery.outstandingTillDate": "Outstanding Till",
   "recovery.overdue": "Overdue",
   "recovery.due": "Due",
   "recovery.recoveryPlan": "Recovery Plan",

@@ -641,6 +641,9 @@ model RecoveryPlanDealer {
   noPlanReason         String?
   outstandingTillDate  Decimal?           @db.Decimal(14, 2)
   runningTillDate      Decimal?           @db.Decimal(14, 2)
+  // Static Outstanding Mode: when true, outstandingTillDate was set by a static-mode aging import and is
+  // protected — future dynamic imports/updates never overwrite it and don't touch the live outstanding.
+  outstandingStatic    Boolean            @default(false)
   srCr                 Decimal            @default(0) @db.Decimal(14, 2)
   liveRecovery         Decimal            @default(0) @db.Decimal(14, 2)
   dealer               Dealer             @relation(fields: [dealerId], references: [id])

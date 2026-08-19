@@ -90,6 +90,22 @@ type Tab = "month" | "week" | "history";
 const money = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n));
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 
+/** Compact dd/mm for dynamic column headers (aging cutoff / month opening). */
+const ddmm = (d: Date | string) => {
+  const x = new Date(d);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(x.getDate())}/${p(x.getMonth() + 1)}`;
+};
+/** First calendar day of the aging cutoff's month — the "Outstanding Till" opening date. */
+const monthFirstDdMm = (cutoff: Date | string) => {
+  const x = new Date(cutoff);
+  return ddmm(new Date(x.getFullYear(), x.getMonth(), 1));
+};
+/** Second header line showing a dynamic date under a (still label-editable) column title. */
+function DateSuffix({ date }: { date: string }) {
+  return <span className="block text-[10px] font-normal normal-case text-muted-foreground">{date}</span>;
+}
+
 /**
  * Business-aware change delta for receivables: a DECREASE is good (green), an increase is bad (red).
  * The main value stays in the normal theme color; only the small delta is coloured. Theme-safe.
@@ -100,6 +116,23 @@ function Delta({ value }: { value: number }) {
   return (
     <div className={cn("text-[10px] font-medium tabular-nums", good ? "text-success" : "text-destructive")}>
       {good ? "▼" : "▲"} {value < 0 ? "-" : "+"}{money(Math.abs(value))}
+    </div>
+  );
+}
+
+/**
+ * Percentage badge for Actual Running Recovery: ARR expressed as a percentage of the dealer's Running
+ * Recovery Plan. Positive → green (▲), negative → red (▼). The ARR VALUE itself is unchanged; this only
+ * decorates it. No badge when there is no plan to compare against (base 0) or the percentage rounds to 0.
+ */
+function PctDelta({ value, base }: { value: number; base: number }) {
+  if (!base) return null;
+  const p = (value / base) * 100;
+  if (Math.abs(Math.round(p * 10)) === 0) return null; // < 0.05% → nothing meaningful to show
+  const good = p > 0;
+  return (
+    <div className={cn("text-[10px] font-medium tabular-nums", good ? "text-success" : "text-destructive")}>
+      {good ? "▲" : "▼"} {p < 0 ? "-" : ""}{Math.abs(p).toFixed(1)}%
     </div>
   );
 }
@@ -222,6 +255,10 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
 function MonthView({ detail }: { detail: RecoveryDetail }) {
   const qc = useQueryClient();
   const editable = detail.monthEditable;
+  // Dynamic column dates: Current Outstanding is as of the aging cutoff; Outstanding Till is the month's
+  // opening (first calendar day of the cutoff's month). Both derived from the plan cutoff — no calc change.
+  const cutoffDdMm = ddmm(detail.cutoffDate);
+  const tillDdMm = monthFirstDdMm(detail.cutoffDate);
   // Admin Edit Mode: staged overlay, separate from the officer autosave path.
   const canAdminEdit = !!detail.canAdminEdit;
   const [adminMode, setAdminMode] = useState(false);
@@ -302,12 +339,15 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
   // Dealer(frozen) → Outstanding → Overdue → Due → Recovery Plan → Running O/S Bills →
   // Running Recovery Plan → Recovery % → Results.
+  // "Total Recovery Plan" (Results, purple) now sits immediately AFTER "Recovery %" — i.e. right after the
+  // green Recovery Progress block — instead of at the far right. The trailing No-Plan action column (when
+  // editable) is intentionally left outside any coloured section band.
   const monthSections: LabelSection[] = [
     { labelKey: "recovery.section.dealerClosing", span: 2, tone: "blue" },
     { labelKey: "recovery.section.recoveryPlanning", span: 3, tone: "amber" },
     { labelKey: "recovery.section.recoveryProgress", span: 4, tone: "green" },
+    { labelKey: "recovery.section.results", span: 1, tone: "purple" },
     { labelKey: "recovery.section.daybook", span: 3, tone: "slate" },
-    { labelKey: "recovery.section.results", span: editable ? 2 : 1, tone: "purple" },
   ];
 
   return (
@@ -341,8 +381,8 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
             <LabelSectionHeaderRow leading={1} sections={monthSections} />
             <TableRow>
               <Th labelKey="col.dealer" className="min-w-[160px]" />
-              <Th labelKey="recovery.currentOutstanding" className="text-right" />
-              <Th labelKey="recovery.outstandingTillDate" className="text-right text-muted-foreground" />
+              <Th labelKey="recovery.currentOutstanding" className="text-right" suffix={<DateSuffix date={cutoffDdMm} />} />
+              <Th labelKey="recovery.outstandingTillDate" className="text-right text-muted-foreground" suffix={<DateSuffix date={tillDdMm} />} />
               <Th labelKey="recovery.overdue" className="text-right" />
               <Th labelKey="recovery.due" className="text-right" />
               <Th labelKey="recovery.recoveryPlan" className="text-center" />
@@ -350,10 +390,11 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <Th labelKey="recovery.runningOsTillDate" className="text-right text-muted-foreground" />
               <Th labelKey="recovery.runningRecoveryPlan" className="text-center" />
               <Th labelKey="recovery.recoveryPct" className="text-right" />
+              {/* Total Recovery Plan — moved to sit beside Recovery % (purple Results). */}
+              <Th labelKey="recovery.monthTotal" className="text-right" />
               <Th labelKey="recovery.srCr" className="text-right text-muted-foreground" />
               <Th labelKey="recovery.liveRecovery" className="text-right text-muted-foreground" />
               <Th labelKey="recovery.actualRunningRecovery" className="text-right" />
-              <Th labelKey="recovery.monthTotal" className="text-right" />
               {editable && <Th labelKey="col.noPlan" className="text-right" />}
             </TableRow>
           </TableHeader>
@@ -369,30 +410,37 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                     {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}{d.dealerName}
                     {d.missingInLatestAging && <span className="ml-1.5 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning" title="This dealer is not in the latest Aging Report; the figures shown are the last known values.">Missing in latest aging</span>}
                   </TableCell>
-                  {/* Section 1 — Dealer & Closing Balance. Current Outstanding refreshes each import;
-                      Outstanding Till Date is the month's opening balance (frozen after first import). */}
+                  {/* Section 1 — Dealer & Closing Balance. Current Outstanding KEEPS its amount change
+                      delta; Outstanding Till Date is the month's opening balance (frozen after first import). */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
-                  {/* Section 2 — Recovery Planning */}
-                  <TableCell className="text-right"><AgingCell value={d.overdue} prev={d.prevAging?.overdue} /></TableCell>
-                  <TableCell className="text-right"><AgingCell value={d.due} prev={d.prevAging?.due} /></TableCell>
+                  {/* Section 2 — Recovery Planning. Delta indicators removed (kept only on Current Outstanding
+                      and Actual Running Recovery). */}
+                  <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{money(d.due)}</TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress. Running O/S Till Date is frozen after first import. */}
-                  <TableCell className="text-right"><AgingCell value={d.running} prev={d.prevAging?.running} /></TableCell>
+                  <TableCell className="text-right tabular-nums">{money(d.running)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.runningTillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{pct(recPct)}</TableCell>
+                  {/* Total Recovery Plan (purple Results) — moved to sit beside Recovery %. */}
+                  <TableCell className="text-right tabular-nums font-medium">{money(monthTotal)}</TableCell>
                   {/* Daybook-derived business values. Actual Running Recovery is DERIVED (Part 5):
-                      Live Recovery + SR/CR − (Due + Overdue). */}
+                      Live Recovery + SR/CR − (Due + Overdue). Its VALUE is unchanged; the badge shows ARR as
+                      a percentage of the Running Recovery Plan (green if positive, red if negative). */}
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.srCr)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.liveRecovery)}</TableCell>
-                  <TableCell className={cn("text-right tabular-nums font-medium", d.actualRunningRecovery < 0 && "text-warning")}>{money(d.actualRunningRecovery)}</TableCell>
-                  {/* Section 4 — Results */}
-                  <TableCell className="text-right tabular-nums font-medium">{money(monthTotal)}</TableCell>
+                  <TableCell className="text-right">
+                    <div className="text-right tabular-nums">
+                      <div className={cn("font-medium", d.actualRunningRecovery < 0 && "text-warning")}>{money(d.actualRunningRecovery)}</div>
+                      <PctDelta value={d.actualRunningRecovery} base={d.monthRunningRecovery} />
+                    </div>
+                  </TableCell>
                   {editable && (
                     <TableCell className="text-right">
                       {d.noPlan ? (
@@ -418,10 +466,11 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <TableCell className="text-right tabular-nums">{money(totals.runningOsTillDate)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.runningRecoveryPlan)}</TableCell>
               <TableCell className="text-right tabular-nums">{pct(totals.recoveryPct)}</TableCell>
+              {/* Total Recovery Plan — moved beside Recovery %. */}
+              <TableCell className="text-right tabular-nums">{money(totals.monthTotal)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.srCr)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.liveRecovery)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.actualRunningRecovery)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.monthTotal)}</TableCell>
               {editable && <TableCell />}
             </TableRow>
           </tfoot>
@@ -551,12 +600,17 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
 
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
   // The Reference section keeps informational balances out of the primary planning flow.
+  // Dealer & Closing now spans 2 (Current Outstanding + Outstanding Till Date, matching Month View).
   const weekSections: LabelSection[] = [
-    { labelKey: "recovery.section.dealerClosing", span: 1, tone: "blue" },
+    { labelKey: "recovery.section.dealerClosing", span: 2, tone: "blue" },
     { labelKey: "recovery.section.weeklyPlanning", span: 3, tone: "amber" },
     { labelKey: "recovery.section.recoveryProgress", span: 3, tone: "green" },
     { labelKey: "recovery.section.results", span: 2, tone: "purple" },
   ];
+  // Dynamic column dates (same derivation as Month View).
+  const cutoffDdMm = ddmm(detail.cutoffDate);
+  const tillDdMm = monthFirstDdMm(detail.cutoffDate);
+  const totalOutstandingTillDate = detail.dealers.reduce((s, d) => s + d.outstandingTillDate, 0);
 
   return (
     <div className="space-y-2">
@@ -588,7 +642,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
             <LabelSectionHeaderRow leading={1} sections={weekSections} />
             <TableRow>
               <Th labelKey="col.dealer" className="min-w-[160px]" />
-              <Th labelKey="recovery.currentOutstanding" className="text-right" />
+              <Th labelKey="recovery.currentOutstanding" className="text-right" suffix={<DateSuffix date={cutoffDdMm} />} />
+              <Th labelKey="recovery.outstandingTillDate" className="text-right text-muted-foreground" suffix={<DateSuffix date={tillDdMm} />} />
               <Th labelKey="recovery.overdue" className="text-right" />
               <Th labelKey="recovery.thisWeeksDue" className="text-right" />
               <Th labelKey="recovery.weekRecovery" className="text-center" />
@@ -609,11 +664,13 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium">{d.dealerName}</TableCell>
-                  {/* Section 1 — Dealer & Closing Balance */}
+                  {/* Section 1 — Dealer & Closing Balance. Current Outstanding keeps its delta; Outstanding
+                      Till Date (same calc as Month View) added beside it. */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
                   {/* Section 2 — Weekly Planning. "This Week's Due" = only invoices due in the
-                      SELECTED business week (not the whole month's Due). */}
-                  <TableCell className="text-right"><AgingCell value={d.overdue} prev={d.prevAging?.overdue} /></TableCell>
+                      SELECTED business week (not the whole month's Due). Delta removed from Overdue. */}
+                  <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
                   <TableCell className="text-right tabular-nums">{money(d.dueByWeek?.[weekNo] ?? 0)}</TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
@@ -637,6 +694,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
             <TableRow className="bg-muted/40 font-semibold hover:bg-muted/40">
               <TableCell>Total</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.outstanding)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totalOutstandingTillDate)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.overdue)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.due)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.recoveryPlan)}</TableCell>

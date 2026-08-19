@@ -74,6 +74,9 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [selectedNew, setSelectedNew] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState<Mode | null>(null);
+  // Static Outstanding Mode (default OFF = current dynamic behaviour). When ON, the aging upload fills only
+  // the static Outstanding Till Date and protects it from future dynamic imports/updates.
+  const [staticMode, setStaticMode] = useState(false);
   const [result, setResult] = useState<CommitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   // When a multi-officer commit partially fails, a retry is scoped to ONLY the failed officers so the
@@ -107,6 +110,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
       setAnalysis(a);
       setRetryIds(null); // fresh analysis → clear any prior retry scoping
       setSelectedNew(new Set()); // onboarding candidates default UNCHECKED (admin curates)
+      setStaticMode(false); // static mode defaults OFF on every fresh analysis (dynamic behaviour)
       const anyExisting = a.officers.some((o) => o.existingRecovery);
       setMode(anyExisting ? null : "CREATE"); // existing → admin must choose UPDATE/REPLACE
       setStep("preview");
@@ -119,7 +123,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
     mutationFn: async () => {
       const form = new FormData();
       form.append("file", file as File);
-      form.append("data", JSON.stringify({ scope: buildScope(), seasonMonthId: monthId, cutoffDate: cutoff, mode, newDealerNames: [...selectedNew] }));
+      form.append("data", JSON.stringify({ scope: buildScope(), seasonMonthId: monthId, cutoffDate: cutoff, mode, newDealerNames: [...selectedNew], staticOutstanding: staticMode }));
       const res = await fetch("/api/recovery/import/commit", { method: "POST", body: form });
       const body = await res.json();
       if (!res.ok) {
@@ -313,6 +317,16 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
                 <label className="flex items-start gap-2"><input type="radio" name="rmode" className="mt-1" checked={mode === "REPLACE"} onChange={() => setMode("REPLACE")} /><span><span className="font-medium">Replace existing</span><span className="block text-xs text-muted-foreground">Reset officer inputs and re-seed from this report. Clears entered planning for the month.</span></span></label>
               </div>
             )}
+
+            <div className="rounded-md border p-3 text-sm">
+              <label className="flex items-start gap-2">
+                <input type="checkbox" className="mt-1 h-4 w-4" checked={staticMode} onChange={(e) => setStaticMode(e.target.checked)} />
+                <span>
+                  <span className="font-medium">Static Outstanding Mode</span>
+                  <span className="block text-xs text-muted-foreground">Fill only the static <span className="font-medium">Outstanding Till Date</span> from this report and protect it — future imports/updates won&apos;t change it or the live outstanding. Leave off for the normal dynamic refresh.</span>
+                </span>
+              </label>
+            </div>
 
             <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-between border-t bg-card px-6 py-3">
               <Button variant="outline" onClick={() => setStep("upload")}><ArrowLeft className="h-4 w-4" /> Back</Button>

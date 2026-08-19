@@ -284,6 +284,8 @@ function buildRecoveryImportPreview(
 const createSchema = z.object({
   seasonMonthId: z.string().min(1, "Select a Month"),
   cutoffDate: z.string().min(1, "Select a Cutoff Date"),
+  // Static Outstanding Mode: seed only the static Outstanding Till Date; live business columns start at 0.
+  staticOutstanding: z.coerce.boolean().default(false),
   // Optional scope: restrict creation to a set of officers (Single / Selected / Seasonal flows). When
   // omitted, every matched officer is planned (All). `officerScope` (single id) is kept for callers
   // that still pass one officer; it is folded into `officerIds`.
@@ -358,7 +360,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   const agingSnapshotRows: { id: string; recoveryPlanId: string; weekNo: number; cutoffDate: Date; workbookName: string; uploadedById: string }[] = [];
   const agingSnapshotDealerRows: { id: string; snapshotId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number }[] = [];
   const agingSnapshotBillRows: { snapshotId: string; snapshotDealerId: string; dealerId: string; billDate: Date | null; refNo: string | null; amount: number; dueDate: Date | null; bucket: string }[] = [];
-  const recoveryPlanDealerRows: { recoveryPlanId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number; outstandingTillDate: number; runningTillDate: number }[] = [];
+  const recoveryPlanDealerRows: { recoveryPlanId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number; outstandingTillDate: number; runningTillDate: number; outstandingStatic?: boolean }[] = [];
 
   const planIds: string[] = [];
   let dealerCount = 0;
@@ -376,7 +378,12 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
       const snapDealerId = randomUUID();
       agingSnapshotDealerRows.push({ id: snapDealerId, snapshotId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running });
       // First import of the month → seed OPENING balances (Till Date). Set once here; never updated.
-      recoveryPlanDealerRows.push({ recoveryPlanId: planId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running, outstandingTillDate: d.aging.outstanding, runningTillDate: d.aging.running });
+      // STATIC mode: populate ONLY the static Outstanding Till Date (+ flag); live columns start at 0.
+      recoveryPlanDealerRows.push(
+        input.staticOutstanding
+          ? { recoveryPlanId: planId, dealerId: d.dealerId, outstanding: 0, overdue: 0, due: 0, running: 0, outstandingTillDate: d.aging.outstanding, runningTillDate: 0, outstandingStatic: true }
+          : { recoveryPlanId: planId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running, outstandingTillDate: d.aging.outstanding, runningTillDate: d.aging.running },
+      );
       for (const b of d.aging.bills) {
         agingSnapshotBillRows.push({ snapshotId, snapshotDealerId: snapDealerId, dealerId: d.dealerId, billDate: b.billDate, refNo: b.refNo, amount: b.amount, dueDate: b.dueDate, bucket: b.bucket });
       }
@@ -781,7 +788,9 @@ async function writeRefreshSnapshot(
   weekNo: number,
   uploadedById: string,
   summary: unknown,
+  opts?: { staticOutstanding?: boolean },
 ): Promise<string> {
+  const staticMode = opts?.staticOutstanding ?? false;
   const snapshot = await tx.agingSnapshot.create({
     data: { recoveryPlanId: planId, weekNo, cutoffDate: cutoff, workbookName: filename, uploadedById, summary: JSON.stringify(summary) },
   });
@@ -801,13 +810,20 @@ async function writeRefreshSnapshot(
     // plans, approvals, no-plan flags and Till Date opening balances are all preserved untouched.
     await tx.recoveryPlanDealer.upsert({
       where: { recoveryPlanId_dealerId: { recoveryPlanId: planId, dealerId: r.dealerId } },
-      update: { outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running },
+      // STATIC mode: fill ONLY the static Outstanding Till Date (+ flag); leave the live business columns
+      // untouched. DYNAMIC mode (default, unchanged): refresh the live aging fields, never the Till Date.
+      update: staticMode
+        ? { outstandingTillDate: r.aging.outstanding, outstandingStatic: true }
+        : { outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running },
       // First appearance in this month → seed the OPENING balances (Till Date) exactly like onboarding.
-      create: {
-        recoveryPlanId: planId, dealerId: r.dealerId,
-        outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running,
-        outstandingTillDate: r.aging.outstanding, runningTillDate: r.aging.running,
-      },
+      // In static mode the live columns start at 0 (only the static Till Date is populated).
+      create: staticMode
+        ? { recoveryPlanId: planId, dealerId: r.dealerId, outstanding: 0, overdue: 0, due: 0, running: 0, outstandingTillDate: r.aging.outstanding, runningTillDate: 0, outstandingStatic: true }
+        : {
+            recoveryPlanId: planId, dealerId: r.dealerId,
+            outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running,
+            outstandingTillDate: r.aging.outstanding, runningTillDate: r.aging.running,
+          },
     });
   }
   return snapshot.id;
@@ -856,6 +872,8 @@ const updateSchema = z.object({
   seasonMonthId: z.string().min(1, "Select a Month"),
   cutoffDate: z.string().min(1, "Select a Cutoff Date"),
   allowWeeklyEdit: z.coerce.boolean().default(true),
+  // Static Outstanding Mode: fill only the static Outstanding Till Date, leave live business untouched.
+  staticOutstanding: z.coerce.boolean().default(false),
   // Optional scope: restrict the refresh to a set of officers (Single / Selected / Seasonal flows).
   // `officerScope` (single id) is kept for existing callers and folded into `officerIds`.
   officerScope: z.string().optional(),
@@ -952,7 +970,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
       const weekNo = await nextSnapshotWeekNo(plan.id);
       await prisma.$transaction(
         async (tx: Tx) => {
-          await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
+          await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo }, { staticOutstanding: input.staticOutstanding });
           await tx.recoveryPlan.update({ where: { id: plan.id }, data: { cutoffDate: cutoff, weeklyEditEnabled: input.allowWeeklyEdit } });
         },
         { timeout: 60000, maxWait: 10000 },
@@ -1088,6 +1106,8 @@ const recoveryImportCommitSchema = recoveryImportSchema.extend({
   // where an unknown name has no officer to attribute it to.
   newDealerNames: z.array(z.string()).default([]),
   allowWeeklyEdit: z.coerce.boolean().default(true),
+  // Static Outstanding Mode: the aging upload fills ONLY the static Outstanding Till Date and protects it.
+  staticOutstanding: z.coerce.boolean().default(false),
 });
 
 export interface RecoveryImportAnalysis extends RecoveryImportPreview {
@@ -1226,6 +1246,7 @@ async function replaceRecoveryPlanAtomic(
   cutoff: Date,
   filename: string,
   allowWeeklyEdit: boolean,
+  staticOutstanding = false,
 ): Promise<boolean> {
   const forOfficer = res.resolved.filter((r) => r.officerId === officerId);
   if (forOfficer.length === 0) return false; // never reset without a replacement snapshot to write
@@ -1242,7 +1263,7 @@ async function replaceRecoveryPlanAtomic(
       await tx.recoveryWeekPlan.deleteMany({ where: { recoveryPlanDealer: { recoveryPlanId: planId } } });
       await tx.recoveryPlanDealer.updateMany({ where: { recoveryPlanId: planId }, data: { monthRecoveryPlan: null, monthRunningRecovery: null, noPlan: false, noPlanReason: null } });
       // (b) … and write the replacement snapshot + refresh aging, in the SAME commit.
-      await writeRefreshSnapshot(tx, planId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
+      await writeRefreshSnapshot(tx, planId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo }, { staticOutstanding });
       await tx.recoveryPlan.update({ where: { id: planId }, data: { status: PlanStatus.DRAFT, cutoffDate: cutoff, weeklyEditEnabled: allowWeeklyEdit } });
     },
     { timeout: 60000, maxWait: 10000 },
@@ -1345,7 +1366,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     // createRecoveryFromAging validates its input as an object. UPDATE uses a legacy JSON-string
     // entry point, but passing that format here made every CREATE fail Zod validation before any
     // report data could be processed.
-    const res = await createRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, ...scoped });
+    const res = await createRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, staticOutstanding: input.staticOutstanding, ...scoped });
     recoveryPlanIds.push(...res.planIds);
   } else if (input.mode === "REPLACE") {
     // REPLACE: reset + refresh are done ATOMICALLY per plan (replaceRecoveryPlanAtomic), so officer
@@ -1365,7 +1386,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
       // Never replace a plan under a frozen (deactivated) parent seasonal plan — same guard as refresh.
       if ((p.seasonPlan?.lifecycleState ?? "ACTIVE") !== "ACTIVE") continue;
       try {
-        const didReplace = await replaceRecoveryPlanAtomic(ctx, p.id, p.officerId, res, cutoff, filename, input.allowWeeklyEdit);
+        const didReplace = await replaceRecoveryPlanAtomic(ctx, p.id, p.officerId, res, cutoff, filename, input.allowWeeklyEdit, input.staticOutstanding);
         if (didReplace) {
           replaced += 1;
           recoveryPlanIds.push(p.id);
@@ -1385,7 +1406,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     // Pass a PLAIN OBJECT — updateRecoveryFromAging validates with a z.object schema, so a JSON string
     // (the legacy shape) fails Zod with "Validation failed" before any refresh runs. This was the cause
     // of Update Recovery silently doing nothing; CREATE was already migrated to the object form.
-    const upd = await updateRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, allowWeeklyEdit: input.allowWeeklyEdit, ...scoped });
+    const upd = await updateRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, allowWeeklyEdit: input.allowWeeklyEdit, staticOutstanding: input.staticOutstanding, ...scoped });
     failedOfficers.push(...upd.failed);
     skippedOfficers.push(...upd.skipped);
     // Only officers that were actually refreshed count as affected plans (exclude both failed AND skipped,

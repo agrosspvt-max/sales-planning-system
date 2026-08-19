@@ -955,6 +955,10 @@ export async function listPlans(ctx: AuthContext, seasonId?: string, mine = fals
     },
     orderBy: [{ updatedAt: "desc" }],
   });
+  // TEMP DIAGNOSTIC (approval visibility, prod-only empty). Remove after diagnosis.
+  if (ctx.role === Role.SALES_OFFICER && mine) {
+    console.log(`[approvals-debug:seasonal] sessionUserId=${ctx.userId} username=${ctx.username} resultCount=${plans.length}`);
+  }
   return plans.map((p) => ({
     id: p.id,
     seasonId: p.seasonId,
@@ -1057,6 +1061,10 @@ export async function duplicateSalesPlan(ctx: AuthContext, planId: string): Prom
 
 /** Plans awaiting the current user's action (approvals inbox). */
 export async function getApprovalsInbox(ctx: AuthContext) {
+  // TEMP DIAGNOSTIC (approval visibility, prod-only empty). This endpoint is the RM/Admin queue; a Sales
+  // Officer legitimately gets []. Logged so the prod session id + role are visible in the request trace.
+  // Remove after diagnosis.
+  console.log(`[approvals-debug:inbox] role=${ctx.role} sessionUserId=${ctx.userId} username=${ctx.username}`);
   if (ctx.role === Role.SALES_OFFICER) return [];
   const scope = await getOfficerScope(ctx);
 
@@ -1078,6 +1086,9 @@ export async function getApprovalsInbox(ctx: AuthContext) {
     },
     orderBy: { submittedAt: "asc" },
   });
+
+  // TEMP DIAGNOSTIC: scope + result count for the RM/Admin queue. Remove after diagnosis.
+  console.log(`[approvals-debug:inbox] role=${ctx.role} scopeIds=${JSON.stringify(scope.ids)} pendingCount=${pending.length}`);
 
   return pending.map((p) => ({
     id: p.id,

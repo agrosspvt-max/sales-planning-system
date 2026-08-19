@@ -156,6 +156,24 @@ export async function listMonthlyPlans(
     },
     orderBy: [{ updatedAt: "desc" }],
   });
+  // TEMP DIAGNOSTIC (approval visibility, prod-only empty): logs the authenticated officer id + the
+  // result count, and — when a Sales Officer sees zero — whether monthly plans exist under the SAME
+  // username but a DIFFERENT officerId (the tell-tale of a duplicated/re-seeded user row in prod).
+  // Read-only; no workflow change. Remove after diagnosis.
+  if (ctx.role === Role.SALES_OFFICER) {
+    console.log(`[approvals-debug:monthly] sessionUserId=${ctx.userId} username=${ctx.username} scopeIds=${JSON.stringify(scope.ids)} resultCount=${rows.length}`);
+    if (rows.length === 0 && ctx.username) {
+      const byName = (await prisma.monthlyPlan.findMany({
+        where: { officer: { username: ctx.username } },
+        select: { officerId: true, status: true, officer: { select: { id: true, name: true } } },
+        take: 25,
+      })) as { officerId: string; status: string; officer: { id: string; name: string } }[];
+      const distinctOfficerIds = [...new Set(byName.map((p) => p.officerId))];
+      console.log(
+        `[approvals-debug:monthly] plans for username=${ctx.username}: count=${byName.length} distinctOfficerIds=${JSON.stringify(distinctOfficerIds)} sessionOfficerId=${ctx.userId} match=${distinctOfficerIds.includes(ctx.userId)}`,
+      );
+    }
+  }
   return rows.map((mp) => ({
     id: mp.id,
     seasonPlanId: mp.seasonPlanId,

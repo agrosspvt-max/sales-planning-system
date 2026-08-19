@@ -426,6 +426,10 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
     include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true } }, officer: { select: { name: true, group: { select: { name: true } } } } },
     orderBy: [{ updatedAt: "desc" }],
   });
+  // TEMP DIAGNOSTIC (approval visibility, prod-only empty). Remove after diagnosis.
+  if (ctx.role === Role.SALES_OFFICER) {
+    console.log(`[approvals-debug:recovery] sessionUserId=${ctx.userId} username=${ctx.username} mine=${mine} scopeIds=${JSON.stringify(scope.ids)} resultCount=${rows.length}`);
+  }
   return rows.map((r) => ({
     id: r.id,
     seasonName: `${r.season.name} ${r.season.year}`,

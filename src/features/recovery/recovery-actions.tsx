@@ -5,15 +5,18 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { TransferRecoveryPlan } from "./transfer-dialog";
 import type { PlanStatus } from "@/features/planning/types";
 
 interface NoPlanDealer { dealerId: string; dealerName: string; noPlanReason: string | null }
 
-/** Recovery Plan workflow actions — reuses the same approval endpoints/UX as Monthly/Seasonal. */
+/**
+ * Recovery Plan workflow actions — same approval lifecycle as Monthly/Seasonal. Approval screens are
+ * VIEW-ONLY: once out of Draft the officer can no longer edit, resubmit or withdraw, and reviewers no
+ * longer Return/Reject. Only Approve (RM/Admin) is retained so the lifecycle can progress; the Super
+ * Admin Transfer tool is kept. Approval endpoints are unchanged.
+ */
 export function RecoveryActions({
   id, status, officerId, role, userId, remainingCount, totalDealers, noPlanDealers,
 }: {
@@ -21,15 +24,12 @@ export function RecoveryActions({
   remainingCount: number; totalDealers: number; noPlanDealers: NoPlanDealer[];
 }) {
   const qc = useQueryClient();
-  const [remarkKind, setRemarkKind] = useState<"return" | "reject" | null>(null);
-  const [remarkText, setRemarkText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [confirmNoPlan, setConfirmNoPlan] = useState(false);
 
   const base = `/api/recovery/plans/${id}`;
   const isOwner = role === Role.SALES_OFFICER && officerId === userId;
   const editable = status === "DRAFT" || status === "RETURNED" || status === "REJECTED";
-  const pending = status === "PENDING_RM" || status === "PENDING_ADMIN";
   const canSubmit = totalDealers > 0 && remainingCount === 0;
 
   function refresh() {
@@ -38,11 +38,6 @@ export function RecoveryActions({
     qc.invalidateQueries({ queryKey: ["approvals"] });
   }
   const act = useMutation({ mutationFn: (path: string) => api.post(`${base}/${path}`, {}), onSuccess: refresh, onError: (e) => setError((e as Error).message) });
-  const actBody = useMutation({
-    mutationFn: (vars: { path: string; body: unknown }) => api.post(`${base}/${vars.path}`, vars.body),
-    onSuccess: () => { setRemarkKind(null); setRemarkText(""); refresh(); },
-    onError: (e) => setError((e as Error).message),
-  });
   const doSubmit = () => { setConfirmNoPlan(false); act.mutate("submit"); };
 
   const buttons: React.ReactNode[] = [];
@@ -53,15 +48,11 @@ export function RecoveryActions({
       </Button>,
     );
   }
-  if (isOwner && pending) buttons.push(<Button key="recall" variant="outline" onClick={() => act.mutate("recall")}>Recall</Button>);
+  // Only reviewer action retained: Approve (view-only otherwise — no Return / Reject / Recall).
   const isRm = role === Role.REGIONAL_MANAGER && status === "PENDING_RM";
   const isAdmin = role === Role.SUPER_ADMIN && status === "PENDING_ADMIN";
   if (isRm || isAdmin) {
-    buttons.push(
-      <Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>Approve</Button>,
-      <Button key="return" variant="outline" onClick={() => { setError(null); setRemarkKind("return"); }}>Return</Button>,
-      <Button key="reject" variant="destructive" onClick={() => { setError(null); setRemarkKind("reject"); }}>Reject</Button>,
-    );
+    buttons.push(<Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>Approve</Button>);
   }
   // Super Admin can move this Recovery Plan to another Seasonal Plan version (self-contained dialog).
   const canTransfer = role === Role.SUPER_ADMIN;
@@ -83,21 +74,6 @@ export function RecoveryActions({
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmNoPlan(false)}>Cancel</Button>
             <Button onClick={doSubmit} disabled={act.isPending}>Continue submit</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={remarkKind !== null} onOpenChange={(o) => !o && setRemarkKind(null)}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>{remarkKind === "return" ? "Return recovery plan" : "Reject recovery plan"}</DialogTitle></DialogHeader>
-          <div className="space-y-1.5">
-            <Label htmlFor="remark">Remarks</Label>
-            <Textarea id="remark" value={remarkText} onChange={(e) => setRemarkText(e.target.value)} placeholder="Required" />
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRemarkKind(null)}>Cancel</Button>
-            <Button disabled={!remarkText.trim() || actBody.isPending} onClick={() => actBody.mutate({ path: remarkKind ?? "return", body: { remarks: remarkText.trim() } })}>Confirm</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

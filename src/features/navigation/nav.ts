@@ -64,7 +64,8 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Approvals",
     href: "/planning/approvals",
     icon: CheckSquare,
-    roles: [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER],
+    // Sales Officers see their OWN submitted plans (read-only); RM/Admin see the approval queue.
+    roles: ALL_ROLES,
     group: "Planning",
   },
   { label: "My Account", href: "/account", icon: Users, roles: ALL_ROLES, group: "Insights" },

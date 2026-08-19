@@ -1,13 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
@@ -24,13 +21,15 @@ interface Props {
   userId: string;
 }
 
-type RemarkKind = "return" | "reject" | "request-revision" | null;
-
+/**
+ * Plan workflow actions. Approval screens are VIEW-ONLY: once a plan leaves Draft (Submitted / Pending RM
+ * / Pending Admin / Approved) the officer can no longer edit, resubmit or withdraw it, and reviewers no
+ * longer Return/Reject/Edit. The only forward action retained is Approve (RM on PENDING_RM, Admin on
+ * PENDING_ADMIN) so the approval lifecycle can still progress. Draft/Returned/Rejected stay editable and
+ * can be Submitted by the owning officer (unchanged workflow). Underlying approval endpoints are intact.
+ */
 export function PlanActions({ detail, role, userId }: Props) {
   const qc = useQueryClient();
-  const router = useRouter();
-  const [remarkKind, setRemarkKind] = useState<RemarkKind>(null);
-  const [remarkText, setRemarkText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [confirmNoPlan, setConfirmNoPlan] = useState(false);
 
@@ -57,23 +56,10 @@ export function PlanActions({ detail, role, userId }: Props) {
     onSuccess: refresh,
     onError: (e) => setError((e as Error).message),
   });
-  const actWithBody = useMutation({
-    mutationFn: (vars: { path: string; body: unknown }) => api.post(`${base}/${vars.path}`, vars.body),
-    onSuccess: () => {
-      setRemarkKind(null);
-      setRemarkText("");
-      refresh();
-    },
-    onError: (e) => setError((e as Error).message),
-  });
-  const authorize = useMutation({
-    mutationFn: () => api.post<{ id: string }>(`${base}/authorize-revision`, {}),
-    onSuccess: (res) => router.push(`/planning/${res.id}`),
-    onError: (e) => setError((e as Error).message),
-  });
 
   const buttons: React.ReactNode[] = [];
 
+  // Owner may Submit only while the plan is still editable (Draft / Returned / Rejected).
   if (isOwner && detail.canEdit) {
     buttons.push(
       <Button
@@ -86,29 +72,8 @@ export function PlanActions({ detail, role, userId }: Props) {
       </Button>,
     );
   }
-  if (isOwner && (detail.status === "PENDING_RM" || detail.status === "PENDING_ADMIN")) {
-    buttons.push(
-      <Button key="recall" variant="outline" onClick={() => act.mutate("recall")}>
-        Recall
-      </Button>,
-    );
-  }
-  if (isOwner && detail.status === "APPROVED" && detail.isActiveVersion) {
-    buttons.push(
-      <Button
-        key="req-rev"
-        variant="outline"
-        onClick={() => {
-          setError(null);
-          setRemarkKind("request-revision");
-        }}
-        disabled={detail.revisionRequested}
-      >
-        {detail.revisionRequested ? "Revision requested" : "Request revision"}
-      </Button>,
-    );
-  }
 
+  // The only reviewer action retained: Approve (view-only otherwise — no Return / Reject / Edit).
   const isRmApprover = role === Role.REGIONAL_MANAGER && detail.status === "PENDING_RM";
   const isAdminApprover = role === Role.SUPER_ADMIN && detail.status === "PENDING_ADMIN";
   if (isRmApprover || isAdminApprover) {
@@ -116,31 +81,8 @@ export function PlanActions({ detail, role, userId }: Props) {
       <Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>
         Approve
       </Button>,
-      <Button key="return" variant="outline" onClick={() => { setError(null); setRemarkKind("return"); }}>
-        Return
-      </Button>,
-      <Button key="reject" variant="destructive" onClick={() => { setError(null); setRemarkKind("reject"); }}>
-        Reject
-      </Button>,
     );
   }
-  if (role === Role.SUPER_ADMIN && detail.status === "APPROVED" && detail.revisionRequested) {
-    buttons.push(
-      <Button key="authorize" onClick={() => authorize.mutate()} disabled={authorize.isPending}>
-        Authorize revision
-      </Button>,
-    );
-  }
-
-  const remarkTitle =
-    remarkKind === "return"
-      ? "Return plan with remarks"
-      : remarkKind === "reject"
-        ? "Reject plan with remarks"
-        : "Request a revision";
-  const remarkField = remarkKind === "request-revision" ? "reason" : "remarks";
-  const remarkPath =
-    remarkKind === "request-revision" ? "request-revision" : (remarkKind ?? "return");
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -167,37 +109,6 @@ export function PlanActions({ detail, role, userId }: Props) {
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmNoPlan(false)}>Cancel</Button>
             <Button onClick={doSubmit} disabled={act.isPending}>Continue submit</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={remarkKind !== null} onOpenChange={(o) => !o && setRemarkKind(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{remarkTitle}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-1.5">
-            <Label htmlFor="remark">{remarkKind === "request-revision" ? "Reason" : "Remarks"}</Label>
-            <Textarea
-              id="remark"
-              value={remarkText}
-              onChange={(e) => setRemarkText(e.target.value)}
-              placeholder="Required"
-            />
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRemarkKind(null)}>
-              Cancel
-            </Button>
-            <Button
-              disabled={!remarkText.trim() || actWithBody.isPending}
-              onClick={() =>
-                actWithBody.mutate({ path: remarkPath, body: { [remarkField]: remarkText.trim() } })
-              }
-            >
-              Confirm
-            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

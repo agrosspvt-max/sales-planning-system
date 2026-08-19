@@ -970,6 +970,7 @@ export async function listPlans(ctx: AuthContext, seasonId?: string, mine = fals
     lifecycleState: (p as { lifecycleState?: string }).lifecycleState ?? "ACTIVE",
     isActiveVersion: p.isActiveVersion,
     lastSavedAt: p.lastSavedAt,
+    submittedAt: p.submittedAt,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
   }));

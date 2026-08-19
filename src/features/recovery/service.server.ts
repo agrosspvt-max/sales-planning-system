@@ -105,6 +105,46 @@ function computeWeekLocks(
   return out;
 }
 
+/* --------------- Row-level lock: Due Recovery Plan ↔ Running Recovery Plan --------------- */
+// Per dealer ROW (independent of other rows): Running Recovery Plan may only hold a value once the Due
+// Recovery Plan is ≥ Overdue + Due; and the Due Recovery Plan is locked while Running has a value. These
+// are enforced on EVERY save (not just the UI) so the API cannot be manipulated.
+function assertRowLock(
+  newPlan: number,
+  newRunning: number,
+  storedPlan: number,
+  threshold: number,
+  dealerLabel: string,
+): void {
+  const p = Math.round(newPlan);
+  const r = Math.round(newRunning);
+  const t = Math.round(threshold);
+  // (1) Running Recovery Plan requires a sufficient Due Recovery Plan.
+  if (r > 0 && p < t) {
+    throw new ApiError(422, `Due Recovery Plan must be equal to or greater than Overdue + Due amount (${dealerLabel}).`);
+  }
+  // (2)/(3) Due Recovery Plan is locked while Running Recovery Plan has a value — clear Running first.
+  if (r > 0 && p !== Math.round(storedPlan)) {
+    throw new ApiError(409, `Due Recovery Plan is locked while Running Recovery Plan has a value — clear Running Recovery Plan first (${dealerLabel}).`);
+  }
+}
+
+/** This-week Due per dealer (Map dealerId → { 1..4 }) from the latest snapshot's DUE bills. */
+async function dueByWeekForPlan(planId: string): Promise<Map<string, Record<1 | 2 | 3 | 4, number>>> {
+  const map = new Map<string, Record<1 | 2 | 3 | 4, number>>();
+  const latest = (await prisma.agingSnapshot.findFirst({ where: { recoveryPlanId: planId }, orderBy: [{ weekNo: "desc" }], select: { id: true } })) as { id: string } | null;
+  if (!latest) return map;
+  const dueBills = (await prisma.agingSnapshotBill.findMany({ where: { snapshotId: latest.id, bucket: "DUE" }, select: { dealerId: true, dueDate: true, amount: true } })) as { dealerId: string; dueDate: Date | null; amount: unknown }[];
+  for (const b of dueBills) {
+    if (!b.dueDate) continue;
+    const wk = businessWeekOfMonth(b.dueDate);
+    const rec = map.get(b.dealerId) ?? { 1: 0, 2: 0, 3: 0, 4: 0 };
+    rec[wk] += num(b.amount);
+    map.set(b.dealerId, rec);
+  }
+  return map;
+}
+
 /** EFFECTIVE lock for one week (admin override wins, else date-based). Used to guard saves + drive toggles. */
 async function effectiveWeekLocked(planId: string, weekNo: number): Promise<boolean> {
   const override = (await prisma.recoveryWeekLock.findUnique({
@@ -719,7 +759,20 @@ export async function saveRecoveryMonth(ctx: AuthContext, id: string, raw: unkno
   const plan = await loadEditablePlan(ctx, id);
   if (!EDITABLE.includes(plan.status as PlanStatus)) throw new ApiError(409, "Month View is locked in this state");
   assertRecoveryLive(plan);
-  const dealerIds = new Set((await prisma.recoveryPlanDealer.findMany({ where: { recoveryPlanId: id }, select: { dealerId: true } })).map((d) => d.dealerId));
+  // Row-lock inputs: Overdue + Due (threshold) and the currently STORED plan (to detect Due edits).
+  const dealerRows = (await prisma.recoveryPlanDealer.findMany({
+    where: { recoveryPlanId: id },
+    select: { dealerId: true, overdue: true, due: true, monthRecoveryPlan: true, dealer: { select: { name: true } } },
+  })) as { dealerId: string; overdue: unknown; due: unknown; monthRecoveryPlan: unknown; dealer: { name: string } }[];
+  const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
+  // Validate the Due↔Running row-lock for every entry BEFORE writing (all-or-nothing).
+  for (const e of entries) {
+    const row = rowByDealer.get(e.dealerId);
+    if (!row) continue;
+    const threshold = num(row.overdue) + num(row.due);
+    assertRowLock(e.monthRecoveryPlan ?? num(row.monthRecoveryPlan), e.monthRunningRecovery ?? 0, num(row.monthRecoveryPlan), threshold, row.dealer.name);
+  }
+  const dealerIds = new Set(dealerRows.map((d) => d.dealerId));
   await prisma.$transaction(
     async (tx: Tx) => {
       const CHUNK = 100;
@@ -769,8 +822,21 @@ export async function saveRecoveryWeek(ctx: AuthContext, id: string, raw: unknow
   assertRecoveryLive(plan);
   // Per-week lock (date-based, admin override wins) — a locked week is read-only; an admin must unlock it.
   if (await effectiveWeekLocked(id, weekNo)) throw new ApiError(409, "This week is locked — ask an admin to unlock it before editing.");
-  const dealerRows = await prisma.recoveryPlanDealer.findMany({ where: { recoveryPlanId: id }, select: { id: true, dealerId: true } });
+  const dealerRows = (await prisma.recoveryPlanDealer.findMany({
+    where: { recoveryPlanId: id },
+    select: { id: true, dealerId: true, overdue: true, dealer: { select: { name: true } }, weekPlans: { where: { weekNo }, select: { weekRecoveryPlan: true } } },
+  })) as { id: string; dealerId: string; overdue: unknown; dealer: { name: string }; weekPlans: { weekRecoveryPlan: unknown }[] }[];
   const byDealer = new Map(dealerRows.map((d) => [d.dealerId, d.id]));
+  const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
+  // Threshold per row = Overdue + THIS WEEK'S Due (same figure the Week View shows).
+  const dueByWeek = await dueByWeekForPlan(id);
+  for (const e of entries) {
+    const row = rowByDealer.get(e.dealerId);
+    if (!row) continue;
+    const storedPlan = num(row.weekPlans[0]?.weekRecoveryPlan ?? 0);
+    const threshold = num(row.overdue) + (dueByWeek.get(e.dealerId)?.[weekNo as 1 | 2 | 3 | 4] ?? 0);
+    assertRowLock(e.weekRecoveryPlan ?? storedPlan, e.weekRunningRecovery ?? 0, storedPlan, threshold, row.dealer.name);
+  }
   await prisma.$transaction(
     async (tx: Tx) => {
       const CHUNK = 100;

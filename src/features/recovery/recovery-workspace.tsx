@@ -115,6 +115,24 @@ function DateSuffix({ date }: { date: string }) {
 }
 
 /**
+ * Row-level Due↔Running lock (independent per dealer). Mirrors the backend rules:
+ *  - Running Recovery Plan is editable only once Due Recovery Plan ≥ threshold (Overdue + Due). While Due
+ *    is below the threshold and Running is still empty, Running is disabled and a warning is shown.
+ *  - Due Recovery Plan locks as soon as Running has a value; it unlocks when Running is cleared.
+ *  - Running with a value stays editable (so it can always be cleared/adjusted, avoiding a lock trap).
+ * Skipped entirely in admin-edit mode so a Super Admin can freely correct values.
+ */
+function rowLockState(plan: number, running: number, threshold: number, adminMode: boolean): { runningDisabled: boolean; dueLocked: boolean; showWarning: boolean } {
+  if (adminMode) return { runningDisabled: false, dueLocked: false, showWarning: false };
+  const dueValid = plan >= threshold;
+  return {
+    runningDisabled: !dueValid && running === 0,
+    dueLocked: running > 0,
+    showWarning: plan > 0 && !dueValid,
+  };
+}
+
+/**
  * Business-aware change delta for receivables: a DECREASE is good (green), an increase is bad (red).
  * The main value stays in the normal theme color; only the small delta is coloured. Theme-safe.
  */
@@ -414,6 +432,9 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               const monthTotal = v.plan + v.running;
               const recPct = d.running > 0 ? v.running / d.running : 0;
               const status = d.noPlan ? DealerPlanningStatus.NO_PLAN : monthTotal > 0 ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING;
+              // Row-level Due↔Running lock: Running is editable only once Due ≥ Overdue+Due; Due locks once
+              // Running has a value. Skipped in admin-edit mode so a Super Admin can freely correct.
+              const rowLock = rowLockState(v.plan, v.running, d.overdue + d.due, adminMode);
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium" style={{ color: status === DealerPlanningStatus.COMPLETED ? "hsl(var(--success))" : status === DealerPlanningStatus.NO_PLAN ? "hsl(var(--noplan))" : undefined }}>
@@ -429,13 +450,14 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
                   <TableCell className="text-right tabular-nums">{money(d.due)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan || rowLock.dueLocked} title={rowLock.dueLocked ? "Locked — clear Running Recovery Plan first" : undefined} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress. Running O/S Till Date is frozen after first import. */}
                   <TableCell className="text-right tabular-nums">{money(d.running)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.runningTillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan || rowLock.runningDisabled} title={rowLock.runningDisabled ? "Enter a Due Recovery Plan ≥ Overdue + Due to enable" : undefined} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    {rowLock.showWarning && <div className="mt-0.5 text-[10px] leading-tight text-destructive">Due Recovery Plan must be equal to or greater than Overdue + Due amount.</div>}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{pct(recPct)}</TableCell>
                   {/* Total Recovery Plan (purple Results) — moved to sit beside Recovery %. */}
@@ -720,6 +742,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               const monthTotal = d.monthRecoveryPlan + d.monthRunningRecovery;
               const diff = monthTotal - allWeeksTotal(d);
               const tillDate = tillDateTotal(d);
+              // Row-level Due↔Running lock — threshold = Overdue + THIS WEEK'S Due (same figures shown here).
+              const rowLock = rowLockState(v.plan, v.running, d.overdue + (d.dueByWeek?.[weekNo] ?? 0), adminMode);
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium">{d.dealerName}</TableCell>
@@ -732,7 +756,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
                   <TableCell className="text-right tabular-nums">{money(d.dueByWeek?.[weekNo] ?? 0)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan || rowLock.dueLocked} title={rowLock.dueLocked ? "Locked — clear Running Recovery Plan first" : undefined} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress */}
                   {/* "Running Plan Month" is the Month View's Running Recovery Plan. Labels are
@@ -740,7 +764,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRunningRecovery)}</TableCell>
                   <TableCell className="text-right tabular-nums font-medium">{money(tillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan || rowLock.runningDisabled} title={rowLock.runningDisabled ? "Enter a Due Recovery Plan ≥ Overdue + This Week's Due to enable" : undefined} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    {rowLock.showWarning && <div className="mt-0.5 text-[10px] leading-tight text-destructive">Due Recovery Plan must be equal to or greater than Overdue + Due amount.</div>}
                   </TableCell>
                   {/* Section 4 — Results */}
                   <TableCell className="text-right tabular-nums font-medium">{money(weekTotal)}</TableCell>

@@ -284,8 +284,6 @@ function buildRecoveryImportPreview(
 const createSchema = z.object({
   seasonMonthId: z.string().min(1, "Select a Month"),
   cutoffDate: z.string().min(1, "Select a Cutoff Date"),
-  // Static Outstanding Mode: seed only the static Outstanding Till Date; live business columns start at 0.
-  staticOutstanding: z.coerce.boolean().default(false),
   // Optional scope: restrict creation to a set of officers (Single / Selected / Seasonal flows). When
   // omitted, every matched officer is planned (All). `officerScope` (single id) is kept for callers
   // that still pass one officer; it is folded into `officerIds`.
@@ -360,7 +358,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   const agingSnapshotRows: { id: string; recoveryPlanId: string; weekNo: number; cutoffDate: Date; workbookName: string; uploadedById: string }[] = [];
   const agingSnapshotDealerRows: { id: string; snapshotId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number }[] = [];
   const agingSnapshotBillRows: { snapshotId: string; snapshotDealerId: string; dealerId: string; billDate: Date | null; refNo: string | null; amount: number; dueDate: Date | null; bucket: string }[] = [];
-  const recoveryPlanDealerRows: { recoveryPlanId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number; outstandingTillDate: number; runningTillDate: number; outstandingStatic?: boolean }[] = [];
+  const recoveryPlanDealerRows: { recoveryPlanId: string; dealerId: string; outstanding: number; overdue: number; due: number; running: number; runningTillDate: number }[] = [];
 
   const planIds: string[] = [];
   let dealerCount = 0;
@@ -377,13 +375,10 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
     for (const d of dealersFor) {
       const snapDealerId = randomUUID();
       agingSnapshotDealerRows.push({ id: snapDealerId, snapshotId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running });
-      // First import of the month → seed OPENING balances (Till Date). Set once here; never updated.
-      // STATIC mode: populate ONLY the static Outstanding Till Date (+ flag); live columns start at 0.
-      recoveryPlanDealerRows.push(
-        input.staticOutstanding
-          ? { recoveryPlanId: planId, dealerId: d.dealerId, outstanding: 0, overdue: 0, due: 0, running: 0, outstandingTillDate: d.aging.outstanding, runningTillDate: 0, outstandingStatic: true }
-          : { recoveryPlanId: planId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running, outstandingTillDate: d.aging.outstanding, runningTillDate: d.aging.running },
-      );
+      // NORMAL create: seed the live aging + the Running O/S opening (runningTillDate) only. It does NOT
+      // set `outstandingTillDate` — the static opening balance is owned exclusively by the Static
+      // Outstanding import, so a normal aging upload never affects both data sources.
+      recoveryPlanDealerRows.push({ recoveryPlanId: planId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running, runningTillDate: d.aging.running });
       for (const b of d.aging.bills) {
         agingSnapshotBillRows.push({ snapshotId, snapshotDealerId: snapDealerId, dealerId: d.dealerId, billDate: b.billDate, refNo: b.refNo, amount: b.amount, dueDate: b.dueDate, bucket: b.bucket });
       }
@@ -575,9 +570,11 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         overdue: cur.overdue,
         due: cur.due,
         running: cur.running,
-        // OPENING balances for the month (frozen after the first import). Fall back to current values
-        // for any legacy row created before these columns existed.
-        outstandingTillDate: num(d.outstandingTillDate ?? d.outstanding),
+        // Outstanding Till Date is the STATIC opening balance — set ONLY by the Static Outstanding import,
+        // independent of the live Current Outstanding. 0 until a static import provides it (no fallback to
+        // the live outstanding, which would otherwise make this column track current outstanding).
+        outstandingTillDate: num(d.outstandingTillDate ?? 0),
+        // Running O/S Till Date keeps its opening seed (falls back to current for legacy rows).
         runningTillDate: num(d.runningTillDate ?? d.running),
         // Day Book-derived business values (populated by the Daybook upload; default 0).
         srCr: num(d.srCr ?? 0),
@@ -788,9 +785,7 @@ async function writeRefreshSnapshot(
   weekNo: number,
   uploadedById: string,
   summary: unknown,
-  opts?: { staticOutstanding?: boolean },
 ): Promise<string> {
-  const staticMode = opts?.staticOutstanding ?? false;
   const snapshot = await tx.agingSnapshot.create({
     data: { recoveryPlanId: planId, weekNo, cutoffDate: cutoff, workbookName: filename, uploadedById, summary: JSON.stringify(summary) },
   });
@@ -804,26 +799,18 @@ async function writeRefreshSnapshot(
       });
     }
     // UPSERT (not updateMany): an aging dealer that isn't yet in the plan must be INSERTED, not dropped.
-    // This is the reconciliation fix — a refresh (UPDATE/REPLACE/weekly) now adds every aging dealer for
-    // the officer that is missing from the plan, under the correct officer (this plan is theirs), while
-    // an EXISTING dealer only has its read-only aging fields refreshed — manual recovery inputs, weekly
-    // plans, approvals, no-plan flags and Till Date opening balances are all preserved untouched.
+    // NORMAL (dynamic) refresh: update ONLY the live aging fields. It NEVER writes `outstandingTillDate`
+    // (the static opening) — that column is owned exclusively by the Static Outstanding import, so the two
+    // are independent data sources. Manual recovery inputs, weekly plans, approvals and no-plan flags are
+    // all preserved untouched. `runningTillDate` (Running O/S opening) is still seeded on first insert.
     await tx.recoveryPlanDealer.upsert({
       where: { recoveryPlanId_dealerId: { recoveryPlanId: planId, dealerId: r.dealerId } },
-      // STATIC mode: fill ONLY the static Outstanding Till Date (+ flag); leave the live business columns
-      // untouched. DYNAMIC mode (default, unchanged): refresh the live aging fields, never the Till Date.
-      update: staticMode
-        ? { outstandingTillDate: r.aging.outstanding, outstandingStatic: true }
-        : { outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running },
-      // First appearance in this month → seed the OPENING balances (Till Date) exactly like onboarding.
-      // In static mode the live columns start at 0 (only the static Till Date is populated).
-      create: staticMode
-        ? { recoveryPlanId: planId, dealerId: r.dealerId, outstanding: 0, overdue: 0, due: 0, running: 0, outstandingTillDate: r.aging.outstanding, runningTillDate: 0, outstandingStatic: true }
-        : {
-            recoveryPlanId: planId, dealerId: r.dealerId,
-            outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running,
-            outstandingTillDate: r.aging.outstanding, runningTillDate: r.aging.running,
-          },
+      update: { outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running },
+      create: {
+        recoveryPlanId: planId, dealerId: r.dealerId,
+        outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running,
+        runningTillDate: r.aging.running,
+      },
     });
   }
   return snapshot.id;
@@ -872,8 +859,6 @@ const updateSchema = z.object({
   seasonMonthId: z.string().min(1, "Select a Month"),
   cutoffDate: z.string().min(1, "Select a Cutoff Date"),
   allowWeeklyEdit: z.coerce.boolean().default(true),
-  // Static Outstanding Mode: fill only the static Outstanding Till Date, leave live business untouched.
-  staticOutstanding: z.coerce.boolean().default(false),
   // Optional scope: restrict the refresh to a set of officers (Single / Selected / Seasonal flows).
   // `officerScope` (single id) is kept for existing callers and folded into `officerIds`.
   officerScope: z.string().optional(),
@@ -970,7 +955,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
       const weekNo = await nextSnapshotWeekNo(plan.id);
       await prisma.$transaction(
         async (tx: Tx) => {
-          await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo }, { staticOutstanding: input.staticOutstanding });
+          await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
           await tx.recoveryPlan.update({ where: { id: plan.id }, data: { cutoffDate: cutoff, weeklyEditEnabled: input.allowWeeklyEdit } });
         },
         { timeout: 60000, maxWait: 10000 },
@@ -1095,23 +1080,39 @@ const importScopeSchema = z.discriminatedUnion("kind", [
 ]);
 export type RecoveryImportScope = z.infer<typeof importScopeSchema>;
 
-const recoveryImportSchema = z.object({
-  scope: importScopeSchema,
-  seasonMonthId: z.string().min(1, "Select a Month"),
-  cutoffDate: z.string().min(1, "Select a Cutoff Date"),
-});
-const recoveryImportCommitSchema = recoveryImportSchema.extend({
-  mode: z.enum(["CREATE", "UPDATE", "REPLACE"]),
-  // Onboarding candidates the admin selected (single-officer scopes only). Ignored for All/Selected,
-  // where an unknown name has no officer to attribute it to.
-  newDealerNames: z.array(z.string()).default([]),
-  allowWeeklyEdit: z.coerce.boolean().default(true),
-  // Static Outstanding Mode: the aging upload fills ONLY the static Outstanding Till Date and protects it.
-  staticOutstanding: z.coerce.boolean().default(false),
-});
+const recoveryImportSchema = z
+  .object({
+    scope: importScopeSchema,
+    seasonMonthId: z.string().min(1, "Select a Month"),
+    // Cutoff is OPTIONAL: Static Outstanding Mode ignores it (the opening balance is cutoff-independent),
+    // so the modal disables it. Normal mode still requires it (enforced by the refine below).
+    cutoffDate: z.string().optional(),
+    // Static Outstanding Mode: the aging upload fills ONLY the static Outstanding Till Date and protects it.
+    staticOutstanding: z.coerce.boolean().default(false),
+  })
+  .refine((v) => v.staticOutstanding || (v.cutoffDate != null && v.cutoffDate.length > 0), {
+    message: "Select a Cutoff Date",
+    path: ["cutoffDate"],
+  });
+const recoveryImportCommitSchema = z
+  .object({
+    scope: importScopeSchema,
+    seasonMonthId: z.string().min(1, "Select a Month"),
+    cutoffDate: z.string().optional(),
+    staticOutstanding: z.coerce.boolean().default(false),
+    mode: z.enum(["CREATE", "UPDATE", "REPLACE"]),
+    // Onboarding candidates the admin selected (single-officer scopes only). Ignored for All/Selected,
+    // where an unknown name has no officer to attribute it to.
+    newDealerNames: z.array(z.string()).default([]),
+    allowWeeklyEdit: z.coerce.boolean().default(true),
+  })
+  .refine((v) => v.staticOutstanding || (v.cutoffDate != null && v.cutoffDate.length > 0), {
+    message: "Select a Cutoff Date",
+    path: ["cutoffDate"],
+  });
 
 export interface RecoveryImportAnalysis extends RecoveryImportPreview {
-  context: { seasonName: string; monthName: string; scopeKind: RecoveryImportScope["kind"] };
+  context: { seasonName: string; monthName: string; scopeKind: RecoveryImportScope["kind"]; static: boolean };
 }
 export interface RecoveryImportResult {
   mode: "CREATE" | "UPDATE" | "REPLACE";
@@ -1222,8 +1223,9 @@ async function reconcileRecoveryDealers(recoveryPlanId: string, dealerIds: Set<s
     const vals = { outstanding: num(sd.outstanding), overdue: num(sd.overdue), due: num(sd.due), running: num(sd.running) };
     await prisma.recoveryPlanDealer.upsert({
       where: { recoveryPlanId_dealerId: { recoveryPlanId, dealerId: sd.dealerId } },
-      // First appearance of an onboarded dealer in the month → seed its OPENING balances (Till Date).
-      create: { recoveryPlanId, dealerId: sd.dealerId, ...vals, outstandingTillDate: vals.outstanding, runningTillDate: vals.running },
+      // First appearance of an onboarded dealer → seed live aging + Running O/S opening only. The static
+      // Outstanding Till Date is NOT set here (it is owned solely by the Static Outstanding import).
+      create: { recoveryPlanId, dealerId: sd.dealerId, ...vals, runningTillDate: vals.running },
       update: {}, // present already → refresh left its aging correct; don't touch officer inputs or Till Date.
     });
   }
@@ -1246,7 +1248,6 @@ async function replaceRecoveryPlanAtomic(
   cutoff: Date,
   filename: string,
   allowWeeklyEdit: boolean,
-  staticOutstanding = false,
 ): Promise<boolean> {
   const forOfficer = res.resolved.filter((r) => r.officerId === officerId);
   if (forOfficer.length === 0) return false; // never reset without a replacement snapshot to write
@@ -1263,7 +1264,7 @@ async function replaceRecoveryPlanAtomic(
       await tx.recoveryWeekPlan.deleteMany({ where: { recoveryPlanDealer: { recoveryPlanId: planId } } });
       await tx.recoveryPlanDealer.updateMany({ where: { recoveryPlanId: planId }, data: { monthRecoveryPlan: null, monthRunningRecovery: null, noPlan: false, noPlanReason: null } });
       // (b) … and write the replacement snapshot + refresh aging, in the SAME commit.
-      await writeRefreshSnapshot(tx, planId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo }, { staticOutstanding });
+      await writeRefreshSnapshot(tx, planId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
       await tx.recoveryPlan.update({ where: { id: planId }, data: { status: PlanStatus.DRAFT, cutoffDate: cutoff, weeklyEditEnabled: allowWeeklyEdit } });
     },
     { timeout: 60000, maxWait: 10000 },
@@ -1275,7 +1276,9 @@ async function replaceRecoveryPlanAtomic(
 export async function analyzeRecoveryImport(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<RecoveryImportAnalysis> {
   assertAdmin(ctx);
   const input = recoveryImportSchema.parse(raw);
-  const cutoff = new Date(input.cutoffDate);
+  // Static mode is cutoff-independent (Outstanding is the sum of all bills). Default the cutoff so the
+  // shared resolver/preview still runs; the overdue/due split it produces is unused by the static commit.
+  const cutoff = input.cutoffDate ? new Date(input.cutoffDate) : new Date();
 
   const month = (await prisma.seasonMonth.findUnique({
     where: { id: input.seasonMonthId },
@@ -1327,7 +1330,78 @@ export async function analyzeRecoveryImport(ctx: AuthContext, buffer: Buffer, fi
   }
 
   const preview = buildRecoveryImportPreview(res.rows, scopeOfficerIds, officerNameById, existingByOfficer, existingDealerIdsByOfficer);
-  return { ...preview, context: { seasonName: `${month.season.name} ${month.season.year}`, monthName: month.name, scopeKind: input.scope.kind } };
+  return { ...preview, context: { seasonName: `${month.season.name} ${month.season.year}`, monthName: month.name, scopeKind: input.scope.kind, static: input.staticOutstanding } };
+}
+
+/**
+ * STATIC OUTSTANDING IMPORT (Mode 1) — freeze the opening balance ONLY. For every EXISTING in-scope
+ * recovery-plan dealer matched in the report, set ONLY `outstandingTillDate` (the month-opening snapshot)
+ * and mark it `outstandingStatic`. It deliberately writes NOTHING else: no aging snapshot, no live
+ * outstanding/overdue/due/running, no Recovery Plan / weekly / actual values, and no cutoff change. This is
+ * the structural guarantee that a static upload can never modify normal aging fields. Cutoff-independent
+ * (Outstanding = sum of all bills), so no cutoff is needed. Officers with no aging / no matching dealer are
+ * skipped with a reason. New dealers are NOT created here — static freezing applies to existing plans.
+ */
+async function applyStaticOutstanding(
+  ctx: AuthContext,
+  buffer: Buffer,
+  filename: string,
+  seasonMonthId: string,
+  officerIds: string[] | null,
+): Promise<{ updatedOfficers: number; recoveryPlanIds: string[]; skipped: RecoverySkip[] }> {
+  const month = await prisma.seasonMonth.findUnique({ where: { id: seasonMonthId }, select: { id: true } });
+  if (!month) throw new ApiError(422, "The selected Month does not exist");
+  const parsed = parseAgingReport(buffer);
+  if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
+  // Cutoff is irrelevant to the total Outstanding; use a placeholder so the shared resolver runs.
+  const res = await resolveAging(parsed, new Date());
+
+  const plans = (await prisma.recoveryPlan.findMany({
+    where: { seasonMonthId: month.id, lifecycleState: "ACTIVE", officerId: officerIds ? { in: officerIds } : undefined },
+    select: { id: true, officerId: true, officer: { select: { name: true } } },
+  })) as { id: string; officerId: string; officer: { name: string } }[];
+  if (plans.length === 0) throw new ApiError(422, "No active recovery plans exist for the selected month.");
+
+  const recoveryPlanIds: string[] = [];
+  const skipped: RecoverySkip[] = [];
+  const officers = new Set<string>();
+  let updatedDealers = 0;
+
+  for (const plan of plans) {
+    const forOfficer = res.resolved.filter((r) => r.officerId === plan.officerId);
+    if (forOfficer.length === 0) { skipped.push({ officerName: plan.officer.name, reason: SKIP_NO_AGING }); continue; }
+    const existing = (await prisma.recoveryPlanDealer.findMany({ where: { recoveryPlanId: plan.id }, select: { dealerId: true } })) as { dealerId: string }[];
+    const planDealerIds = new Set(existing.map((d) => d.dealerId));
+    const matches = forOfficer.filter((r) => planDealerIds.has(r.dealerId));
+    if (matches.length === 0) { skipped.push({ officerName: plan.officer.name, reason: SKIP_DEALER_MISMATCH }); continue; }
+
+    // ONLY outstandingTillDate + flag — never any live business/planning column.
+    await prisma.$transaction(
+      async (tx: Tx) => {
+        for (const m of matches) {
+          await tx.recoveryPlanDealer.update({
+            where: { recoveryPlanId_dealerId: { recoveryPlanId: plan.id, dealerId: m.dealerId } },
+            data: { outstandingTillDate: m.aging.outstanding, outstandingStatic: true },
+          });
+        }
+      },
+      { timeout: 60000, maxWait: 10000 },
+    );
+    updatedDealers += matches.length;
+    officers.add(plan.officerId);
+    recoveryPlanIds.push(plan.id);
+  }
+
+  await writeAudit({
+    userId: ctx.userId,
+    action: "UPDATE",
+    entity: "recoveryPlan",
+    summary: `Static Outstanding from ${filename}: ${officers.size} officer(s), ${updatedDealers} dealer(s) — Outstanding Till Date only (live aging untouched)`,
+  });
+  if (skipped.length > 0) {
+    console.warn(`[recovery:static] ${filename} — ${officers.size} updated, ${skipped.length} skipped`, { skipped: skipped.map((s) => ({ officer: s.officerName, reason: s.reason })) });
+  }
+  return { updatedOfficers: officers.size, recoveryPlanIds, skipped };
 }
 
 /**
@@ -1348,6 +1422,22 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
   }
   const officerIds = scopeOfficerIdList(input.scope, singleOfficerId); // null = ALL
 
+  // STATIC OUTSTANDING MODE — a completely separate, isolated commit. It writes ONLY the static
+  // Outstanding Till Date (+ flag) on existing in-scope plan dealers and NOTHING else: no aging snapshot,
+  // no live outstanding/overdue/due/running, no cutoff change, no planning. This guarantees a static
+  // upload can never touch the normal aging fields (Mode-1 backend validation, by construction).
+  if (input.staticOutstanding) {
+    const stat = await applyStaticOutstanding(ctx, buffer, filename, input.seasonMonthId, officerIds);
+    return {
+      mode: input.mode,
+      officersAffected: stat.updatedOfficers,
+      recoveryPlanIds: stat.recoveryPlanIds,
+      createdDealers: 0,
+      failedOfficers: [],
+      skippedOfficers: stat.skipped,
+    };
+  }
+
   // 1) Onboarding — only meaningful for a single officer (unknown names have no officer otherwise).
   let createdDealers = 0;
   const onboardedIds = new Set<string>();
@@ -1366,7 +1456,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     // createRecoveryFromAging validates its input as an object. UPDATE uses a legacy JSON-string
     // entry point, but passing that format here made every CREATE fail Zod validation before any
     // report data could be processed.
-    const res = await createRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, staticOutstanding: input.staticOutstanding, ...scoped });
+    const res = await createRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, ...scoped });
     recoveryPlanIds.push(...res.planIds);
   } else if (input.mode === "REPLACE") {
     // REPLACE: reset + refresh are done ATOMICALLY per plan (replaceRecoveryPlanAtomic), so officer
@@ -1377,7 +1467,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
       where: { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) },
       select: { id: true, officerId: true, officer: { select: { name: true } }, seasonPlan: { select: { lifecycleState: true } } },
     })) as { id: string; officerId: string; officer: { name: string }; seasonPlan: { lifecycleState: string } | null }[];
-    const cutoff = new Date(input.cutoffDate);
+    const cutoff = new Date(input.cutoffDate ?? new Date()); // normal mode guarantees a cutoff (schema refine)
     const parsed = parseAgingReport(buffer);
     if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
     const res = await resolveAging(parsed, cutoff);
@@ -1386,7 +1476,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
       // Never replace a plan under a frozen (deactivated) parent seasonal plan — same guard as refresh.
       if ((p.seasonPlan?.lifecycleState ?? "ACTIVE") !== "ACTIVE") continue;
       try {
-        const didReplace = await replaceRecoveryPlanAtomic(ctx, p.id, p.officerId, res, cutoff, filename, input.allowWeeklyEdit, input.staticOutstanding);
+        const didReplace = await replaceRecoveryPlanAtomic(ctx, p.id, p.officerId, res, cutoff, filename, input.allowWeeklyEdit);
         if (didReplace) {
           replaced += 1;
           recoveryPlanIds.push(p.id);
@@ -1406,7 +1496,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     // Pass a PLAIN OBJECT — updateRecoveryFromAging validates with a z.object schema, so a JSON string
     // (the legacy shape) fails Zod with "Validation failed" before any refresh runs. This was the cause
     // of Update Recovery silently doing nothing; CREATE was already migrated to the object form.
-    const upd = await updateRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, allowWeeklyEdit: input.allowWeeklyEdit, staticOutstanding: input.staticOutstanding, ...scoped });
+    const upd = await updateRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, allowWeeklyEdit: input.allowWeeklyEdit, ...scoped });
     failedOfficers.push(...upd.failed);
     skippedOfficers.push(...upd.skipped);
     // Only officers that were actually refreshed count as affected plans (exclude both failed AND skipped,

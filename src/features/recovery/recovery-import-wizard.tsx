@@ -33,7 +33,7 @@ interface Analysis {
   skipped: { unknown: SkipLine[]; inactive: SkipLine[]; otherOfficer: SkipLine[] };
   summary: { totalRows: number; accepted: number; skipped: number; unknown: number; duplicates: number; inactive: number; assignedToOther: number; newDealers: number };
   newDealerCandidates: string[];
-  context: { seasonName: string; monthName: string; scopeKind: "ALL" | "SELECTED" | "SINGLE" | "SINGLE_FROM_SEASONAL" };
+  context: { seasonName: string; monthName: string; scopeKind: "ALL" | "SELECTED" | "SINGLE" | "SINGLE_FROM_SEASONAL"; static: boolean };
 }
 interface FailedOfficer { officerId: string; officerName: string; reason: string }
 interface SkippedOfficer { officerName: string; reason: string }
@@ -100,7 +100,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
     mutationFn: async () => {
       const form = new FormData();
       form.append("file", file as File);
-      form.append("data", JSON.stringify({ scope: buildScope(), seasonMonthId: monthId, cutoffDate: cutoff }));
+      form.append("data", JSON.stringify({ scope: buildScope(), seasonMonthId: monthId, cutoffDate: staticMode ? undefined : cutoff, staticOutstanding: staticMode }));
       const res = await fetch("/api/recovery/import/analyze", { method: "POST", body: form });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Analysis failed");
@@ -110,7 +110,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
       setAnalysis(a);
       setRetryIds(null); // fresh analysis → clear any prior retry scoping
       setSelectedNew(new Set()); // onboarding candidates default UNCHECKED (admin curates)
-      setStaticMode(false); // static mode defaults OFF on every fresh analysis (dynamic behaviour)
+      // NOTE: staticMode is chosen in the upload step and MUST persist into commit — do not reset it here.
       const anyExisting = a.officers.some((o) => o.existingRecovery);
       setMode(anyExisting ? null : "CREATE"); // existing → admin must choose UPDATE/REPLACE
       setStep("preview");
@@ -123,7 +123,9 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
     mutationFn: async () => {
       const form = new FormData();
       form.append("file", file as File);
-      form.append("data", JSON.stringify({ scope: buildScope(), seasonMonthId: monthId, cutoffDate: cutoff, mode, newDealerNames: [...selectedNew], staticOutstanding: staticMode }));
+      // Static mode ignores create/update/replace, but the commit schema still needs a valid enum — send a
+      // harmless placeholder so validation passes; the server routes to the isolated static path regardless.
+      form.append("data", JSON.stringify({ scope: buildScope(), seasonMonthId: monthId, cutoffDate: staticMode ? undefined : cutoff, mode: staticMode ? "UPDATE" : mode, newDealerNames: [...selectedNew], staticOutstanding: staticMode }));
       const res = await fetch("/api/recovery/import/commit", { method: "POST", body: form });
       const body = await res.json();
       if (!res.ok) {
@@ -206,16 +208,29 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
                 <NativeSelect placeholder="Choose the month…" options={(months ?? []).map((m) => ({ value: m.id, label: m.label }))} value={monthId} onChange={(e) => setMonthId(e.target.value)} />
               </div>
               <div className="space-y-1.5">
-                <Label>Cutoff Date</Label>
-                <Input type="date" value={cutoff} onChange={(e) => setCutoff(e.target.value)} />
+                <Label className={staticMode ? "text-muted-foreground" : undefined}>Cutoff Date{staticMode ? " · not required in static mode" : ""}</Label>
+                <Input type="date" value={staticMode ? "" : cutoff} onChange={(e) => setCutoff(e.target.value)} disabled={staticMode} />
               </div>
             </div>
+
+            {/* Static Outstanding Mode — appears right after Recovery Month. When on, the cutoff is disabled
+                and the commit updates ONLY the Outstanding Till Date snapshot. */}
+            <div className="rounded-md border p-3 text-sm">
+              <label className="flex items-start gap-2">
+                <input type="checkbox" className="mt-1 h-4 w-4" checked={staticMode} onChange={(e) => setStaticMode(e.target.checked)} />
+                <span>
+                  <span className="font-medium">Static Outstanding Mode</span>
+                  <span className="block text-xs text-muted-foreground">Static mode updates only Outstanding Till Date snapshot. It does not affect current outstanding or recovery values.</span>
+                </span>
+              </label>
+            </div>
+
             <div className="space-y-1.5">
               <Label>Aging Report (Bills Receivable .xlsx)</Label>
               <input type="file" accept=".xlsx,.xls" className="block text-sm" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setError(null); }} />
             </div>
             <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-end border-t bg-card px-6 py-3">
-              <Button onClick={() => analyzeMut.mutate()} disabled={!file || !monthId || !cutoff || !scopeReady || analyzeMut.isPending}>
+              <Button onClick={() => analyzeMut.mutate()} disabled={!file || !monthId || (!cutoff && !staticMode) || !scopeReady || analyzeMut.isPending}>
                 {analyzeMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Analyzing…</> : <><ArrowRight className="h-4 w-4" /> Analyze</>}
               </Button>
             </div>
@@ -224,7 +239,17 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
 
         {step === "preview" && analysis && (
           <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">{analysis.context.seasonName} · {analysis.context.monthName}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-sm text-muted-foreground">{analysis.context.seasonName} · {analysis.context.monthName}</p>
+              {analysis.context.static && (
+                <span className="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs font-medium text-warning">Static Outstanding Mode</span>
+              )}
+            </div>
+            {analysis.context.static && (
+              <div className="rounded-md border border-warning/40 bg-warning/5 p-2 text-xs text-muted-foreground">
+                This import will update <span className="font-medium text-foreground">only the Outstanding Till Date</span> snapshot for matched dealers. Current Outstanding, Overdue, Due, Recovery Plan, weekly plans and all other recovery values are left unchanged.
+              </div>
+            )}
 
             {/* Summary card — every number is expandable in the sections below. */}
             <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
@@ -309,8 +334,9 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
               </div>
             )}
 
-            {/* Mode: CREATE when none exist; else the admin must pick UPDATE or REPLACE. */}
-            {anyExisting && (
+            {/* Mode: CREATE when none exist; else the admin must pick UPDATE or REPLACE. Hidden in Static
+                mode — static ignores create/update/replace and only writes the Outstanding Till Date. */}
+            {anyExisting && !analysis.context.static && (
               <div className="space-y-2 rounded-md border border-info/40 bg-info/5 p-3 text-sm">
                 <p className="font-medium">A Recovery Plan already exists for {analysis.officers.filter((o) => o.existingRecovery).length} of the in-scope officer(s).</p>
                 <label className="flex items-start gap-2"><input type="radio" name="rmode" className="mt-1" checked={mode === "UPDATE"} onChange={() => setMode("UPDATE")} /><span><span className="font-medium">Update existing (recommended)</span><span className="block text-xs text-muted-foreground">Refresh aging values only — officer inputs, weekly plans and approvals are preserved.</span></span></label>
@@ -318,20 +344,10 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
               </div>
             )}
 
-            <div className="rounded-md border p-3 text-sm">
-              <label className="flex items-start gap-2">
-                <input type="checkbox" className="mt-1 h-4 w-4" checked={staticMode} onChange={(e) => setStaticMode(e.target.checked)} />
-                <span>
-                  <span className="font-medium">Static Outstanding Mode</span>
-                  <span className="block text-xs text-muted-foreground">Fill only the static <span className="font-medium">Outstanding Till Date</span> from this report and protect it — future imports/updates won&apos;t change it or the live outstanding. Leave off for the normal dynamic refresh.</span>
-                </span>
-              </label>
-            </div>
-
             <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-between border-t bg-card px-6 py-3">
               <Button variant="outline" onClick={() => setStep("upload")}><ArrowLeft className="h-4 w-4" /> Back</Button>
-              <Button onClick={() => { setRetryIds(null); commitMut.mutate(); }} disabled={commitMut.isPending || !mode || analysis.summary.accepted === 0}>
-                {commitMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Working…</> : <>{mode === "UPDATE" ? <RefreshCw className="h-4 w-4" /> : <Check className="h-4 w-4" />} {mode === "UPDATE" ? "Update Recovery" : mode === "REPLACE" ? "Replace Recovery" : "Create Recovery"}</>}
+              <Button onClick={() => { setRetryIds(null); commitMut.mutate(); }} disabled={commitMut.isPending || (!mode && !staticMode) || analysis.summary.accepted === 0}>
+                {commitMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Working…</> : staticMode ? <><RefreshCw className="h-4 w-4" /> Freeze Outstanding Till Date</> : <>{mode === "UPDATE" ? <RefreshCw className="h-4 w-4" /> : <Check className="h-4 w-4" />} {mode === "UPDATE" ? "Update Recovery" : mode === "REPLACE" ? "Replace Recovery" : "Create Recovery"}</>}
               </Button>
             </div>
           </div>

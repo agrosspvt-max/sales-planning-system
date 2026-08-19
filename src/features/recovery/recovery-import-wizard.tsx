@@ -36,7 +36,8 @@ interface Analysis {
   context: { seasonName: string; monthName: string; scopeKind: "ALL" | "SELECTED" | "SINGLE" | "SINGLE_FROM_SEASONAL" };
 }
 interface FailedOfficer { officerId: string; officerName: string; reason: string }
-interface CommitResult { mode: "CREATE" | "UPDATE" | "REPLACE"; officersAffected: number; recoveryPlanIds: string[]; createdDealers: number; failedOfficers: FailedOfficer[] }
+interface SkippedOfficer { officerName: string; reason: string }
+interface CommitResult { mode: "CREATE" | "UPDATE" | "REPLACE"; officersAffected: number; recoveryPlanIds: string[]; createdDealers: number; failedOfficers: FailedOfficer[]; skippedOfficers?: SkippedOfficer[] }
 type Mode = "CREATE" | "UPDATE" | "REPLACE";
 
 /** Fixed single-officer scope (Manage Plans / Seasonal Replace) — no picker shown. */
@@ -121,7 +122,14 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
       form.append("data", JSON.stringify({ scope: buildScope(), seasonMonthId: monthId, cutoffDate: cutoff, mode, newDealerNames: [...selectedNew] }));
       const res = await fetch("/api/recovery/import/commit", { method: "POST", body: form });
       const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? "Commit failed");
+      if (!res.ok) {
+        // Surface server-side validation detail rather than only the generic label: flatten Zod field
+        // issues (`{ field: [msg] }`) into a readable list so the admin sees exactly what was rejected.
+        const issues = body.issues
+          ? Object.entries(body.issues as Record<string, string[]>).map(([f, msgs]) => `${f}: ${(msgs ?? []).join(", ")}`).join("; ")
+          : "";
+        throw new Error([body.error ?? "Commit failed", issues].filter(Boolean).join(" — "));
+      }
       return body as CommitResult;
     },
     onSuccess: (r) => {
@@ -340,6 +348,19 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
                 >
                   {commitMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Retrying…</> : <><RefreshCw className="h-4 w-4" /> Retry failed officer(s)</>}
                 </Button>
+              </div>
+            )}
+
+            {/* Skipped officers (UPDATE): intentionally NOT refreshed, each with its exact reason — so a
+                low affected-count is explained per-officer rather than looking like a silent failure. */}
+            {result.skippedOfficers && result.skippedOfficers.length > 0 && (
+              <div className="space-y-1 rounded-md border p-3 text-sm">
+                <p className="font-medium">{result.skippedOfficers.length} officer(s) skipped (not updated)</p>
+                <ul className="space-y-0.5">
+                  {result.skippedOfficers.map((s) => (
+                    <li key={s.officerName} className="text-xs text-muted-foreground"><span className="font-medium text-foreground">{s.officerName}</span> — {s.reason}</li>
+                  ))}
+                </ul>
               </div>
             )}
 

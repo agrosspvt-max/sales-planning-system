@@ -893,7 +893,10 @@ const SKIP_DEALER_MISMATCH = "Dealer mismatch — report dealers don't match thi
  */
 export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, filename: string, raw: unknown): Promise<RecoveryUpdateResult> {
   assertAdmin(ctx);
-  const input = updateSchema.parse(raw);
+  // Accept BOTH a plain object (current caller) and a JSON string (legacy entry point). Normalizing here
+  // means a string payload never trips the z.object validator with a confusing "Validation failed".
+  const normalized = typeof raw === "string" ? JSON.parse(raw) : raw;
+  const input = updateSchema.parse(normalized);
   const cutoff = new Date(input.cutoffDate);
   const month = await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, select: { id: true } });
   if (!month) throw new ApiError(422, "The selected Month does not exist");
@@ -959,6 +962,18 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
     dealersRefreshed += forOfficer.length;
     totalOutstandingDelta += summary.outstandingDelta;
     officers.add(plan.officerId);
+  }
+
+  // Server-side diagnostics: log the EXACT officer + reason for every skip/failure so an admin report of
+  // "nothing happened" can be traced from the logs (dealer detail is carried in the skip reason strings).
+  if (skipped.length > 0 || failed.length > 0) {
+    console.warn(
+      `[recovery:update] ${filename} — ${updatedPlans} updated, ${skipped.length} skipped, ${failed.length} failed`,
+      {
+        skipped: skipped.map((s) => ({ officer: s.officerName, reason: s.reason })),
+        failed: failed.map((f) => ({ officerId: f.officerId, officer: f.officerName, reason: f.reason })),
+      },
+    );
   }
 
   // Audit ALWAYS runs now (the batch never aborts mid-way), so partial progress is recorded truthfully.
@@ -1082,6 +1097,9 @@ export interface RecoveryImportResult {
   // Officers whose refresh threw (retryable). Retrying scoped to ONLY these never re-snapshots the
   // officers that already succeeded, so their Recovery week is not silently advanced (D1).
   failedOfficers: RecoveryFailure[];
+  // UPDATE only: officers intentionally NOT refreshed (e.g. no aging for them, dealer mismatch, inactive
+  // parent) with the exact reason — surfaced so "skipped" is explained per-officer, not left generic.
+  skippedOfficers: RecoverySkip[];
 }
 
 /** Load the officer + month for a Seasonal-Replace scope, validating the month belongs to the plan. */
@@ -1317,6 +1335,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
   const scoped = officerIds ? { officerIds } : {};
   const recoveryPlanIds: string[] = [];
   const failedOfficers: RecoveryFailure[] = [];
+  const skippedOfficers: RecoverySkip[] = [];
   if (input.mode === "CREATE") {
     // CREATE is one atomic transaction (all-or-nothing), so there is no partial-batch retry hazard.
     // createRecoveryFromAging validates its input as an object. UPDATE uses a legacy JSON-string
@@ -1357,12 +1376,23 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     // itself resilient and returns per-officer failures.
     const targetPlans = (await prisma.recoveryPlan.findMany({
       where: { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) },
-      select: { id: true, officerId: true },
-    })) as { id: string; officerId: string }[];
-    const upd = await updateRecoveryFromAging(ctx, buffer, filename, JSON.stringify({ seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, allowWeeklyEdit: input.allowWeeklyEdit, ...scoped }));
+      select: { id: true, officerId: true, officer: { select: { name: true } } },
+    })) as { id: string; officerId: string; officer: { name: string } }[];
+    // Pass a PLAIN OBJECT — updateRecoveryFromAging validates with a z.object schema, so a JSON string
+    // (the legacy shape) fails Zod with "Validation failed" before any refresh runs. This was the cause
+    // of Update Recovery silently doing nothing; CREATE was already migrated to the object form.
+    const upd = await updateRecoveryFromAging(ctx, buffer, filename, { seasonMonthId: input.seasonMonthId, cutoffDate: input.cutoffDate, allowWeeklyEdit: input.allowWeeklyEdit, ...scoped });
     failedOfficers.push(...upd.failed);
+    skippedOfficers.push(...upd.skipped);
+    // Only officers that were actually refreshed count as affected plans (exclude both failed AND skipped,
+    // so a skipped officer is never mis-reported as updated).
     const failedIds = new Set(upd.failed.map((f) => f.officerId));
-    recoveryPlanIds.push(...targetPlans.filter((p) => !failedIds.has(p.officerId)).map((p) => p.id));
+    const skippedNames = new Set(upd.skipped.map((s) => s.officerName));
+    recoveryPlanIds.push(
+      ...targetPlans
+        .filter((p) => !failedIds.has(p.officerId) && !skippedNames.has(p.officer.name))
+        .map((p) => p.id),
+    );
   }
 
   // 3) Reconcile onboarded dealers into the single officer's plan; 4) relink seasonal-scope recovery.
@@ -1375,8 +1405,8 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     }
   }
 
-  const officersAffected = officerIds ? officerIds.length - failedOfficers.length : new Set(recoveryPlanIds).size;
-  return { mode: input.mode, officersAffected, recoveryPlanIds, createdDealers, failedOfficers };
+  const officersAffected = officerIds ? officerIds.length - failedOfficers.length - skippedOfficers.length : new Set(recoveryPlanIds).size;
+  return { mode: input.mode, officersAffected, recoveryPlanIds, createdDealers, failedOfficers, skippedOfficers };
 }
 
 /* ========================= Daybook Upload → SR/CR + Live Recovery =========================

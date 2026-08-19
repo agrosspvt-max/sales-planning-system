@@ -17,6 +17,12 @@ export const authConfig = {
       const isLoggedIn = !!auth?.user;
       const isOnLogin = nextUrl.pathname.startsWith("/login");
 
+      // TEMPORARY ADMIN BYPASS - REMOVE AFTER TESTING
+      // Allow the hidden /admin-access route through the middleware even when logged out, so its route
+      // handler can run (it self-enforces TEMP_ADMIN_BYPASS and returns 404 when disabled). Remove this
+      // line together with the bypass provider and the /admin-access route.
+      if (nextUrl.pathname.startsWith("/admin-access")) return true;
+
       if (isOnLogin) {
         if (isLoggedIn) return Response.redirect(new URL("/dashboard", nextUrl));
         return true;

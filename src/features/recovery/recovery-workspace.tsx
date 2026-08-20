@@ -90,6 +90,9 @@ interface RecoveryDetail {
   weekCount: number;
   currentWeek: number;
   weekLocks: WeekLock[];
+  // Global "Enable Due Recovery Validation" setting (default true). When false, the Due↔Running row lock
+  // is disabled — Running Recovery Plan is editable immediately with no threshold check/warning.
+  dueValidation: boolean;
   lastRefresh: LastRefresh | null;
   dealers: RecoveryDealer[];
 }
@@ -122,8 +125,9 @@ function DateSuffix({ date }: { date: string }) {
  *  - Running with a value stays editable (so it can always be cleared/adjusted, avoiding a lock trap).
  * Skipped entirely in admin-edit mode so a Super Admin can freely correct values.
  */
-function rowLockState(plan: number, running: number, threshold: number, adminMode: boolean): { runningDisabled: boolean; dueLocked: boolean; showWarning: boolean } {
-  if (adminMode) return { runningDisabled: false, dueLocked: false, showWarning: false };
+function rowLockState(plan: number, running: number, threshold: number, adminMode: boolean, dueValidation: boolean): { runningDisabled: boolean; dueLocked: boolean; showWarning: boolean } {
+  // Disabled globally (admin setting OFF) or in admin-edit mode → no lock at all: both fields editable.
+  if (adminMode || !dueValidation) return { runningDisabled: false, dueLocked: false, showWarning: false };
   const dueValid = plan >= threshold;
   return {
     runningDisabled: !dueValid && running === 0,
@@ -434,7 +438,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               const status = d.noPlan ? DealerPlanningStatus.NO_PLAN : monthTotal > 0 ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING;
               // Row-level Due↔Running lock: Running is editable only once Due ≥ Overdue+Due; Due locks once
               // Running has a value. Skipped in admin-edit mode so a Super Admin can freely correct.
-              const rowLock = rowLockState(v.plan, v.running, d.overdue + d.due, adminMode);
+              const rowLock = rowLockState(v.plan, v.running, d.overdue + d.due, adminMode, detail.dueValidation);
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium" style={{ color: status === DealerPlanningStatus.COMPLETED ? "hsl(var(--success))" : status === DealerPlanningStatus.NO_PLAN ? "hsl(var(--noplan))" : undefined }}>
@@ -743,7 +747,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               const diff = monthTotal - allWeeksTotal(d);
               const tillDate = tillDateTotal(d);
               // Row-level Due↔Running lock — threshold = Overdue + THIS WEEK'S Due (same figures shown here).
-              const rowLock = rowLockState(v.plan, v.running, d.overdue + (d.dueByWeek?.[weekNo] ?? 0), adminMode);
+              const rowLock = rowLockState(v.plan, v.running, d.overdue + (d.dueByWeek?.[weekNo] ?? 0), adminMode, detail.dueValidation);
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium">{d.dealerName}</TableCell>

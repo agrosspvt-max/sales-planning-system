@@ -98,6 +98,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Announcements", href: "/masters/announcements", icon: Megaphone, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Settings", href: "/masters/settings", icon: Settings, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Planning Configuration", href: "/masters/planning-config", icon: SlidersHorizontal, roles: ADMIN_ONLY, group: "Master Data" },
+  { label: "Recovery Settings", href: "/masters/recovery-config", icon: SlidersHorizontal, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Dealer Import Wizard", href: "/masters/dealer-import", icon: FileUp, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Product Price Import", href: "/masters/product-price-import", icon: FileSpreadsheet, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Import History", href: "/masters/import-history", icon: History, roles: ADMIN_ONLY, group: "Master Data" },

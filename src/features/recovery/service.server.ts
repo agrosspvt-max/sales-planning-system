@@ -9,6 +9,7 @@ import { tightKey } from "@/lib/match-key";
 import { createAndAssignDealer } from "@/features/assignments/service.server";
 import { getOfficerScope, assertOfficerInScope, isPlanOwner } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
+import { getRecoveryConfig } from "@/lib/recovery-config";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
@@ -660,6 +661,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   const weekLocks = computeWeekLocks(cal, overrides, new Date());
   // First EDITABLE week (for the default selected week + guidance); if all locked, the last week.
   const currentWeek = (weekLocks.find((w) => !w.locked)?.weekNo ?? BUSINESS_WEEK_COUNT);
+  // Global "Enable Due Recovery Validation" setting → drives the Due↔Running row lock in the UI.
+  const { dueValidation } = await getRecoveryConfig();
   const lastRefresh =
     latestSnapshot && latestSnapshot.weekNo > 0 && latestSnapshot.summary
       ? { at: latestSnapshot.createdAt, businessWeek: Math.min(((latestSnapshot.weekNo as number) ?? 0) + 1, BUSINESS_WEEK_COUNT), ...(JSON.parse(latestSnapshot.summary) as AgingChangeSummary) }
@@ -680,6 +683,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     weekCount,
     currentWeek,
     weekLocks,
+    dueValidation,
     lastRefresh,
     dealers: plan.dealers.map((d) => {
       const weeks: Record<number, { weekRecoveryPlan: number; weekRunningRecovery: number }> = {};
@@ -765,12 +769,15 @@ export async function saveRecoveryMonth(ctx: AuthContext, id: string, raw: unkno
     select: { dealerId: true, overdue: true, due: true, monthRecoveryPlan: true, dealer: { select: { name: true } } },
   })) as { dealerId: string; overdue: unknown; due: unknown; monthRecoveryPlan: unknown; dealer: { name: string } }[];
   const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
-  // Validate the Due↔Running row-lock for every entry BEFORE writing (all-or-nothing).
-  for (const e of entries) {
-    const row = rowByDealer.get(e.dealerId);
-    if (!row) continue;
-    const threshold = num(row.overdue) + num(row.due);
-    assertRowLock(e.monthRecoveryPlan ?? num(row.monthRecoveryPlan), e.monthRunningRecovery ?? 0, num(row.monthRecoveryPlan), threshold, row.dealer.name);
+  // Validate the Due↔Running row-lock for every entry BEFORE writing (all-or-nothing) — but ONLY when the
+  // admin setting "Enable Due Recovery Validation" is ON (global, DB-backed, default ON).
+  if ((await getRecoveryConfig()).dueValidation) {
+    for (const e of entries) {
+      const row = rowByDealer.get(e.dealerId);
+      if (!row) continue;
+      const threshold = num(row.overdue) + num(row.due);
+      assertRowLock(e.monthRecoveryPlan ?? num(row.monthRecoveryPlan), e.monthRunningRecovery ?? 0, num(row.monthRecoveryPlan), threshold, row.dealer.name);
+    }
   }
   const dealerIds = new Set(dealerRows.map((d) => d.dealerId));
   await prisma.$transaction(
@@ -828,14 +835,17 @@ export async function saveRecoveryWeek(ctx: AuthContext, id: string, raw: unknow
   })) as { id: string; dealerId: string; overdue: unknown; dealer: { name: string }; weekPlans: { weekRecoveryPlan: unknown }[] }[];
   const byDealer = new Map(dealerRows.map((d) => [d.dealerId, d.id]));
   const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
-  // Threshold per row = Overdue + THIS WEEK'S Due (same figure the Week View shows).
-  const dueByWeek = await dueByWeekForPlan(id);
-  for (const e of entries) {
-    const row = rowByDealer.get(e.dealerId);
-    if (!row) continue;
-    const storedPlan = num(row.weekPlans[0]?.weekRecoveryPlan ?? 0);
-    const threshold = num(row.overdue) + (dueByWeek.get(e.dealerId)?.[weekNo as 1 | 2 | 3 | 4] ?? 0);
-    assertRowLock(e.weekRecoveryPlan ?? storedPlan, e.weekRunningRecovery ?? 0, storedPlan, threshold, row.dealer.name);
+  // Threshold per row = Overdue + THIS WEEK'S Due (same figure the Week View shows). Gated on the global
+  // "Enable Due Recovery Validation" setting (default ON).
+  if ((await getRecoveryConfig()).dueValidation) {
+    const dueByWeek = await dueByWeekForPlan(id);
+    for (const e of entries) {
+      const row = rowByDealer.get(e.dealerId);
+      if (!row) continue;
+      const storedPlan = num(row.weekPlans[0]?.weekRecoveryPlan ?? 0);
+      const threshold = num(row.overdue) + (dueByWeek.get(e.dealerId)?.[weekNo as 1 | 2 | 3 | 4] ?? 0);
+      assertRowLock(e.weekRecoveryPlan ?? storedPlan, e.weekRunningRecovery ?? 0, storedPlan, threshold, row.dealer.name);
+    }
   }
   await prisma.$transaction(
     async (tx: Tx) => {

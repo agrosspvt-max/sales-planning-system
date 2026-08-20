@@ -6,16 +6,19 @@ import { Role } from "@prisma/client";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import { TransferRecoveryPlan } from "./transfer-dialog";
 import type { PlanStatus } from "@/features/planning/types";
 
 interface NoPlanDealer { dealerId: string; dealerName: string; noPlanReason: string | null }
 
 /**
- * Recovery Plan workflow actions — same approval lifecycle as Monthly/Seasonal. Approval screens are
- * VIEW-ONLY: once out of Draft the officer can no longer edit, resubmit or withdraw, and reviewers no
- * longer Return/Reject. Only Approve (RM/Admin) is retained so the lifecycle can progress; the Super
- * Admin Transfer tool is kept. Approval endpoints are unchanged.
+ * Recovery Plan workflow actions — same approval lifecycle as Monthly/Seasonal. Reviewers (RM on
+ * Pending RM, Super Admin on Pending RM / Pending Super Admin) can Approve or Return-for-correction; a
+ * Return requires a reason, sets status RETURNED (editable + resubmittable by the owner), records it in
+ * the plan history and notifies the Sales Officer. The Super Admin Transfer tool is kept. The Approve
+ * flow and all approval endpoints are unchanged.
  */
 export function RecoveryActions({
   id, status, officerId, role, userId, remainingCount, totalDealers, noPlanDealers,
@@ -26,6 +29,9 @@ export function RecoveryActions({
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [confirmNoPlan, setConfirmNoPlan] = useState(false);
+  // Return-for-correction modal (Super Admin / RM reviewer). Requires a reason, saved to audit + history.
+  const [returnOpen, setReturnOpen] = useState(false);
+  const [returnReason, setReturnReason] = useState("");
 
   const base = `/api/recovery/plans/${id}`;
   const isOwner = role === Role.SALES_OFFICER && officerId === userId;
@@ -39,6 +45,13 @@ export function RecoveryActions({
   }
   const act = useMutation({ mutationFn: (path: string) => api.post(`${base}/${path}`, {}), onSuccess: refresh, onError: (e) => setError((e as Error).message) });
   const doSubmit = () => { setConfirmNoPlan(false); act.mutate("submit"); };
+  // Return sends the plan back to the owner for correction (reuses the existing /return endpoint, which
+  // sets status RETURNED, records an ApprovalAction with the reason, and notifies the Sales Officer).
+  const returnMut = useMutation({
+    mutationFn: (reason: string) => api.post(`${base}/return`, { remarks: reason }),
+    onSuccess: () => { setReturnOpen(false); setReturnReason(""); refresh(); },
+    onError: (e) => setError((e as Error).message),
+  });
 
   const buttons: React.ReactNode[] = [];
   if (isOwner && editable) {
@@ -48,13 +61,14 @@ export function RecoveryActions({
       </Button>,
     );
   }
-  // Only reviewer action retained: Approve (view-only otherwise — no Return / Reject / Recall).
+  // Reviewer actions: Approve + Return (send back for correction).
   const isRm = role === Role.REGIONAL_MANAGER && status === "PENDING_RM";
   // Super Admin has final authority on ANY submitted plan — Pending RM or Pending Super Admin — so RM
   // approval is never a prerequisite for the admin to approve.
   const isAdmin = role === Role.SUPER_ADMIN && (status === "PENDING_ADMIN" || status === "PENDING_RM");
   if (isRm || isAdmin) {
-    buttons.push(<Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>Approve</Button>);
+    buttons.push(<Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending || returnMut.isPending}>Approve</Button>);
+    buttons.push(<Button key="return" variant="outline" onClick={() => { setError(null); setReturnOpen(true); }} disabled={act.isPending || returnMut.isPending}>Return</Button>);
   }
   // Super Admin can move this Recovery Plan to another Seasonal Plan version (self-contained dialog).
   const canTransfer = role === Role.SUPER_ADMIN;
@@ -65,6 +79,22 @@ export function RecoveryActions({
       {buttons}
       {canTransfer && <TransferRecoveryPlan id={id} />}
       {error && <span className="text-sm text-destructive">{error}</span>}
+
+      <Dialog open={returnOpen} onOpenChange={(o) => { setReturnOpen(o); if (!o) setReturnReason(""); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Return recovery plan for correction</DialogTitle></DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="recovery-return-reason">Return reason *</Label>
+            <Textarea id="recovery-return-reason" value={returnReason} onChange={(e) => setReturnReason(e.target.value)} placeholder="Explain what needs to be corrected before resubmission…" />
+            <p className="text-xs text-muted-foreground">The Sales Officer is notified and can edit and resubmit. The reason is saved to the plan history.</p>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReturnOpen(false)} disabled={returnMut.isPending}>Cancel</Button>
+            <Button onClick={() => returnMut.mutate(returnReason.trim())} disabled={returnMut.isPending || returnReason.trim().length === 0}>Return Plan</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={confirmNoPlan} onOpenChange={setConfirmNoPlan}>
         <DialogContent>

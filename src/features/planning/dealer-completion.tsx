@@ -67,25 +67,45 @@ export function DealerProgressBar({ counts }: { counts: StatusCounts }) {
   );
 }
 
-/** Dialog to mark a dealer "No Plan" with an optional reason. */
+/** Dialog to mark a dealer "No Plan" with a reason. */
 const REASONS = ["Inactive Dealer", "Dealer Closed", "No Demand", "Business Stopped", "Season Skip", "Other"];
 
+/**
+ * `captureDetail` (Recovery) keeps the selected reason AND a separate required detail when "Other" is
+ * chosen — onConfirm(reason, detail). Default (Monthly) is unchanged: reason is optional and "Other"
+ * merges the custom text into the reason string, onConfirm(reason).
+ */
 export function NoPlanDialog({
   open,
   dealerName,
   onOpenChange,
   onConfirm,
   saving,
+  reasons = REASONS,
+  captureDetail = false,
 }: {
   open: boolean;
   dealerName: string;
   onOpenChange: (o: boolean) => void;
-  onConfirm: (reason: string | undefined) => void;
+  onConfirm: (reason: string | undefined, detail?: string) => void;
   saving?: boolean;
+  reasons?: string[];
+  captureDetail?: boolean;
 }) {
   const [reason, setReason] = useState("");
   const [other, setOther] = useState("");
-  const finalReason = reason === "Other" ? other.trim() || undefined : reason || undefined;
+
+  const isOther = reason === "Other";
+  // Recovery: require a reason, and require the detail when "Other". Monthly: nothing required.
+  const disabled = !!saving || (captureDetail && (!reason || (isOther && other.trim().length === 0)));
+
+  const confirm = () => {
+    if (captureDetail) {
+      onConfirm(reason || undefined, isOther ? other.trim() : undefined);
+    } else {
+      onConfirm(isOther ? other.trim() || undefined : reason || undefined);
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -95,24 +115,27 @@ export function NoPlanDialog({
         </DialogHeader>
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            This dealer will be intentionally skipped for this plan. A reason is optional.
+            This dealer will be intentionally skipped for this plan.{captureDetail ? " Select a reason." : " A reason is optional."}
           </p>
           <div className="space-y-1.5">
-            <Label>Reason (optional)</Label>
+            <Label>{captureDetail ? "Reason *" : "Reason (optional)"}</Label>
             <NativeSelect
               placeholder="Select a reason…"
-              options={REASONS.map((r) => ({ value: r, label: r }))}
+              options={reasons.map((r) => ({ value: r, label: r }))}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
             />
           </div>
-          {reason === "Other" && (
-            <Input placeholder="Describe the reason" value={other} onChange={(e) => setOther(e.target.value)} />
+          {isOther && (
+            <div className="space-y-1.5">
+              {captureDetail && <Label>Enter reason *</Label>}
+              <Input placeholder={captureDetail ? "Enter reason" : "Describe the reason"} value={other} onChange={(e) => setOther(e.target.value)} />
+            </div>
           )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={() => onConfirm(finalReason)} disabled={saving} className={cn(saving && "opacity-70")}>
+          <Button onClick={confirm} disabled={disabled} className={cn(saving && "opacity-70")}>
             {saving ? "Saving…" : "Mark No Plan"}
           </Button>
         </DialogFooter>

@@ -658,6 +658,8 @@ model RecoveryPlanDealer {
   monthRunningRecovery Decimal?           @db.Decimal(14, 2)
   noPlan               Boolean            @default(false)
   noPlanReason         String?
+  // Free-text detail captured ONLY when the No-Plan reason is "Other".
+  noPlanReasonDetail   String?
   outstandingTillDate  Decimal?           @db.Decimal(14, 2)
   runningTillDate      Decimal?           @db.Decimal(14, 2)
   // Static Outstanding Mode: when true, outstandingTillDate was set by a static-mode aging import and is

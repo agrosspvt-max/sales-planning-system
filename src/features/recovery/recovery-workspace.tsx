@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Ban, Save, Lock, Unlock } from "lucide-react";
+import { Ban, Save, Lock, Unlock, Info } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -47,6 +47,7 @@ interface RecoveryDealer {
   monthRunningRecovery: number;
   noPlan: boolean;
   noPlanReason: string | null;
+  noPlanReasonDetail: string | null;
   completed: boolean;
   weeks: Record<number, { weekRecoveryPlan: number; weekRunningRecovery: number }>;
   // Month's Due split across the four business weeks by invoice due date. Week View shows the
@@ -100,6 +101,21 @@ interface RecoveryDetail {
 type Tab = "month" | "week" | "history";
 const money = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n));
 const pct = (n: number) => `${Math.round(n * 100)}%`;
+
+/** The fixed No-Plan reasons for Recovery Planning. "Other" requires a custom detail. */
+export const RECOVERY_NO_PLAN_REASONS = ["CN not updated", "Sales Return Not updated", "Showing interest only", "Payment not updated", "Other"];
+
+/** Info icon + tooltip showing a dealer's No-Plan reason (and the custom detail when "Other"). Shown to
+ *  every role (Sales Officer / RM / Admin) — it is display-only and never gates editing. */
+function NoPlanInfo({ reason, detail }: { reason: string | null; detail: string | null }) {
+  if (!reason) return null;
+  const tip = `Reason: ${reason}${reason === "Other" && detail ? `\nDetails: ${detail}` : ""}`;
+  return (
+    <span title={tip} aria-label={tip} className="ml-1 inline-flex cursor-help align-middle text-muted-foreground hover:text-foreground">
+      <Info className="h-3.5 w-3.5" />
+    </span>
+  );
+}
 
 /** Compact dd/mm for dynamic column headers (aging cutoff / month opening). */
 const ddmm = (d: Date | string) => {
@@ -260,7 +276,7 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
         userId={userId}
         remainingCount={remaining.length}
         totalDealers={data.dealers.length}
-        noPlanDealers={noPlanDealers.map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason }))}
+        noPlanDealers={noPlanDealers.map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason, noPlanReasonDetail: d.noPlanReasonDetail }))}
       />
 
       <GuidancePanel data={data} />
@@ -316,7 +332,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
 
   const [noPlanFor, setNoPlanFor] = useState<RecoveryDealer | null>(null);
   const noPlanMut = useMutation({
-    mutationFn: (vars: { dealerId: string; noPlan: boolean; reason?: string }) => api.post(`/api/recovery/plans/${detail.id}/dealers/${vars.dealerId}/no-plan`, vars),
+    mutationFn: (vars: { dealerId: string; noPlan: boolean; reason?: string; reasonDetail?: string }) => api.post(`/api/recovery/plans/${detail.id}/dealers/${vars.dealerId}/no-plan`, vars),
     onSuccess: () => { setNoPlanFor(null); qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] }); },
   });
 
@@ -443,6 +459,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium" style={{ color: status === DealerPlanningStatus.COMPLETED ? "hsl(var(--success))" : status === DealerPlanningStatus.NO_PLAN ? "hsl(var(--noplan))" : undefined }}>
                     {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}{d.dealerName}
+                    {d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}
                     {d.missingInLatestAging && <span className="ml-1.5 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning" title="This dealer is not in the latest Aging Report; the figures shown are the last known values.">Missing in latest aging</span>}
                   </TableCell>
                   {/* Section 1 — Dealer & Closing Balance. Current Outstanding KEEPS its amount change
@@ -518,7 +535,9 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
           dealerName={noPlanFor.dealerName}
           onOpenChange={(o) => !o && setNoPlanFor(null)}
           saving={noPlanMut.isPending}
-          onConfirm={(reason) => { void flush().then(() => noPlanMut.mutate({ dealerId: noPlanFor.dealerId, noPlan: true, reason })); }}
+          reasons={RECOVERY_NO_PLAN_REASONS}
+          captureDetail
+          onConfirm={(reason, detail) => { void flush().then(() => noPlanMut.mutate({ dealerId: noPlanFor.dealerId, noPlan: true, reason, reasonDetail: detail })); }}
         />
       )}
     </div>
@@ -750,7 +769,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               const rowLock = rowLockState(v.plan, v.running, d.overdue + (d.dueByWeek?.[weekNo] ?? 0), adminMode, detail.dueValidation);
               return (
                 <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
-                  <TableCell className="font-medium">{d.dealerName}</TableCell>
+                  <TableCell className="font-medium">{d.dealerName}{d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}</TableCell>
                   {/* Section 1 — Dealer & Closing Balance. Current Outstanding keeps its delta; Outstanding
                       Till Date (same calc as Month View) added beside it. */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>

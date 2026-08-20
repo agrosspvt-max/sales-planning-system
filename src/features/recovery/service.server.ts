@@ -718,6 +718,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         monthRunningRecovery,
         noPlan: d.noPlan,
         noPlanReason: d.noPlanReason,
+        noPlanReasonDetail: (d as { noPlanReasonDetail?: string | null }).noPlanReasonDetail ?? null,
         completed: monthRecoveryPlan > 0 || monthRunningRecovery > 0,
         weeks,
         // Month's Due split across the four business weeks by due date (Week View uses the selected
@@ -885,13 +886,21 @@ export async function saveRecoveryWeek(ctx: AuthContext, id: string, raw: unknow
   return { saved: true, lastSavedAt: saved.lastSavedAt };
 }
 
-export async function setRecoveryDealerNoPlan(ctx: AuthContext, id: string, dealerId: string, noPlan: boolean, reason?: string) {
+export async function setRecoveryDealerNoPlan(ctx: AuthContext, id: string, dealerId: string, noPlan: boolean, reason?: string, reasonDetail?: string) {
   const plan = await loadEditablePlan(ctx, id);
   if (!EDITABLE.includes(plan.status as PlanStatus)) throw new ApiError(409, "This recovery plan is not editable");
   assertRecoveryLive(plan);
   const noPlanReason = noPlan ? reason?.trim() || null : null;
-  await prisma.recoveryPlanDealer.update({ where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId } }, data: { noPlan, noPlanReason } });
-  return { noPlan, noPlanReason };
+  // Detail is kept ONLY for the "Other" reason; cleared otherwise (and when un-marking No Plan). When
+  // "Other" is chosen the custom detail is required.
+  const isOther = noPlan && noPlanReason === "Other";
+  const detail = isOther ? reasonDetail?.trim() || null : null;
+  if (isOther && !detail) throw new ApiError(422, "Enter a reason when 'Other' is selected");
+  await prisma.recoveryPlanDealer.update({
+    where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId } },
+    data: { noPlan, noPlanReason, noPlanReasonDetail: detail },
+  });
+  return { noPlan, noPlanReason, noPlanReasonDetail: detail };
 }
 
 /* ---------------------- Weekly re-upload + change tracking ----------------- */

@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { TransferRecoveryPlan } from "./transfer-dialog";
 import type { PlanStatus } from "@/features/planning/types";
 
-interface NoPlanDealer { dealerId: string; dealerName: string; noPlanReason: string | null }
+interface NoPlanDealer { dealerId: string; dealerName: string; noPlanReason: string | null; noPlanReasonDetail?: string | null }
 
 /**
  * Recovery Plan workflow actions — same approval lifecycle as Monthly/Seasonal. Reviewers (RM on
@@ -101,7 +101,7 @@ export function RecoveryActions({
           <DialogHeader><DialogTitle>Submit with No-Plan dealers?</DialogTitle></DialogHeader>
           <div className="space-y-2 text-sm">
             <p className="text-muted-foreground">These dealers are marked No Plan and will be submitted as skipped:</p>
-            <ul className="list-disc pl-5">{noPlanDealers.map((d) => <li key={d.dealerId}>{d.dealerName}{d.noPlanReason ? ` — ${d.noPlanReason}` : ""}</li>)}</ul>
+            <ul className="list-disc pl-5">{noPlanDealers.map((d) => <li key={d.dealerId}>{d.dealerName}{d.noPlanReason ? ` — ${d.noPlanReason}${d.noPlanReason === "Other" && d.noPlanReasonDetail ? ` (${d.noPlanReasonDetail})` : ""}` : ""}</li>)}</ul>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmNoPlan(false)}>Cancel</Button>

@@ -99,6 +99,7 @@ export interface PlanListItem {
   seasonName: string;
   officerId: string;
   officerName: string;
+  territory: string | null; // officer's territory from User master (relation, not stored on the plan)
   planningType: PlanningType;
   planningMode: PlanningMode;
   versionName: string | null;

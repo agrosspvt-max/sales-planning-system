@@ -59,7 +59,7 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
   const [tab, setTab] = useState<Tab>("SEASONAL");
   const [viewSub, setViewSub] = useState<ViewSub>("SUBMITTED");
   const [officerFilter, setOfficerFilter] = useState(""); // admin, non-history
-  const [historyFilters, setHistoryFilters] = useState<Record<string, string>>({});
+  const [historyFilters, setHistoryFilters] = useState<Record<string, string[]>>({});
   const [open, setOpen] = useState(false);
 
   // New Seasonal draft form.
@@ -113,8 +113,9 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
         if (lifecycle !== "CLOSED" && lifecycle !== "DEACTIVATED") return false;
       }
       if (isHistory) {
-        if (historyFilters.officer && p.officerId !== historyFilters.officer) return false;
-        if (historyFilters.season && p.seasonName !== historyFilters.season) return false;
+        // Multi-select: OR within a filter (match any selected value); empty = no constraint.
+        if (historyFilters.officer?.length && !historyFilters.officer.includes(p.officerId)) return false;
+        if (historyFilters.season?.length && !historyFilters.season.includes(p.seasonName)) return false;
       } else if (isAdmin && officerFilter && p.officerId !== officerFilter) {
         return false;
       }
@@ -322,6 +323,7 @@ function PlanSection({ title, showTitle, rows, isOfficer, loading }: { title: st
             <TableRow>
               <TableHead>Season</TableHead>
               {!isOfficer && <TableHead>Sales Officer</TableHead>}
+              <TableHead>Territory</TableHead>
               <TableHead>Version</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Last saved</TableHead>
@@ -330,14 +332,15 @@ function PlanSection({ title, showTitle, rows, isOfficer, loading }: { title: st
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+              <TableRow><TableCell colSpan={7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
             ) : rows.length === 0 ? (
-              <TableRow><TableCell colSpan={6} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
             ) : (
               rows.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell className="font-medium">{p.seasonName}</TableCell>
                   {!isOfficer && <TableCell>{p.officerName}</TableCell>}
+                  <TableCell>{p.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                   <TableCell>
                     v{p.version}{p.versionName ? ` · ${p.versionName}` : ""}
                     {p.source === "IMPORT" && <Badge variant="muted" className="ml-1">Imported</Badge>}

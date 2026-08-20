@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Trash2, UserX, UserCheck, UserMinus, ShieldCheck, ArrowUpCircle, ArrowDownCircle } from "lucide-react";
+import { KeyRound, Trash2, UserX, UserCheck, UserMinus, ShieldCheck, ArrowUpCircle, ArrowDownCircle, Pencil, Check, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -38,6 +38,7 @@ export interface Officer {
   deleted: boolean;
   groupId: string | null;
   groupName: string | null;
+  territory: string | null;
   dealerCount: number;
 }
 
@@ -76,12 +77,18 @@ export function UserTable({
     onSuccess: onRefresh,
   });
   const deleteMut = useMutation({ mutationFn: (id: string) => api.del(`/api/users/${id}`), onSuccess: onRefresh });
+  // Inline edit of Name / Territory (admin only). Partial PATCH — sends only the changed field.
+  const editMut = useMutation({
+    mutationFn: (v: { id: string; field: "name" | "territory"; value: string }) => api.patch(`/api/users/${v.id}`, { [v.field]: v.value }),
+    onSuccess: onRefresh,
+    onError: (e) => alert((e as Error).message),
+  });
   const roleMut = useMutation({
     mutationFn: (v: { id: string; role: "SALES_OFFICER" | "REGIONAL_MANAGER" }) => api.post(`/api/users/${v.id}/role`, { role: v.role }),
     onSuccess: onRefresh,
     onError: (e) => alert((e as Error).message),
   });
-  const colSpan = (showGroupColumn ? 5 : 4) + (readOnly ? 0 : 1);
+  const colSpan = (showGroupColumn ? 6 : 5) + (readOnly ? 0 : 1);
 
   return (
     <div className="rounded-lg border bg-background">
@@ -91,6 +98,7 @@ export function UserTable({
             <TableHead>Name</TableHead>
             <TableHead>Username</TableHead>
             {showGroupColumn && <TableHead>Group</TableHead>}
+            <TableHead>Territory</TableHead>
             <TableHead className="text-right">Dealers</TableHead>
             <TableHead>Status</TableHead>
             {!readOnly && <TableHead className="text-right">Actions</TableHead>}
@@ -112,13 +120,34 @@ export function UserTable({
             users.map((o) => (
               <TableRow key={o.id}>
                 <TableCell className="font-medium">
-                  {readOnly ? o.name : <Link href={`/masters/users/${o.id}`} className="hover:underline" title="View profile">{o.name}</Link>}
+                  {readOnly || o.deleted ? (
+                    o.name
+                  ) : (
+                    <InlineEditCell
+                      value={o.name}
+                      placeholder="Name"
+                      required
+                      onSave={(v) => editMut.mutateAsync({ id: o.id, field: "name", value: v })}
+                      view={<Link href={`/masters/users/${o.id}`} className="hover:underline" title="View profile">{o.name}</Link>}
+                    />
+                  )}
                   {showRoleActions && o.isManager && (
                     <Badge variant="default" className="ml-2 gap-1"><ShieldCheck className="h-3 w-3" /> RM</Badge>
                   )}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{o.username}</TableCell>
                 {showGroupColumn && <TableCell>{o.groupName ? <Badge variant="secondary">{o.groupName}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>}
+                <TableCell>
+                  {readOnly || o.deleted ? (
+                    o.territory ?? <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <InlineEditCell
+                      value={o.territory ?? ""}
+                      placeholder="Add territory"
+                      onSave={(v) => editMut.mutateAsync({ id: o.id, field: "territory", value: v })}
+                    />
+                  )}
+                </TableCell>
                 <TableCell className="text-right tabular-nums">{o.dealerCount}</TableCell>
                 <TableCell>
                   {o.deleted ? <Badge variant="destructive">Deleted</Badge> : o.isActive ? <Badge variant="success">Active</Badge> : <Badge variant="muted">Inactive</Badge>}
@@ -157,6 +186,48 @@ export function UserTable({
       </Table>
       <ResetPasswordDialog officer={resetFor} onClose={() => setResetFor(null)} />
     </div>
+  );
+}
+
+/**
+ * Click-to-edit cell. Shows the value (or a custom `view`, e.g. a profile link) with a pencil affordance;
+ * clicking the pencil turns it into an input with Save (✓) / Cancel (✕). Enter saves, Escape cancels.
+ * `required` blocks saving an empty value (used for Name); Territory allows clearing.
+ */
+function InlineEditCell({ value, onSave, view, placeholder, required = false }: { value: string; onSave: (v: string) => Promise<unknown>; view?: React.ReactNode; placeholder?: string; required?: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(value);
+  const [busy, setBusy] = useState(false);
+  const start = () => { setVal(value); setEditing(true); };
+  const commit = async () => {
+    const trimmed = val.trim();
+    if (required && trimmed.length === 0) return; // Name cannot be blank
+    if (trimmed === (value ?? "").trim()) { setEditing(false); return; } // no change
+    setBusy(true);
+    try { await onSave(trimmed); setEditing(false); } finally { setBusy(false); }
+  };
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <Input
+          autoFocus
+          value={val}
+          disabled={busy}
+          placeholder={placeholder}
+          className="h-7 w-40"
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") void commit(); if (e.key === "Escape") setEditing(false); }}
+        />
+        <button onClick={() => void commit()} disabled={busy} className="text-success" title="Save"><Check className="h-4 w-4" /></button>
+        <button onClick={() => setEditing(false)} disabled={busy} className="text-muted-foreground" title="Cancel"><X className="h-4 w-4" /></button>
+      </span>
+    );
+  }
+  return (
+    <span className="group/inline inline-flex items-center gap-1">
+      {view ?? (value ? value : <span className="text-muted-foreground">—</span>)}
+      <button onClick={start} title="Edit" className="opacity-0 transition-opacity group-hover/inline:opacity-100"><Pencil className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>
+    </span>
   );
 }
 

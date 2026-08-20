@@ -951,7 +951,7 @@ export async function listPlans(ctx: AuthContext, seasonId?: string, mine = fals
     },
     include: {
       season: { select: { name: true, year: true, seasonalMode: true } },
-      officer: { select: { name: true } },
+      officer: { select: { name: true, territory: true } },
     },
     orderBy: [{ updatedAt: "desc" }],
   });
@@ -965,6 +965,7 @@ export async function listPlans(ctx: AuthContext, seasonId?: string, mine = fals
     seasonName: `${p.season.name} ${p.season.year}`,
     officerId: p.officerId,
     officerName: p.officer.name,
+    territory: (p.officer as { territory?: string | null }).territory ?? null,
     planningType: p.planningType,
     planningMode: p.season.seasonalMode,
     versionName: p.versionName,

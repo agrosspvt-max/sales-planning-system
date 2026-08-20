@@ -17,6 +17,8 @@ model User {
   role                   Role
   phone                  String?
   email                  String?                  @unique
+  // Sales Officer's assigned territory (distinct from `name` and from the group/region). Admin-editable.
+  territory              String?
   isActive               Boolean                  @default(true)
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime                 @updatedAt

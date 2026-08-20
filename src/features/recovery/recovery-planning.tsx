@@ -13,7 +13,6 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/features/planning/status-badge";
-import { Badge } from "@/components/ui/badge";
 import type { PlanStatus } from "@/features/planning/types";
 import { RecoveryImportWizard } from "@/features/recovery/recovery-import-wizard";
 import {
@@ -30,6 +29,7 @@ interface RecoveryPlanRow {
   officerId: string;
   officerName: string;
   groupName: string | null;
+  territory: string | null;
   status: PlanStatus;
   lifecycleState: string;
   cutoffDate: string;
@@ -57,7 +57,7 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
   const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN";
 
   const [viewSub, setViewSub] = useState<ViewSub>("SUBMITTED");
-  const [historyFilters, setHistoryFilters] = useState<Record<string, string>>({});
+  const [historyFilters, setHistoryFilters] = useState<Record<string, string[]>>({});
   const [open, setOpen] = useState(false);
   const isHistory = !isCreate && viewSub === "HISTORY";
 
@@ -91,9 +91,10 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
       else if (viewSub === "APPROVED") { if (!(p.status === "APPROVED" && lifecycle === "ACTIVE")) return false; }
       else { if (lifecycle !== "CLOSED" && lifecycle !== "DEACTIVATED") return false; }
       if (isHistory) {
-        if (historyFilters.officer && p.officerId !== historyFilters.officer) return false;
-        if (historyFilters.season && p.seasonName !== historyFilters.season) return false;
-        if (historyFilters.region && (p.groupName ?? "") !== historyFilters.region) return false;
+        // Multi-select: OR within a filter (match any selected value); empty = no constraint.
+        if (historyFilters.officer?.length && !historyFilters.officer.includes(p.officerId)) return false;
+        if (historyFilters.season?.length && !historyFilters.season.includes(p.seasonName)) return false;
+        if (historyFilters.region?.length && !historyFilters.region.includes(p.groupName ?? "")) return false;
       }
       return true;
     });
@@ -152,7 +153,7 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
                     <TableHead>Season</TableHead>
                     <TableHead>Month</TableHead>
                     {!isOfficer && <TableHead>Sales Officer</TableHead>}
-                    {!isOfficer && <TableHead>Region</TableHead>}
+                    <TableHead>Territory</TableHead>
                     <TableHead>Cutoff</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead className="text-right">Open</TableHead>
@@ -160,16 +161,16 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
                 </TableHeader>
                 <TableBody>
                   {isLoading ? (
-                    <TableRow><TableCell colSpan={isOfficer ? 5 : 7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                    <TableRow><TableCell colSpan={isOfficer ? 6 : 7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
                   ) : sec.rows.length === 0 ? (
-                    <TableRow><TableCell colSpan={isOfficer ? 5 : 7} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={isOfficer ? 6 : 7} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
                   ) : (
                     sec.rows.map((p) => (
                       <TableRow key={p.id}>
                         <TableCell className="font-medium">{p.seasonName}</TableCell>
                         <TableCell>{p.monthName}</TableCell>
                         {!isOfficer && <TableCell>{p.officerName}</TableCell>}
-                        {!isOfficer && <TableCell>{p.groupName ? <Badge variant="secondary">{p.groupName}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>}
+                        <TableCell>{p.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell className="text-muted-foreground">{formatDate(p.cutoffDate)}</TableCell>
                         <TableCell><StatusBadge status={p.status} /></TableCell>
                         <TableCell className="text-right"><Button asChild variant="outline" size="sm"><Link href={`/planning/recovery/${p.id}`}>Open</Link></Button></TableCell>

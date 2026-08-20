@@ -44,6 +44,7 @@ interface MonthlyPlanRow {
   monthOrder: number;
   officerId: string;
   officerName: string;
+  territory: string | null;
   status: PlanStatus;
   lifecycleState: string;
   lastSavedAt: string;
@@ -97,7 +98,7 @@ export function MonthlyPlansPanel({
   mode: SalesMode;
   subView: MonthlySubView;
   officerFilter: string;
-  historyFilters?: Record<string, string>;
+  historyFilters?: Record<string, string[]>;
 }) {
   const router = useRouter();
   const isAdmin = role === Role.SUPER_ADMIN;
@@ -119,8 +120,8 @@ export function MonthlyPlansPanel({
       else if (subView === "APPROVED") { if (!(p.status === "APPROVED" && lifecycle === "ACTIVE")) return false; }
       else { if (lifecycle !== "CLOSED" && lifecycle !== "DEACTIVATED") return false; }
       if (isHistory) {
-        if (historyFilters.officer && p.officerId !== historyFilters.officer) return false;
-        if (historyFilters.season && p.seasonName !== historyFilters.season) return false;
+        if (historyFilters.officer?.length && !historyFilters.officer.includes(p.officerId)) return false;
+        if (historyFilters.season?.length && !historyFilters.season.includes(p.seasonName)) return false;
       } else if (isAdmin && officerFilter && p.officerId !== officerFilter) {
         return false;
       }
@@ -220,6 +221,7 @@ export function MonthlyPlansPanel({
                     <TableHead>Season</TableHead>
                     <TableHead>Month</TableHead>
                     {!isOfficer && <TableHead>Sales Officer</TableHead>}
+                    <TableHead>Territory</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Last saved</TableHead>
                     <TableHead className="text-right">Open</TableHead>
@@ -227,15 +229,16 @@ export function MonthlyPlansPanel({
                 </TableHeader>
                 <TableBody>
                   {isLoading ? (
-                    <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                    <TableRow><TableCell colSpan={7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
                   ) : sec.rows.length === 0 ? (
-                    <TableRow><TableCell colSpan={6} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
                   ) : (
                     sec.rows.map((p) => (
                       <TableRow key={p.id}>
                         <TableCell className="font-medium">{p.seasonName}</TableCell>
                         <TableCell>{p.monthName}</TableCell>
                         {!isOfficer && <TableCell>{p.officerName}</TableCell>}
+                        <TableCell>{p.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
                         <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>
                         <TableCell className="text-right">

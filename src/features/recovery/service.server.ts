@@ -541,7 +541,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
         ? { OR: [{ seasonPlanId: null }, { lifecycleFromParent: false }, { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } }] }
         : {}),
     },
-    include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true } }, officer: { select: { name: true, group: { select: { name: true } } } } },
+    include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true } }, officer: { select: { name: true, territory: true, group: { select: { name: true } } } } },
     orderBy: [{ updatedAt: "desc" }],
   });
   // TEMP DIAGNOSTIC (approval visibility, prod-only empty). Remove after diagnosis.
@@ -555,6 +555,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
     officerId: r.officerId,
     officerName: r.officer.name,
     groupName: r.officer.group?.name ?? null,
+    territory: (r.officer as { territory?: string | null }).territory ?? null,
     status: r.status as PlanStatus,
     lifecycleState: (r as { lifecycleState?: string }).lifecycleState ?? "ACTIVE",
     cutoffDate: r.cutoffDate,
@@ -592,8 +593,9 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   }
   await assertOfficerInScope(ctx, plan.officerId);
 
-  const isOwner = isPlanOwner(ctx, plan.officerId);
-  const canManage = isOwner || ctx.role === Role.SUPER_ADMIN;
+  // Owner + Super Admin always; an RM may edit a RETURNED plan of a team member (drives editable inputs +
+  // Save button). assertOfficerInScope above already confirmed an RM only reaches their own team's plans.
+  const canManage = await canManageRecovery(ctx, plan.officerId, plan.status as PlanStatus);
   // A closed/deactivated recovery (or parent seasonal) plan is frozen — no month/week editing.
   const isLive = ((plan as { lifecycleState?: string }).lifecycleState ?? "ACTIVE") === "ACTIVE" && (parentLifecycle ?? "ACTIVE") === "ACTIVE";
   const monthEditable = canManage && EDITABLE.includes(plan.status as PlanStatus) && isLive;
@@ -741,14 +743,27 @@ const weekSchema = z.object({
   entries: z.array(z.object({ dealerId: z.string().min(1), weekRecoveryPlan: z.coerce.number().min(0).optional(), weekRunningRecovery: z.coerce.number().min(0).optional() })),
 });
 
+/**
+ * Who may EDIT a recovery plan: the owning Sales Officer and the Super Admin always may. A Regional
+ * Manager may edit a RETURNED plan of an officer on THEIR team (group scope) — so an RM can correct and
+ * resubmit a plan sent back to the team. Any other status keeps the existing owner/admin-only rule.
+ */
+async function canManageRecovery(ctx: AuthContext, officerId: string, status: PlanStatus): Promise<boolean> {
+  if (ctx.role === Role.SUPER_ADMIN || isPlanOwner(ctx, officerId)) return true;
+  if (ctx.role === Role.REGIONAL_MANAGER && status === PlanStatus.RETURNED) {
+    const scope = await getOfficerScope(ctx);
+    return scope.all || scope.ids.includes(officerId);
+  }
+  return false;
+}
+
 async function loadEditablePlan(ctx: AuthContext, id: string) {
   const plan = await prisma.recoveryPlan.findUnique({
     where: { id },
     select: { id: true, officerId: true, status: true, weeklyEditEnabled: true, lifecycleState: true, seasonPlan: { select: { lifecycleState: true } } },
   });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
-  const isOwner = isPlanOwner(ctx, plan.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot edit this recovery plan");
+  if (!(await canManageRecovery(ctx, plan.officerId, plan.status as PlanStatus))) throw new ApiError(403, "You cannot edit this recovery plan");
   return plan as typeof plan & { lifecycleState: string; seasonPlan: { lifecycleState: string } | null };
 }
 

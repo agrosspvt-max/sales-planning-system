@@ -133,20 +133,28 @@ export async function changeOwnPassword(ctx: AuthContext, raw: unknown) {
 /* ------------------------------ Edit profile ------------------------------ */
 
 const editSchema = z.object({
-  name: z.string().min(1).max(120),
+  // All optional → a PARTIAL update. The profile form sends name/phone/email; the Users-master inline
+  // edit sends only { name } or { territory }. Only fields PRESENT in the payload are written, so an
+  // inline territory edit never wipes phone/email (and vice-versa).
+  name: z.string().min(1, "Name is required").max(120).optional(),
   phone: z.string().max(20).optional(),
   email: z.string().email().max(160).optional().or(z.literal("")),
+  territory: z.string().max(120).optional(),
 });
 
 export async function editUser(ctx: AuthContext, userId: string, raw: unknown) {
   assertAdmin(ctx);
   const data = editSchema.parse(raw);
-  await loadUserOr404(userId);
-  await prisma.user.update({
-    where: { id: userId },
-    data: { name: data.name.trim(), phone: data.phone?.trim() || null, email: data.email?.trim() || null },
-  });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Edited user ${data.name}` });
+  const existing = await loadUserOr404(userId);
+  // Only write fields that were actually provided (partial update).
+  const patch: { name?: string; phone?: string | null; email?: string | null; territory?: string | null } = {};
+  if (data.name !== undefined) patch.name = data.name.trim();
+  if (data.phone !== undefined) patch.phone = data.phone.trim() || null;
+  if (data.email !== undefined) patch.email = data.email.trim() || null;
+  if (data.territory !== undefined) patch.territory = data.territory.trim() || null;
+  if (Object.keys(patch).length === 0) return { ok: true };
+  await prisma.user.update({ where: { id: userId }, data: patch });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Edited user ${patch.name ?? existing.name} (${Object.keys(patch).join(", ")})` });
   return { ok: true };
 }
 
@@ -214,12 +222,12 @@ export async function listOfficers(ctx: AuthContext, filter: UserFilter = "activ
     where,
     orderBy: { name: "asc" },
     select: {
-      id: true, name: true, username: true, role: true, isActive: true, deletedAt: true,
+      id: true, name: true, username: true, role: true, isActive: true, deletedAt: true, territory: true,
       group: { select: { id: true, name: true } },
       _count: { select: { dealerAssignments: true } },
     },
   })) as {
-    id: string; name: string; username: string; role: Role; isActive: boolean; deletedAt: Date | null;
+    id: string; name: string; username: string; role: Role; isActive: boolean; deletedAt: Date | null; territory: string | null;
     group: { id: string; name: string } | null; _count: { dealerAssignments: number };
   }[];
 
@@ -233,6 +241,7 @@ export async function listOfficers(ctx: AuthContext, filter: UserFilter = "activ
     deleted: !!u.deletedAt,
     groupId: u.group?.id ?? null,
     groupName: u.group?.name ?? null,
+    territory: u.territory ?? null,
     dealerCount: u._count.dealerAssignments,
   }));
 }

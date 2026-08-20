@@ -152,7 +152,7 @@ export async function listMonthlyPlans(
     include: {
       seasonPlan: { select: { seasonId: true, season: { select: { name: true, year: true } } } },
       seasonMonth: { select: { name: true, order: true } },
-      officer: { select: { name: true } },
+      officer: { select: { name: true, territory: true } },
     },
     orderBy: [{ updatedAt: "desc" }],
   });
@@ -183,6 +183,7 @@ export async function listMonthlyPlans(
     monthOrder: mp.seasonMonth.order,
     officerId: mp.officerId,
     officerName: mp.officer.name,
+    territory: (mp.officer as { territory?: string | null }).territory ?? null,
     status: mp.status as PlanStatus,
     lifecycleState: (mp as { lifecycleState?: string }).lifecycleState ?? "ACTIVE",
     submittedAt: mp.submittedAt,

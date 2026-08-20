@@ -50,7 +50,9 @@ export function RecoveryActions({
   }
   // Only reviewer action retained: Approve (view-only otherwise — no Return / Reject / Recall).
   const isRm = role === Role.REGIONAL_MANAGER && status === "PENDING_RM";
-  const isAdmin = role === Role.SUPER_ADMIN && status === "PENDING_ADMIN";
+  // Super Admin has final authority on ANY submitted plan — Pending RM or Pending Super Admin — so RM
+  // approval is never a prerequisite for the admin to approve.
+  const isAdmin = role === Role.SUPER_ADMIN && (status === "PENDING_ADMIN" || status === "PENDING_RM");
   if (isRm || isAdmin) {
     buttons.push(<Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>Approve</Button>);
   }

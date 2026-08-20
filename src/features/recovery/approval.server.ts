@@ -97,8 +97,11 @@ export async function recallRecoveryPlan(ctx: AuthContext, id: string) {
 
 async function assertApprover(ctx: AuthContext, p: RecoveryRow) {
   if (p.status === PlanStatus.PENDING_RM) {
+    // Super Admin has FINAL authority and may act on a submitted plan directly — RM approval is optional
+    // and never a prerequisite for the admin (so a plan stuck at Pending RM is still admin-actionable).
+    if (ctx.role === Role.SUPER_ADMIN) return;
     const managerId = await getCurrentManagerId(p.officerId);
-    if (ctx.userId !== managerId) throw new ApiError(403, "Only the assigned Regional Manager can act on this recovery plan");
+    if (ctx.userId !== managerId) throw new ApiError(403, "Only the assigned Regional Manager or a Super Admin can act on this recovery plan");
   } else if (p.status === PlanStatus.PENDING_ADMIN) {
     if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can act on this recovery plan");
   } else {
@@ -110,14 +113,17 @@ export async function approveRecoveryPlan(ctx: AuthContext, id: string) {
   const p = await loadOr404(id);
   await assertApprover(ctx, p);
   assertRecoveryLive(p);
-  if (p.status === PlanStatus.PENDING_RM) {
+  // RM approving a Pending-RM plan advances it to Pending Super Admin (RM workflow UNCHANGED).
+  if (p.status === PlanStatus.PENDING_RM && ctx.role !== Role.SUPER_ADMIN) {
     await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.PENDING_ADMIN } });
     await record(p, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN);
     await notifyMany(await getSuperAdminIds(), { type: NotificationType.PLAN_SUBMITTED, title: "Recovery plan awaiting Super Admin approval", message: `${await label(p)} was approved by the Regional Manager.`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });
     return { status: PlanStatus.PENDING_ADMIN };
   }
+  // Super Admin approval is FINAL from EITHER Pending RM or Pending Super Admin → Approved (RM step
+  // optional). fromStatus reflects the plan's actual prior state for a truthful audit trail.
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.APPROVED, approvedAt: new Date() } });
-  await record(p, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_ADMIN, PlanStatus.APPROVED);
+  await record(p, ctx.userId, ApprovalActionType.APPROVE, p.status, PlanStatus.APPROVED);
   await createNotification({ userId: p.officerId, type: NotificationType.PLAN_APPROVED, title: "Recovery plan approved", message: `${await label(p)} has been approved.`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });
   return { status: PlanStatus.APPROVED };
 }

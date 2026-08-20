@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { Plus, CalendarPlus } from "lucide-react";
 import { api } from "@/lib/api-client";
@@ -30,7 +30,10 @@ import {
 } from "@/components/ui/table";
 import { PlanStateBadge } from "./status-badge";
 import type { PlanListItem, PlanStatus } from "./types";
-import type { SalesMode, LifecycleFilter } from "./sales-planning";
+import type { SalesMode } from "./sales-planning";
+import { CREATE_STATUSES, SUBMITTED_STATUSES, roleSections, yearOf, seasonIndexOf } from "./plan-list-ui";
+
+export type MonthlySubView = "CREATE" | "SUBMITTED" | "APPROVED" | "HISTORY";
 
 interface MonthlyPlanRow {
   id: string;
@@ -61,48 +64,79 @@ interface SeasonMonthsResp {
   months: MonthInfo[];
 }
 
-const CREATE_STATUSES = "DRAFT,RETURNED";
-const VIEW_STATUSES = "APPROVED";
+// Fetch every relevant status once; slice by sub-view client-side (Create / Submitted / Approved / History).
+const ALL_STATUSES = "DRAFT,RETURNED,REJECTED,PENDING_RM,PENDING_ADMIN,APPROVED";
 // A month already submitted or approved can't be re-created (only reopened if editable).
 const OCCUPYING: PlanStatus[] = ["PENDING_RM", "PENDING_ADMIN", "APPROVED"];
 
+/** Newest-first for monthly rows: latest season, then latest month (Dec → Nov → …), then last updated. */
+function byMonthlyNewestFirst(a: MonthlyPlanRow, b: MonthlyPlanRow): number {
+  const ya = yearOf(a.seasonName), yb = yearOf(b.seasonName);
+  if (ya !== yb) return yb - ya;
+  const sa = seasonIndexOf(a.seasonName), sb = seasonIndexOf(b.seasonName);
+  if (sa !== sb) return sb - sa;
+  if (a.monthOrder !== b.monthOrder) return b.monthOrder - a.monthOrder;
+  return (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "");
+}
+
 /**
- * Monthly tab — first-class Monthly Plans. Create mode lists Draft/Returned monthly plans and
- * offers "Create New Monthly Plan"; View mode lists Approved monthly plans (read-only). Reuses
- * the seasonal approval lifecycle and notification system via the monthly-plan service.
+ * Monthly tab — first-class Monthly Plans, driven by the parent's sub-view. Create offers "Create New
+ * Monthly Plan"; the buckets (Create / Submitted / Approved / History) and role sections match the
+ * Seasonal/Yearly tabs. Reuses the seasonal approval lifecycle via the monthly-plan service.
  */
 export function MonthlyPlansPanel({
   role,
+  userId,
   mode,
+  subView,
   officerFilter,
-  lifecycleFilter = "ACTIVE",
+  historyFilters = {},
 }: {
   role: Role;
+  userId: string;
   mode: SalesMode;
+  subView: MonthlySubView;
   officerFilter: string;
-  lifecycleFilter?: LifecycleFilter;
+  historyFilters?: Record<string, string>;
 }) {
   const router = useRouter();
-  const qc = useQueryClient();
   const isAdmin = role === Role.SUPER_ADMIN;
   const isOfficer = role === Role.SALES_OFFICER;
   const isCreate = mode === "create";
-  const statuses = isCreate ? CREATE_STATUSES : VIEW_STATUSES;
+  const isHistory = subView === "HISTORY";
+  const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN";
 
   const { data: plans, isLoading } = useQuery<MonthlyPlanRow[]>({
-    queryKey: ["monthly-plans", statuses],
-    queryFn: () => api.get<MonthlyPlanRow[]>(`/api/planning/monthly-plans?status=${statuses}`),
+    queryKey: ["monthly-plans", ALL_STATUSES],
+    queryFn: () => api.get<MonthlyPlanRow[]>(`/api/planning/monthly-plans?status=${ALL_STATUSES}`),
   });
 
-  const rows = useMemo(
-    () =>
-      (plans ?? []).filter(
-        (p) =>
-          (!(isAdmin && officerFilter) || p.officerId === officerFilter) &&
-          (lifecycleFilter === "ALL" || (p.lifecycleState ?? "ACTIVE") === lifecycleFilter),
-      ),
-    [plans, isAdmin, officerFilter, lifecycleFilter],
-  );
+  const rows = useMemo(() => {
+    const out = (plans ?? []).filter((p) => {
+      const lifecycle = p.lifecycleState ?? "ACTIVE";
+      if (subView === "CREATE") { if (!CREATE_STATUSES.includes(p.status)) return false; }
+      else if (subView === "SUBMITTED") { if (!SUBMITTED_STATUSES.includes(p.status)) return false; }
+      else if (subView === "APPROVED") { if (!(p.status === "APPROVED" && lifecycle === "ACTIVE")) return false; }
+      else { if (lifecycle !== "CLOSED" && lifecycle !== "DEACTIVATED") return false; }
+      if (isHistory) {
+        if (historyFilters.officer && p.officerId !== historyFilters.officer) return false;
+        if (historyFilters.season && p.seasonName !== historyFilters.season) return false;
+      } else if (isAdmin && officerFilter && p.officerId !== officerFilter) {
+        return false;
+      }
+      return true;
+    });
+    return out.sort(byMonthlyNewestFirst);
+  }, [plans, subView, isHistory, historyFilters, isAdmin, officerFilter]);
+
+  const sectionLabels = subView === "CREATE"
+    ? { mine: "My Plans", team: "Team Plans", admin: "Draft Plans" }
+    : subView === "SUBMITTED"
+      ? { mine: "My Submitted Plans", team: "Team Submitted Plans", admin: "All Submitted Plans" }
+      : subView === "APPROVED"
+        ? { mine: "My Approved Plans", team: "Team Approved Plans", admin: "All Approved Plans" }
+        : { mine: "My Plans", team: "Team Plans", admin: "All Plans" };
+  const sections = roleSections(rows, roleKey, userId, sectionLabels);
 
   // ---- Create New Monthly Plan dialog ----
   const [open, setOpen] = useState(false);
@@ -175,47 +209,46 @@ export function MonthlyPlansPanel({
         )}
       </div>
 
-      <div className="rounded-lg border bg-background">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Season</TableHead>
-              <TableHead>Month</TableHead>
-              {!isOfficer && <TableHead>Sales Officer</TableHead>}
-              <TableHead>Status</TableHead>
-              <TableHead>Last saved</TableHead>
-              <TableHead className="text-right">Open</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell>
-              </TableRow>
-            ) : rows.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
-                  {isCreate ? "No draft or returned monthly plans." : "No approved monthly plans."}
-                </TableCell>
-              </TableRow>
-            ) : (
-              rows.map((p) => (
-                <TableRow key={p.id}>
-                  <TableCell className="font-medium">{p.seasonName}</TableCell>
-                  <TableCell>{p.monthName}</TableCell>
-                  {!isOfficer && <TableCell>{p.officerName}</TableCell>}
-                  <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
-                  <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>
-                  <TableCell className="text-right">
-                    <Button asChild variant="outline" size="sm">
-                      <Link href={`/planning/monthly/${p.id}`}>Open</Link>
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
+      <div className="space-y-6">
+        {sections.map((sec) => (
+          <div key={sec.key} className="space-y-2">
+            <h3 className="text-sm font-semibold">{sec.title}</h3>
+            <div className="rounded-lg border bg-background">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Season</TableHead>
+                    <TableHead>Month</TableHead>
+                    {!isOfficer && <TableHead>Sales Officer</TableHead>}
+                    <TableHead>Status</TableHead>
+                    <TableHead>Last saved</TableHead>
+                    <TableHead className="text-right">Open</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isLoading ? (
+                    <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                  ) : sec.rows.length === 0 ? (
+                    <TableRow><TableCell colSpan={6} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
+                  ) : (
+                    sec.rows.map((p) => (
+                      <TableRow key={p.id}>
+                        <TableCell className="font-medium">{p.seasonName}</TableCell>
+                        <TableCell>{p.monthName}</TableCell>
+                        {!isOfficer && <TableCell>{p.officerName}</TableCell>}
+                        <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
+                        <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>
+                        <TableCell className="text-right">
+                          <Button asChild variant="outline" size="sm"><Link href={`/planning/monthly/${p.id}`}>Open</Link></Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Create New Monthly Plan — Step 1 season, Step 2 month, + Add Month. */}

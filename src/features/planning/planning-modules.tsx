@@ -19,32 +19,23 @@ interface Module {
 }
 
 /**
- * The landing for both primary planning workspaces — Create Plan (work-in-progress) and
- * View Plans (approved). It lists the planning MODULES (Sales, Recovery, Scheme, Party);
- * only Sales Planning is functional. Recovery/Scheme/Party render as Coming Soon here
- * instead of being separate sidebar items. The Sales card routes into the matching side of
- * the existing Sales Planning workspace, reusing all existing screens.
+ * "Create/View Plans" landing — the single Planning entry. It lists the planning MODULES (Sales,
+ * Recovery, Scheme, Party). Sales & Recovery are functional and open into their own workspace, which
+ * carries the internal [Create New Plan | View Plans] toggle; Scheme & Party render as Coming Soon.
+ * The optional `mode` is kept only for backward-compatible deep links and no longer changes the landing.
  */
-export function PlanningModules({ mode }: { mode: PlanningWorkspaceMode }) {
-  const isCreate = mode === "create";
-  const title = isCreate ? "Create New Plan" : "View Approved Plans";
-  const subtitle = isCreate
-    ? "Start or continue a plan. Only work-in-progress (Draft) plans live here."
-    : "Browse finalised planning. Only Approved plans are shown here.";
-  // Sales & Recovery reuse the existing screens; the workspace mode selects create vs browse.
-  const salesHref = isCreate ? "/planning/sales" : "/planning/sales/plans";
-  const recoveryHref = isCreate ? "/planning/recovery" : "/planning/recovery/plans";
-
+export function PlanningModules({ mode }: { mode?: PlanningWorkspaceMode }) {
+  void mode;
   const modules: Module[] = [
     {
       key: "sales",
       label: "Sales Planning",
-      href: salesHref,
+      href: "/planning/sales",
       description: "Seasonal, Monthly and Yearly sales plans — dealer-first, with approvals and reports.",
       icon: ShoppingCart,
       available: true,
     },
-    { key: "recovery", label: "Recovery Planning", href: recoveryHref, description: "Plan and track outstanding recovery from the Aging Report.", icon: Wallet, available: true },
+    { key: "recovery", label: "Recovery Planning", href: "/planning/recovery", description: "Plan and track outstanding recovery from the Aging Report.", icon: Wallet, available: true },
     { key: "scheme", label: "Scheme Planning", href: "/planning/scheme", description: "Design and plan dealer/product schemes.", icon: Gift, available: false },
     { key: "party", label: "Party Planning", href: "/planning/party", description: "Plan party-wise targets and engagement.", icon: UsersRound, available: false },
   ];
@@ -52,9 +43,9 @@ export function PlanningModules({ mode }: { mode: PlanningWorkspaceMode }) {
   return (
     <div className="space-y-6">
       <PageHeader
-        crumbs={[{ label: "Planning" }, { label: title }]}
-        title={title}
-        subtitle={subtitle}
+        crumbs={[{ label: "Planning" }, { label: "Create/View Plans" }]}
+        title="Create / View Plans"
+        subtitle="Choose a planning module. Each module lets you create new plans or view submitted, approved and historical plans."
       />
       <div className="grid gap-4 sm:grid-cols-2">
         {modules.map((m) => {

@@ -19,7 +19,6 @@ import {
   FileSpreadsheet,
   History,
   SlidersHorizontal,
-  FilePlus2,
   FileInput,
   Rocket,
   Upload,
@@ -45,12 +44,10 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Company Onboarding", href: "/onboarding", icon: Rocket, roles: ADMIN_ONLY, group: "Setup" },
   { label: "Onboarding History", href: "/onboarding/history", icon: History, roles: ADMIN_ONLY, group: "Setup" },
 
-  // Planning is organised around the business lifecycle: Create Plan (work-in-progress /
-  // drafts) and View Plans (approved). Recovery/Scheme/Party are selectable MODULES inside
-  // those two workspaces (module cards), not sidebar items. Import + Approvals are
-  // independent workflows and stay as their own entries.
-  { label: "Create New Plan", href: "/planning/create", icon: FilePlus2, roles: ALL_ROLES, group: "Planning" },
-  { label: "View Approved Plans", href: "/planning/view", icon: ClipboardList, roles: ALL_ROLES, group: "Planning" },
+  // ONE Planning entry: "Create/View Plans" opens the module picker (Sales, Recovery, Scheme, Party).
+  // Each module has its own [Create New Plan | View Plans] toggle inside, so Create and View are no
+  // longer separate sidebar items. Import + Approvals stay as their own independent entries.
+  { label: "Create/View Plans", href: "/planning/create", icon: ClipboardList, roles: ALL_ROLES, group: "Planning" },
   {
     label: "Import Seasonal Plan",
     href: "/planning/sales/import",

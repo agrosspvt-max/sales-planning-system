@@ -184,6 +184,8 @@ export interface LabelSection {
   labelKey: LabelKey;
   span: number;
   tone: SectionTone;
+  /** Optional exact header-band background (hex). Overrides the tone class; text is forced white. */
+  color?: string;
 }
 
 /** Label-aware Excel-style section band (the ONE grouped-header renderer). Titles are editable. */
@@ -195,9 +197,11 @@ export function LabelSectionHeaderRow({ leading = 0, sections }: { leading?: num
         <TableHead
           key={i}
           colSpan={s.span}
+          style={s.color ? { backgroundColor: s.color, color: "#fff" } : undefined}
           className={cn(
-            "h-8 border-b border-l-2 border-border/70 text-center align-middle text-[11px] font-semibold uppercase tracking-wider text-foreground/70",
-            TONE_BG[s.tone],
+            "h-8 border-b border-l-2 border-border/70 text-center align-middle text-[11px] font-semibold uppercase tracking-wider",
+            s.color ? "text-white" : "text-foreground/70",
+            !s.color && TONE_BG[s.tone],
           )}
         >
           <LabelHeaderContent labelKey={s.labelKey} stack={false} />

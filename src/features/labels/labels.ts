@@ -60,6 +60,7 @@ export const DEFAULT_LABELS = {
   "recovery.outstandingTillDate": "Outstanding Till",
   "recovery.overdue": "Overdue",
   "recovery.due": "Due",
+  "recovery.dueOverdue": "Due + Overdue",
   "recovery.recoveryPlan": "Recovery Plan",
   "recovery.runningOsBills": "Running O/S Bills",
   "recovery.runningOsTillDate": "Running O/S Till Date",

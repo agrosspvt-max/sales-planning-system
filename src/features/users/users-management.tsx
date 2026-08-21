@@ -42,7 +42,7 @@ export function UsersManagement({ role = Role.SUPER_ADMIN, groupId = null }: { r
       <div className="space-y-5">
         <PageHeader
           title="Users"
-          subtitle="Sales Officers in your group."
+          subtitle="Sales Officers in your state."
           actions={
             groupId ? (
               <Button variant="outline" size="sm" asChild>
@@ -51,7 +51,7 @@ export function UsersManagement({ role = Role.SUPER_ADMIN, groupId = null }: { r
             ) : undefined
           }
         />
-        <UsersTablePanel readOnly emptyMessage="No Sales Officers in your group." />
+        <UsersTablePanel readOnly emptyMessage="No Sales Officers in your state." />
       </div>
     );
   }
@@ -61,11 +61,11 @@ export function UsersManagement({ role = Role.SUPER_ADMIN, groupId = null }: { r
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Users & Groups" subtitle="Manage Sales Officers, passwords, status and groups." />
+      <PageHeader title="Users & States" subtitle="Manage Sales Officers, passwords, status and states." />
       <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
         {(["group", "all"] as View[]).map((v) => (
           <button key={v} onClick={() => setView(v)} className={cn("rounded px-3 py-1.5 font-medium", view === v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
-            {v === "group" ? "Group View" : "All Users"}
+            {v === "group" ? "State View" : "All Users"}
           </button>
         ))}
       </div>
@@ -132,12 +132,12 @@ function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
                 options={[{ value: "SALES_OFFICER", label: "Sales Officer" }, { value: "REGIONAL_MANAGER", label: "Regional Manager" }]} />
             </div>
             <div className="space-y-1.5">
-              <Label>Group {role === "REGIONAL_MANAGER" ? "*" : "(optional)"}</Label>
+              <Label>State {role === "REGIONAL_MANAGER" ? "*" : "(optional)"}</Label>
               <NativeSelect value={groupId} onChange={(e) => setGroupId(e.target.value)}
-                options={[{ value: "", label: "No group" }, ...(groups ?? []).map((g) => ({ value: g.id, label: g.name }))]} />
+                options={[{ value: "", label: "No state" }, ...(groups ?? []).map((g) => ({ value: g.id, label: g.name }))]} />
             </div>
           </div>
-          {role === "REGIONAL_MANAGER" && <p className="text-xs text-muted-foreground">A group may have only one Regional Manager.</p>}
+          {role === "REGIONAL_MANAGER" && <p className="text-xs text-muted-foreground">A state may have only one Regional Manager.</p>}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
@@ -166,12 +166,12 @@ function GroupCards({ onOpen }: { onOpen: (g: { id: string; name: string }) => v
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" /> Create Group</Button>
+        <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" /> Create State</Button>
       </div>
       {isLoading ? (
         <Skeleton className="h-24 w-full" />
       ) : (groups?.length ?? 0) === 0 ? (
-        <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">No groups yet. Create one (MP, UP, WB, CG…).</CardContent></Card>
+        <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">No states yet. Create one (MP, UP, WB, CG…).</CardContent></Card>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {groups!.map((g) => (
@@ -181,7 +181,7 @@ function GroupCards({ onOpen }: { onOpen: (g: { id: string; name: string }) => v
                   <CardTitle className="flex items-center gap-2 text-base"><Users2 className="h-4 w-4 text-primary" /> {g.name}</CardTitle>
                   <Badge variant="secondary">{g.memberCount}</Badge>
                 </CardHeader>
-                <CardContent><p className="text-xs text-muted-foreground">{g.description ?? "Sales Officer group"}</p></CardContent>
+                <CardContent><p className="text-xs text-muted-foreground">{g.description ?? "Sales Officer state"}</p></CardContent>
               </Card>
             </button>
           ))}
@@ -190,7 +190,7 @@ function GroupCards({ onOpen }: { onOpen: (g: { id: string; name: string }) => v
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Create Group</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>Create State</DialogTitle></DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1.5"><Label>Name *</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. MP" /></div>
             <div className="space-y-1.5"><Label>Description</Label><Input value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
@@ -213,8 +213,8 @@ function GroupDetail({ group, onBack }: { group: { id: string; name: string }; o
     <div className="space-y-5">
       <PageHeader
         crumbs={[{ label: "Masters" }, { label: "Users", href: "/masters/users" }, { label: group.name }]}
-        title={`${group.name} Group`}
-        subtitle="Sales Officers in this group. Same actions as All Users."
+        title={`${group.name} State`}
+        subtitle="Sales Officers in this state. Same actions as All Users."
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={onBack}><ArrowLeft className="h-4 w-4" /> Back</Button>
@@ -231,7 +231,7 @@ function GroupDetail({ group, onBack }: { group: { id: string; name: string }; o
       <UsersTablePanel
         groupId={group.id}
         includeManagers
-        emptyMessage="No users in this group."
+        emptyMessage="No users in this state."
         emptyAction={<Button size="sm" onClick={() => setAddOpen(true)}><Plus className="h-4 w-4" /> Add Sales Officer</Button>}
       />
       <AddOfficersDialog groupId={group.id} open={addOpen} onOpenChange={setAddOpen} />
@@ -261,7 +261,7 @@ function AddOfficersDialog({ groupId, open, onOpenChange }: { groupId: string; o
       <DialogContent className="max-w-lg">
         <DialogHeader><DialogTitle>Add Sales Officer</DialogTitle></DialogHeader>
         <div className="space-y-2">
-          <p className="text-xs text-muted-foreground">Only officers not already in another group are shown.</p>
+          <p className="text-xs text-muted-foreground">Only officers not already in another state are shown.</p>
           <div className="max-h-72 space-y-1 overflow-auto rounded-md border p-2">
             {(unassigned ?? []).length === 0 ? (
               <p className="text-sm text-muted-foreground">No unassigned officers.</p>

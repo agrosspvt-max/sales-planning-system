@@ -13,6 +13,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/features/planning/status-badge";
+import { Badge } from "@/components/ui/badge";
 import type { PlanStatus } from "@/features/planning/types";
 import { RecoveryImportWizard } from "@/features/recovery/recovery-import-wizard";
 import {
@@ -153,6 +154,7 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
                     <TableHead>Season</TableHead>
                     <TableHead>Month</TableHead>
                     {!isOfficer && <TableHead>Sales Officer</TableHead>}
+                    <TableHead>State</TableHead>
                     <TableHead>Territory</TableHead>
                     <TableHead>Cutoff</TableHead>
                     <TableHead>Status</TableHead>
@@ -161,15 +163,16 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
                 </TableHeader>
                 <TableBody>
                   {isLoading ? (
-                    <TableRow><TableCell colSpan={isOfficer ? 6 : 7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                    <TableRow><TableCell colSpan={isOfficer ? 7 : 8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
                   ) : sec.rows.length === 0 ? (
-                    <TableRow><TableCell colSpan={isOfficer ? 6 : 7} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={isOfficer ? 7 : 8} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
                   ) : (
                     sec.rows.map((p) => (
                       <TableRow key={p.id}>
                         <TableCell className="font-medium">{p.seasonName}</TableCell>
                         <TableCell>{p.monthName}</TableCell>
                         {!isOfficer && <TableCell>{p.officerName}</TableCell>}
+                        <TableCell>{p.groupName ? <Badge variant="secondary">{p.groupName}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell>{p.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell className="text-muted-foreground">{formatDate(p.cutoffDate)}</TableCell>
                         <TableCell><StatusBadge status={p.status} /></TableCell>

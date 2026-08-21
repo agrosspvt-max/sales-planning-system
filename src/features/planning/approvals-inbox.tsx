@@ -38,7 +38,7 @@ interface ExtensionRequest {
   createdAt: string;
 }
 
-export function ApprovalsInbox({ role }: { role: Role }) {
+export function ApprovalsInbox({ role, userId }: { role: Role; userId: string }) {
   const { data, isLoading } = useQuery<InboxItem[]>({
     queryKey: ["approvals"],
     queryFn: () => api.get<InboxItem[]>("/api/planning/approvals"),
@@ -101,6 +101,7 @@ export function ApprovalsInbox({ role }: { role: Role }) {
 
       <MonthlyApprovals role={role} />
       <RecoveryApprovals role={role} />
+      <CnRequestApprovals role={role} userId={userId} />
       {role === Role.SUPER_ADMIN && <MonthExtensionReview />}
     </div>
   );
@@ -248,6 +249,68 @@ function MonthExtensionReview() {
                     <Button size="sm" variant="outline" onClick={() => decide.mutate({ id: r.id, approve: false })} disabled={decide.isPending}>
                       Decline
                     </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
+interface CnInboxItem {
+  id: string; officerId: string; partyName: string; cnType: string; amount: number | null; employeeName: string; state: string | null; territory: string | null; status: string; createdAt: string;
+}
+/** CN Requests awaiting the current reviewer. RM acts on SUBMITTED (Accept/Reject); Super Admin acts on
+ *  SUBMITTED or ACCEPTED (Approve/Reject) — no RM acceptance required. Sales Officers see nothing here. */
+function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery<CnInboxItem[]>({ queryKey: ["cn-requests"], queryFn: () => api.get<CnInboxItem[]>("/api/cn-requests") });
+  const actMut = useMutation({
+    mutationFn: (v: { id: string; action: "accept" | "reject" | "approve" }) => api.post(`/api/cn-requests/${v.id}/act`, { action: v.action }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["cn-requests"] }),
+    onError: (e) => alert((e as Error).message),
+  });
+  const isAdmin = role === Role.SUPER_ADMIN;
+  const isManager = role === Role.REGIONAL_MANAGER;
+  // RM sees team members' SUBMITTED requests only (never their own); Admin sees any pending.
+  const rows = useMemo(
+    () => (data ?? []).filter((r) => (isAdmin ? r.status === "SUBMITTED" || r.status === "ACCEPTED" : isManager ? r.status === "SUBMITTED" && r.officerId !== userId : false)),
+    [data, isAdmin, isManager, userId],
+  );
+  if (!isAdmin && !isManager) return null;
+  if (isLoading) return <Skeleton className="h-16 w-full" />;
+  if (rows.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-semibold">CN Requests awaiting {isAdmin ? "approval" : "your review"}</h3>
+      <div className="rounded-lg border bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Party</TableHead>
+              <TableHead>CN Type</TableHead>
+              <TableHead>Employee</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-right">Action</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r) => (
+              <TableRow key={r.id}>
+                <TableCell className="font-medium">{r.partyName}</TableCell>
+                <TableCell>{r.cnType}</TableCell>
+                <TableCell>{r.employeeName}</TableCell>
+                <TableCell>{r.state ? <Badge variant="secondary">{r.state}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
+                <TableCell><Badge variant={r.status === "ACCEPTED" ? "default" : "secondary"}>{r.status}</Badge></TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-1">
+                    <Button size="sm" variant="outline" disabled={actMut.isPending} onClick={() => actMut.mutate({ id: r.id, action: isAdmin ? "approve" : "accept" })}>{isAdmin ? "Approve" : "Accept"}</Button>
+                    <Button size="sm" variant="ghost" className="text-destructive" disabled={actMut.isPending} onClick={() => actMut.mutate({ id: r.id, action: "reject" })}>Reject</Button>
+                    <Button asChild size="sm" variant="ghost"><Link href="/requests/cn">Open</Link></Button>
                   </div>
                 </TableCell>
               </TableRow>

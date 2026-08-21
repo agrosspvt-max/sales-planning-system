@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
@@ -45,6 +46,7 @@ interface MonthlyPlanRow {
   officerId: string;
   officerName: string;
   territory: string | null;
+  groupName: string | null;
   status: PlanStatus;
   lifecycleState: string;
   lastSavedAt: string;
@@ -221,6 +223,7 @@ export function MonthlyPlansPanel({
                     <TableHead>Season</TableHead>
                     <TableHead>Month</TableHead>
                     {!isOfficer && <TableHead>Sales Officer</TableHead>}
+                    <TableHead>State</TableHead>
                     <TableHead>Territory</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Last saved</TableHead>
@@ -229,15 +232,16 @@ export function MonthlyPlansPanel({
                 </TableHeader>
                 <TableBody>
                   {isLoading ? (
-                    <TableRow><TableCell colSpan={7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                    <TableRow><TableCell colSpan={8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
                   ) : sec.rows.length === 0 ? (
-                    <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={8} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
                   ) : (
                     sec.rows.map((p) => (
                       <TableRow key={p.id}>
                         <TableCell className="font-medium">{p.seasonName}</TableCell>
                         <TableCell>{p.monthName}</TableCell>
                         {!isOfficer && <TableCell>{p.officerName}</TableCell>}
+                        <TableCell>{p.groupName ? <Badge variant="secondary">{p.groupName}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell>{p.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
                         <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>

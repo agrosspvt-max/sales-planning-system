@@ -9,5 +9,5 @@ export default async function Page() {
   // Sales Officers see a READ-ONLY list of their own submitted plans + statuses; RM/Admin get the
   // approval queue for their scope.
   if (role === Role.SALES_OFFICER) return <MyApprovals />;
-  return <ApprovalsInbox role={role} />;
+  return <ApprovalsInbox role={role} userId={session!.user.id} />;
 }

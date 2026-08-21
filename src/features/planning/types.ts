@@ -100,6 +100,7 @@ export interface PlanListItem {
   officerId: string;
   officerName: string;
   territory: string | null; // officer's territory from User master (relation, not stored on the plan)
+  groupName: string | null; // officer's State (group), from the relation
   planningType: PlanningType;
   planningMode: PlanningMode;
   versionName: string | null;

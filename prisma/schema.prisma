@@ -43,6 +43,7 @@ model User {
   salesUploads           SalesUploadRun[]         @relation("SalesUploads")
   seasonPlans            SeasonPlan[]             @relation("OfficerPlans")
   planImportRecords      SeasonPlanImportRecord[] @relation("PlanImports")
+  cnRequests             CnRequest[]              @relation("OfficerCnRequests")
   group                  UserGroup?               @relation(fields: [groupId], references: [id])
 
   @@index([role])
@@ -153,8 +154,33 @@ model Dealer {
   assignments         DealerAssignment[]
   planDealers         PlanDealer[]
   recoveryPlanDealers RecoveryPlanDealer[]
+  cnRequests          CnRequest[]
 
   @@index([isActive])
+  @@index([status])
+}
+
+/// Credit Note (CN) Request raised by a Sales Officer for one of their dealers. Workflow:
+/// SUBMITTED → ACCEPTED (RM) → APPROVED (Admin); SUBMITTED → REJECTED; ACCEPTED → APPROVED.
+/// The Admin has final authority and may APPROVE directly without an RM acceptance.
+model CnRequest {
+  id             String   @id @default(cuid())
+  officerId      String // the Sales Officer who raised it
+  dealerId       String // the "Party"
+  cnType         String // CD | FRAT | Scheme
+  amount         Decimal? @db.Decimal(14, 2) // optional approx amount
+  paymentStatus  String // Bill unpaid | Bill Paid
+  details        String? // optional free-text details from the raiser
+  status         String   @default("SUBMITTED") // SUBMITTED | ACCEPTED | APPROVED | REJECTED
+  remarks        String? // optional note captured on reject
+  actedByRmId    String? // RM who accepted/rejected
+  actedByAdminId String? // Admin who approved/rejected
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  officer        User     @relation("OfficerCnRequests", fields: [officerId], references: [id])
+  dealer         Dealer   @relation(fields: [dealerId], references: [id])
+
+  @@index([officerId])
   @@index([status])
 }
 

@@ -323,6 +323,7 @@ function PlanSection({ title, showTitle, rows, isOfficer, loading }: { title: st
             <TableRow>
               <TableHead>Season</TableHead>
               {!isOfficer && <TableHead>Sales Officer</TableHead>}
+              <TableHead>State</TableHead>
               <TableHead>Territory</TableHead>
               <TableHead>Version</TableHead>
               <TableHead>Status</TableHead>
@@ -332,14 +333,15 @@ function PlanSection({ title, showTitle, rows, isOfficer, loading }: { title: st
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow><TableCell colSpan={7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+              <TableRow><TableCell colSpan={8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
             ) : rows.length === 0 ? (
-              <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={8} className="py-8 text-center text-muted-foreground">No plans here.</TableCell></TableRow>
             ) : (
               rows.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell className="font-medium">{p.seasonName}</TableCell>
                   {!isOfficer && <TableCell>{p.officerName}</TableCell>}
+                  <TableCell>{p.groupName ? <Badge variant="secondary">{p.groupName}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
                   <TableCell>{p.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                   <TableCell>
                     v{p.version}{p.versionName ? ` · ${p.versionName}` : ""}

@@ -47,7 +47,7 @@ export interface Officer {
 /**
  * The ONE Sales-Officer table + row actions, reused by "All Users" and by each Group detail
  * page — only the `users` data source differs. When `onRemoveFromGroup` is provided the row also
- * offers "Remove From Group" (group context). Everything else (profile link, reset, de/activate,
+ * offers "Remove From State" (group context). Everything else (profile link, reset, de/activate,
  * delete) is identical everywhere.
  */
 export function UserTable({
@@ -97,7 +97,7 @@ export function UserTable({
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Username</TableHead>
-            {showGroupColumn && <TableHead>Group</TableHead>}
+            {showGroupColumn && <TableHead>State</TableHead>}
             <TableHead>Territory</TableHead>
             <TableHead className="text-right">Dealers</TableHead>
             <TableHead>Status</TableHead>
@@ -168,7 +168,7 @@ export function UserTable({
                       )
                     )}
                     {onRemoveFromGroup && !o.deleted && (
-                      <Button size="sm" variant="ghost" title="Remove from group" onClick={() => onRemoveFromGroup(o)}><UserMinus className="h-4 w-4" /></Button>
+                      <Button size="sm" variant="ghost" title="Remove from state" onClick={() => onRemoveFromGroup(o)}><UserMinus className="h-4 w-4" /></Button>
                     )}
                     {!o.deleted && <Button size="sm" variant="ghost" title="Reset password" onClick={() => setResetFor(o)}><KeyRound className="h-4 w-4" /></Button>}
                     {!o.deleted && (o.isActive ? (

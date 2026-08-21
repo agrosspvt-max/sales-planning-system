@@ -20,6 +20,7 @@ import {
   History,
   SlidersHorizontal,
   FileInput,
+  FileText,
   Rocket,
   Upload,
   PackageCheck,
@@ -65,6 +66,8 @@ export const NAV_ITEMS: NavItem[] = [
     roles: ALL_ROLES,
     group: "Planning",
   },
+  // Requests — Sales Officers raise them; RM/Admin act on them. CN Requests is the first type.
+  { label: "CN Requests", href: "/requests/cn", icon: FileText, roles: ALL_ROLES, group: "Requests" },
   { label: "My Account", href: "/account", icon: Users, roles: ALL_ROLES, group: "Insights" },
   { label: "Reports", href: "/reports", icon: BarChart3, roles: ALL_ROLES, group: "Insights" },
   { label: "Announcements", href: "/announcements", icon: Megaphone, roles: ALL_ROLES, group: "Insights" },

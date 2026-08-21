@@ -379,7 +379,9 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   // Reuses the shared roll-up. Behaviour preserved: the workspace keeps summing per-dealer ratios for
   // Recovery % ("sumOfRatios") and reads the live edit map for each dealer's plan/running.
   const totals = useMemo(
-    () => recoveryMonthTotals(detail.dealers, (d) => valFor(d.dealerId), "sumOfRatios"),
+    // Total Running Recovery % = Σ Running Recovery Plan ÷ Σ Running O/S Bills × 100 (NOT the sum of
+    // per-dealer percentages, which over-counts, e.g. 338%). Row-level % is unchanged.
+    () => recoveryMonthTotals(detail.dealers, (d) => valFor(d.dealerId), "ratioOfSums"),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [detail.dealers, values, adminMode, adminEdits],
   );
@@ -392,7 +394,9 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   // editable) is intentionally left outside any coloured section band.
   const monthSections: LabelSection[] = [
     { labelKey: "recovery.section.dealerClosing", span: 2, tone: "blue" },
-    { labelKey: "recovery.section.recoveryPlanning", span: 3, tone: "amber" },
+    // "Recovery Planning" now spans 4 (Overdue, Due, Due + Overdue, Recovery Plan) and uses the requested
+    // header colour #FF3445.
+    { labelKey: "recovery.section.recoveryPlanning", span: 4, tone: "amber", color: "#FF3445" },
     { labelKey: "recovery.section.recoveryProgress", span: 4, tone: "green" },
     { labelKey: "recovery.section.results", span: 1, tone: "purple" },
     { labelKey: "recovery.section.daybook", span: 3, tone: "slate" },
@@ -433,6 +437,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <Th labelKey="recovery.outstandingTillDate" className="text-right text-muted-foreground" suffix={<DateSuffix date={tillDdMm} />} />
               <Th labelKey="recovery.overdue" className="text-right" />
               <Th labelKey="recovery.due" className="text-right" />
+              <Th labelKey="recovery.dueOverdue" className="text-right" />
               <Th labelKey="recovery.recoveryPlan" className="text-center" />
               <Th labelKey="recovery.runningOsBills" className="text-right" />
               <Th labelKey="recovery.runningOsTillDate" className="text-right text-muted-foreground" />
@@ -470,6 +475,8 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                       and Actual Running Recovery). */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
                   <TableCell className="text-right tabular-nums">{money(d.due)}</TableCell>
+                  {/* Due + Overdue — display-only combined pending amount. */}
+                  <TableCell className="text-right tabular-nums font-medium">{money(d.due + d.overdue)}</TableCell>
                   <TableCell className="p-1 text-center">
                     <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan || rowLock.dueLocked} title={rowLock.dueLocked ? "Locked — clear Running Recovery Plan first" : undefined} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
@@ -514,6 +521,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <TableCell className="text-right tabular-nums">{money(totals.outstandingTillDate)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.overdue)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.due)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.due + totals.overdue)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.recoveryPlan)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.runningOs)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.runningOsTillDate)}</TableCell>

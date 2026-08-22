@@ -50,7 +50,7 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
     audit: ["read"],
     salesPlanning: ["read", "create", "update"],
     recoveryPlanning: ["read"],
-    schemePlanning: ["read"],
+    schemePlanning: ["read", "create", "update"], // Admin verifies enrollment (update)
     partyPlanning: ["read"],
     planImport: ["read", "create"],
     onboarding: ["read", "create"],
@@ -71,7 +71,7 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
     rmAssignments: ["read"],
     salesPlanning: ["read", "create", "update"],
     recoveryPlanning: ["read", "create", "update"],
-    schemePlanning: ["read"],
+    schemePlanning: ["read", "create", "update"], // RM approves/rejects/returns team plans
     partyPlanning: ["read"],
   },
   [Role.SALES_OFFICER]: {

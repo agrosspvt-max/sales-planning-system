@@ -44,6 +44,10 @@ model User {
   seasonPlans            SeasonPlan[]             @relation("OfficerPlans")
   planImportRecords      SeasonPlanImportRecord[] @relation("PlanImports")
   cnRequests             CnRequest[]              @relation("OfficerCnRequests")
+  createdSchemes         Scheme[]                 @relation("SchemeCreatedBy")
+  schemePlans            DealerSchemePlan[]       @relation("OfficerSchemePlans")
+  rmActedSchemePlans     DealerSchemePlan[]       @relation("RmActedSchemePlans")
+  enrolledSchemePlans    DealerSchemePlan[]       @relation("EnrolledSchemePlans")
   group                  UserGroup?               @relation(fields: [groupId], references: [id])
 
   @@index([role])
@@ -61,6 +65,100 @@ model UserGroup {
   updatedAt        DateTime                @updatedAt
   members          User[]
   productCatalogue GroupProductCatalogue[]
+  schemeStates     SchemeState[]
+}
+
+/// Commercial Scheme Master. This is intentionally independent of sales planning in Phase 1;
+/// later Scheme Planning will consume these definitions without changing their history.
+model Scheme {
+  id                   String          @id @default(cuid())
+  schemeName           String
+  isPerpetual          Boolean         @default(false)
+  startDate            DateTime?
+  endDate              DateTime?
+  bookingLastDate      DateTime?
+  schemeValueWithoutGST Decimal        @db.Decimal(14, 2)
+  schemeValueWithGST   Decimal         @db.Decimal(14, 2)
+  bookingAmount        Decimal?        @db.Decimal(14, 2)
+  schemeBenefit        SchemeBenefit
+  benefitDetails       String?
+  otherBenefitDetails  String?
+  allowMultipleSchemes Boolean         @default(false)
+  documentUrl          String?
+  status               SchemeStatus    @default(OPEN)
+  createdById          String
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  createdBy            User            @relation("SchemeCreatedBy", fields: [createdById], references: [id])
+  states               SchemeState[]
+  installmentRules     SchemeInstallmentRule[]
+  dealerPlans          DealerSchemePlan[]
+
+  @@index([status])
+  @@index([isPerpetual, endDate])
+  @@index([createdById])
+}
+
+/// How the Scheme Value (With GST) is paid out — one row per installment. Percentage rules sum to 100%;
+/// fixed-amount rules sum to the Scheme Value (With GST). Validated when saved with the scheme.
+model SchemeInstallmentRule {
+  id                 String         @id @default(cuid())
+  schemeId           String
+  installmentNumber  Int
+  calculationType    SchemeCalcType
+  value              Decimal        @db.Decimal(14, 2)
+  daysAfterBillingDate Int
+  scheme             Scheme         @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+
+  @@unique([schemeId, installmentNumber])
+  @@index([schemeId])
+}
+
+/// A dealer planned into a scheme by a Sales Officer. Two independent tracks:
+/// planningStatus (SO submit → RM approve/reject/return) and enrollmentStatus (Admin document
+/// verification → ENROLLED). RM approval is planning approval only; it does NOT enroll the dealer.
+model DealerSchemePlan {
+  id               String                 @id @default(cuid())
+  schemeId         String
+  dealerId         String
+  salesOfficerId   String
+  planningStatus   SchemePlanStatus       @default(DRAFT)
+  enrollmentStatus SchemeEnrollmentStatus @default(PENDING_DOCUMENT)
+  expectedBillingDate DateTime?
+  submittedAt      DateTime?
+  rmActedById      String?
+  rmActedAt        DateTime?
+  rmRemarks        String?
+  documentCompleted Boolean               @default(false)
+  documentType     SchemeDocType?
+  verificationRemarks String?
+  enrolledById     String?
+  enrolledAt       DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  scheme           Scheme                 @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  dealer           Dealer                 @relation(fields: [dealerId], references: [id])
+  salesOfficer     User                   @relation("OfficerSchemePlans", fields: [salesOfficerId], references: [id])
+  rmActedBy        User?                  @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
+  enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
+
+  @@unique([schemeId, dealerId])
+  @@index([schemeId])
+  @@index([dealerId])
+  @@index([salesOfficerId])
+  @@index([planningStatus])
+  @@index([enrollmentStatus])
+}
+
+/// A Scheme can be available in multiple existing State/UserGroup records.
+model SchemeState {
+  schemeId String
+  groupId  String
+  scheme   Scheme    @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  group    UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([schemeId, groupId])
+  @@index([groupId])
 }
 
 /// Group-wise Product Catalogue: which Master Products are available in a group, at what group price,
@@ -155,6 +253,7 @@ model Dealer {
   planDealers         PlanDealer[]
   recoveryPlanDealers RecoveryPlanDealer[]
   cnRequests          CnRequest[]
+  schemePlans         DealerSchemePlan[]
 
   @@index([isActive])
   @@index([status])
@@ -848,6 +947,42 @@ enum Role {
 enum SeasonStatus {
   OPEN
   CLOSED
+}
+
+enum SchemeStatus {
+  OPEN
+  CLOSED
+}
+
+enum SchemeBenefit {
+  DOMESTIC_TOUR
+  DOMESTIC_COUPLE_TOUR
+  FOREIGN_TOUR
+  CREDIT_NOTE
+  OTHER
+}
+
+enum SchemeCalcType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+enum SchemePlanStatus {
+  DRAFT
+  SUBMITTED
+  RM_APPROVED
+  RM_REJECTED
+  RETURNED
+}
+
+enum SchemeEnrollmentStatus {
+  PENDING_DOCUMENT
+  ENROLLED
+}
+
+enum SchemeDocType {
+  SOFT_COPY
+  HARD_COPY
 }
 
 enum PlanStatus {

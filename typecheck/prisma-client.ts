@@ -60,6 +60,36 @@ export const ImportStatus = {
 } as const;
 export type ImportStatus = (typeof ImportStatus)[keyof typeof ImportStatus];
 
+export const SchemeStatus = { OPEN: "OPEN", CLOSED: "CLOSED" } as const;
+export type SchemeStatus = (typeof SchemeStatus)[keyof typeof SchemeStatus];
+
+export const SchemeBenefit = {
+  DOMESTIC_TOUR: "DOMESTIC_TOUR",
+  DOMESTIC_COUPLE_TOUR: "DOMESTIC_COUPLE_TOUR",
+  FOREIGN_TOUR: "FOREIGN_TOUR",
+  CREDIT_NOTE: "CREDIT_NOTE",
+  OTHER: "OTHER",
+} as const;
+export type SchemeBenefit = (typeof SchemeBenefit)[keyof typeof SchemeBenefit];
+
+export const SchemeCalcType = { PERCENTAGE: "PERCENTAGE", FIXED_AMOUNT: "FIXED_AMOUNT" } as const;
+export type SchemeCalcType = (typeof SchemeCalcType)[keyof typeof SchemeCalcType];
+
+export const SchemePlanStatus = {
+  DRAFT: "DRAFT",
+  SUBMITTED: "SUBMITTED",
+  RM_APPROVED: "RM_APPROVED",
+  RM_REJECTED: "RM_REJECTED",
+  RETURNED: "RETURNED",
+} as const;
+export type SchemePlanStatus = (typeof SchemePlanStatus)[keyof typeof SchemePlanStatus];
+
+export const SchemeEnrollmentStatus = { PENDING_DOCUMENT: "PENDING_DOCUMENT", ENROLLED: "ENROLLED" } as const;
+export type SchemeEnrollmentStatus = (typeof SchemeEnrollmentStatus)[keyof typeof SchemeEnrollmentStatus];
+
+export const SchemeDocType = { SOFT_COPY: "SOFT_COPY", HARD_COPY: "HARD_COPY" } as const;
+export type SchemeDocType = (typeof SchemeDocType)[keyof typeof SchemeDocType];
+
 export namespace Prisma {
   export type TransactionClient = any;
   export type PrismaClientKnownRequestError = any;

@@ -13,6 +13,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import type { PlanStatus } from "./types";
 
 /**
@@ -49,6 +51,8 @@ export function MonthlyPlanActions({
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [confirmNoPlan, setConfirmNoPlan] = useState(false);
+  const [returnOpen, setReturnOpen] = useState(false);
+  const [returnReason, setReturnReason] = useState("");
 
   const base = `/api/planning/monthly-plans/${monthlyPlanId}`;
   const isOwner = role === Role.SALES_OFFICER && officerId === userId;
@@ -62,6 +66,13 @@ export function MonthlyPlanActions({
   const act = useMutation({
     mutationFn: (path: string) => api.post(`${base}/${path}`, {}),
     onSuccess: refresh,
+    onError: (e) => setError((e as Error).message),
+  });
+
+  // Return-to-officer with a mandatory reason (Super Admin, on PENDING_ADMIN). RM flow is unchanged.
+  const returnMut = useMutation({
+    mutationFn: () => api.post(`${base}/return`, { remarks: returnReason.trim() }),
+    onSuccess: () => { setReturnOpen(false); setReturnReason(""); refresh(); },
     onError: (e) => setError((e as Error).message),
   });
 
@@ -87,12 +98,18 @@ export function MonthlyPlanActions({
     );
   }
 
-  // Only reviewer action retained: Approve (view-only otherwise — no Return / Reject / Recall).
+  // Reviewer actions: RM approves PENDING_RM (unchanged). Super Admin approves PENDING_ADMIN and may also
+  // Return the plan to the officer with a mandatory reason (SUBMITTED → RETURNED).
   const isRmApprover = role === Role.REGIONAL_MANAGER && status === "PENDING_RM";
   const isAdminApprover = role === Role.SUPER_ADMIN && status === "PENDING_ADMIN";
   if (isRmApprover || isAdminApprover) {
     buttons.push(
       <Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>Approve</Button>,
+    );
+  }
+  if (isAdminApprover) {
+    buttons.push(
+      <Button key="return" variant="outline" onClick={() => { setError(null); setReturnOpen(true); }} disabled={act.isPending}>Return</Button>,
     );
   }
 
@@ -123,6 +140,32 @@ export function MonthlyPlanActions({
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmNoPlan(false)}>Cancel</Button>
             <Button onClick={doSubmit} disabled={act.isPending}>Continue submit</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Admin return-to-officer with a mandatory reason. */}
+      <Dialog open={returnOpen} onOpenChange={(o) => { setReturnOpen(o); if (!o) setReturnReason(""); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Return monthly plan to Sales Officer</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>Return reason *</Label>
+            <Textarea
+              value={returnReason}
+              onChange={(e) => setReturnReason(e.target.value)}
+              placeholder="Explain what the Sales Officer needs to correct before resubmitting."
+              rows={4}
+              autoFocus
+            />
+            <p className="text-xs text-muted-foreground">The officer will see this reason and can edit and resubmit the plan.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReturnOpen(false)}>Cancel</Button>
+            <Button onClick={() => { setError(null); returnMut.mutate(); }} disabled={!returnReason.trim() || returnMut.isPending}>
+              {returnMut.isPending ? "Returning…" : "Return plan"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -75,11 +75,12 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
 
   // Active (OPEN) seasons only — a CLOSED season must not be selectable for Territory planning/recovery.
   const { data: seasons } = useQuery<Season[]>({ queryKey: ["seasons", "active"], queryFn: () => api.get("/api/seasons?active=true") });
-  // Officers of THIS group. The endpoint is group-scoped for RMs (their own group only), so the
-  // dropdown can never list officers outside the viewed group.
+  // Contributors of THIS group — Sales Officers PLUS the group's Regional Manager (roles=all), matching the
+  // Territory Plan aggregation. The endpoint is group-scoped for RMs (their own group only), so the
+  // dropdown can never list contributors outside the viewed group.
   const { data: officers } = useQuery<OfficerOpt[]>({
     queryKey: ["officers", groupId, "group-territory"],
-    queryFn: () => api.get<OfficerOpt[]>(`/api/users/officers?groupId=${groupId}&filter=active`),
+    queryFn: () => api.get<OfficerOpt[]>(`/api/users/officers?groupId=${groupId}&filter=active&roles=all`),
   });
   const effectiveSeason = seasonId || seasons?.[0]?.id || "";
 
@@ -88,13 +89,13 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
       <PageHeader
         crumbs={[{ label: "Masters" }, { label: "Users", href: "/masters/users" }, { label: groupName }, { label: "Territory Plan" }]}
         title={`${groupName} — Territory Plan`}
-        subtitle="Read-only analytics aggregated across every Sales Officer in this group. Nothing here is editable."
+        subtitle="Read-only analytics aggregated across every team member (Sales Officers + Regional Manager) in this group. Nothing here is editable."
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm text-muted-foreground">Sales Officer</span>
+            <span className="text-sm text-muted-foreground">Team Member</span>
             <NativeSelect
               className="w-52"
-              options={[{ value: "", label: "All Sales Officers" }, ...(officers ?? []).map((o) => ({ value: o.id, label: o.name }))]}
+              options={[{ value: "", label: "All Team Members" }, ...(officers ?? []).map((o) => ({ value: o.id, label: o.name }))]}
               value={officerId}
               onChange={(e) => setOfficerId(e.target.value)}
             />

@@ -141,3 +141,21 @@ export async function closeScheme(ctx: AuthContext, id: string) {
   await writeAudit({ userId: ctx.userId, action: "CLOSE", entity: "scheme", entityId: id, summary: `Closed scheme ${scheme.schemeName}` });
   return { closed: true };
 }
+
+/**
+ * Reopen a manually-closed scheme (CLOSED → OPEN). A non-perpetual scheme whose end date has already
+ * passed is EXPIRED and cannot be reopened directly — the admin must extend the Scheme Period first (Edit).
+ * Perpetual schemes have no end date and may always be reopened. All other scheme details are unchanged.
+ */
+export async function reopenScheme(ctx: AuthContext, id: string, now = new Date()) {
+  assertAdmin(ctx);
+  const scheme = await prisma.scheme.findUnique({ where: { id }, select: { schemeName: true, status: true, isPerpetual: true, endDate: true } });
+  if (!scheme) throw new ApiError(404, "Scheme not found");
+  if (scheme.status !== SchemeStatus.CLOSED) throw new ApiError(409, "Only a closed scheme can be reopened");
+  if (!scheme.isPerpetual && scheme.endDate && scheme.endDate < now) {
+    throw new ApiError(422, "This scheme's period has expired. Extend the Scheme End Date (Edit) before reopening.");
+  }
+  await prisma.scheme.update({ where: { id }, data: { status: SchemeStatus.OPEN } });
+  await writeAudit({ userId: ctx.userId, action: "REOPEN", entity: "scheme", entityId: id, summary: `Reopened scheme ${scheme.schemeName}` });
+  return { reopened: true };
+}

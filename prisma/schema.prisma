@@ -134,6 +134,25 @@ model DealerSchemePlan {
   verificationRemarks String?
   enrolledById     String?
   enrolledAt       DateTime?
+  // --- Part E: new Plan Status / Scheme Status model (old planningStatus/enrollmentStatus kept during migration) ---
+  planStatus       SchemePlanState        @default(DRAFT) // Draft → Pending for RM → Pending Approval → Approved (+ Returned/Rejected)
+  schemeStatus     SchemeConversionStatus @default(PENDING) // appears only after Approved; SO-controlled
+  numberOfSchemes  Int                    @default(1) // dealer takes the same scheme N times (Allow Multi Schemes = Yes)
+  totalSchemeAmount Decimal?              @db.Decimal(14, 2) // schemeValueWithGST × numberOfSchemes
+  // SO conversion entry (after Approved)
+  conversionDate   DateTime?
+  soBookingStatus  SchemeBookingStatus?
+  soBookingAmount  Decimal?               @db.Decimal(14, 2)
+  soDocumentStatus SchemeSoDocStatus?
+  billingDate      DateTime?
+  // Admin verification (final source of truth; overrides SO values). SO originals stay in the so* fields.
+  adminConversionDate DateTime?
+  adminBookingStatus  SchemeBookingStatus?
+  adminBookingAmount  Decimal?            @db.Decimal(14, 2)
+  adminDocumentStatus SchemeAdminDocStatus?
+  adminBillingDate    DateTime?
+  adminVerifiedById   String?
+  adminVerifiedAt     DateTime?
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
   scheme           Scheme                 @relation(fields: [schemeId], references: [id], onDelete: Cascade)
@@ -141,6 +160,7 @@ model DealerSchemePlan {
   salesOfficer     User                   @relation("OfficerSchemePlans", fields: [salesOfficerId], references: [id])
   rmActedBy        User?                  @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
   enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
+  installments     DealerSchemeInstallment[]
 
   @@unique([schemeId, dealerId])
   @@index([schemeId])
@@ -148,6 +168,30 @@ model DealerSchemePlan {
   @@index([salesOfficerId])
   @@index([planningStatus])
   @@index([enrollmentStatus])
+  @@index([planStatus])
+  @@index([schemeStatus])
+}
+
+/// Per-dealer installment schedule for an ENROLLED scheme plan (the operational "Enrolled Scheme" layer).
+/// Seeded from the scheme's SchemeInstallmentRule + the dealer's billing date (dates are dealer-specific).
+/// Planned amount/date are editable by SO/RM/Admin; received amount/date are Admin-only (payment truth).
+model DealerSchemeInstallment {
+  id                 String           @id @default(cuid())
+  dealerSchemePlanId String
+  installmentNumber  Int
+  plannedAmount      Decimal          @db.Decimal(14, 2)
+  plannedDate        DateTime?
+  receivedAmount     Decimal?         @db.Decimal(14, 2)
+  receivedDate       DateTime?
+  status             String           @default("PENDING") // PENDING | RECEIVED (OVERDUE derived on read)
+  createdById        String?
+  updatedById        String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  dealerSchemePlan   DealerSchemePlan @relation(fields: [dealerSchemePlanId], references: [id], onDelete: Cascade)
+
+  @@unique([dealerSchemePlanId, installmentNumber])
+  @@index([dealerSchemePlanId])
 }
 
 /// A Scheme can be available in multiple existing State/UserGroup records.
@@ -983,6 +1027,40 @@ enum SchemeEnrollmentStatus {
 enum SchemeDocType {
   SOFT_COPY
   HARD_COPY
+}
+
+// --- Part E status model ---
+enum SchemePlanState {
+  DRAFT
+  PENDING_RM
+  PENDING_APPROVAL
+  APPROVED
+  RETURNED
+  REJECTED
+}
+
+enum SchemeConversionStatus {
+  PENDING
+  CONVERTED
+  DECLINED
+}
+
+enum SchemeBookingStatus {
+  RECEIVED
+  NOT_RECEIVED
+  PARTIAL
+}
+
+enum SchemeSoDocStatus {
+  IN_TRANSIT
+  RECEIVED
+  NOT_RECEIVED
+}
+
+enum SchemeAdminDocStatus {
+  RECEIVED_SOFT
+  RECEIVED_HARD
+  NOT_RECEIVED
 }
 
 enum PlanStatus {

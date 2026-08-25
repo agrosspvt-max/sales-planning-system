@@ -165,10 +165,11 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   const monthNameById = new Map(season.months.map((m) => [m.id, m.name] as const));
   const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthlyMode, seasonalMode, months: season.months, packSizes, filter: { ...filter, buckets } };
 
-  // Optional single-officer filter. The groupId constraint stays, so an officerId outside this group
-  // (or an RM probing another group's officer) simply matches nothing — no cross-group leakage.
+  // Contributors to a state's Territory Plan = every Sales Officer in the group PLUS the group's own
+  // Regional Manager (the RM also plans their own dealers). The groupId constraint stays, so an officerId
+  // outside this group (or an RM probing another group's officer) simply matches nothing — no leakage.
   const officers = (await prisma.user.findMany({
-    where: { groupId, role: Role.SALES_OFFICER, isActive: true, ...(filter.officerId ? { id: filter.officerId } : {}) },
+    where: { groupId, role: { in: [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] }, isActive: true, ...(filter.officerId ? { id: filter.officerId } : {}) },
     orderBy: { name: "asc" },
     select: { id: true, name: true },
   })) as OfficerRef[];

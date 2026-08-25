@@ -90,6 +90,21 @@ export type SchemeEnrollmentStatus = (typeof SchemeEnrollmentStatus)[keyof typeo
 export const SchemeDocType = { SOFT_COPY: "SOFT_COPY", HARD_COPY: "HARD_COPY" } as const;
 export type SchemeDocType = (typeof SchemeDocType)[keyof typeof SchemeDocType];
 
+export const SchemePlanState = { DRAFT: "DRAFT", PENDING_RM: "PENDING_RM", PENDING_APPROVAL: "PENDING_APPROVAL", APPROVED: "APPROVED", RETURNED: "RETURNED", REJECTED: "REJECTED" } as const;
+export type SchemePlanState = (typeof SchemePlanState)[keyof typeof SchemePlanState];
+
+export const SchemeConversionStatus = { PENDING: "PENDING", CONVERTED: "CONVERTED", DECLINED: "DECLINED" } as const;
+export type SchemeConversionStatus = (typeof SchemeConversionStatus)[keyof typeof SchemeConversionStatus];
+
+export const SchemeBookingStatus = { RECEIVED: "RECEIVED", NOT_RECEIVED: "NOT_RECEIVED", PARTIAL: "PARTIAL" } as const;
+export type SchemeBookingStatus = (typeof SchemeBookingStatus)[keyof typeof SchemeBookingStatus];
+
+export const SchemeSoDocStatus = { IN_TRANSIT: "IN_TRANSIT", RECEIVED: "RECEIVED", NOT_RECEIVED: "NOT_RECEIVED" } as const;
+export type SchemeSoDocStatus = (typeof SchemeSoDocStatus)[keyof typeof SchemeSoDocStatus];
+
+export const SchemeAdminDocStatus = { RECEIVED_SOFT: "RECEIVED_SOFT", RECEIVED_HARD: "RECEIVED_HARD", NOT_RECEIVED: "NOT_RECEIVED" } as const;
+export type SchemeAdminDocStatus = (typeof SchemeAdminDocStatus)[keyof typeof SchemeAdminDocStatus];
+
 export namespace Prisma {
   export type TransactionClient = any;
   export type PrismaClientKnownRequestError = any;

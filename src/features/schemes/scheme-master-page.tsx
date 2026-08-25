@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { FileText, Lock, Pencil, Plus, X } from "lucide-react";
+import { FileText, Lock, Unlock, Pencil, Plus, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { formatDate, formatCurrency, cn } from "@/lib/utils";
@@ -13,8 +13,13 @@ import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SchemeDetailDialog } from "./scheme-detail-dialog";
+import { EnrolledSchemesView } from "./scheme-enrolled-view";
+
+/** A non-perpetual scheme whose end date has already passed is EXPIRED — auto-closed, not reopenable. */
+const isExpired = (s: Scheme) => !s.isPerpetual && !!s.endDate && new Date(s.endDate) < new Date();
 
 type Benefit = "DOMESTIC_TOUR" | "DOMESTIC_COUPLE_TOUR" | "FOREIGN_TOUR" | "CREDIT_NOTE" | "OTHER";
 type CalcType = "PERCENTAGE" | "FIXED_AMOUNT";
@@ -31,15 +36,40 @@ export function SchemeMasterPage({ canManage = true }: { canManage?: boolean }) 
   const [create, setCreate] = useState(false);
   const [editing, setEditing] = useState<Scheme | null>(null);
   const [detail, setDetail] = useState<Scheme | null>(null);
+  const [closing, setClosing] = useState<Scheme | null>(null);
+  const [reopening, setReopening] = useState<Scheme | null>(null);
+  const [view, setView] = useState<"master" | "enrolled">("master");
   const { data: states = [] } = useQuery<State[]>({ queryKey: ["scheme-state-options"], queryFn: () => api.get("/api/schemes/options") });
   const { data, isLoading } = useQuery<Scheme[]>({ queryKey: ["schemes", status, state], queryFn: () => api.get(`/api/schemes?status=${status}&state=${state}`) });
   const invalidate = () => qc.invalidateQueries({ queryKey: ["schemes"] });
   const close = useMutation({ mutationFn: (id: string) => api.post(`/api/schemes/${id}/close`, {}), onSuccess: invalidate });
+  const reopen = useMutation({ mutationFn: (id: string) => api.post(`/api/schemes/${id}/reopen`, {}), onSuccess: invalidate, onError: (e) => alert((e as Error).message) });
   return <div className="space-y-5">
     <PageHeader crumbs={[{ label: canManage ? "Masters" : "Planning" }, { label: "Scheme Master" }]} title="Scheme Master" subtitle={canManage ? "Create and manage commercial schemes by State." : "Available commercial schemes by State."} actions={<div className="flex gap-2"><NativeSelect className="w-32" value={status} onChange={(e) => setStatus(e.target.value)} options={[{ value: "", label: "All status" }, { value: "OPEN", label: "Open" }, { value: "CLOSED", label: "Closed" }]} /><NativeSelect className="w-40" value={state} onChange={(e) => setState(e.target.value)} options={[{ value: "", label: "All states" }, ...states.map((s) => ({ value: s.id, label: s.name }))]} />{canManage && <Button onClick={() => setCreate(true)}><Plus className="h-4 w-4" /> New Scheme</Button>}</div>} />
-    <div className="overflow-auto rounded-lg border bg-background"><Table stickyFirstColumn><TableHeader><TableRow><TableHead>Scheme Name</TableHead><TableHead>States</TableHead><TableHead>Scheme Period</TableHead><TableHead>Last Booking Date</TableHead><TableHead className="text-right">Without GST</TableHead><TableHead className="text-right">With GST</TableHead><TableHead>Benefit</TableHead><TableHead>Status</TableHead>{canManage && <TableHead className="text-right">Actions</TableHead>}</TableRow></TableHeader><TableBody>{isLoading ? <TableRow><TableCell colSpan={canManage ? 9 : 8}><Skeleton className="h-7 w-full" /></TableCell></TableRow> : !data?.length ? <TableRow><TableCell colSpan={canManage ? 9 : 8} className="py-10 text-center text-muted-foreground">No schemes found.</TableCell></TableRow> : data.map((s) => <TableRow key={s.id}><TableCell className="font-medium"><button type="button" className="text-left text-primary hover:underline" onClick={() => setDetail(s)} title="View dealer plans">{s.schemeName}</button>{s.documentUrl && <a href={s.documentUrl} target="_blank" rel="noreferrer" className="ml-2 inline-block text-primary" title="Open scheme document"><FileText className="h-4 w-4" /></a>}</TableCell><TableCell>{s.states.map((x) => x.name).join(", ")}</TableCell><TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate!)} – ${formatDate(s.endDate!)}`}</TableCell><TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate!)}</TableCell><TableCell className="text-right tabular-nums">{formatCurrency(s.schemeValueWithoutGST)}</TableCell><TableCell className="text-right tabular-nums">{formatCurrency(s.schemeValueWithGST)}</TableCell><TableCell>{benefits[s.schemeBenefit]}{s.benefitDetails ? ` · ${s.benefitDetails}` : ""}</TableCell><TableCell><Badge variant={s.status === "OPEN" ? "success" : "muted"}>{s.status}</Badge></TableCell>{canManage && <TableCell className="text-right"><Button variant="ghost" size="sm" onClick={() => setEditing(s)} title="Edit"><Pencil className="h-4 w-4" /></Button>{s.status === "OPEN" && <Button variant="ghost" size="sm" onClick={() => close.mutate(s.id)} title="Close scheme" disabled={close.isPending}><Lock className="h-4 w-4" /></Button>}</TableCell>}</TableRow>)}</TableBody></Table></div>
+    <div className="flex gap-2">
+      <button type="button" onClick={() => setView("master")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "master" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>View Scheme</button>
+      <button type="button" onClick={() => setView("enrolled")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "enrolled" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>Enrolled Scheme</button>
+    </div>
+    {view === "enrolled" ? <EnrolledSchemesView /> : <div className="overflow-auto rounded-lg border bg-background"><Table stickyFirstColumn><TableHeader><TableRow><TableHead>Scheme Name</TableHead><TableHead>States</TableHead><TableHead>Scheme Period</TableHead><TableHead>Last Booking Date</TableHead><TableHead className="text-right">Without GST</TableHead><TableHead className="text-right">With GST</TableHead><TableHead>Benefit</TableHead><TableHead>Status</TableHead>{canManage && <TableHead className="text-right">Actions</TableHead>}</TableRow></TableHeader><TableBody>{isLoading ? <TableRow><TableCell colSpan={canManage ? 9 : 8}><Skeleton className="h-7 w-full" /></TableCell></TableRow> : !data?.length ? <TableRow><TableCell colSpan={canManage ? 9 : 8} className="py-10 text-center text-muted-foreground">No schemes found.</TableCell></TableRow> : data.map((s) => <TableRow key={s.id}><TableCell className="font-medium"><button type="button" className="text-left text-primary hover:underline" onClick={() => setDetail(s)} title="View dealer plans">{s.schemeName}</button>{s.documentUrl && <a href={s.documentUrl} target="_blank" rel="noreferrer" className="ml-2 inline-block text-primary" title="Open scheme document"><FileText className="h-4 w-4" /></a>}</TableCell><TableCell>{s.states.map((x) => x.name).join(", ")}</TableCell><TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate!)} – ${formatDate(s.endDate!)}`}</TableCell><TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate!)}</TableCell><TableCell className="text-right tabular-nums">{formatCurrency(s.schemeValueWithoutGST)}</TableCell><TableCell className="text-right tabular-nums">{formatCurrency(s.schemeValueWithGST)}</TableCell><TableCell>{benefits[s.schemeBenefit]}{s.benefitDetails ? ` · ${s.benefitDetails}` : ""}</TableCell><TableCell><Badge variant={s.status === "OPEN" ? "success" : "muted"}>{s.status}</Badge></TableCell>{canManage && <TableCell className="text-right"><Button variant="ghost" size="sm" onClick={() => setEditing(s)} title="Edit"><Pencil className="h-4 w-4" /></Button>{s.status === "OPEN" && <Button variant="ghost" size="sm" onClick={() => setClosing(s)} title="Close scheme" disabled={close.isPending}><Lock className="h-4 w-4" /></Button>}{s.status === "CLOSED" && !isExpired(s) && <Button variant="ghost" size="sm" onClick={() => setReopening(s)} title="Reopen scheme" disabled={reopen.isPending}><Unlock className="h-4 w-4" /></Button>}</TableCell>}</TableRow>)}</TableBody></Table></div>}
     {create && <SchemeDialog states={states} onClose={() => setCreate(false)} onSaved={() => { setCreate(false); invalidate(); }} />}{editing && <SchemeDialog scheme={editing} states={states} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); invalidate(); }} />}
     {detail && <SchemeDetailDialog schemeId={detail.id} schemeName={detail.schemeName} canVerify={canManage} onClose={() => setDetail(null)} />}
+    <ConfirmDialog
+      open={!!closing}
+      onOpenChange={(o) => !o && setClosing(null)}
+      title="Close Scheme?"
+      description="Are you sure you want to close this scheme? Sales Officers will no longer be able to plan new dealers into it."
+      confirmLabel="Close Scheme"
+      destructive
+      onConfirm={() => { if (closing) close.mutate(closing.id); }}
+    />
+    <ConfirmDialog
+      open={!!reopening}
+      onOpenChange={(o) => !o && setReopening(null)}
+      title="Reopen Scheme?"
+      description="Are you sure you want to reopen this scheme? It will become available for eligible Sales Officers again."
+      confirmLabel="Reopen Scheme"
+      onConfirm={() => { if (reopening) reopen.mutate(reopening.id); }}
+    />
   </div>;
 }
 

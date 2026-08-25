@@ -1,0 +1,2 @@
+-- RenameIndex
+ALTER INDEX "DealerSchemeInstallment_dealerSchemePlanId_installmentNumber_ke" RENAME TO "DealerSchemeInstallment_dealerSchemePlanId_installmentNumbe_key";

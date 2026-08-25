@@ -84,9 +84,10 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
   const monthId = month?.id ?? "";
   const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthName: month?.name ?? "", seasonMonthId: monthId, weekCount: BUSINESS_WEEK_COUNT, months: season.months, filter: { buckets, seasonMonthId: monthId } };
 
-  // Optional single-officer filter — the groupId constraint prevents any cross-group access.
+  // Contributors = the group's Sales Officers PLUS its Regional Manager (a contributor to the state's
+  // territory). The groupId constraint prevents any cross-group access.
   const officers = (await prisma.user.findMany({
-    where: { groupId, role: Role.SALES_OFFICER, isActive: true, ...(officerId ? { id: officerId } : {}) },
+    where: { groupId, role: { in: [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] }, isActive: true, ...(officerId ? { id: officerId } : {}) },
     orderBy: { name: "asc" },
     select: { id: true, name: true },
   })) as OfficerRef[];

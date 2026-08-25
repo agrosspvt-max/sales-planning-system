@@ -83,8 +83,13 @@ export interface SchemePlanRow {
   adminDocumentStatus: string | null;
   adminBillingDate: string | null;
   adminVerifiedAt: string | null;
+  // Multi-scheme billing (per-instance) — lets the SO/Admin dialogs restore their same/different choice + dates.
+  soBillingSameForAll: boolean;
+  adminBillingSameForAll: boolean;
+  instances: { instanceNumber: number; soBillingDate: string | null; adminBillingDate: string | null }[];
 }
 
+type RawInstance = { instanceNumber: number; soBillingDate: Date | null; adminBillingDate: Date | null };
 type RawPlan = {
   id: string; schemeId: string; dealerId: string; salesOfficerId: string; planningStatus: string; enrollmentStatus: string;
   expectedBillingDate: Date | null; submittedAt: Date | null; rmActedAt: Date | null; rmRemarks: string | null; documentCompleted: boolean; documentType: string | null;
@@ -92,6 +97,7 @@ type RawPlan = {
   planStatus: string; schemeStatus: string; numberOfSchemes: number; totalSchemeAmount: unknown;
   conversionDate: Date | null; soBookingStatus: string | null; soBookingAmount: unknown; soDocumentStatus: string | null; billingDate: Date | null;
   adminConversionDate: Date | null; adminBookingStatus: string | null; adminBookingAmount: unknown; adminDocumentStatus: string | null; adminBillingDate: Date | null; adminVerifiedAt: Date | null;
+  soBillingSameForAll: boolean; adminBillingSameForAll: boolean; instances: RawInstance[];
   scheme: { schemeName: string; schemeValueWithGST: unknown };
   dealer: { name: string };
   salesOfficer: { name: string; territory: string | null; group: { name: string } | null };
@@ -104,6 +110,7 @@ const PLAN_INCLUDE = {
   salesOfficer: { select: { name: true, territory: true, group: { select: { name: true } } } },
   rmActedBy: { select: { name: true } },
   enrolledBy: { select: { name: true } },
+  instances: { select: { instanceNumber: true, soBillingDate: true, adminBillingDate: true }, orderBy: { instanceNumber: "asc" } },
 } as const;
 
 const asNum = (v: unknown): number => (v == null ? 0 : Number(v.toString()));
@@ -149,6 +156,9 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
     adminDocumentStatus: r.adminDocumentStatus,
     adminBillingDate: r.adminBillingDate?.toISOString() ?? null,
     adminVerifiedAt: r.adminVerifiedAt?.toISOString() ?? null,
+    soBillingSameForAll: r.soBillingSameForAll,
+    adminBillingSameForAll: r.adminBillingSameForAll,
+    instances: (r.instances ?? []).map((i) => ({ instanceNumber: i.instanceNumber, soBillingDate: i.soBillingDate?.toISOString() ?? null, adminBillingDate: i.adminBillingDate?.toISOString() ?? null })),
   };
 }
 
@@ -275,30 +285,90 @@ export async function adminActOnSchemePlan(ctx: AuthContext, id: string, raw: un
   return { planStatus: nextPlan };
 }
 
-/* --------------------------------- Admin verification + enrollment --------------------------------- */
+/* --------------------------------- Scheme instances --------------------------------- */
 
-const verifySchema = z.object({
-  adminConversionDate: z.coerce.date().nullable().optional(),
-  adminBookingStatus: z.nativeEnum(SchemeBookingStatus).nullable().optional(),
-  adminBookingAmount: z.coerce.number().min(0).nullable().optional(),
-  adminDocumentStatus: z.nativeEnum(SchemeAdminDocStatus).nullable().optional(),
-  adminBillingDate: z.coerce.date().nullable().optional(),
-  remarks: z.string().max(500).optional(),
-  enroll: z.boolean().optional(), // request enrollment (only allowed when payment + document are complete)
-});
-
-/** Enrollment is allowed only when payment is RECEIVED and the document is RECEIVED (soft or hard). */
-export function enrollmentEligible(adminBookingStatus: string | null, adminDocumentStatus: string | null): boolean {
-  const paymentOk = adminBookingStatus === SchemeBookingStatus.RECEIVED;
-  const docOk = adminDocumentStatus === SchemeAdminDocStatus.RECEIVED_SOFT || adminDocumentStatus === SchemeAdminDocStatus.RECEIVED_HARD;
-  return paymentOk && docOk;
+/** Read a plan's instances (ordered). */
+async function listInstances(planId: string): Promise<{ id: string; instanceNumber: number }[]> {
+  return (await prisma.dealerSchemeInstance.findMany({ where: { dealerSchemePlanId: planId }, select: { id: true, instanceNumber: true }, orderBy: { instanceNumber: "asc" } })) as { id: string; instanceNumber: number }[];
 }
 
 /**
- * Super Admin verification (final source of truth). Records the admin's verified values (which override
- * the SO's). Verification does NOT enroll on its own — Save just persists the admin values and stamps
- * adminVerifiedAt. Enrollment happens ONLY when `enroll` is requested AND payment + document are complete;
- * it then activates the (untouched) Enrolled installment module via enrollmentStatus = ENROLLED.
+ * Guarantee Instance 1 exists and return the plan's instances — WITHOUT expanding to numberOfSchemes. Used
+ * by verify + enrolled reads. This is what protects LEGACY records: a plan whose numberOfSchemes was only an
+ * amount multiplier (and was never re-planned under the new flow) stays at Instance 1 forever, so no empty
+ * instances are fabricated over its existing payment history. Expansion happens ONLY in expandInstances
+ * (the explicit planning entry point).
+ */
+export async function ensureInstances(planId: string): Promise<{ id: string; instanceNumber: number }[]> {
+  const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id: planId }, select: { id: true } })) as { id: string } | null;
+  if (!plan) return [];
+  const existing = await listInstances(planId);
+  if (!existing.some((i) => i.instanceNumber === 1)) {
+    await prisma.dealerSchemeInstance.create({ data: { dealerSchemePlanId: planId, instanceNumber: 1 } });
+    return listInstances(planId);
+  }
+  return existing;
+}
+
+/**
+ * Expand/prune a plan's instances to match numberOfSchemes — the EXPLICIT new-flow action, called only from
+ * the SO/RM planning save (persistDraft). Creates instances 1..N and prunes surplus EMPTY instances (no
+ * installments, no billing dates). Never runs for enrolled plans; only prunes while editable. Because it is
+ * reached solely through active planning, legacy records that are merely read/verified are never expanded.
+ */
+export async function expandInstances(planId: string): Promise<void> {
+  const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id: planId }, select: { numberOfSchemes: true, planStatus: true, enrollmentStatus: true } })) as { numberOfSchemes: number; planStatus: string; enrollmentStatus: string } | null;
+  if (!plan || plan.enrollmentStatus === SchemeEnrollmentStatus.ENROLLED) return;
+  const count = Math.min(Math.max(plan.numberOfSchemes || 1, 1), 10);
+  const editable = plan.planStatus === SchemePlanState.DRAFT || plan.planStatus === SchemePlanState.RETURNED;
+  const existing = (await prisma.dealerSchemeInstance.findMany({
+    where: { dealerSchemePlanId: planId },
+    select: { id: true, instanceNumber: true, soBillingDate: true, adminBillingDate: true, _count: { select: { installments: true } } },
+    orderBy: { instanceNumber: "asc" },
+  })) as { id: string; instanceNumber: number; soBillingDate: Date | null; adminBillingDate: Date | null; _count: { installments: number } }[];
+  const have = new Set(existing.map((i) => i.instanceNumber));
+  for (let n = 1; n <= count; n++) {
+    if (!have.has(n)) await prisma.dealerSchemeInstance.create({ data: { dealerSchemePlanId: planId, instanceNumber: n } });
+  }
+  if (editable) {
+    const surplus = existing.filter((i) => i.instanceNumber > count && i._count.installments === 0 && !i.soBillingDate && !i.adminBillingDate).map((i) => i.id);
+    if (surplus.length) await prisma.dealerSchemeInstance.deleteMany({ where: { id: { in: surplus } } });
+  }
+}
+
+/* --------------------------------- Admin verification + enrollment --------------------------------- */
+
+// Single "Update" action: the three core Admin fields (conversion date, booking, document) are ALWAYS
+// required; billing dates are optional (needed only for enrollment) and are PER INSTANCE.
+const verifySchema = z.object({
+  adminConversionDate: z.coerce.date(),
+  adminBookingStatus: z.nativeEnum(SchemeBookingStatus),
+  adminBookingAmount: z.coerce.number().min(0).nullable().optional(),
+  adminDocumentStatus: z.nativeEnum(SchemeAdminDocStatus),
+  adminBillingSameForAll: z.boolean().optional(),
+  adminBillingDate: z.coerce.date().nullable().optional(), // single (same-for-all) — legacy/compat
+  adminBillingDates: z.array(z.object({ instanceNumber: z.coerce.number().int().min(1).max(10), date: z.coerce.date().nullable() })).optional(),
+  remarks: z.string().max(500).optional(),
+});
+
+/** True when the Admin document status counts as "received" (soft or hard copy). */
+function adminDocReceived(s: string | null): boolean {
+  return s === SchemeAdminDocStatus.RECEIVED_SOFT || s === SchemeAdminDocStatus.RECEIVED_HARD;
+}
+
+/**
+ * Core (non-billing) enrollment prerequisites: Admin conversion date present, booking = RECEIVED, document
+ * = RECEIVED (soft/hard). Full eligibility additionally requires a billing date for EVERY instance.
+ */
+export function enrollmentEligible(p: { adminConversionDate: Date | string | null; adminBookingStatus: string | null; adminDocumentStatus: string | null }): boolean {
+  return !!p.adminConversionDate && p.adminBookingStatus === SchemeBookingStatus.RECEIVED && adminDocReceived(p.adminDocumentStatus);
+}
+
+/**
+ * Super Admin verification ("Update"). Persists the Admin's explicit values (source of truth) and enrolls
+ * automatically iff the core three hold AND every scheme instance has an Admin billing date. Billing dates
+ * are per instance and only accepted once booking + document are both Received (mirrors the UI). Without a
+ * date on every instance it saves verification but does NOT enroll.
  */
 export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): Promise<{ enrolled: boolean; eligible: boolean }> {
   if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can verify a scheme plan");
@@ -310,29 +380,49 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
   if (data.adminBookingStatus === SchemeBookingStatus.PARTIAL && (data.adminBookingAmount == null || data.adminBookingAmount <= 0)) {
     throw new ApiError(422, "Enter the partial booking amount");
   }
-  const eligible = enrollmentEligible(data.adminBookingStatus ?? null, data.adminDocumentStatus ?? null);
-  const enroll = !!data.enroll;
-  if (enroll && !eligible) throw new ApiError(422, "Enrollment requires payment Received and document Received");
+  const readyForBilling = data.adminBookingStatus === SchemeBookingStatus.RECEIVED && adminDocReceived(data.adminDocumentStatus);
+
+  const instances = await ensureInstances(id);
+  // Resolve the Admin billing date per instance. Same-for-all (default) applies one date to every
+  // instance; otherwise use the per-instance array. Billing dates are ignored unless readyForBilling.
+  const sameForAll = data.adminBillingSameForAll ?? true;
+  const byNum = new Map((data.adminBillingDates ?? []).map((d) => [d.instanceNumber, d.date] as const));
+  const dateFor = (instanceNumber: number): Date | null => {
+    if (!readyForBilling) return null;
+    if (sameForAll) return data.adminBillingDate ?? null;
+    return byNum.get(instanceNumber) ?? null;
+  };
+  if ((data.adminBillingDate || (data.adminBillingDates?.some((d) => d.date))) && !readyForBilling) {
+    throw new ApiError(422, "A billing date can only be set once booking and document are both Received");
+  }
+
+  // Persist per-instance admin billing dates.
+  for (const inst of instances) {
+    await prisma.dealerSchemeInstance.update({ where: { id: inst.id }, data: { adminBillingDate: dateFor(inst.instanceNumber) } });
+  }
+  const everyInstanceBilled = instances.length > 0 && instances.every((inst) => dateFor(inst.instanceNumber) != null);
+  const eligible = enrollmentEligible(data) && everyInstanceBilled;
 
   await prisma.dealerSchemePlan.update({
     where: { id },
     data: {
-      adminConversionDate: data.adminConversionDate ?? null,
-      adminBookingStatus: data.adminBookingStatus ?? null,
-      adminBookingAmount: data.adminBookingAmount ?? null,
-      adminDocumentStatus: data.adminDocumentStatus ?? null,
-      adminBillingDate: data.adminBillingDate ?? null,
+      adminConversionDate: data.adminConversionDate,
+      adminBookingStatus: data.adminBookingStatus,
+      adminBookingAmount: data.adminBookingStatus === SchemeBookingStatus.NOT_RECEIVED ? null : (data.adminBookingAmount ?? null),
+      adminDocumentStatus: data.adminDocumentStatus,
+      adminBillingSameForAll: sameForAll,
+      // Parent adminBillingDate kept for compat: the single same-for-all date, else null.
+      adminBillingDate: sameForAll && readyForBilling ? (data.adminBillingDate ?? null) : null,
       verificationRemarks: data.remarks?.trim() || null,
       adminVerifiedById: ctx.userId,
       adminVerifiedAt: new Date(),
-      // Enroll only on explicit request + eligibility → activates the Enrolled installment module.
-      ...(enroll
+      ...(eligible
         ? { enrollmentStatus: SchemeEnrollmentStatus.ENROLLED, enrolledById: ctx.userId, enrolledAt: new Date() }
         : {}),
     },
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: enroll ? "Dealer enrolled after verification" : "Scheme verification saved" });
-  return { enrolled: enroll, eligible };
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: eligible ? "Dealer enrolled after verification" : "Scheme verification saved" });
+  return { enrolled: eligible, eligible };
 }
 
 /* --------------------------------- Running Schemes (Sales Officer) --------------------------------- */
@@ -546,6 +636,10 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
   const toRemove = existing.filter((e) => EDITABLE.has(e.planStatus) && !selected.has(e.dealerId)).map((e) => e.id);
   if (toRemove.length) await prisma.dealerSchemePlan.deleteMany({ where: { id: { in: toRemove } } });
 
+  // Explicit new-flow expansion: match each affected plan's instances to its numberOfSchemes.
+  const affected = (await prisma.dealerSchemePlan.findMany({ where: { schemeId: data.schemeId, salesOfficerId: targetOfficerId, dealerId: { in: [...selected] } }, select: { id: true } })) as { id: string }[];
+  for (const p of affected) await expandInstances(p.id);
+
   await writeAudit({ userId: ctx.userId, action: submit ? "UPDATE" : "CREATE", entity: "dealerSchemePlan", entityId: data.schemeId, summary: submit ? `Scheme plan submitted (${submitted} dealers)` : `Scheme draft saved (${drafted} dealers)` });
   return { drafted, submitted };
 }
@@ -565,7 +659,9 @@ const conversionSchema = z.object({
   soBookingStatus: z.nativeEnum(SchemeBookingStatus).nullable().optional(),
   soBookingAmount: z.coerce.number().min(0).nullable().optional(),
   soDocumentStatus: z.nativeEnum(SchemeSoDocStatus).nullable().optional(),
-  billingDate: z.coerce.date().nullable().optional(),
+  billingSameForAll: z.boolean().optional(),
+  billingDate: z.coerce.date().nullable().optional(), // single (same-for-all) — legacy/compat
+  billingDates: z.array(z.object({ instanceNumber: z.coerce.number().int().min(1).max(10), date: z.coerce.date().nullable() })).optional(),
 });
 
 /**
@@ -586,6 +682,20 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
   if (converting && data.soBookingStatus === SchemeBookingStatus.PARTIAL && (data.soBookingAmount == null || data.soBookingAmount <= 0)) {
     throw new ApiError(422, "Enter the partial booking amount");
   }
+
+  // Per-instance SO billing dates. Same-for-all (default) applies one date to every instance; otherwise
+  // the per-instance array. Cleared when not Converted. SO dates are informational; Admin dates are truth.
+  const instances = await ensureInstances(planId);
+  const sameForAll = data.billingSameForAll ?? true;
+  const byNum = new Map((data.billingDates ?? []).map((d) => [d.instanceNumber, d.date] as const));
+  const soDateFor = (instanceNumber: number): Date | null => {
+    if (!converting) return null;
+    return sameForAll ? (data.billingDate ?? null) : (byNum.get(instanceNumber) ?? null);
+  };
+  for (const inst of instances) {
+    await prisma.dealerSchemeInstance.update({ where: { id: inst.id }, data: { soBillingDate: soDateFor(inst.instanceNumber) } });
+  }
+
   await prisma.dealerSchemePlan.update({
     where: { id: planId },
     data: {
@@ -594,7 +704,9 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
       soBookingStatus: converting ? data.soBookingStatus ?? null : null,
       soBookingAmount: converting && data.soBookingStatus === SchemeBookingStatus.PARTIAL ? data.soBookingAmount ?? null : (converting ? (data.soBookingAmount ?? null) : null),
       soDocumentStatus: converting ? data.soDocumentStatus ?? null : null,
-      billingDate: converting ? data.billingDate ?? null : null,
+      soBillingSameForAll: sameForAll,
+      // Parent billingDate kept for compat: the single same-for-all SO date when Converted, else null.
+      billingDate: converting && sameForAll ? (data.billingDate ?? null) : null,
     },
   });
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Scheme status set to ${data.schemeStatus}` });

@@ -147,6 +147,89 @@ export async function closeScheme(ctx: AuthContext, id: string) {
  * passed is EXPIRED and cannot be reopened directly — the admin must extend the Scheme Period first (Edit).
  * Perpetual schemes have no end date and may always be reopened. All other scheme details are unchanged.
  */
+/** Minimum meaningful length for a deletion reason (see requirement #9). */
+const MIN_DELETE_REASON = 10;
+
+/**
+ * Real, database-computed counts of the records a permanent deletion would remove. Used to populate the
+ * pre-deletion confirmation summary — every number is queried, never inferred (e.g. never assume
+ * numberOfSchemes = instance count; count the actual DealerSchemeInstance rows).
+ */
+export async function getSchemeDeletionImpact(ctx: AuthContext, id: string) {
+  assertAdmin(ctx);
+  const scheme = await prisma.scheme.findUnique({ where: { id }, select: { id: true, schemeName: true } });
+  if (!scheme) throw new ApiError(404, "Scheme not found");
+  const [dealerPlans, installmentRules, states] = await Promise.all([
+    prisma.dealerSchemePlan.count({ where: { schemeId: id } }),
+    prisma.schemeInstallmentRule.count({ where: { schemeId: id } }),
+    prisma.schemeState.count({ where: { schemeId: id } }),
+  ]);
+  const [instances, installments] = await Promise.all([
+    prisma.dealerSchemeInstance.count({ where: { dealerSchemePlan: { schemeId: id } } }),
+    prisma.dealerSchemeInstallment.count({ where: { instance: { dealerSchemePlan: { schemeId: id } } } }),
+  ]);
+  return { schemeId: scheme.id, schemeName: scheme.schemeName, dealerPlans, instances, installments, installmentRules, states };
+}
+
+/**
+ * PERMANENTLY delete a Scheme and every record exclusively owned by it. High-risk, irreversible, atomic.
+ *
+ * Boundary (see the reviewed dependency analysis): DELETE the Scheme + its SchemeInstallmentRules,
+ * SchemeState join rows, and the full DealerSchemePlan → DealerSchemeInstance → DealerSchemeInstallment
+ * subtree (which carries all SO-conversion, admin-verification, billing and installment data as columns).
+ * PRESERVE every shared master (User, Dealer, UserGroup, Product, …) — none are children of Scheme.
+ *
+ * Deletes are explicit and bottom-up inside one interactive transaction so the boundary is auditable and
+ * the counts are real, rather than relying blindly on DB cascade. The audit row is written on the SAME
+ * transaction client and, because AuditLog has no FK to Scheme, survives the deletion as a snapshot.
+ * All-or-nothing: any failure rolls the whole thing back — the scheme is never left partially deleted.
+ */
+export async function deleteScheme(ctx: AuthContext, id: string, rawReason: unknown) {
+  assertAdmin(ctx);
+  const reason = typeof rawReason === "string" ? rawReason.trim() : "";
+  if (reason.length < MIN_DELETE_REASON) {
+    throw new ApiError(422, `A deletion reason of at least ${MIN_DELETE_REASON} characters is required.`);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    // Re-read inside the transaction — a concurrent/second delete finds it already gone (idempotent 404).
+    const scheme = await tx.scheme.findUnique({ where: { id }, select: { id: true, schemeName: true } });
+    if (!scheme) throw new ApiError(404, "Scheme not found");
+
+    // Real counts (also serve as the audit snapshot). Instances/installments are reached via relations.
+    const [dealerPlans, installmentRules, states, instances, installments] = await Promise.all([
+      tx.dealerSchemePlan.count({ where: { schemeId: id } }),
+      tx.schemeInstallmentRule.count({ where: { schemeId: id } }),
+      tx.schemeState.count({ where: { schemeId: id } }),
+      tx.dealerSchemeInstance.count({ where: { dealerSchemePlan: { schemeId: id } } }),
+      tx.dealerSchemeInstallment.count({ where: { instance: { dealerSchemePlan: { schemeId: id } } } }),
+    ]);
+
+    // Explicit bottom-up deletion (leaf → root). Each layer is scoped to THIS scheme only.
+    await tx.dealerSchemeInstallment.deleteMany({ where: { instance: { dealerSchemePlan: { schemeId: id } } } });
+    await tx.dealerSchemeInstance.deleteMany({ where: { dealerSchemePlan: { schemeId: id } } });
+    await tx.dealerSchemePlan.deleteMany({ where: { schemeId: id } });
+    await tx.schemeInstallmentRule.deleteMany({ where: { schemeId: id } });
+    await tx.schemeState.deleteMany({ where: { schemeId: id } });
+    await tx.scheme.delete({ where: { id } });
+
+    const counts = { dealerPlans, instances, installments, installmentRules, states };
+    // Snapshot everything needed to identify the deleted scheme forever (no live FK to Scheme).
+    await writeAudit(
+      {
+        userId: ctx.userId,
+        action: "SCHEME_PERMANENTLY_DELETED",
+        entity: "scheme",
+        entityId: scheme.id,
+        summary: JSON.stringify({ schemeName: scheme.schemeName, reason, actor: ctx.username, counts, deletedAt: new Date().toISOString() }),
+      },
+      tx,
+    );
+
+    return { deleted: true, schemeName: scheme.schemeName, ...counts };
+  });
+}
+
 export async function reopenScheme(ctx: AuthContext, id: string, now = new Date()) {
   assertAdmin(ctx);
   const scheme = await prisma.scheme.findUnique({ where: { id }, select: { schemeName: true, status: true, isPerpetual: true, endDate: true } });

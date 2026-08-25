@@ -99,7 +99,7 @@ export type SchemeConversionStatus = (typeof SchemeConversionStatus)[keyof typeo
 export const SchemeBookingStatus = { RECEIVED: "RECEIVED", NOT_RECEIVED: "NOT_RECEIVED", PARTIAL: "PARTIAL" } as const;
 export type SchemeBookingStatus = (typeof SchemeBookingStatus)[keyof typeof SchemeBookingStatus];
 
-export const SchemeSoDocStatus = { IN_TRANSIT: "IN_TRANSIT", RECEIVED: "RECEIVED", NOT_RECEIVED: "NOT_RECEIVED" } as const;
+export const SchemeSoDocStatus = { SIGNED_BUT_NOT_SENT: "SIGNED_BUT_NOT_SENT", SIGNED_AND_SENT: "SIGNED_AND_SENT", DOC_RECEIVED: "DOC_RECEIVED" } as const;
 export type SchemeSoDocStatus = (typeof SchemeSoDocStatus)[keyof typeof SchemeSoDocStatus];
 
 export const SchemeAdminDocStatus = { RECEIVED_SOFT: "RECEIVED_SOFT", RECEIVED_HARD: "RECEIVED_HARD", NOT_RECEIVED: "NOT_RECEIVED" } as const;

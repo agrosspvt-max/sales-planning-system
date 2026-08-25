@@ -21,7 +21,10 @@ export async function writeAudit(
       | "REOPEN"
       | "REPLACE"
       // Move a Recovery Plan from one Seasonal Plan version to another (relation-only change).
-      | "TRANSFER";
+      | "TRANSFER"
+      // Permanent, irreversible deletion of a Scheme and all its scheme-owned records. The audit row
+      // itself survives (it has no FK to Scheme); the deleted scheme's id/name/reason/counts are snapshotted.
+      | "SCHEME_PERMANENTLY_DELETED";
     entity: string;
     entityId?: string;
     summary?: string;

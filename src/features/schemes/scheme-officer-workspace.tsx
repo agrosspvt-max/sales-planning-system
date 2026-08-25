@@ -16,6 +16,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PlanStateBadge, SchemeStatusBadge, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
+import { schemeTable, verifyTint } from "./scheme-table-theme";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 
 const BENEFIT_LABEL: Record<string, string> = { DOMESTIC_TOUR: "Domestic Tour", DOMESTIC_COUPLE_TOUR: "Domestic Couple Tour", FOREIGN_TOUR: "Foreign Tour", CREDIT_NOTE: "Credit Note", OTHER: "Other" };
@@ -126,7 +127,7 @@ function MySchemesTab({ onOpen }: { onOpen: (id: string) => void }) {
               <Button size="sm" variant="outline" onClick={() => onOpen(g.schemeId)}>{editable ? "Continue Planning" : "View"}</Button>
             </CardHeader>
             <CardContent>
-              <div className="overflow-auto rounded-md border">
+              <div className={schemeTable.nestedShell}>
                 <Table>
                   <TableHeader>
                     {/* Grouping band: plan info | Scheme Status | the four SO conversion details (Admin-final shown once verified). */}
@@ -142,10 +143,10 @@ function MySchemesTab({ onOpen }: { onOpen: (id: string) => void }) {
                       <TableHead>Planning Date</TableHead>
                       <TableHead>Plan Status</TableHead>
                       <TableHead>Scheme Status</TableHead>
-                      <TableHead className="border-l">Conversion Date</TableHead>
-                      <TableHead>Booking Amount</TableHead>
-                      <TableHead>Document Status</TableHead>
-                      <TableHead>Billing Date</TableHead>
+                      <TableHead className={verifyTint.conversion.head}>Conversion Date</TableHead>
+                      <TableHead className={verifyTint.booking.head}>Booking Amount</TableHead>
+                      <TableHead className={verifyTint.document.head}>Document Status</TableHead>
+                      <TableHead className={verifyTint.billing.head}>Billing Date</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -165,10 +166,10 @@ function MySchemesTab({ onOpen }: { onOpen: (id: string) => void }) {
                             </button>
                           ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
-                        <TableCell className="border-l whitespace-nowrap"><MarkedValue v={conversionDateCell(p)} /></TableCell>
-                        <TableCell className="whitespace-nowrap"><MarkedValue v={bookingCell(p)} /></TableCell>
-                        <TableCell className="whitespace-nowrap"><MarkedValue v={documentCell(p)} /></TableCell>
-                        <TableCell className="whitespace-nowrap"><MarkedValue v={billingDateCell(p)} /></TableCell>
+                        <TableCell className={cn("whitespace-nowrap", verifyTint.conversion.cell)}><MarkedValue v={conversionDateCell(p)} /></TableCell>
+                        <TableCell className={cn("whitespace-nowrap", verifyTint.booking.cell)}><MarkedValue v={bookingCell(p)} /></TableCell>
+                        <TableCell className={cn("whitespace-nowrap", verifyTint.document.cell)}><MarkedValue v={documentCell(p)} /></TableCell>
+                        <TableCell className={cn("whitespace-nowrap", verifyTint.billing.cell)}><MarkedValue v={billingDateCell(p)} /></TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -185,16 +186,29 @@ function MySchemesTab({ onOpen }: { onOpen: (id: string) => void }) {
 
 const dateTime = (s: string) => new Date(s).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 
-/** SO conversion entry: set Scheme Status and (when Converted) record conversion details. */
+/** SO conversion entry: set Scheme Status and (when Converted) record conversion details + billing date(s). */
 function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose: () => void; onSaved: () => void }) {
+  const count = plan.numberOfSchemes || 1;
+  const multi = count > 1;
   const [schemeStatus, setSchemeStatus] = useState(plan.schemeStatus === "PENDING" ? "CONVERTED" : plan.schemeStatus);
   const [conversionDate, setConversionDate] = useState(toDateInput(plan.conversionDate));
   const [booking, setBooking] = useState(plan.soBookingStatus ?? "RECEIVED");
   const [bookingAmount, setBookingAmount] = useState(plan.soBookingAmount != null ? String(plan.soBookingAmount) : "");
-  const [doc, setDoc] = useState(plan.soDocumentStatus ?? "IN_TRANSIT");
-  const [billingDate, setBillingDate] = useState(toDateInput(plan.billingDate));
+  const [doc, setDoc] = useState(plan.soDocumentStatus ?? "SIGNED_AND_SENT");
+  const [sameForAll, setSameForAll] = useState(plan.soBillingSameForAll ?? true);
+  const [billingDate, setBillingDate] = useState(toDateInput(plan.billingDate ?? plan.instances.find((i) => i.instanceNumber === 1)?.soBillingDate ?? null));
+  const [instDates, setInstDates] = useState<Record<number, string>>(() => {
+    const m: Record<number, string> = {};
+    for (const i of plan.instances) m[i.instanceNumber] = toDateInput(i.soBillingDate);
+    return m;
+  });
   const [error, setError] = useState<string | null>(null);
   const converting = schemeStatus === "CONVERTED";
+
+  const perInstance = multi && !sameForAll;
+  const instNums = Array.from({ length: count }, (_, i) => i + 1);
+  const billingComplete = !converting || (perInstance ? instNums.every((n) => !!instDates[n]) : !!billingDate);
+  const partialInvalid = converting && booking === "PARTIAL" && !bookingAmount;
 
   const save = useMutation({
     mutationFn: () => api.patch(`/api/scheme-plans/${plan.id}/conversion`, {
@@ -203,7 +217,9 @@ function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose
       soBookingStatus: converting ? booking : null,
       soBookingAmount: converting && booking === "PARTIAL" ? Number(bookingAmount) : (converting && bookingAmount ? Number(bookingAmount) : null),
       soDocumentStatus: converting ? doc : null,
-      billingDate: converting ? (billingDate || null) : null,
+      billingSameForAll: !perInstance,
+      billingDate: converting && !perInstance ? (billingDate || null) : null,
+      billingDates: converting && perInstance ? instNums.map((n) => ({ instanceNumber: n, date: instDates[n] || null })) : undefined,
     }),
     onSuccess: onSaved,
     onError: (e) => setError((e as Error).message),
@@ -212,7 +228,7 @@ function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
-        <DialogHeader><DialogTitle>{plan.schemeName} — {plan.dealerName}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{plan.schemeName} — {plan.dealerName}{multi ? ` · ${count} Schemes` : ""}</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
             <Label>Scheme Status *</Label>
@@ -225,8 +241,29 @@ function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose
                 <div className="space-y-1.5"><Label>Booking Amount</Label><NativeSelect value={booking} onChange={(e) => setBooking(e.target.value)} options={[{ value: "RECEIVED", label: "Received" }, { value: "NOT_RECEIVED", label: "Not Received" }, { value: "PARTIAL", label: "Partial Received" }]} /></div>
                 {booking === "PARTIAL" && <div className="space-y-1.5"><Label>Partial Amount *</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} /></div>}
               </div>
-              <div className="space-y-1.5"><Label>Document Status</Label><NativeSelect value={doc} onChange={(e) => setDoc(e.target.value)} options={[{ value: "IN_TRANSIT", label: "In Transit" }, { value: "RECEIVED", label: "Received" }, { value: "NOT_RECEIVED", label: "Not Received" }]} /></div>
-              <div className="space-y-1.5"><Label>Billing Date</Label><Input type="date" value={billingDate} onChange={(e) => setBillingDate(e.target.value)} /></div>
+              <div className="space-y-1.5"><Label>Document Status</Label><NativeSelect value={doc} onChange={(e) => setDoc(e.target.value)} options={[{ value: "SIGNED_BUT_NOT_SENT", label: "Signed but not Sent" }, { value: "SIGNED_AND_SENT", label: "Signed & Sent" }, { value: "DOC_RECEIVED", label: "Doc Received" }]} /></div>
+
+              {multi && (
+                <div className="space-y-1.5">
+                  <Label>Is Billing Date same for all schemes?</Label>
+                  <NativeSelect className="w-28" value={sameForAll ? "yes" : "no"} onChange={(e) => setSameForAll(e.target.value === "yes")} options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]} />
+                </div>
+              )}
+              {perInstance ? (
+                <div className="space-y-1.5">
+                  <Label>Billing Dates</Label>
+                  <div className="space-y-1.5 rounded-md border p-2">
+                    {instNums.map((n) => (
+                      <div key={n} className="flex items-center gap-2">
+                        <span className="w-20 text-sm text-muted-foreground">Scheme {n}</span>
+                        <Input type="date" value={instDates[n] ?? ""} onChange={(e) => setInstDates((p) => ({ ...p, [n]: e.target.value }))} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1.5"><Label>Billing Date{multi ? " (all schemes)" : ""}</Label><Input type="date" value={billingDate} onChange={(e) => setBillingDate(e.target.value)} /></div>
+              )}
             </>
           )}
           {error && <p className="text-sm text-destructive">{error}</p>}
@@ -234,7 +271,7 @@ function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={save.isPending || (converting && booking === "PARTIAL" && !bookingAmount)} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</Button>
+          <Button disabled={save.isPending || partialInvalid || !billingComplete} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

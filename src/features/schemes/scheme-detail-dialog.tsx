@@ -22,6 +22,8 @@ export interface SchemePlan {
   planStatus: string; schemeStatus: string; numberOfSchemes: number; totalSchemeAmount: number; planningDate: string | null;
   conversionDate: string | null; soBookingStatus: string | null; soBookingAmount: number | null; soDocumentStatus: string | null; billingDate: string | null;
   adminConversionDate: string | null; adminBookingStatus: string | null; adminBookingAmount: number | null; adminDocumentStatus: string | null; adminBillingDate: string | null; adminVerifiedAt: string | null;
+  soBillingSameForAll: boolean; adminBillingSameForAll: boolean;
+  instances: { instanceNumber: number; soBillingDate: string | null; adminBillingDate: string | null }[];
 }
 
 // Part E Plan Status labels/badges.
@@ -30,18 +32,18 @@ const PLAN_STATUS_VARIANT: Record<string, "secondary" | "default" | "success" | 
 export function PlanStateBadge({ status }: { status: string }) {
   return <Badge variant={PLAN_STATUS_VARIANT[status] ?? "muted"}>{PLAN_STATUS_LABEL[status] ?? status}</Badge>;
 }
-// Scheme (conversion) status with ✓/!/✕ markers derived from booking + document completeness.
-export function schemeStatusMark(p: { schemeStatus: string; adminBookingStatus: string | null; soBookingStatus: string | null; adminDocumentStatus: string | null; soDocumentStatus: string | null }): "" | "✓" | "!" | "✕" {
+// Scheme (conversion) status marker — driven by ADMIN verification only. Until the Admin verifies the
+// booking/document, a Converted plan shows NO marker (SO entries never produce ✓/!/✕).
+export function schemeStatusMark(p: { schemeStatus: string; adminBookingStatus: string | null; adminDocumentStatus: string | null }): "" | "✓" | "!" | "✕" {
   if (p.schemeStatus !== "CONVERTED") return "";
-  const booking = p.adminBookingStatus ?? p.soBookingStatus;
-  const doc = p.adminDocumentStatus ?? (p.soDocumentStatus === "RECEIVED" ? "RECEIVED_SOFT" : p.soDocumentStatus === "NOT_RECEIVED" ? "NOT_RECEIVED" : null);
-  const bookingOk = booking === "RECEIVED";
-  const bookingFail = booking === "NOT_RECEIVED" || booking == null;
-  const docOk = doc === "RECEIVED_SOFT" || doc === "RECEIVED_HARD";
-  const docFail = doc === "NOT_RECEIVED" || doc == null;
+  if (p.adminBookingStatus == null && p.adminDocumentStatus == null) return ""; // not yet Admin-verified
+  const bookingOk = p.adminBookingStatus === "RECEIVED";
+  const bookingFail = p.adminBookingStatus === "NOT_RECEIVED";
+  const docOk = p.adminDocumentStatus === "RECEIVED_SOFT" || p.adminDocumentStatus === "RECEIVED_HARD";
+  const docFail = p.adminDocumentStatus === "NOT_RECEIVED";
   if (bookingOk && docOk) return "✓";
   if (bookingFail || docFail) return "✕";
-  return "!"; // partial
+  return "!"; // partial / incomplete Admin verification
 }
 export function SchemeStatusBadge({ plan }: { plan: SchemePlan }) {
   const mark = schemeStatusMark(plan);
@@ -129,7 +131,7 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 const SO_BOOKING_LABEL: Record<string, string> = { RECEIVED: "Received", NOT_RECEIVED: "Not Received", PARTIAL: "Partial Received" };
-const SO_DOC_LABEL: Record<string, string> = { IN_TRANSIT: "In Transit", RECEIVED: "Received", NOT_RECEIVED: "Not Received" };
+const SO_DOC_LABEL: Record<string, string> = { SIGNED_BUT_NOT_SENT: "Signed but not Sent", SIGNED_AND_SENT: "Signed & Sent", DOC_RECEIVED: "Doc Received" };
 const ADMIN_DOC_LABEL: Record<string, string> = { RECEIVED_SOFT: "Received Soft Copy", RECEIVED_HARD: "Received Hard Copy", NOT_RECEIVED: "Not Received" };
 const money = (n: number | null) => (n == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n))}`);
 
@@ -142,30 +144,39 @@ export type SchemeMark = "" | "✓" | "!" | "✕";
 export interface MarkedText { text: string; mark: SchemeMark }
 const MARK_CLASS: Record<SchemeMark, string> = { "✓": "text-success", "!": "text-warning", "✕": "text-destructive", "": "" };
 
-/** Conversion Date — Admin override preferred; ✓ once the Admin has verified the plan. */
+/* The ✓/!/✕ marker is an ADMIN VERIFICATION INDICATOR ONLY. An SO-entered value is shown with NO marker;
+ * a marker appears only once the Admin has explicitly entered/overridden that field. */
+
+/** Conversion Date — Admin value ⇒ ✓; otherwise the SO value with no marker. */
 export function conversionDateCell(p: SchemePlan): MarkedText {
-  const v = p.adminConversionDate ?? p.conversionDate;
-  if (!v) return { text: "—", mark: "" };
-  return { text: date(v), mark: p.adminVerifiedAt ? "✓" : "" };
+  if (p.adminConversionDate) return { text: date(p.adminConversionDate), mark: "✓" };
+  if (p.conversionDate) return { text: date(p.conversionDate), mark: "" };
+  return { text: "—", mark: "" };
 }
-/** Billing Date — Admin override preferred; ✓ once verified. */
+/** Billing Date — Admin value ⇒ ✓; otherwise the SO value with no marker. */
 export function billingDateCell(p: SchemePlan): MarkedText {
-  const v = p.adminBillingDate ?? p.billingDate;
-  if (!v) return { text: "—", mark: "" };
-  return { text: date(v), mark: p.adminVerifiedAt ? "✓" : "" };
+  if (p.adminBillingDate) return { text: date(p.adminBillingDate), mark: "✓" };
+  if (p.billingDate) return { text: date(p.billingDate), mark: "" };
+  return { text: "—", mark: "" };
 }
-/** Booking Amount — Admin override preferred. ✓ Received · ! Partial · ✕ Not Received. */
+/** Booking Amount — Admin value ⇒ ✓ Received / ! Partial / ✕ Not Received; otherwise SO value, no marker. */
 export function bookingCell(p: SchemePlan): MarkedText {
-  const admin = p.adminBookingStatus != null;
-  const status = admin ? p.adminBookingStatus : p.soBookingStatus;
-  const amount = admin ? p.adminBookingAmount : p.soBookingAmount;
-  if (!status) return { text: "—", mark: "" };
-  const label = SO_BOOKING_LABEL[status] ?? status;
-  const text = status !== "NOT_RECEIVED" && amount != null ? `${label} · ${money(amount)}` : label;
-  const mark: SchemeMark = status === "RECEIVED" ? "✓" : status === "PARTIAL" ? "!" : "✕";
-  return { text, mark };
+  if (p.adminBookingStatus) {
+    const s = p.adminBookingStatus;
+    const label = SO_BOOKING_LABEL[s] ?? s;
+    const text = s !== "NOT_RECEIVED" && p.adminBookingAmount != null ? `${label} · ${money(p.adminBookingAmount)}` : label;
+    const mark: SchemeMark = s === "RECEIVED" ? "✓" : s === "PARTIAL" ? "!" : "✕";
+    return { text, mark };
+  }
+  if (p.soBookingStatus) {
+    const s = p.soBookingStatus;
+    const label = SO_BOOKING_LABEL[s] ?? s;
+    const text = s !== "NOT_RECEIVED" && p.soBookingAmount != null ? `${label} · ${money(p.soBookingAmount)}` : label;
+    return { text, mark: "" };
+  }
+  return { text: "—", mark: "" };
 }
-/** Document Status — Admin override preferred. ✓ Received (soft/hard) · ! In Transit · ✕ Not Received. */
+/** Document Status — Admin value ⇒ ✓ Received (soft/hard) / ✕ Not Received; otherwise SO value, no marker. */
 export function documentCell(p: SchemePlan): MarkedText {
   if (p.adminDocumentStatus) {
     const s = p.adminDocumentStatus;
@@ -173,7 +184,7 @@ export function documentCell(p: SchemePlan): MarkedText {
   }
   if (p.soDocumentStatus) {
     const s = p.soDocumentStatus;
-    return { text: SO_DOC_LABEL[s] ?? s, mark: s === "RECEIVED" ? "✓" : s === "NOT_RECEIVED" ? "✕" : "!" };
+    return { text: SO_DOC_LABEL[s] ?? s, mark: "" };
   }
   return { text: "—", mark: "" };
 }

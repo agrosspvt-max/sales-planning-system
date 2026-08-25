@@ -153,6 +153,9 @@ model DealerSchemePlan {
   adminBillingDate    DateTime?
   adminVerifiedById   String?
   adminVerifiedAt     DateTime?
+  // Multi-scheme billing mode: whether ONE billing date applies to all instances (SO / Admin sides).
+  soBillingSameForAll    Boolean            @default(true)
+  adminBillingSameForAll Boolean            @default(true)
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
   scheme           Scheme                 @relation(fields: [schemeId], references: [id], onDelete: Cascade)
@@ -160,7 +163,7 @@ model DealerSchemePlan {
   salesOfficer     User                   @relation("OfficerSchemePlans", fields: [salesOfficerId], references: [id])
   rmActedBy        User?                  @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
   enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
-  installments     DealerSchemeInstallment[]
+  instances        DealerSchemeInstance[]
 
   @@unique([schemeId, dealerId])
   @@index([schemeId])
@@ -172,26 +175,44 @@ model DealerSchemePlan {
   @@index([schemeStatus])
 }
 
-/// Per-dealer installment schedule for an ENROLLED scheme plan (the operational "Enrolled Scheme" layer).
-/// Seeded from the scheme's SchemeInstallmentRule + the dealer's billing date (dates are dealer-specific).
-/// Planned amount/date are editable by SO/RM/Admin; received amount/date are Admin-only (payment truth).
-model DealerSchemeInstallment {
-  id                 String           @id @default(cuid())
+/// One scheme instance for a dealer plan. A plan with numberOfSchemes = N has N instances (1..N); each
+/// instance is one occurrence of the scheme and owns its OWN billing dates + installment schedule. This
+/// makes multi-scheme dealers first-class without duplicating DealerSchemePlan rows.
+model DealerSchemeInstance {
+  id                 String                    @id @default(cuid())
   dealerSchemePlanId String
+  instanceNumber     Int
+  soBillingDate      DateTime?
+  adminBillingDate   DateTime? // authoritative billing date for this instance's installment schedule
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  dealerSchemePlan   DealerSchemePlan          @relation(fields: [dealerSchemePlanId], references: [id], onDelete: Cascade)
+  installments       DealerSchemeInstallment[]
+
+  @@unique([dealerSchemePlanId, instanceNumber])
+  @@index([dealerSchemePlanId])
+}
+
+/// Per-INSTANCE installment schedule for an ENROLLED scheme plan (the operational "Enrolled Scheme" layer).
+/// Seeded from the scheme's SchemeInstallmentRule + the instance's admin billing date (dealer/instance
+/// specific). Planned amount/date editable by SO/RM/Admin; received amount/date are Admin-only.
+model DealerSchemeInstallment {
+  id                 String               @id @default(cuid())
+  instanceId         String
   installmentNumber  Int
-  plannedAmount      Decimal          @db.Decimal(14, 2)
+  plannedAmount      Decimal              @db.Decimal(14, 2)
   plannedDate        DateTime?
-  receivedAmount     Decimal?         @db.Decimal(14, 2)
+  receivedAmount     Decimal?             @db.Decimal(14, 2)
   receivedDate       DateTime?
-  status             String           @default("PENDING") // PENDING | RECEIVED (OVERDUE derived on read)
+  status             String               @default("PENDING") // PENDING | RECEIVED (OVERDUE derived on read)
   createdById        String?
   updatedById        String?
-  createdAt          DateTime         @default(now())
-  updatedAt          DateTime         @updatedAt
-  dealerSchemePlan   DealerSchemePlan @relation(fields: [dealerSchemePlanId], references: [id], onDelete: Cascade)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  instance           DealerSchemeInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
 
-  @@unique([dealerSchemePlanId, installmentNumber])
-  @@index([dealerSchemePlanId])
+  @@unique([instanceId, installmentNumber])
+  @@index([instanceId])
 }
 
 /// A Scheme can be available in multiple existing State/UserGroup records.
@@ -1052,9 +1073,9 @@ enum SchemeBookingStatus {
 }
 
 enum SchemeSoDocStatus {
-  IN_TRANSIT
-  RECEIVED
-  NOT_RECEIVED
+  SIGNED_BUT_NOT_SENT
+  SIGNED_AND_SENT
+  DOC_RECEIVED
 }
 
 enum SchemeAdminDocStatus {

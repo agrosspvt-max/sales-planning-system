@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
+import { ensureInstances } from "./scheme-planning.server";
 
 /**
  * Enrolled Scheme — the operational layer AFTER a dealer is enrolled (Admin document verification).
@@ -30,24 +31,34 @@ function plannedAmountFor(rule: RuleRow, schemeValueWithGST: number): number {
 }
 
 /**
- * Ensure a plan has its installment rows. Creates them once from the scheme rules + billing date. Safe to
- * call on every read — it only inserts when none exist yet (so manual edits are never overwritten here).
+ * Ensure ONE instance has its installment rows. Lazy: inserts only when the instance has none yet (so
+ * manual edits are never overwritten). Dates come from the instance's OWN billing date:
+ *  - New Admin flow (plan.adminVerifiedAt set) → ONLY instance.adminBillingDate; never SO/plan fallbacks.
+ *  - Legacy records → fall back to plan-level admin/SO/planned dates (preserves pre-instance schedules).
  */
-async function ensureInstallments(planId: string): Promise<void> {
-  const existing = (await prisma.dealerSchemeInstallment.count({ where: { dealerSchemePlanId: planId } })) as number;
+async function ensureInstanceInstallments(instanceId: string): Promise<void> {
+  const existing = (await prisma.dealerSchemeInstallment.count({ where: { instanceId } })) as number;
   if (existing > 0) return;
-  const plan = (await prisma.dealerSchemePlan.findUnique({
-    where: { id: planId },
-    select: { expectedBillingDate: true, scheme: { select: { schemeValueWithGST: true, installmentRules: true } } },
-  })) as { expectedBillingDate: Date | null; scheme: { schemeValueWithGST: unknown; installmentRules: RuleRow[] } } | null;
-  if (!plan) return;
+  const inst = (await prisma.dealerSchemeInstance.findUnique({
+    where: { id: instanceId },
+    select: {
+      adminBillingDate: true, soBillingDate: true,
+      dealerSchemePlan: { select: { adminVerifiedAt: true, adminBillingDate: true, billingDate: true, expectedBillingDate: true, scheme: { select: { schemeValueWithGST: true, installmentRules: true } } } },
+    },
+  })) as {
+    adminBillingDate: Date | null; soBillingDate: Date | null;
+    dealerSchemePlan: { adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; scheme: { schemeValueWithGST: unknown; installmentRules: RuleRow[] } };
+  } | null;
+  if (!inst) return;
+  const plan = inst.dealerSchemePlan;
   const rules = plan.scheme.installmentRules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber);
   if (rules.length === 0) return;
   const gst = money(plan.scheme.schemeValueWithGST);
-  const billing = plan.expectedBillingDate;
+  const isNewFlow = plan.adminVerifiedAt != null;
+  const billing = isNewFlow ? inst.adminBillingDate : (inst.adminBillingDate ?? plan.adminBillingDate ?? plan.billingDate ?? plan.expectedBillingDate);
   await prisma.dealerSchemeInstallment.createMany({
     data: rules.map((r) => ({
-      dealerSchemePlanId: planId,
+      instanceId,
       installmentNumber: r.installmentNumber,
       plannedAmount: plannedAmountFor(r, gst),
       plannedDate: billing ? addDays(billing, r.daysAfterBillingDate) : null,
@@ -114,9 +125,14 @@ export async function enrolledSchemes(ctx: AuthContext): Promise<EnrolledSchemeL
 
 /* --------------------------- Detail --------------------------- */
 
+export interface EnrolledInstanceRow {
+  instanceId: string; instanceNumber: number; billingDate: string | null; status: string; installments: InstallmentRow[];
+}
 export interface EnrolledDealerRow {
   planId: string; dealerId: string; dealerName: string; salesOfficerId: string; salesOfficerName: string; state: string | null;
-  billingDate: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number; status: string; installments: InstallmentRow[];
+  numberOfSchemes: number; billingDate: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number; status: string;
+  instances: EnrolledInstanceRow[];
+  installments: InstallmentRow[]; // compat: flattened across instances (single-scheme = the one schedule)
 }
 export interface EnrolledSchemeDetail {
   scheme: {
@@ -145,39 +161,51 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string): 
     where: { schemeId, enrollmentStatus: SchemeEnrollmentStatus.ENROLLED, ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }) },
     select: { id: true },
   })) as { id: string }[];
-  for (const p of plans) await ensureInstallments(p.id);
+  // Ensure each enrolled plan has its instances, then lazily generate each instance's schedule.
+  for (const p of plans) {
+    const instances = await ensureInstances(p.id);
+    for (const inst of instances) await ensureInstanceInstallments(inst.id);
+  }
 
   const full = (await prisma.dealerSchemePlan.findMany({
     where: { id: { in: plans.map((p) => p.id) } },
     include: {
       dealer: { select: { name: true } },
       salesOfficer: { select: { name: true, group: { select: { name: true } } } },
-      installments: true,
+      instances: { include: { installments: true }, orderBy: { instanceNumber: "asc" } },
     },
     orderBy: { createdAt: "asc" },
   })) as unknown as {
-    id: string; dealerId: string; expectedBillingDate: Date | null; salesOfficerId: string;
+    id: string; dealerId: string; numberOfSchemes: number; salesOfficerId: string;
     dealer: { name: string }; salesOfficer: { name: string; group: { name: string } | null };
-    installments: RawInst[];
+    instances: { id: string; instanceNumber: number; adminBillingDate: Date | null; soBillingDate: Date | null; installments: RawInst[] }[];
   }[];
 
   const now = new Date();
   const gstWithout = money(scheme.schemeValueWithoutGST);
   const gstWith = money(scheme.schemeValueWithGST);
+  const toRow = (i: RawInst): InstallmentRow => ({
+    id: i.id,
+    installmentNumber: i.installmentNumber,
+    plannedAmount: money(i.plannedAmount),
+    plannedDate: i.plannedDate?.toISOString() ?? null,
+    receivedAmount: i.receivedAmount == null ? null : money(i.receivedAmount),
+    receivedDate: i.receivedDate?.toISOString() ?? null,
+    status: installmentStatus(i, now),
+  });
 
   const dealers: EnrolledDealerRow[] = full.map((p) => {
-    const insts = p.installments
-      .slice()
-      .sort((a, b) => a.installmentNumber - b.installmentNumber)
-      .map<InstallmentRow>((i) => ({
-        id: i.id,
-        installmentNumber: i.installmentNumber,
-        plannedAmount: money(i.plannedAmount),
-        plannedDate: i.plannedDate?.toISOString() ?? null,
-        receivedAmount: i.receivedAmount == null ? null : money(i.receivedAmount),
-        receivedDate: i.receivedDate?.toISOString() ?? null,
-        status: installmentStatus(i, now),
-      }));
+    const instances: EnrolledInstanceRow[] = p.instances.map((inst) => {
+      const insts = inst.installments.slice().sort((a, b) => a.installmentNumber - b.installmentNumber).map(toRow);
+      return {
+        instanceId: inst.id,
+        instanceNumber: inst.instanceNumber,
+        billingDate: (inst.adminBillingDate ?? inst.soBillingDate)?.toISOString() ?? null,
+        status: dealerStatus(insts),
+        installments: insts,
+      };
+    });
+    const flat = instances.flatMap((x) => x.installments);
     return {
       planId: p.id,
       dealerId: p.dealerId,
@@ -185,11 +213,13 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string): 
       salesOfficerId: p.salesOfficerId,
       salesOfficerName: p.salesOfficer.name,
       state: p.salesOfficer.group?.name ?? null,
-      billingDate: p.expectedBillingDate?.toISOString() ?? null,
+      numberOfSchemes: p.numberOfSchemes || 1,
+      billingDate: instances[0]?.billingDate ?? null, // compat: first instance
       schemeValueWithoutGST: gstWithout,
       schemeValueWithGST: gstWith,
-      status: dealerStatus(insts),
-      installments: insts,
+      status: dealerStatus(flat),
+      instances,
+      installments: instances[0]?.installments ?? [], // compat: single-scheme = the one schedule
     };
   });
 
@@ -219,38 +249,43 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string): 
 
 /* --------------------------- Edits --------------------------- */
 
-async function assertPlanInScope(ctx: AuthContext, planId: string): Promise<{ salesOfficerId: string; enrollmentStatus: string }> {
-  const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id: planId }, select: { salesOfficerId: true, enrollmentStatus: true } })) as { salesOfficerId: string; enrollmentStatus: string } | null;
-  if (!plan) throw new ApiError(404, "Scheme plan not found");
-  const scope = await getOfficerScope(ctx);
-  if (!scope.all && !scope.ids.includes(plan.salesOfficerId)) throw new ApiError(403, "You cannot manage this scheme plan");
-  return plan;
-}
-
 const billingSchema = z.object({ billingDate: z.coerce.date() });
 
-/** Update a dealer's billing date. Recomputes planned dates for not-yet-received installments. */
-export async function updateBillingDate(ctx: AuthContext, planId: string, raw: unknown): Promise<{ ok: true }> {
+/**
+ * Update ONE instance's billing date and recompute ONLY that instance's not-yet-received installment dates
+ * (other instances are untouched). The instance's adminBillingDate is authoritative for the new flow.
+ */
+export async function updateInstanceBillingDate(ctx: AuthContext, instanceId: string, raw: unknown): Promise<{ ok: true }> {
   if (![Role.SALES_OFFICER, Role.REGIONAL_MANAGER, Role.SUPER_ADMIN].includes(ctx.role)) throw new ApiError(403, "Not allowed");
-  const plan = await assertPlanInScope(ctx, planId);
-  if (plan.enrollmentStatus !== SchemeEnrollmentStatus.ENROLLED) throw new ApiError(409, "Only enrolled dealers can be managed here");
+  const inst = (await prisma.dealerSchemeInstance.findUnique({
+    where: { id: instanceId },
+    select: { id: true, dealerSchemePlan: { select: { salesOfficerId: true, enrollmentStatus: true, scheme: { select: { installmentRules: { select: { installmentNumber: true, daysAfterBillingDate: true } } } } } } },
+  })) as { id: string; dealerSchemePlan: { salesOfficerId: string; enrollmentStatus: string; scheme: { installmentRules: { installmentNumber: number; daysAfterBillingDate: number }[] } } } | null;
+  if (!inst) throw new ApiError(404, "Scheme instance not found");
+  const scope = await getOfficerScope(ctx);
+  if (!scope.all && !scope.ids.includes(inst.dealerSchemePlan.salesOfficerId)) throw new ApiError(403, "You cannot manage this scheme plan");
+  if (inst.dealerSchemePlan.enrollmentStatus !== SchemeEnrollmentStatus.ENROLLED) throw new ApiError(409, "Only enrolled dealers can be managed here");
   const { billingDate } = billingSchema.parse(raw);
 
-  await ensureInstallments(planId);
-  await prisma.dealerSchemePlan.update({ where: { id: planId }, data: { expectedBillingDate: billingDate } });
+  await ensureInstanceInstallments(instanceId);
+  await prisma.dealerSchemeInstance.update({ where: { id: instanceId }, data: { adminBillingDate: billingDate } });
 
-  // Recompute planned dates for installments not yet received, using the scheme's day offsets.
-  const rules = (await prisma.dealerSchemePlan.findUnique({ where: { id: planId }, select: { scheme: { select: { installmentRules: { select: { installmentNumber: true, daysAfterBillingDate: true } } } } } })) as
-    { scheme: { installmentRules: { installmentNumber: number; daysAfterBillingDate: number }[] } } | null;
-  const dayByNum = new Map((rules?.scheme.installmentRules ?? []).map((r) => [r.installmentNumber, r.daysAfterBillingDate]));
-  const insts = (await prisma.dealerSchemeInstallment.findMany({ where: { dealerSchemePlanId: planId, receivedAmount: null }, select: { id: true, installmentNumber: true } })) as { id: string; installmentNumber: number }[];
-  for (const i of insts) {
+  const dayByNum = new Map(inst.dealerSchemePlan.scheme.installmentRules.map((r) => [r.installmentNumber, r.daysAfterBillingDate]));
+  const rows = (await prisma.dealerSchemeInstallment.findMany({ where: { instanceId, receivedAmount: null }, select: { id: true, installmentNumber: true } })) as { id: string; installmentNumber: number }[];
+  for (const i of rows) {
     const offset = dayByNum.get(i.installmentNumber);
     if (offset == null) continue;
     await prisma.dealerSchemeInstallment.update({ where: { id: i.id }, data: { plannedDate: addDays(billingDate, offset), updatedById: ctx.userId } });
   }
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: "Enrolled billing date updated" });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemeInstance", entityId: instanceId, summary: "Enrolled instance billing date updated" });
   return { ok: true };
+}
+
+/** Compat: update the FIRST instance's billing date (single-scheme dealers / legacy callers by plan id). */
+export async function updateBillingDate(ctx: AuthContext, planId: string, raw: unknown): Promise<{ ok: true }> {
+  const first = (await prisma.dealerSchemeInstance.findFirst({ where: { dealerSchemePlanId: planId, instanceNumber: 1 }, select: { id: true } })) as { id: string } | null;
+  if (!first) throw new ApiError(404, "Scheme plan not found");
+  return updateInstanceBillingDate(ctx, first.id, raw);
 }
 
 const installmentPatchSchema = z.object({
@@ -265,10 +300,11 @@ const installmentPatchSchema = z.object({
  * received amount/date (payment truth). Received-amount presence drives the stored status.
  */
 export async function updateInstallment(ctx: AuthContext, installmentId: string, raw: unknown): Promise<{ ok: true }> {
-  const inst = (await prisma.dealerSchemeInstallment.findUnique({ where: { id: installmentId }, select: { id: true, dealerSchemePlanId: true, receivedAmount: true, receivedDate: true } })) as
-    { id: string; dealerSchemePlanId: string; receivedAmount: unknown; receivedDate: Date | null } | null;
+  const inst = (await prisma.dealerSchemeInstallment.findUnique({ where: { id: installmentId }, select: { id: true, receivedDate: true, instance: { select: { dealerSchemePlan: { select: { salesOfficerId: true } } } } } })) as
+    { id: string; receivedDate: Date | null; instance: { dealerSchemePlan: { salesOfficerId: string } } } | null;
   if (!inst) throw new ApiError(404, "Installment not found");
-  await assertPlanInScope(ctx, inst.dealerSchemePlanId);
+  const scope = await getOfficerScope(ctx);
+  if (!scope.all && !scope.ids.includes(inst.instance.dealerSchemePlan.salesOfficerId)) throw new ApiError(403, "You cannot manage this scheme plan");
   const patch = installmentPatchSchema.parse(raw);
   const isAdmin = ctx.role === Role.SUPER_ADMIN;
 

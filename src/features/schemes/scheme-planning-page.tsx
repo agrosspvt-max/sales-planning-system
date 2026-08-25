@@ -3,7 +3,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { CornerUpLeft, Send, Eye, ShieldCheck, ChevronRight, ChevronDown } from "lucide-react";
+import { CornerUpLeft, Send, Eye, ShieldCheck, ChevronRight, ChevronLeft, ChevronDown, Trash2, AlertTriangle } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatDate, formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
+import { schemeTable, verifyTint } from "./scheme-table-theme";
 import { SchemeOfficerWorkspace, RunningSchemesTab, SchemePlanningView } from "./scheme-officer-workspace";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 
@@ -72,6 +73,8 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
   // RM gets a "Running Schemes" tab to CREATE plans (skips RM approval); Admin has no create.
   const [view, setView] = useState<"review" | "running" | "enrolled">("review");
   const [runId, setRunId] = useState<string | null>(null); // scheme being planned in the Running tab
+  const [verifyCols, setVerifyCols] = useState(true); // horizontal collapse of the 4 verification columns (UI-only, expanded by default)
+  const [deleteTarget, setDeleteTarget] = useState<SchemeGroup | null>(null); // Super-Admin permanent-delete flow
   const invalidate = () => qc.invalidateQueries({ queryKey: ["scheme-plans"] });
 
   const groups = useMemo<SchemeGroup[]>(() => {
@@ -136,7 +139,7 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
       {view === "enrolled" ? <EnrolledSchemesView /> : view === "running" ? (
         runId ? <SchemePlanningView schemeId={runId} enableRmScope onBack={() => setRunId(null)} /> : <RunningSchemesTab onView={setRunId} />
       ) : (
-      <div className="overflow-auto rounded-lg border bg-background">
+      <div className={schemeTable.outer}>
         <Table>
           <TableHeader>
             <TableRow>
@@ -163,8 +166,8 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                 const returnable = rmReturnable(g);
                 return (
                   <Fragment key={g.schemeId}>
-                    <TableRow className="cursor-pointer bg-muted/30 hover:bg-muted/50" onClick={() => toggle(g.schemeId)}>
-                      <TableCell>{open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
+                    <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(g.schemeId)}>
+                      <TableCell>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
                       <TableCell className="font-semibold">{g.schemeName}</TableCell>
                       <TableCell>{g.plans.length} Dealer{g.plans.length === 1 ? "" : "s"}</TableCell>
                       <TableCell className="max-w-[16rem] truncate" title={officers.join(", ")}>{officers.length <= 1 ? officers[0] ?? "—" : `${officers[0]} +${officers.length - 1}`}</TableCell>
@@ -187,12 +190,24 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                             <CornerUpLeft className="h-4 w-4" /> Return Entire Scheme
                           </Button>
                         )}
+                        {isAdmin && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            onClick={() => setDeleteTarget(g)}
+                            title="Permanently delete this entire scheme"
+                          >
+                            <Trash2 className="h-4 w-4" /> Delete Scheme
+                          </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                     {open && (
                       <TableRow>
-                        <TableCell colSpan={COLS + 1} className="bg-background p-0">
-                          <div className="overflow-auto p-2">
+                        <TableCell colSpan={COLS + 1} className={schemeTable.nestedCell}>
+                          <div className={schemeTable.nestedInset}>
+                            <div className={schemeTable.nestedShell}>
                             <Table>
                               <TableHeader>
                                 <TableRow>
@@ -202,11 +217,20 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                                   <TableHead>Planned Conversion</TableHead>
                                   <TableHead>Plan Status</TableHead>
                                   <TableHead>Scheme Status</TableHead>
-                                  <TableHead className="border-l">Conversion Date</TableHead>
-                                  <TableHead>Booking Amount</TableHead>
-                                  <TableHead>Document Status</TableHead>
-                                  <TableHead>Billing Date</TableHead>
-                                  <TableHead className="text-right">Actions</TableHead>
+                                  <TableHead className="w-8 border-l p-0 text-center">
+                                    <button type="button" title={verifyCols ? "Hide verification details" : "Show verification details"} aria-label={verifyCols ? "Hide verification details" : "Show verification details"} onClick={() => setVerifyCols((v) => !v)} className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
+                                      {verifyCols ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                    </button>
+                                  </TableHead>
+                                  {verifyCols && (
+                                    <>
+                                      <TableHead className={verifyTint.conversion.head}>Conversion Date</TableHead>
+                                      <TableHead className={verifyTint.booking.head}>Booking Amount</TableHead>
+                                      <TableHead className={verifyTint.document.head}>Document Status</TableHead>
+                                      <TableHead className={verifyTint.billing.head}>Billing Date</TableHead>
+                                    </>
+                                  )}
+                                  <TableHead className="border-l text-right">Actions</TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -218,11 +242,16 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                                     <TableCell>{r.expectedBillingDate ? formatDate(r.expectedBillingDate) : <span className="text-muted-foreground">—</span>}</TableCell>
                                     <TableCell><PlanStateBadge status={r.planStatus} /></TableCell>
                                     <TableCell>{r.planStatus === "APPROVED" ? <SchemeStatusBadge plan={r} /> : <span className="text-muted-foreground">—</span>}</TableCell>
-                                    <TableCell className="border-l whitespace-nowrap"><MarkedValue v={conversionDateCell(r)} /></TableCell>
-                                    <TableCell className="whitespace-nowrap"><MarkedValue v={bookingCell(r)} /></TableCell>
-                                    <TableCell className="whitespace-nowrap"><MarkedValue v={documentCell(r)} /></TableCell>
-                                    <TableCell className="whitespace-nowrap"><MarkedValue v={billingDateCell(r)} /></TableCell>
-                                    <TableCell className="text-right">
+                                    <TableCell className="border-l" />
+                                    {verifyCols && (
+                                      <>
+                                        <TableCell className={cn("whitespace-nowrap", verifyTint.conversion.cell)}><MarkedValue v={conversionDateCell(r)} /></TableCell>
+                                        <TableCell className={cn("whitespace-nowrap", verifyTint.booking.cell)}><MarkedValue v={bookingCell(r)} /></TableCell>
+                                        <TableCell className={cn("whitespace-nowrap", verifyTint.document.cell)}><MarkedValue v={documentCell(r)} /></TableCell>
+                                        <TableCell className={cn("whitespace-nowrap", verifyTint.billing.cell)}><MarkedValue v={billingDateCell(r)} /></TableCell>
+                                      </>
+                                    )}
+                                    <TableCell className="border-l text-right">
                                       <div className="flex items-center justify-end gap-1">
                                         {canSubmit(r) && <Button size="sm" variant="outline" disabled={submit.isPending} onClick={() => submit.mutate(r.id)}><Send className="h-4 w-4" /> Submit</Button>}
                                         {canRmAct(r) && (
@@ -256,13 +285,14 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                                           />
                                         )}
                                         {canVerify(r) && <Button size="sm" variant="outline" onClick={() => setVerify(r)}><ShieldCheck className="h-4 w-4" /> Verify</Button>}
-                                        <Button size="sm" variant="ghost" onClick={() => setDetail(r)}><Eye className="h-4 w-4" /> Open</Button>
+                                        <Button size="sm" variant="ghost" onClick={() => setDetail(r)}><Eye className="h-4 w-4" /> Info</Button>
                                       </div>
                                     </TableCell>
                                   </TableRow>
                                 ))}
                               </TableBody>
                             </Table>
+                            </div>
                           </div>
                         </TableCell>
                       </TableRow>
@@ -279,6 +309,7 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
       {detail && <SchemePlanDialog plan={detail} canVerify={false} onClose={() => setDetail(null)} />}
       {verify && <AdminVerifyDialog plan={verify} onClose={() => setVerify(null)} onSaved={() => { setVerify(null); invalidate(); }} />}
       {reason && <ReasonModal prompt={reason} onClose={() => setReason(null)} />}
+      {deleteTarget && <DeleteSchemeDialog group={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={() => { setDeleteTarget(null); invalidate(); }} />}
     </div>
   );
 }
@@ -305,43 +336,172 @@ function ReasonModal({ prompt, onClose }: { prompt: ReasonPrompt; onClose: () =>
   );
 }
 
+/* --------------------------- Permanent scheme deletion (Super Admin) --------------------------- */
+
+interface DeletionImpact { schemeId: string; schemeName: string; dealerPlans: number; instances: number; installments: number; installmentRules: number; states: number }
+const MIN_DELETE_REASON = 10;
+
+/**
+ * Two-step, high-friction permanent deletion. Step 1 warns + collects a mandatory reason (≥10 chars);
+ * step 2 shows the real DB-computed impact counts + the reason and requires a final "Permanently Delete".
+ * The button self-disables while the request is in flight (double-submit guard). Nothing is deleted until
+ * the final click; Cancel at any point aborts with no changes. Authorization is also enforced server-side.
+ */
+function DeleteSchemeDialog({ group, onClose, onDeleted }: { group: SchemeGroup; onClose: () => void; onDeleted: () => void }) {
+  const [step, setStep] = useState<1 | 2>(1);
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const trimmed = reason.trim();
+  const reasonValid = trimmed.length >= MIN_DELETE_REASON;
+
+  // Real impact counts, fetched once when the dialog opens (never inferred).
+  const { data: impact, isLoading: impactLoading } = useQuery<DeletionImpact>({
+    queryKey: ["scheme-deletion-impact", group.schemeId],
+    queryFn: () => api.get(`/api/schemes/${group.schemeId}/deletion-impact`),
+  });
+
+  const del = useMutation({
+    mutationFn: () => api.del(`/api/schemes/${group.schemeId}`, { reason: trimmed }),
+    onSuccess: () => { alert(`Scheme '${group.schemeName}' was permanently deleted.`); onDeleted(); },
+    onError: (e) => setError((e as Error).message || "Scheme could not be deleted. No changes were made."),
+  });
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !del.isPending) onClose(); }}>
+      <DialogContent className="max-w-md">
+        {step === 1 ? (
+          <>
+            <DialogHeader><DialogTitle className="flex items-center gap-2 text-destructive"><AlertTriangle className="h-5 w-5" /> Delete Scheme</DialogTitle></DialogHeader>
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">You are about to permanently delete:</p>
+              <p className="text-center text-2xl font-bold">{group.schemeName}</p>
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                This permanently removes this scheme and all its related planning, enrollment, instance, installment and other scheme-owned records. This action cannot be undone.
+              </div>
+              <div className="space-y-1.5">
+                <Label>Reason for deletion *</Label>
+                <Textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} autoFocus placeholder="Enter the reason for permanently deleting this scheme" />
+                <p className="text-xs text-muted-foreground">Required — at least {MIN_DELETE_REASON} characters.</p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={onClose}>Cancel</Button>
+              <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={!reasonValid} onClick={() => { setError(null); setStep(2); }}>Continue</Button>
+            </DialogFooter>
+          </>
+        ) : (
+          <>
+            <DialogHeader><DialogTitle className="flex items-center gap-2 text-destructive"><AlertTriangle className="h-5 w-5" /> Permanently Delete Scheme?</DialogTitle></DialogHeader>
+            <div className="space-y-3 text-sm">
+              <p><span className="text-muted-foreground">Scheme:</span> <span className="font-semibold">{group.schemeName}</span></p>
+              <div>
+                <p className="text-muted-foreground">This will permanently remove:</p>
+                {impactLoading ? (
+                  <Skeleton className="mt-1 h-24 w-full" />
+                ) : impact ? (
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                    <li>{impact.dealerPlans} dealer scheme plan{impact.dealerPlans === 1 ? "" : "s"}</li>
+                    <li>{impact.instances} scheme instance{impact.instances === 1 ? "" : "s"}</li>
+                    <li>{impact.installments} installment record{impact.installments === 1 ? "" : "s"}</li>
+                    <li>{impact.installmentRules} installment rule{impact.installmentRules === 1 ? "" : "s"}</li>
+                    <li>{impact.states} state link{impact.states === 1 ? "" : "s"}</li>
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-muted-foreground">Related scheme-owned records will also be permanently removed.</p>
+                )}
+              </div>
+              <div>
+                <p className="text-muted-foreground">Reason:</p>
+                <p className="mt-0.5 whitespace-pre-wrap rounded-md border bg-muted/30 p-2 italic">&ldquo;{trimmed}&rdquo;</p>
+              </div>
+              <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>This action permanently deletes the scheme and its related records. This cannot be undone.</span>
+              </div>
+              {error && <p className="text-sm text-destructive">{error}</p>}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" disabled={del.isPending} onClick={() => { if (!del.isPending) onClose(); }}>Cancel</Button>
+              <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={del.isPending} onClick={() => { setError(null); del.mutate(); }}>{del.isPending ? "Deleting Scheme…" : "Permanently Delete"}</Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /* --------------------------- Admin three-column verification --------------------------- */
 
 const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
-const SO_BOOKING_LABEL: Record<string, string> = { RECEIVED: "Received", NOT_RECEIVED: "Not Received", PARTIAL: "Partial" };
-const SO_DOC_LABEL: Record<string, string> = { IN_TRANSIT: "In Transit", RECEIVED: "Received", NOT_RECEIVED: "Not Received" };
+const SO_BOOKING_LABEL: Record<string, string> = { RECEIVED: "Received", NOT_RECEIVED: "Not Received", PARTIAL: "Partial Received" };
+const SO_DOC_LABEL: Record<string, string> = { SIGNED_BUT_NOT_SENT: "Signed but not Sent", SIGNED_AND_SENT: "Signed & Sent", DOC_RECEIVED: "Doc Received" };
 
-/** Field / SO value / Admin final value verification. Admin values override SO; enrollment only when complete. */
+function AdminMark({ mark }: { mark: "" | "✓" | "!" | "✕" }) {
+  if (!mark) return null;
+  return <span className={cn("font-semibold", mark === "✓" ? "text-success" : mark === "✕" ? "text-destructive" : "text-warning")}>{mark}</span>;
+}
+
+/**
+ * Admin verification (Field / Sales Officer / Admin). Admin fields start BLANK — the SO value is shown for
+ * reference in the middle column but never copied in. ✓/!/✕ appear only for values the Admin explicitly
+ * selects. One "Update" saves the verification; the backend auto-enrolls when all four conditions hold
+ * (conversion date + booking Received + document Received + billing date). Billing date is disabled until
+ * booking + document are both Received. Previously-saved Admin values re-populate on reopen.
+ */
 function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClose: () => void; onSaved: () => void }) {
-  const [convDate, setConvDate] = useState(toDateInput(plan.adminConversionDate ?? plan.conversionDate));
-  const [booking, setBooking] = useState(plan.adminBookingStatus ?? "RECEIVED");
-  const [bookingAmount, setBookingAmount] = useState(plan.adminBookingAmount != null ? String(plan.adminBookingAmount) : (plan.soBookingAmount != null ? String(plan.soBookingAmount) : ""));
-  const [doc, setDoc] = useState(plan.adminDocumentStatus ?? "RECEIVED_HARD");
-  const [billDate, setBillDate] = useState(toDateInput(plan.adminBillingDate ?? plan.billingDate));
+  const count = plan.numberOfSchemes || 1;
+  const multi = count > 1;
+  const instNums = Array.from({ length: count }, (_, i) => i + 1);
+  // Seed ONLY from prior Admin values (persisted verification); blank on first open. Never from SO values.
+  const [convDate, setConvDate] = useState(toDateInput(plan.adminConversionDate));
+  const [booking, setBooking] = useState(plan.adminBookingStatus ?? "");
+  const [bookingAmount, setBookingAmount] = useState(plan.adminBookingAmount != null ? String(plan.adminBookingAmount) : "");
+  const [doc, setDoc] = useState(plan.adminDocumentStatus ?? "");
+  const [sameForAll, setSameForAll] = useState(plan.adminBillingSameForAll ?? true);
+  const [billDate, setBillDate] = useState(toDateInput(plan.adminBillingDate ?? plan.instances.find((i) => i.instanceNumber === 1)?.adminBillingDate ?? null));
+  const [instDates, setInstDates] = useState<Record<number, string>>(() => {
+    const m: Record<number, string> = {};
+    for (const i of plan.instances) m[i.instanceNumber] = toDateInput(i.adminBillingDate);
+    return m;
+  });
   const [remarks, setRemarks] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const paymentOk = booking === "RECEIVED";
   const docOk = doc === "RECEIVED_SOFT" || doc === "RECEIVED_HARD";
-  const eligible = paymentOk && docOk;
-  const bookingMark = booking === "RECEIVED" ? "✓" : booking === "PARTIAL" ? "!" : "✕";
-  const docMark = docOk ? "✓" : "✕";
+  const billingEnabled = booking === "RECEIVED" && docOk; // billing only once payment + document Received
+  const partialNeedsAmount = booking === "PARTIAL" && !(Number(bookingAmount) > 0);
+  const coreComplete = !!convDate && !!booking && !!doc && !partialNeedsAmount;
+  const perInstance = multi && !sameForAll;
+  const billingComplete = billingEnabled && (perInstance ? instNums.every((n) => !!instDates[n]) : !!billDate);
+  const eligible = coreComplete && billingComplete; // all conditions incl. every instance → backend enrolls
 
-  const body = (enroll: boolean) => ({
-    adminConversionDate: convDate || null,
-    adminBookingStatus: booking,
-    adminBookingAmount: booking === "NOT_RECEIVED" ? 0 : (bookingAmount ? Number(bookingAmount) : null),
-    adminDocumentStatus: doc,
-    adminBillingDate: billDate || null,
-    remarks: remarks.trim() || undefined,
-    enroll,
-  });
+  // Markers reflect the Admin's CURRENT selection (blank when nothing chosen yet).
+  const bookingMark: "" | "✓" | "!" | "✕" = booking === "" ? "" : booking === "RECEIVED" ? "✓" : booking === "PARTIAL" ? "!" : "✕";
+  const docMark: "" | "✓" | "!" | "✕" = doc === "" ? "" : doc === "NOT_RECEIVED" ? "✕" : "✓";
+  const convMark: "" | "✓" = convDate ? "✓" : "";
+
+  // When booking/document stop qualifying, clear the (now-disabled) billing dates.
+  const clearBilling = () => { setBillDate(""); setInstDates({}); };
+  const onBooking = (v: string) => { setBooking(v); if (!(v === "RECEIVED" && docOk)) clearBilling(); };
+  const onDoc = (v: string) => { const ok = v === "RECEIVED_SOFT" || v === "RECEIVED_HARD"; setDoc(v); if (!(booking === "RECEIVED" && ok)) clearBilling(); };
+
   const mut = useMutation({
-    mutationFn: (enroll: boolean) => api.post(`/api/scheme-plans/${plan.id}/verify`, body(enroll)),
+    mutationFn: () => api.post(`/api/scheme-plans/${plan.id}/verify`, {
+      adminConversionDate: convDate,
+      adminBookingStatus: booking,
+      adminBookingAmount: booking === "NOT_RECEIVED" ? null : (bookingAmount ? Number(bookingAmount) : null),
+      adminDocumentStatus: doc,
+      adminBillingSameForAll: !perInstance,
+      adminBillingDate: billingEnabled && !perInstance ? (billDate || null) : null,
+      adminBillingDates: billingEnabled && perInstance ? instNums.map((n) => ({ instanceNumber: n, date: instDates[n] || null })) : undefined,
+      remarks: remarks.trim() || undefined,
+    }),
     onSuccess: onSaved,
     onError: (e) => setError((e as Error).message),
   });
 
+  const soBooking = plan.soBookingStatus ? `${SO_BOOKING_LABEL[plan.soBookingStatus] ?? plan.soBookingStatus}${plan.soBookingAmount != null ? ` · ${formatCurrency(plan.soBookingAmount)}` : ""}` : "—";
   const Cell = ({ children }: { children: React.ReactNode }) => <td className="border-b px-3 py-2 align-top">{children}</td>;
 
   return (
@@ -352,41 +512,74 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                <th className="px-3 py-2">Field</th><th className="px-3 py-2">Sales Officer</th><th className="px-3 py-2">Admin Final</th>
+                <th className="px-3 py-2">Field</th><th className="px-3 py-2">Sales Officer</th><th className="px-3 py-2">Admin</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <Cell><span className="font-medium">Conversion Date</span></Cell>
+                <Cell><span className="font-medium">Conversion Date *</span></Cell>
                 <Cell>{plan.conversionDate ? formatDate(plan.conversionDate) : "—"}</Cell>
-                <Cell><Input type="date" className="w-40" value={convDate} onChange={(e) => setConvDate(e.target.value)} /></Cell>
+                <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={convDate} onChange={(e) => setConvDate(e.target.value)} /><AdminMark mark={convMark} /></div></Cell>
               </tr>
               <tr>
-                <Cell><span className="font-medium">Booking Amount</span></Cell>
-                <Cell>{plan.soBookingStatus ? `${SO_BOOKING_LABEL[plan.soBookingStatus] ?? plan.soBookingStatus}${plan.soBookingAmount != null ? ` · ${formatCurrency(plan.soBookingAmount)}` : ""}` : "—"}</Cell>
+                <Cell><span className="font-medium">Booking Amount *</span></Cell>
+                <Cell>{soBooking}</Cell>
                 <Cell>
                   <div className="flex items-center gap-2">
-                    <NativeSelect className="w-36" value={booking} onChange={(e) => setBooking(e.target.value)} options={[{ value: "RECEIVED", label: "Received" }, { value: "NOT_RECEIVED", label: "Not Received" }, { value: "PARTIAL", label: "Partial" }]} />
-                    {booking !== "NOT_RECEIVED" && <Input type="number" min="0" className="w-28" placeholder="Amount" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} />}
-                    <span className={cn("font-semibold", bookingMark === "✓" ? "text-success" : bookingMark === "✕" ? "text-destructive" : "text-warning")}>{bookingMark}</span>
+                    <NativeSelect className="w-40" value={booking} onChange={(e) => onBooking(e.target.value)} options={[{ value: "", label: "Choose Booking Status" }, { value: "RECEIVED", label: "Received" }, { value: "NOT_RECEIVED", label: "Not Received" }, { value: "PARTIAL", label: "Partial Received" }]} />
+                    {booking && booking !== "NOT_RECEIVED" && <Input type="number" min="0" className="w-28" placeholder="Amount" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} />}
+                    <AdminMark mark={bookingMark} />
                   </div>
                 </Cell>
               </tr>
               <tr>
-                <Cell><span className="font-medium">Document</span></Cell>
+                <Cell><span className="font-medium">Document *</span></Cell>
                 <Cell>{plan.soDocumentStatus ? SO_DOC_LABEL[plan.soDocumentStatus] ?? plan.soDocumentStatus : "—"}</Cell>
                 <Cell>
                   <div className="flex items-center gap-2">
-                    <NativeSelect className="w-52" value={doc} onChange={(e) => setDoc(e.target.value)} options={[{ value: "RECEIVED_SOFT", label: "Received Soft Copy" }, { value: "RECEIVED_HARD", label: "Received Hard Copy" }, { value: "NOT_RECEIVED", label: "Not Received" }]} />
-                    <span className={cn("font-semibold", docMark === "✓" ? "text-success" : "text-destructive")}>{docMark}</span>
+                    <NativeSelect className="w-52" value={doc} onChange={(e) => onDoc(e.target.value)} options={[{ value: "", label: "Choose Document Status" }, { value: "RECEIVED_SOFT", label: "Received Soft Copy" }, { value: "RECEIVED_HARD", label: "Received Hard Copy" }, { value: "NOT_RECEIVED", label: "Not Received" }]} />
+                    <AdminMark mark={docMark} />
                   </div>
                 </Cell>
               </tr>
-              <tr>
-                <Cell><span className="font-medium">Billing Date</span></Cell>
-                <Cell>{plan.billingDate ? formatDate(plan.billingDate) : "—"}</Cell>
-                <Cell><Input type="date" className="w-40" value={billDate} onChange={(e) => setBillDate(e.target.value)} /></Cell>
-              </tr>
+              {!multi ? (
+                <tr>
+                  <Cell><span className="font-medium">Billing Date</span></Cell>
+                  <Cell>{plan.billingDate ? formatDate(plan.billingDate) : "—"}</Cell>
+                  <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={billDate} disabled={!billingEnabled} onChange={(e) => setBillDate(e.target.value)} /><AdminMark mark={billDate ? "✓" : ""} /></div></Cell>
+                </tr>
+              ) : (
+                <>
+                  <tr>
+                    <Cell><span className="font-medium">Billing Dates</span></Cell>
+                    <Cell>—</Cell>
+                    <Cell>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground">Same for all schemes?</span>
+                        <NativeSelect className="w-24" value={sameForAll ? "yes" : "no"} disabled={!billingEnabled} onChange={(e) => setSameForAll(e.target.value === "yes")} options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]} />
+                      </div>
+                    </Cell>
+                  </tr>
+                  {sameForAll ? (
+                    <tr>
+                      <Cell><span className="pl-3 text-muted-foreground">All schemes</span></Cell>
+                      <Cell>—</Cell>
+                      <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={billDate} disabled={!billingEnabled} onChange={(e) => setBillDate(e.target.value)} /><AdminMark mark={billDate ? "✓" : ""} /></div></Cell>
+                    </tr>
+                  ) : (
+                    instNums.map((n) => {
+                      const so = plan.instances.find((i) => i.instanceNumber === n)?.soBillingDate ?? null;
+                      return (
+                        <tr key={n}>
+                          <Cell><span className="pl-3 text-muted-foreground">Scheme {n}</span></Cell>
+                          <Cell>{so ? formatDate(so) : "—"}</Cell>
+                          <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={instDates[n] ?? ""} disabled={!billingEnabled} onChange={(e) => setInstDates((p) => ({ ...p, [n]: e.target.value }))} /><AdminMark mark={instDates[n] ? "✓" : ""} /></div></Cell>
+                        </tr>
+                      );
+                    })
+                  )}
+                </>
+              )}
             </tbody>
           </table>
         </div>
@@ -395,11 +588,18 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
           <Textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} rows={2} placeholder="Optional" />
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
-        <p className="text-xs text-muted-foreground">{eligible ? "Payment and document are complete — the dealer can be enrolled." : "Enrollment needs payment Received and document Received. Otherwise you can only Save."}</p>
+        <p className="text-xs text-muted-foreground">
+          {!coreComplete
+            ? "Select Conversion Date, Booking Amount and Document to update the verification."
+            : eligible
+              ? "All four conditions are met — Update will enroll the dealer."
+              : billingEnabled
+                ? "Add a Billing Date to enroll, or Update now to save without enrolling."
+                : "Booking and Document must both be Received before a Billing Date / enrollment."}
+        </p>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button variant="outline" disabled={mut.isPending} onClick={() => { setError(null); mut.mutate(false); }}>{mut.isPending ? "Saving…" : "Save"}</Button>
-          <Button disabled={mut.isPending || !eligible} onClick={() => { setError(null); mut.mutate(true); }}>Enroll</Button>
+          <Button disabled={mut.isPending || !coreComplete} onClick={() => { setError(null); mut.mutate(); }}>{mut.isPending ? "Updating…" : "Update"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

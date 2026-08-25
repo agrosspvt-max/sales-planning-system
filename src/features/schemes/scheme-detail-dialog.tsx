@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { api } from "@/lib/api-client";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -127,10 +128,60 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-const SO_BOOKING_LABEL: Record<string, string> = { RECEIVED: "Received", NOT_RECEIVED: "Not Received", PARTIAL: "Partial" };
+const SO_BOOKING_LABEL: Record<string, string> = { RECEIVED: "Received", NOT_RECEIVED: "Not Received", PARTIAL: "Partial Received" };
 const SO_DOC_LABEL: Record<string, string> = { IN_TRANSIT: "In Transit", RECEIVED: "Received", NOT_RECEIVED: "Not Received" };
 const ADMIN_DOC_LABEL: Record<string, string> = { RECEIVED_SOFT: "Received Soft Copy", RECEIVED_HARD: "Received Hard Copy", NOT_RECEIVED: "Not Received" };
 const money = (n: number | null) => (n == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n))}`);
+
+/* ------------------- Shared conversion-detail display helpers -------------------
+ * ONE place that decides, per field, the value + ✓/!/✕ marker shown in the tables. The Admin-final
+ * value (admin* fields) is preferred once present; otherwise the SO value; otherwise "—". Markers reuse
+ * the existing convention (✓ complete/verified, ! partial/intermediate, ✕ failed/not received). These
+ * are DISPLAY-ONLY — they read existing fields and never change workflow, enrollment, or Scheme Status. */
+export type SchemeMark = "" | "✓" | "!" | "✕";
+export interface MarkedText { text: string; mark: SchemeMark }
+const MARK_CLASS: Record<SchemeMark, string> = { "✓": "text-success", "!": "text-warning", "✕": "text-destructive", "": "" };
+
+/** Conversion Date — Admin override preferred; ✓ once the Admin has verified the plan. */
+export function conversionDateCell(p: SchemePlan): MarkedText {
+  const v = p.adminConversionDate ?? p.conversionDate;
+  if (!v) return { text: "—", mark: "" };
+  return { text: date(v), mark: p.adminVerifiedAt ? "✓" : "" };
+}
+/** Billing Date — Admin override preferred; ✓ once verified. */
+export function billingDateCell(p: SchemePlan): MarkedText {
+  const v = p.adminBillingDate ?? p.billingDate;
+  if (!v) return { text: "—", mark: "" };
+  return { text: date(v), mark: p.adminVerifiedAt ? "✓" : "" };
+}
+/** Booking Amount — Admin override preferred. ✓ Received · ! Partial · ✕ Not Received. */
+export function bookingCell(p: SchemePlan): MarkedText {
+  const admin = p.adminBookingStatus != null;
+  const status = admin ? p.adminBookingStatus : p.soBookingStatus;
+  const amount = admin ? p.adminBookingAmount : p.soBookingAmount;
+  if (!status) return { text: "—", mark: "" };
+  const label = SO_BOOKING_LABEL[status] ?? status;
+  const text = status !== "NOT_RECEIVED" && amount != null ? `${label} · ${money(amount)}` : label;
+  const mark: SchemeMark = status === "RECEIVED" ? "✓" : status === "PARTIAL" ? "!" : "✕";
+  return { text, mark };
+}
+/** Document Status — Admin override preferred. ✓ Received (soft/hard) · ! In Transit · ✕ Not Received. */
+export function documentCell(p: SchemePlan): MarkedText {
+  if (p.adminDocumentStatus) {
+    const s = p.adminDocumentStatus;
+    return { text: ADMIN_DOC_LABEL[s] ?? s, mark: s === "NOT_RECEIVED" ? "✕" : "✓" };
+  }
+  if (p.soDocumentStatus) {
+    const s = p.soDocumentStatus;
+    return { text: SO_DOC_LABEL[s] ?? s, mark: s === "RECEIVED" ? "✓" : s === "NOT_RECEIVED" ? "✕" : "!" };
+  }
+  return { text: "—", mark: "" };
+}
+/** Render a marked value (colored marker + text) consistently across tables. */
+export function MarkedValue({ v }: { v: MarkedText }) {
+  if (!v.mark) return <span>{v.text}</span>;
+  return <span className="inline-flex items-center gap-1"><span className={cn("font-semibold", MARK_CLASS[v.mark])}>{v.mark}</span>{v.text}</span>;
+}
 
 /** Read-only plan detail (used from Open). Verification is a separate Admin dialog; this never edits. */
 function PlanDrawer({ plan, onBack }: { plan: SchemePlan; onBack: () => void }) {

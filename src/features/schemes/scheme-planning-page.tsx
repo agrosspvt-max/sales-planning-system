@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, type SchemePlan } from "./scheme-detail-dialog";
+import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
 import { SchemeOfficerWorkspace, RunningSchemesTab, SchemePlanningView } from "./scheme-officer-workspace";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 
@@ -199,9 +199,13 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                                   <TableHead>Dealer</TableHead>
                                   <TableHead>Sales Officer</TableHead>
                                   <TableHead>State</TableHead>
-                                  <TableHead>Conversion Date</TableHead>
+                                  <TableHead>Planned Conversion</TableHead>
                                   <TableHead>Plan Status</TableHead>
                                   <TableHead>Scheme Status</TableHead>
+                                  <TableHead className="border-l">Conversion Date</TableHead>
+                                  <TableHead>Booking Amount</TableHead>
+                                  <TableHead>Document Status</TableHead>
+                                  <TableHead>Billing Date</TableHead>
                                   <TableHead className="text-right">Actions</TableHead>
                                 </TableRow>
                               </TableHeader>
@@ -214,6 +218,10 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                                     <TableCell>{r.expectedBillingDate ? formatDate(r.expectedBillingDate) : <span className="text-muted-foreground">—</span>}</TableCell>
                                     <TableCell><PlanStateBadge status={r.planStatus} /></TableCell>
                                     <TableCell>{r.planStatus === "APPROVED" ? <SchemeStatusBadge plan={r} /> : <span className="text-muted-foreground">—</span>}</TableCell>
+                                    <TableCell className="border-l whitespace-nowrap"><MarkedValue v={conversionDateCell(r)} /></TableCell>
+                                    <TableCell className="whitespace-nowrap"><MarkedValue v={bookingCell(r)} /></TableCell>
+                                    <TableCell className="whitespace-nowrap"><MarkedValue v={documentCell(r)} /></TableCell>
+                                    <TableCell className="whitespace-nowrap"><MarkedValue v={billingDateCell(r)} /></TableCell>
                                     <TableCell className="text-right">
                                       <div className="flex items-center justify-end gap-1">
                                         {canSubmit(r) && <Button size="sm" variant="outline" disabled={submit.isPending} onClick={() => submit.mutate(r.id)}><Send className="h-4 w-4" /> Submit</Button>}

@@ -34,7 +34,9 @@ export function RecoveryActions({
   const [returnReason, setReturnReason] = useState("");
 
   const base = `/api/recovery/plans/${id}`;
-  const isOwner = role === Role.SALES_OFFICER && officerId === userId;
+  // Owner = the officer the plan belongs to, whether a Sales Officer OR a Regional Manager who owns their
+  // own plan (mirrors the backend isPlanOwner, which already permits an RM to submit their own plan).
+  const isOwner = (role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER) && officerId === userId;
   const editable = status === "DRAFT" || status === "RETURNED" || status === "REJECTED";
   const canSubmit = totalDealers > 0 && remainingCount === 0;
 

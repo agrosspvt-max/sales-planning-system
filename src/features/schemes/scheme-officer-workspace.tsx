@@ -15,7 +15,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { PlanStateBadge, SchemeStatusBadge, type SchemePlan } from "./scheme-detail-dialog";
+import { PlanStateBadge, SchemeStatusBadge, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 
 const BENEFIT_LABEL: Record<string, string> = { DOMESTIC_TOUR: "Domestic Tour", DOMESTIC_COUPLE_TOUR: "Domestic Couple Tour", FOREIGN_TOUR: "Foreign Tour", CREDIT_NOTE: "Credit Note", OTHER: "Other" };
@@ -129,14 +129,23 @@ function MySchemesTab({ onOpen }: { onOpen: (id: string) => void }) {
               <div className="overflow-auto rounded-md border">
                 <Table>
                   <TableHeader>
+                    {/* Grouping band: plan info | Scheme Status | the four SO conversion details (Admin-final shown once verified). */}
+                    <TableRow className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      <TableHead colSpan={7} />
+                      <TableHead colSpan={4} className="border-l text-center">Conversion Details · SO / Admin-final</TableHead>
+                    </TableRow>
                     <TableRow>
                       <TableHead>Dealer</TableHead>
-                      <TableHead>Conversion Date</TableHead>
+                      <TableHead>Planned Conversion</TableHead>
                       <TableHead className="text-right">Schemes</TableHead>
                       <TableHead className="text-right">Total Amount</TableHead>
                       <TableHead>Planning Date</TableHead>
                       <TableHead>Plan Status</TableHead>
                       <TableHead>Scheme Status</TableHead>
+                      <TableHead className="border-l">Conversion Date</TableHead>
+                      <TableHead>Booking Amount</TableHead>
+                      <TableHead>Document Status</TableHead>
+                      <TableHead>Billing Date</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -156,6 +165,10 @@ function MySchemesTab({ onOpen }: { onOpen: (id: string) => void }) {
                             </button>
                           ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
+                        <TableCell className="border-l whitespace-nowrap"><MarkedValue v={conversionDateCell(p)} /></TableCell>
+                        <TableCell className="whitespace-nowrap"><MarkedValue v={bookingCell(p)} /></TableCell>
+                        <TableCell className="whitespace-nowrap"><MarkedValue v={documentCell(p)} /></TableCell>
+                        <TableCell className="whitespace-nowrap"><MarkedValue v={billingDateCell(p)} /></TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Check, X, Tag } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -73,6 +73,15 @@ function useLabelCtx(): LabelCtx {
 /** Resolve one label (override → default). */
 export function useLabel(key: LabelKey): string {
   return useLabelCtx().labels[key] ?? DEFAULT_LABELS[key];
+}
+
+/**
+ * Inline label text for structural controls that are NOT table headers — flip/tab buttons, view pills,
+ * and any header cell not rendered through <Th>. Renders the current (override → default) text globally;
+ * editing happens on the Admin Labels page. As a component it may be used anywhere in JSX, including maps.
+ */
+export function L({ k }: { k: LabelKey }): ReactNode {
+  return useLabel(k);
 }
 
 /* ------------------------- Admin edit-mode toggle ------------------------ */

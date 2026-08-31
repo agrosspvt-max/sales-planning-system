@@ -55,6 +55,15 @@ const weekEndDay = (weekNo: number, year: number, month0: number): number =>
   weekNo === 1 ? 7 : weekNo === 2 ? 14 : weekNo === 3 ? 22 : new Date(year, month0 + 1, 0).getDate();
 
 /**
+ * Inclusive day-of-month range of a business week, for a given calendar month. Exported so any other
+ * module that offers a W1–W4 selector (e.g. Scheme/Dealer Follow-up) reuses THIS single definition
+ * instead of restating the boundaries. Read-only helper — no data access, no side effects.
+ */
+export function businessWeekDayRange(weekNo: number, year: number, month0: number): { startDay: number; endDay: number } {
+  return { startDay: WEEK_START_DAY[weekNo] ?? 1, endDay: weekEndDay(weekNo, year, month0) };
+}
+
+/**
  * The plan's CALENDAR month as { year, month0 }. Derived from the season start month + the month's order
  * (Season 1st month + order−1), falling back to the cutoff date's month when the season has no start set.
  */

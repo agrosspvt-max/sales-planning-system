@@ -3,7 +3,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { CornerUpLeft, Send, Eye, ShieldCheck, ChevronRight, ChevronLeft, ChevronDown, Trash2, AlertTriangle } from "lucide-react";
+import { CornerUpLeft, Send, Eye, ShieldCheck, ChevronRight, ChevronLeft, ChevronDown } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatDate, formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { PillNav } from "@/features/planning/plan-list-ui";
+import { L, useLabel } from "@/features/labels/label-ui";
 import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
 import { schemeTable, verifyTint } from "./scheme-table-theme";
-import { SchemeOfficerWorkspace, RunningSchemesTab, SchemePlanningView } from "./scheme-officer-workspace";
+import { SchemeOfficerWorkspace, SchemePlanningView } from "./scheme-officer-workspace";
+import { SchemeCreatePlanWorkspace } from "./scheme-create-plan";
+import { SchemeOfficerViewPlan, DealerWiseComingSoon, SchemeWiseCollapsibleView } from "./scheme-view-plan";
+import { SchemeManagerModeLinks } from "./scheme-follow-up-view";
+import { SchemeMasterPage } from "./scheme-master-page";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 
 const uniq = (xs: (string | null)[]) => [...new Set(xs.filter(Boolean) as string[])];
@@ -42,12 +48,226 @@ function schemeSummary(plans: SchemePlan[]): string {
 }
 
 /**
- * Scheme Planning entry — role-aware. Sales Officers use the field-sales workflow (Running Schemes /
- * My Schemes with drafts); Regional Managers approve/reject/return their team's plans (planning approval
- * only); Super Admin verifies enrollment documents and enrolls dealers.
+ * Scheme Planning entry (/planning/scheme — CREATE PLAN) — role-aware. Sales Officers get the field-sales
+ * create flow (Running Schemes → planning page); Super Admin gets Scheme Master, since for an Admin
+ * "creating a plan" means authoring the scheme itself; Regional Managers keep their existing review
+ * workspace (approve/reject/return their team's plans, plus their own Running Schemes create tab).
  */
 export function SchemePlanningPage({ role, userId }: { role: Role; userId: string }) {
   if (role === Role.SALES_OFFICER) return <SchemeOfficerWorkspace />;
+  if (role === Role.SUPER_ADMIN) return <SchemeAdminCreatePlan role={role} />;
+  return <SchemeManagerCreatePlan role={role} userId={userId} />;
+}
+
+/** Team-officers dropdown source (RM's own Sales Officers). Reused by the RM Create Plan / View Plans shells. */
+function useTeamOfficers() {
+  return useQuery<{ id: string; name: string }[]>({ queryKey: ["scheme-team-officers"], queryFn: () => api.get("/api/schemes/team-officers") });
+}
+
+/** The scope pill row shared by the RM Create Plan and View Plans shells. */
+function RmScopeBar<T extends string>({ value, onChange, items, officers, officerId, onOfficer, showOfficer }: {
+  value: T; onChange: (v: T) => void; items: { value: T; label: string }[];
+  officers: { id: string; name: string }[]; officerId: string; onOfficer: (id: string) => void; showOfficer: boolean;
+}) {
+  return (
+    <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Scope</div>
+      <div className="flex flex-wrap items-center gap-3">
+        <PillNav value={value} onChange={onChange} items={items} />
+        {showOfficer && (
+          <NativeSelect className="w-56" placeholder="Select a Sales Officer…" value={officerId} onChange={(e) => onOfficer(e.target.value)} options={officers.map((o) => ({ value: o.id, label: o.name }))} />
+        )}
+      </div>
+      {showOfficer && officers.length === 0 && <p className="text-xs text-muted-foreground">No Sales Officers on your team yet.</p>}
+    </div>
+  );
+}
+
+/**
+ * Regional Manager → CREATE PLAN. The Sales-Officer create workflow, plus RM scope:
+ *   My Schemes    — the RM plans their own dealers (controlled `SchemeCreatePlanWorkspace`, self).
+ *   Team Schemes  — pick a team Sales Officer; the RM plans ON THEIR BEHALF (plan.salesOfficerId = that SO,
+ *                   enforced server-side by `resolveTargetOfficer`).
+ *   All Plan View — every team member as a section, each with the same collapsible create table.
+ * Review stays on View Plans (a separate flip), so this route is purely the planning surface.
+ */
+function SchemeManagerCreatePlan({ role, userId }: { role: Role; userId: string }) {
+  const [scope, setScope] = useState<"self" | "team" | "all">("self");
+  const [officerId, setOfficerId] = useState("");
+  const { data: officers = [] } = useTeamOfficers();
+  const lMy = useLabel("scheme_planning.view.my_schemes");
+  const lTeam = useLabel("scheme_planning.view.team_schemes");
+  const lAllView = useLabel("scheme_planning.view.all_plan_view");
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        crumbs={[{ label: "Planning" }, { label: "Create/View Plans", href: "/planning/create" }, { label: "Scheme Planning" }, { label: "Create Plan" }]}
+        title="Scheme Planning"
+        subtitle="Plan your own dealers, or plan on behalf of a Sales Officer on your team."
+      />
+      <SchemeManagerModeLinks active="planning" role={role} />
+      <RmScopeBar
+        value={scope}
+        onChange={(v) => { setScope(v); setOfficerId(""); }}
+        items={[{ value: "self", label: lMy }, { value: "team", label: lTeam }, { value: "all", label: lAllView }]}
+        officers={officers}
+        officerId={officerId}
+        onOfficer={setOfficerId}
+        showOfficer={scope === "team"}
+      />
+      {scope === "all" ? (
+        <SchemeAllPlanView userId={userId} officers={officers} />
+      ) : scope === "team" ? (
+        officerId
+          ? <SchemeCreatePlanWorkspace key={officerId} enableRmScope hideScopeSelector controlledOfficerId={officerId} userId={userId} />
+          : <div className="rounded-lg border bg-background py-10 text-center text-muted-foreground">Select a Sales Officer to plan on their behalf.</div>
+      ) : (
+        <SchemeCreatePlanWorkspace key="self" enableRmScope hideScopeSelector controlledOfficerId={userId} userId={userId} />
+      )}
+    </div>
+  );
+}
+
+/** All Plan View — the RM's whole team, one section per Sales Officer (own first), each reusing the exact
+ *  collapsible create table so the RM can plan on behalf of any member from a single screen. */
+function SchemeAllPlanView({ userId, officers }: { userId: string; officers: { id: string; name: string }[] }) {
+  const sections = [{ id: userId, name: "My Schemes (you)" }, ...officers];
+  return (
+    <div className="space-y-6">
+      {sections.map((o) => (
+        <div key={o.id} className="space-y-2">
+          <div className="text-sm font-semibold">{o.name}</div>
+          <SchemeCreatePlanWorkspace key={o.id} enableRmScope hideScopeSelector controlledOfficerId={o.id} userId={userId} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Regional Manager → VIEW PLANS. My Schemes / Team Schemes narrow to one officer (server-validated); All
+ * Plans is the team-wide, Sales-Officer-attributed view; Review flips to the existing (unchanged) review
+ * workspace, embedded so the outer chrome isn't duplicated.
+ */
+function SchemeManagerViewPlans({ role, userId }: { role: Role; userId: string }) {
+  const [scope, setScope] = useState<"self" | "team" | "all" | "review">("self");
+  const [officerId, setOfficerId] = useState("");
+  const [tab, setTab] = useState<"scheme" | "enrolled">("scheme");
+  const [planningId, setPlanningId] = useState<string | null>(null); // "Continue Planning" (My Schemes only)
+  const { data: officers = [] } = useTeamOfficers();
+  // Labels resolved unconditionally (before any early return) so hook order is stable.
+  const lMy = useLabel("scheme_planning.view.my_schemes");
+  const lTeam = useLabel("scheme_planning.view.team_schemes");
+  const lAll = useLabel("scheme_planning.view.all_plans");
+  const lReview = useLabel("scheme_planning.view.review");
+  const lSchemeWise = useLabel("scheme_planning.view.scheme_wise");
+  const lEnrolled = useLabel("scheme_planning.view.enrolled_scheme");
+
+  if (planningId) return <SchemePlanningView schemeId={planningId} onBack={() => setPlanningId(null)} />;
+
+  const effOfficer = scope === "self" ? userId : scope === "team" ? officerId : undefined;
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        crumbs={[{ label: "Planning" }, { label: "Create/View Plans", href: "/planning/create" }, { label: "Scheme Planning" }, { label: "View Plan" }]}
+        title="Scheme Planning"
+        subtitle="View your plans and your team's, or switch to Review to act on pending plans."
+      />
+      <SchemeManagerModeLinks active="view" role={role} />
+      <RmScopeBar
+        value={scope}
+        onChange={(v) => { setScope(v); setOfficerId(""); }}
+        items={[{ value: "self", label: lMy }, { value: "team", label: lTeam }, { value: "all", label: lAll }, { value: "review", label: lReview }]}
+        officers={officers}
+        officerId={officerId}
+        onOfficer={setOfficerId}
+        showOfficer={scope === "team"}
+      />
+
+      {scope === "review" ? (
+        <SchemeReviewWorkspace role={role} userId={userId} embedded />
+      ) : scope === "team" && !officerId ? (
+        <div className="rounded-lg border bg-background py-10 text-center text-muted-foreground">Select a Sales Officer to view their plans.</div>
+      ) : (
+        <>
+          <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">View</div>
+            <div className="flex flex-wrap items-center gap-3">
+              <PillNav value={tab} onChange={setTab} items={[{ value: "scheme", label: lSchemeWise }, { value: "enrolled", label: lEnrolled }]} />
+            </div>
+          </div>
+          {tab === "enrolled" ? (
+            <EnrolledSchemesView officerId={effOfficer} />
+          ) : (
+            <SchemeWiseCollapsibleView
+              onOpen={setPlanningId}
+              officerId={scope === "all" ? undefined : effOfficer}
+              groupByOfficer={scope === "all"}
+              ownUserId={userId}
+              showAction={scope === "self"}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Super Admin → Create Plan. This is the EXISTING Scheme Master, reused — not a copy of it. Every scheme
+ * behaviour (create, edit, Open/Closed + State filters, close/reopen, scheme period and last booking date,
+ * the installment rule builder, the Enrolled Scheme pill) comes from `SchemeMasterPage`, which remains the
+ * single source of truth and stays reachable from its own Master Data route. Only the breadcrumb trail and
+ * the mode bar are supplied here, so the page reads as part of Scheme Planning. Authorization is unchanged:
+ * every mutating scheme endpoint still enforces Super Admin server-side, and Regional Managers never reach
+ * this branch.
+ *
+ * Below it, the same scheme → dealers collapsible structure the field roles now plan with, in READ-ONLY form
+ * (`readOnly`): an Admin can see who has been planned into each running scheme and reach Info / View Document
+ * / Share, but gets no Add Dealer and no Save Draft / Submit. Admin authority is untouched — reviewing,
+ * verifying and acting on plans stay in View Plan, and nothing here makes Admin an SO-scoped planner.
+ */
+function SchemeAdminCreatePlan({ role }: { role: Role }) {
+  // Two inner options: "View All Scheme" (the Scheme Master list, its internal Enrolled pill hidden here)
+  // and "Planned Scheme" (the existing read-only Planned Dealers by Scheme section — moved, not redesigned).
+  const [adminView, setAdminView] = useState<"schemes" | "planned">("schemes");
+  return (
+    <div className="space-y-5">
+      <SchemeMasterPage
+        hideViewToggle
+        crumbs={[{ label: "Planning" }, { label: "Create/View Plans", href: "/planning/create" }, { label: "Scheme Planning" }, { label: "Create Plan" }]}
+        nav={
+          <div className="space-y-3">
+            {/* Top-level module bar — unchanged (Create Plan | View Plan | Follow-up Plans). */}
+            <SchemeManagerModeLinks active="planning" role={role} />
+            {/* Inner two-option toggle for Admin Create Plan. */}
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setAdminView("schemes")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", adminView === "schemes" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.view_all_scheme" /></button>
+              <button type="button" onClick={() => setAdminView("planned")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", adminView === "planned" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.planned_scheme" /></button>
+            </div>
+          </div>
+        }
+        hideList={adminView !== "schemes"}
+      />
+      {adminView === "planned" && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Planned Dealers by Scheme</div>
+          <SchemeCreatePlanWorkspace readOnly />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Scheme Planning · VIEW PLAN (/planning/scheme/plans) — role-aware in the same way. Sales Officers get their
+ * own View Plan workspace (Scheme-wise / Dealer-wise / Enrolled Scheme); Super Admin gets the same three-way
+ * structure over organization-wide data, and Regional Managers get the review workspace exactly as before.
+ * Both manager roles render `SchemeReviewWorkspace`; only its chrome differs (see there).
+ */
+export function SchemeViewPlansPage({ role, userId }: { role: Role; userId: string }) {
+  if (role === Role.SALES_OFFICER) return <SchemeOfficerViewPlan />;
+  if (role === Role.REGIONAL_MANAGER) return <SchemeManagerViewPlans role={role} userId={userId} />;
   return <SchemeReviewWorkspace role={role} userId={userId} />;
 }
 
@@ -55,12 +275,30 @@ interface SchemeGroup { schemeId: string; schemeName: string; plans: SchemePlan[
 type ReasonPrompt = { title: string; confirmLabel: string; require: boolean; run: (remarks: string) => void };
 
 /**
+ * Panels this workspace can show. `review` is the grouped scheme → dealers table; `running` is the RM-only
+ * create tab; `enrolled` and `dealer` are the shared Enrolled Scheme view and the Dealer-wise placeholder.
+ * The Admin View Plan tabs below are a presentation of the same states — no second state machine.
+ */
+type ReviewView = "review" | "running" | "enrolled" | "dealer";
+
+
+/**
  * RM/Admin review — the SAME grouped, collapsible SCHEME → DEALERS structure for both roles. Only the
  * available actions differ by role: RM approves/returns/rejects planning (incl. Return Entire Scheme);
  * Super Admin verifies enrollment documents. Row-level DealerSchemePlan statuses are never changed by the
  * grouping itself; every action reuses the existing endpoints.
+ *
+ * The CHROME around that table is role-shaped, because the two roles reach it from different places:
+ *   Regional Manager — rendered at BOTH /planning/scheme and /planning/scheme/plans, fronted by the
+ *     [Scheme Planning | Follow-up Plans] bar and the Review · Running Schemes · Enrolled Scheme pills.
+ *     Unchanged.
+ *   Super Admin — rendered only at /planning/scheme/plans (Create Plan is Scheme Master), presented as
+ *     View Plan: [Create Plan | View Plan | Follow-up Plans] and the [Scheme-wise | Dealer-wise |
+ *     Enrolled Scheme] tabs, where Scheme-wise is this very table with every Admin action intact.
+ * The data is identical either way and stays server-scoped: `listSchemePlans` applies `getOfficerScope`, so
+ * an Admin receives organization-wide plans and an RM their group's — nothing is filtered in the browser.
  */
-function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string }) {
+function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role; userId: string; embedded?: boolean }) {
   const qc = useQueryClient();
   const isManager = role === Role.REGIONAL_MANAGER;
   const isAdmin = role === Role.SUPER_ADMIN;
@@ -71,10 +309,14 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
   const [expanded, setExpanded] = useState<Set<string>>(new Set()); // collapsed by default
   const [reason, setReason] = useState<ReasonPrompt | null>(null);
   // RM gets a "Running Schemes" tab to CREATE plans (skips RM approval); Admin has no create.
-  const [view, setView] = useState<"review" | "running" | "enrolled">("review");
-  const [runId, setRunId] = useState<string | null>(null); // scheme being planned in the Running tab
+  const [view, setView] = useState<ReviewView>("review");
   const [verifyCols, setVerifyCols] = useState(true); // horizontal collapse of the 4 verification columns (UI-only, expanded by default)
-  const [deleteTarget, setDeleteTarget] = useState<SchemeGroup | null>(null); // Super-Admin permanent-delete flow
+  // Admin View-Plan tab labels (global label dictionary).
+  const adminViewTabs: { value: ReviewView; label: string }[] = [
+    { value: "review", label: useLabel("scheme_planning.view.scheme_wise") },
+    { value: "dealer", label: useLabel("scheme_planning.view.dealer_wise") },
+    { value: "enrolled", label: useLabel("scheme_planning.view.enrolled_scheme") },
+  ];
   const invalidate = () => qc.invalidateQueries({ queryKey: ["scheme-plans"] });
 
   const groups = useMemo<SchemeGroup[]>(() => {
@@ -123,34 +365,67 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
 
   return (
     <div className="space-y-5">
+      {/* When `embedded` (the RM View Plans "Review" flip), the outer chrome is supplied by the host, so the
+          workspace renders only its own pills + table — the review functionality itself is unchanged. */}
+      {!embedded && (
       <PageHeader
-        crumbs={[{ label: "Planning" }, { label: "Scheme Planning" }]}
+        crumbs={
+          isAdmin
+            ? [{ label: "Planning" }, { label: "Create/View Plans", href: "/planning/create" }, { label: "Scheme Planning" }, { label: "View Plan" }]
+            : [{ label: "Planning" }, { label: "Scheme Planning" }]
+        }
         title="Scheme Planning"
-        subtitle={isManager ? "Approve, reject or return your team's scheme plans." : "Verify enrollment documents and enroll dealers."}
+        subtitle={isManager ? "Approve, reject or return your team's scheme plans." : "Every scheme planned across the organization — verify enrollment documents and enroll dealers."}
         actions={undefined}
       />
+      )}
 
-      <div className="flex gap-2">
-        <button type="button" onClick={() => setView("review")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "review" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>Review</button>
-        {isManager && <button type="button" onClick={() => { setView("running"); setRunId(null); }} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "running" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>Running Schemes</button>}
-        <button type="button" onClick={() => setView("enrolled")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "enrolled" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>Enrolled Scheme</button>
-      </div>
+      {/*
+        Level 1 — Admin: Create Plan | View Plan | Follow-up Plans (View Plan active, since Create Plan is
+        Scheme Master). RM: rendered by the host when embedded; otherwise the standalone bar.
+      */}
+      {!embedded && <SchemeManagerModeLinks active={isAdmin ? "view" : "planning"} role={role} />}
 
-      {view === "enrolled" ? <EnrolledSchemesView /> : view === "running" ? (
-        runId ? <SchemePlanningView schemeId={runId} enableRmScope onBack={() => setRunId(null)} /> : <RunningSchemesTab onView={setRunId} />
+      {/*
+        Level 2 — Admin: the three View Plan tabs, matching the Sales Officer's structure (no List /
+        Collapsible toggle — that was deliberately removed). RM: the existing Review · Running Schemes ·
+        Enrolled Scheme pills, unchanged.
+      */}
+      {isAdmin ? (
+        <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">View</div>
+          <div className="flex flex-wrap items-center gap-3">
+            <PillNav value={view} onChange={setView} items={adminViewTabs} />
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setView("review")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "review" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.review" /></button>
+          {isManager && <button type="button" onClick={() => setView("running")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "running" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.running_schemes" /></button>}
+          <button type="button" onClick={() => setView("enrolled")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "enrolled" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.enrolled_scheme" /></button>
+        </div>
+      )}
+
+      {view === "enrolled" ? <EnrolledSchemesView /> : view === "dealer" ? <DealerWiseComingSoon /> : view === "running" ? (
+        /*
+          RM create tab — the same collapsible Create Plan workspace the Sales Officer uses, with the RM's
+          existing My Dealers / My Team → Sales Officer scope control (`enableRmScope`). The scope itself is
+          still resolved server-side by `resolveTargetOfficer`, so an RM can only plan for their own team.
+        */
+        <SchemeCreatePlanWorkspace enableRmScope userId={userId} />
       ) : (
       <div className={schemeTable.outer}>
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead className="w-8" />
-              <TableHead>Scheme</TableHead>
-              <TableHead>Dealers</TableHead>
-              <TableHead>Sales Officer(s)</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Plan Status</TableHead>
-              <TableHead>Scheme Status</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
+              <TableHead><L k="scheme_planning.col.scheme" /></TableHead>
+              <TableHead><L k="scheme_planning.col.dealers" /></TableHead>
+              <TableHead><L k="scheme_planning.col.sales_officers" /></TableHead>
+              <TableHead><L k="scheme_planning.col.state" /></TableHead>
+              <TableHead><L k="scheme_planning.col.plan_status" /></TableHead>
+              <TableHead><L k="scheme_planning.col.scheme_status" /></TableHead>
+              <TableHead className="text-right"><L k="scheme_planning.col.actions" /></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -190,17 +465,6 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                             <CornerUpLeft className="h-4 w-4" /> Return Entire Scheme
                           </Button>
                         )}
-                        {isAdmin && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                            onClick={() => setDeleteTarget(g)}
-                            title="Permanently delete this entire scheme"
-                          >
-                            <Trash2 className="h-4 w-4" /> Delete Scheme
-                          </Button>
-                        )}
                       </TableCell>
                     </TableRow>
                     {open && (
@@ -211,12 +475,12 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                             <Table>
                               <TableHeader>
                                 <TableRow>
-                                  <TableHead>Dealer</TableHead>
-                                  <TableHead>Sales Officer</TableHead>
-                                  <TableHead>State</TableHead>
-                                  <TableHead>Planned Conversion</TableHead>
-                                  <TableHead>Plan Status</TableHead>
-                                  <TableHead>Scheme Status</TableHead>
+                                  <TableHead><L k="scheme_planning.nested.dealer" /></TableHead>
+                                  <TableHead><L k="scheme_planning.nested.sales_officer" /></TableHead>
+                                  <TableHead><L k="scheme_planning.nested.state" /></TableHead>
+                                  <TableHead><L k="scheme_planning.nested.planned_conversion" /></TableHead>
+                                  <TableHead><L k="scheme_planning.nested.plan_status" /></TableHead>
+                                  <TableHead><L k="scheme_planning.nested.scheme_status" /></TableHead>
                                   <TableHead className="w-8 border-l p-0 text-center">
                                     <button type="button" title={verifyCols ? "Hide verification details" : "Show verification details"} aria-label={verifyCols ? "Hide verification details" : "Show verification details"} onClick={() => setVerifyCols((v) => !v)} className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
                                       {verifyCols ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -224,13 +488,13 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
                                   </TableHead>
                                   {verifyCols && (
                                     <>
-                                      <TableHead className={verifyTint.conversion.head}>Conversion Date</TableHead>
-                                      <TableHead className={verifyTint.booking.head}>Booking Amount</TableHead>
-                                      <TableHead className={verifyTint.document.head}>Document Status</TableHead>
-                                      <TableHead className={verifyTint.billing.head}>Billing Date</TableHead>
+                                      <TableHead className={verifyTint.conversion.head}><L k="scheme_planning.nested.conversion_date" /></TableHead>
+                                      <TableHead className={verifyTint.booking.head}><L k="scheme_planning.nested.booking_amount" /></TableHead>
+                                      <TableHead className={verifyTint.document.head}><L k="scheme_planning.nested.document_status" /></TableHead>
+                                      <TableHead className={verifyTint.billing.head}><L k="scheme_planning.nested.billing_date" /></TableHead>
                                     </>
                                   )}
-                                  <TableHead className="border-l text-right">Actions</TableHead>
+                                  <TableHead className="border-l text-right"><L k="scheme_planning.nested.actions" /></TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -309,7 +573,6 @@ function SchemeReviewWorkspace({ role, userId }: { role: Role; userId: string })
       {detail && <SchemePlanDialog plan={detail} canVerify={false} onClose={() => setDetail(null)} />}
       {verify && <AdminVerifyDialog plan={verify} onClose={() => setVerify(null)} onSaved={() => { setVerify(null); invalidate(); }} />}
       {reason && <ReasonModal prompt={reason} onClose={() => setReason(null)} />}
-      {deleteTarget && <DeleteSchemeDialog group={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={() => { setDeleteTarget(null); invalidate(); }} />}
     </div>
   );
 }
@@ -331,101 +594,6 @@ function ReasonModal({ prompt, onClose }: { prompt: ReasonPrompt; onClose: () =>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button className={cn(prompt.confirmLabel.toLowerCase().includes("reject") && "bg-destructive text-destructive-foreground hover:bg-destructive/90")} disabled={invalid} onClick={() => { prompt.run(remarks.trim()); onClose(); }}>{prompt.confirmLabel}</Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/* --------------------------- Permanent scheme deletion (Super Admin) --------------------------- */
-
-interface DeletionImpact { schemeId: string; schemeName: string; dealerPlans: number; instances: number; installments: number; installmentRules: number; states: number }
-const MIN_DELETE_REASON = 10;
-
-/**
- * Two-step, high-friction permanent deletion. Step 1 warns + collects a mandatory reason (≥10 chars);
- * step 2 shows the real DB-computed impact counts + the reason and requires a final "Permanently Delete".
- * The button self-disables while the request is in flight (double-submit guard). Nothing is deleted until
- * the final click; Cancel at any point aborts with no changes. Authorization is also enforced server-side.
- */
-function DeleteSchemeDialog({ group, onClose, onDeleted }: { group: SchemeGroup; onClose: () => void; onDeleted: () => void }) {
-  const [step, setStep] = useState<1 | 2>(1);
-  const [reason, setReason] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const trimmed = reason.trim();
-  const reasonValid = trimmed.length >= MIN_DELETE_REASON;
-
-  // Real impact counts, fetched once when the dialog opens (never inferred).
-  const { data: impact, isLoading: impactLoading } = useQuery<DeletionImpact>({
-    queryKey: ["scheme-deletion-impact", group.schemeId],
-    queryFn: () => api.get(`/api/schemes/${group.schemeId}/deletion-impact`),
-  });
-
-  const del = useMutation({
-    mutationFn: () => api.del(`/api/schemes/${group.schemeId}`, { reason: trimmed }),
-    onSuccess: () => { alert(`Scheme '${group.schemeName}' was permanently deleted.`); onDeleted(); },
-    onError: (e) => setError((e as Error).message || "Scheme could not be deleted. No changes were made."),
-  });
-
-  return (
-    <Dialog open onOpenChange={(o) => { if (!o && !del.isPending) onClose(); }}>
-      <DialogContent className="max-w-md">
-        {step === 1 ? (
-          <>
-            <DialogHeader><DialogTitle className="flex items-center gap-2 text-destructive"><AlertTriangle className="h-5 w-5" /> Delete Scheme</DialogTitle></DialogHeader>
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">You are about to permanently delete:</p>
-              <p className="text-center text-2xl font-bold">{group.schemeName}</p>
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-                This permanently removes this scheme and all its related planning, enrollment, instance, installment and other scheme-owned records. This action cannot be undone.
-              </div>
-              <div className="space-y-1.5">
-                <Label>Reason for deletion *</Label>
-                <Textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} autoFocus placeholder="Enter the reason for permanently deleting this scheme" />
-                <p className="text-xs text-muted-foreground">Required — at least {MIN_DELETE_REASON} characters.</p>
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={onClose}>Cancel</Button>
-              <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={!reasonValid} onClick={() => { setError(null); setStep(2); }}>Continue</Button>
-            </DialogFooter>
-          </>
-        ) : (
-          <>
-            <DialogHeader><DialogTitle className="flex items-center gap-2 text-destructive"><AlertTriangle className="h-5 w-5" /> Permanently Delete Scheme?</DialogTitle></DialogHeader>
-            <div className="space-y-3 text-sm">
-              <p><span className="text-muted-foreground">Scheme:</span> <span className="font-semibold">{group.schemeName}</span></p>
-              <div>
-                <p className="text-muted-foreground">This will permanently remove:</p>
-                {impactLoading ? (
-                  <Skeleton className="mt-1 h-24 w-full" />
-                ) : impact ? (
-                  <ul className="mt-1 list-disc space-y-0.5 pl-5">
-                    <li>{impact.dealerPlans} dealer scheme plan{impact.dealerPlans === 1 ? "" : "s"}</li>
-                    <li>{impact.instances} scheme instance{impact.instances === 1 ? "" : "s"}</li>
-                    <li>{impact.installments} installment record{impact.installments === 1 ? "" : "s"}</li>
-                    <li>{impact.installmentRules} installment rule{impact.installmentRules === 1 ? "" : "s"}</li>
-                    <li>{impact.states} state link{impact.states === 1 ? "" : "s"}</li>
-                  </ul>
-                ) : (
-                  <p className="mt-1 text-muted-foreground">Related scheme-owned records will also be permanently removed.</p>
-                )}
-              </div>
-              <div>
-                <p className="text-muted-foreground">Reason:</p>
-                <p className="mt-0.5 whitespace-pre-wrap rounded-md border bg-muted/30 p-2 italic">&ldquo;{trimmed}&rdquo;</p>
-              </div>
-              <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <span>This action permanently deletes the scheme and its related records. This cannot be undone.</span>
-              </div>
-              {error && <p className="text-sm text-destructive">{error}</p>}
-            </div>
-            <DialogFooter>
-              <Button variant="outline" disabled={del.isPending} onClick={() => { if (!del.isPending) onClose(); }}>Cancel</Button>
-              <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={del.isPending} onClick={() => { setError(null); del.mutate(); }}>{del.isPending ? "Deleting Scheme…" : "Permanently Delete"}</Button>
-            </DialogFooter>
-          </>
-        )}
       </DialogContent>
     </Dialog>
   );

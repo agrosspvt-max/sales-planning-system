@@ -24,6 +24,7 @@ import {
   Rocket,
   Upload,
   PackageCheck,
+  Wallet,
   type LucideIcon,
 } from "lucide-react";
 
@@ -66,6 +67,9 @@ export const NAV_ITEMS: NavItem[] = [
     roles: ALL_ROLES,
     group: "Planning",
   },
+  // Payment Management — record actual money received on enrolled schemes + browse the payment history.
+  // Admin-only, matching the Enrolled Scheme received-payment authority.
+  { label: "Payments", href: "/payments", icon: Wallet, roles: ADMIN_ONLY, group: "Planning" },
   // Requests — Sales Officers raise them; RM/Admin act on them. CN Requests is the first type.
   { label: "CN Requests", href: "/requests/cn", icon: FileText, roles: ALL_ROLES, group: "Requests" },
   { label: "My Account", href: "/account", icon: Users, roles: ALL_ROLES, group: "Insights" },
@@ -100,6 +104,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Planning Configuration", href: "/masters/planning-config", icon: SlidersHorizontal, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Recovery Settings", href: "/masters/recovery-config", icon: SlidersHorizontal, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Scheme Master", href: "/masters/schemes", icon: FileText, roles: ADMIN_ONLY, group: "Master Data" },
+  { label: "Labels", href: "/masters/labels", icon: Tags, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Dealer Import Wizard", href: "/masters/dealer-import", icon: FileUp, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Product Price Import", href: "/masters/product-price-import", icon: FileSpreadsheet, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Import History", href: "/masters/import-history", icon: History, roles: ADMIN_ONLY, group: "Master Data" },

@@ -3,7 +3,7 @@ import { Role, SchemeStatus, SchemeEnrollmentStatus } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { getOfficerScope } from "@/lib/scope";
+import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { ensureInstances } from "./scheme-planning.server";
 
@@ -23,11 +23,45 @@ function addDays(base: Date, days: number): Date {
 
 /* --------------------------- Installment generation --------------------------- */
 
-type RuleRow = { installmentNumber: number; calculationType: string; value: unknown; daysAfterBillingDate: number };
+export interface InstallmentRuleRow { installmentNumber: number; calculationType: string; value: unknown; daysAfterBillingDate: number }
+type RuleRow = InstallmentRuleRow;
 
 /** Planned amount for a rule row against the scheme's With-GST value. */
 function plannedAmountFor(rule: RuleRow, schemeValueWithGST: number): number {
   return rule.calculationType === "PERCENTAGE" ? round2((schemeValueWithGST * Number(rule.value)) / 100) : round2(Number(rule.value));
+}
+
+export interface DerivedInstallment { installmentNumber: number; plannedAmount: number; plannedDate: Date | null }
+
+/**
+ * PURE — the schedule a set of installment rules produces for one billing date. No DB access, no writes.
+ * `ensureInstanceInstallments` PERSISTS exactly this, and read-only consumers (Scheme/Dealer Follow-up)
+ * use it to DISPLAY the schedule of an instance whose rows have not been generated yet — so the two paths
+ * can never disagree about amounts or dates, and merely viewing a report never creates rows.
+ */
+export function derivedInstallmentSchedule(rules: InstallmentRuleRow[], schemeValueWithGST: number, billingDate: Date | null): DerivedInstallment[] {
+  return rules
+    .slice()
+    .sort((a, b) => a.installmentNumber - b.installmentNumber)
+    .map((r) => ({
+      installmentNumber: r.installmentNumber,
+      plannedAmount: plannedAmountFor(r, schemeValueWithGST),
+      plannedDate: billingDate ? addDays(billingDate, r.daysAfterBillingDate) : null,
+    }));
+}
+
+/**
+ * PURE — which billing date drives an instance's schedule (the legacy/new-flow rule, unchanged):
+ * new Admin flow (`plan.adminVerifiedAt` set) uses ONLY `instance.adminBillingDate`; legacy records fall
+ * back to the plan-level admin/SO/expected dates. Exported so read-only consumers resolve it identically.
+ */
+export function resolveInstanceBillingDate(
+  plan: { adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null },
+  instance: { adminBillingDate: Date | null },
+): Date | null {
+  return plan.adminVerifiedAt != null
+    ? instance.adminBillingDate
+    : (instance.adminBillingDate ?? plan.adminBillingDate ?? plan.billingDate ?? plan.expectedBillingDate);
 }
 
 /**
@@ -54,17 +88,26 @@ async function ensureInstanceInstallments(instanceId: string): Promise<void> {
   const rules = plan.scheme.installmentRules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber);
   if (rules.length === 0) return;
   const gst = money(plan.scheme.schemeValueWithGST);
-  const isNewFlow = plan.adminVerifiedAt != null;
-  const billing = isNewFlow ? inst.adminBillingDate : (inst.adminBillingDate ?? plan.adminBillingDate ?? plan.billingDate ?? plan.expectedBillingDate);
+  const billing = resolveInstanceBillingDate(plan, inst);
   await prisma.dealerSchemeInstallment.createMany({
-    data: rules.map((r) => ({
+    data: derivedInstallmentSchedule(rules, gst, billing).map((r) => ({
       instanceId,
       installmentNumber: r.installmentNumber,
-      plannedAmount: plannedAmountFor(r, gst),
-      plannedDate: billing ? addDays(billing, r.daysAfterBillingDate) : null,
+      plannedAmount: r.plannedAmount,
+      plannedDate: r.plannedDate,
       status: "PENDING",
     })),
   });
+}
+
+/**
+ * Guarantee every instance of an enrolled plan has its installment rows generated. Idempotent (each call
+ * only inserts where an instance has none yet). Used by the Payment Management flow so a payment always has
+ * concrete installment rows to allocate against, even if the Enrolled Scheme view was never opened first.
+ */
+export async function ensureAllInstallments(planId: string): Promise<void> {
+  const instances = await ensureInstances(planId);
+  for (const inst of instances) await ensureInstanceInstallments(inst.id);
 }
 
 /* --------------------------- Status helpers --------------------------- */
@@ -75,20 +118,26 @@ export interface InstallmentRow {
 }
 type RawInst = { id: string; installmentNumber: number; plannedAmount: unknown; plannedDate: Date | null; receivedAmount: unknown; receivedDate: Date | null; status: string };
 
-/** Derive an installment's display status: RECEIVED if paid; OVERDUE if pending & past planned date; else PENDING. */
+/**
+ * Derive an installment's display status from its rolled-up received amount (maintained from payment
+ * allocations): RECEIVED (settled, received ≥ planned); PARTIAL (0 < received < planned); OVERDUE (nothing
+ * received & past planned date); else PENDING.
+ */
 function installmentStatus(i: RawInst, now: Date): string {
-  if (i.receivedAmount != null) return "RECEIVED";
+  const received = i.receivedAmount == null ? 0 : money(i.receivedAmount);
+  const planned = money(i.plannedAmount);
+  if (received > 0) return received + 0.005 >= planned ? "RECEIVED" : "PARTIAL";
   if (i.plannedDate && i.plannedDate < now) return "OVERDUE";
   return "PENDING";
 }
 
-/** Dealer-level payment status rolled up from its installments. */
+/** Dealer-level payment status rolled up from its installments. PARTIAL counts as some money received. */
 function dealerStatus(insts: { status: string }[]): string {
   if (insts.length === 0) return "Enrolled";
-  const received = insts.filter((i) => i.status === "RECEIVED").length;
-  if (received === insts.length) return "Completed";
+  const settled = insts.filter((i) => i.status === "RECEIVED").length;
+  if (settled === insts.length) return "Completed";
   if (insts.some((i) => i.status === "OVERDUE")) return "Overdue";
-  if (received > 0) return "Installment Received";
+  if (insts.some((i) => i.status === "RECEIVED" || i.status === "PARTIAL")) return "Installment Received";
   return "Installment Pending";
 }
 
@@ -98,11 +147,14 @@ export interface EnrolledSchemeListRow {
   id: string; schemeName: string; enrolledDealers: number; startDate: string | null; endDate: string | null; isPerpetual: boolean; status: string;
 }
 
-/** Schemes that have at least one ENROLLED dealer within the caller's scope — one row per scheme. */
-export async function enrolledSchemes(ctx: AuthContext): Promise<EnrolledSchemeListRow[]> {
+/** Schemes that have at least one ENROLLED dealer within the caller's scope — one row per scheme.
+ *  Optional `officerId` narrows an RM/Admin to a single Sales Officer (server-validated). */
+export async function enrolledSchemes(ctx: AuthContext, officerId?: string): Promise<EnrolledSchemeListRow[]> {
   const scope = await getOfficerScope(ctx);
+  if (officerId) await assertOfficerInScope(ctx, officerId);
+  const officerFilter = officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
   const plans = (await prisma.dealerSchemePlan.findMany({
-    where: { enrollmentStatus: SchemeEnrollmentStatus.ENROLLED, ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }) },
+    where: { enrollmentStatus: SchemeEnrollmentStatus.ENROLLED, ...officerFilter },
     select: { schemeId: true, scheme: { select: { schemeName: true, startDate: true, endDate: true, isPerpetual: true, status: true } } },
   })) as { schemeId: string; scheme: { schemeName: string; startDate: Date | null; endDate: Date | null; isPerpetual: boolean; status: string } }[];
 
@@ -145,8 +197,9 @@ export interface EnrolledSchemeDetail {
   canEditReceived: boolean; // Admin only
 }
 
-export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string): Promise<EnrolledSchemeDetail> {
+export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string, officerId?: string): Promise<EnrolledSchemeDetail> {
   const scope = await getOfficerScope(ctx);
+  if (officerId) await assertOfficerInScope(ctx, officerId);
   const scheme = (await prisma.scheme.findUnique({
     where: { id: schemeId },
     include: { states: { include: { group: { select: { name: true } } } }, installmentRules: true },
@@ -158,7 +211,7 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string): 
   if (!scheme) throw new ApiError(404, "Scheme not found");
 
   const plans = (await prisma.dealerSchemePlan.findMany({
-    where: { schemeId, enrollmentStatus: SchemeEnrollmentStatus.ENROLLED, ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }) },
+    where: { schemeId, enrollmentStatus: SchemeEnrollmentStatus.ENROLLED, ...(officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } }) },
     select: { id: true },
   })) as { id: string }[];
   // Ensure each enrolled plan has its instances, then lazily generate each instance's schedule.
@@ -288,46 +341,32 @@ export async function updateBillingDate(ctx: AuthContext, planId: string, raw: u
   return updateInstanceBillingDate(ctx, first.id, raw);
 }
 
+// Planned amount/date only. Received amount/date are NO LONGER editable here — they are the rollup of
+// SchemePayment allocations and are maintained solely by the Payment Management flow (addSchemePayment).
 const installmentPatchSchema = z.object({
   plannedAmount: z.coerce.number().min(0).optional(),
   plannedDate: z.coerce.date().nullable().optional(),
-  receivedAmount: z.coerce.number().min(0).nullable().optional(),
-  receivedDate: z.coerce.date().nullable().optional(),
 });
 
 /**
- * Update one installment. SO/RM (scoped) may edit planned amount/date only. Super Admin may also edit the
- * received amount/date (payment truth). Received-amount presence drives the stored status.
+ * Update one installment's PLANNED amount/date (SO/RM/Admin, scoped). Received amount/date are read-only and
+ * can only change through a recorded payment (see `addSchemePayment`), so this endpoint no longer accepts
+ * them — that keeps payment records the single source of truth for money received (§9/§25).
  */
 export async function updateInstallment(ctx: AuthContext, installmentId: string, raw: unknown): Promise<{ ok: true }> {
-  const inst = (await prisma.dealerSchemeInstallment.findUnique({ where: { id: installmentId }, select: { id: true, receivedDate: true, instance: { select: { dealerSchemePlan: { select: { salesOfficerId: true } } } } } })) as
-    { id: string; receivedDate: Date | null; instance: { dealerSchemePlan: { salesOfficerId: string } } } | null;
+  const inst = (await prisma.dealerSchemeInstallment.findUnique({ where: { id: installmentId }, select: { id: true, instance: { select: { dealerSchemePlan: { select: { salesOfficerId: true } } } } } })) as
+    { id: string; instance: { dealerSchemePlan: { salesOfficerId: string } } } | null;
   if (!inst) throw new ApiError(404, "Installment not found");
   const scope = await getOfficerScope(ctx);
   if (!scope.all && !scope.ids.includes(inst.instance.dealerSchemePlan.salesOfficerId)) throw new ApiError(403, "You cannot manage this scheme plan");
-  const patch = installmentPatchSchema.parse(raw);
-  const isAdmin = ctx.role === Role.SUPER_ADMIN;
-
-  // Guard: only the Super Admin may touch received fields.
-  if (!isAdmin && (patch.receivedAmount !== undefined || patch.receivedDate !== undefined)) {
-    throw new ApiError(403, "Only the Super Admin can record received payments");
-  }
   if (![Role.SALES_OFFICER, Role.REGIONAL_MANAGER, Role.SUPER_ADMIN].includes(ctx.role)) throw new ApiError(403, "Not allowed");
+  const patch = installmentPatchSchema.parse(raw);
 
   const data: Record<string, unknown> = { updatedById: ctx.userId };
   if (patch.plannedAmount !== undefined) data.plannedAmount = patch.plannedAmount;
   if (patch.plannedDate !== undefined) data.plannedDate = patch.plannedDate;
-  if (isAdmin && patch.receivedAmount !== undefined) data.receivedAmount = patch.receivedAmount;
-  if (isAdmin && patch.receivedDate !== undefined) data.receivedDate = patch.receivedDate;
-
-  // Keep stored status consistent with received amount (final vs pending). Overdue is derived on read.
-  if (isAdmin && patch.receivedAmount !== undefined) {
-    data.status = patch.receivedAmount != null ? "RECEIVED" : "PENDING";
-    if (patch.receivedAmount != null && patch.receivedDate === undefined && !inst.receivedDate) data.receivedDate = new Date();
-    if (patch.receivedAmount == null) data.receivedDate = null;
-  }
 
   await prisma.dealerSchemeInstallment.update({ where: { id: installmentId }, data });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemeInstallment", entityId: installmentId, summary: "Enrolled installment updated" });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemeInstallment", entityId: installmentId, summary: "Enrolled installment planned values updated" });
   return { ok: true };
 }

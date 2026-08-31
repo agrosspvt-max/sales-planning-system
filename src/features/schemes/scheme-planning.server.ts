@@ -3,7 +3,7 @@ import { Role, SchemeStatus, SchemePlanStatus, SchemeEnrollmentStatus, SchemePla
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { getOfficerScope } from "@/lib/scope";
+import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { refreshSchemeStatuses } from "./scheme-master.server";
 
@@ -164,15 +164,132 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
 
 /* --------------------------------- Listing --------------------------------- */
 
-/** Scoped list: SO → own; RM → their team; Admin → all. Optional `schemeId` filter (for the detail view). */
-export async function listSchemePlans(ctx: AuthContext, schemeId?: string): Promise<SchemePlanRow[]> {
+/**
+ * Scoped list: SO → own; RM → their team; Admin → all. Optional `schemeId` filter (for the detail view).
+ * Optional `officerId` narrows an RM (or Admin) to a SINGLE Sales Officer — validated server-side against
+ * the caller's scope, so it can only ever restrict, never widen, what `getOfficerScope` already allows.
+ */
+export async function listSchemePlans(ctx: AuthContext, schemeId?: string, officerId?: string): Promise<SchemePlanRow[]> {
   const scope = await getOfficerScope(ctx);
+  if (officerId) await assertOfficerInScope(ctx, officerId);
+  const officerFilter = officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
   const rows = (await prisma.dealerSchemePlan.findMany({
-    where: { ...(schemeId ? { schemeId } : {}), ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }) },
+    where: { ...(schemeId ? { schemeId } : {}), ...officerFilter },
     include: PLAN_INCLUDE,
     orderBy: { createdAt: "desc" },
   })) as unknown as RawPlan[];
   return rows.map(toPlanRow);
+}
+
+/* --------------------------------- Scheme-wise summary --------------------------------- */
+
+/**
+ * One row per scheme for the Sales Officer's View Plan → Scheme-wise → List View.
+ *
+ * Everything except `dealersPlanned` is counted in SCHEME UNITS, never dealers: a plan represents
+ * `numberOfSchemes` units, and approval / conversion / Admin-verification all live on the PLAN
+ * (DealerSchemePlan has those columns; DealerSchemeInstance has none of them), so a plan's state applies
+ * to all N of its units. Counting DealerSchemeInstance rows instead would undercount LEGACY plans, which
+ * intentionally carry only Instance 1 even when numberOfSchemes > 1 — see `ensureInstances`.
+ *
+ * `billedSchemes` is the ONE deliberate exception, because billing is the one thing stored per INSTANCE
+ * rather than on the plan. A legacy plan whose single Instance 1 is billed is evidence of exactly ONE
+ * billed unit, not N, so that column's numerator counts actual billed DealerSchemeInstance rows while its
+ * denominator stays in units for consistency with the columns above. For a fully expanded new-flow plan
+ * both rules give the same answer; they diverge only on legacy plans — precisely where the plan-level rule
+ * would be claiming billing the data cannot evidence.
+ */
+export interface SchemeWiseSummaryRow {
+  schemeId: string;
+  schemeName: string;
+  /** Dealer count. One plan exists per (scheme, dealer), so this is the plan count — NOT a unit count. */
+  dealersPlanned: number;
+  /** Σ numberOfSchemes over every plan in scope for this scheme. */
+  totalSchemes: number;
+  /** Σ numberOfSchemes where planStatus = APPROVED. */
+  approvedSchemes: number;
+  /** Converted units the Admin has NOT yet verified. */
+  unverifiedConversions: number;
+  /** Converted units the Admin HAS verified. */
+  verifiedConversions: number;
+  /**
+   * Billed units among the verified-converted ones: actual DealerSchemeInstance rows carrying an
+   * Admin-verified adminBillingDate, clamped to the plan's numberOfSchemes. Deliberately NOT
+   * Σ numberOfSchemes — see the note above.
+   */
+  billedSchemes: number;
+}
+
+type SummaryRaw = {
+  schemeId: string;
+  numberOfSchemes: number;
+  planStatus: string;
+  schemeStatus: string;
+  adminVerifiedAt: Date | null;
+  scheme: { schemeName: string };
+  instances: { adminBillingDate: Date | null }[];
+};
+
+/**
+ * Billed unit count for ONE Admin-verified plan = how many instance rows the plan ACTUALLY HAS that carry
+ * an adminBillingDate, clamped to its planned unit count. `verifyScheme` writes adminBillingDate onto every
+ * instance that exists (via `ensureInstances`, which never expands), so those rows are the only per-unit
+ * billing evidence in the database. The plan-level `adminBillingDate` column cannot substitute: verifyScheme
+ * deliberately leaves it null whenever billing is entered per instance.
+ *
+ * The clamp is defensive only. Instances outnumbering numberOfSchemes should be unreachable — expandInstances
+ * prunes surplus instances only while a plan is still editable and refuses ENROLLED plans — but a numerator
+ * larger than its own denominator would be a nonsense figure to render.
+ */
+const billedInstanceUnits = (instances: { adminBillingDate: Date | null }[], units: number): number =>
+  Math.min(instances.filter((i) => i.adminBillingDate != null).length, units);
+
+/**
+ * Scoped scheme-wise summary: SO → own plans; RM → their team; Admin → all (same `getOfficerScope`
+ * filter as `listSchemePlans`, so scoping is enforced in the database, not the browser).
+ *
+ * READ-ONLY by construction — a single findMany reduced in memory. It must never call `ensureInstances`
+ * or `expandInstances`: displaying a summary must not create or expand instances.
+ */
+export async function schemeWiseSummary(ctx: AuthContext, officerId?: string): Promise<SchemeWiseSummaryRow[]> {
+  const scope = await getOfficerScope(ctx);
+  if (officerId) await assertOfficerInScope(ctx, officerId);
+  const officerFilter = officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
+  const rows = (await prisma.dealerSchemePlan.findMany({
+    where: { ...officerFilter },
+    select: {
+      schemeId: true,
+      numberOfSchemes: true,
+      planStatus: true,
+      schemeStatus: true,
+      adminVerifiedAt: true,
+      scheme: { select: { schemeName: true } },
+      instances: { select: { adminBillingDate: true } },
+    },
+  })) as unknown as SummaryRaw[];
+
+  const byScheme = new Map<string, SchemeWiseSummaryRow>();
+  for (const r of rows) {
+    const row =
+      byScheme.get(r.schemeId) ??
+      { schemeId: r.schemeId, schemeName: r.scheme.schemeName, dealersPlanned: 0, totalSchemes: 0, approvedSchemes: 0, unverifiedConversions: 0, verifiedConversions: 0, billedSchemes: 0 };
+    const units = r.numberOfSchemes || 1;
+    row.dealersPlanned += 1;
+    row.totalSchemes += units;
+    if (r.planStatus === SchemePlanState.APPROVED) row.approvedSchemes += units;
+    // Conversion is only settable on an APPROVED plan (see setConversion), so converted ⊆ approved.
+    if (r.schemeStatus === SchemeConversionStatus.CONVERTED) {
+      if (r.adminVerifiedAt == null) {
+        row.unverifiedConversions += units;
+      } else {
+        row.verifiedConversions += units;
+        // Instance-level, NOT `units`: one billed legacy Instance 1 is one billed unit, never N.
+        row.billedSchemes += billedInstanceUnits(r.instances, units);
+      }
+    }
+    byScheme.set(r.schemeId, row);
+  }
+  return [...byScheme.values()].sort((a, b) => a.schemeName.localeCompare(b.schemeName));
 }
 
 export async function getSchemePlan(ctx: AuthContext, id: string): Promise<SchemePlanRow> {
@@ -432,6 +549,11 @@ export interface RunningScheme {
   startDate: string | null; endDate: string | null; bookingLastDate: string | null;
   schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number;
   documentUrl: string | null;
+  // Scheme Information shown by Create Plan's "Info" panel + the fields its dealer rows calculate from.
+  // Carried on this one list read so opening Info or expanding a scheme needs no further request (and so
+  // cannot trigger `refreshSchemeStatuses`, which writes).
+  bookingAmount: number | null; otherBenefitDetails: string | null; allowMultipleSchemes: boolean;
+  installments: { installmentNumber: number; calculationType: string; value: number; daysAfterBillingDate: number }[];
 }
 
 /** OPEN schemes applicable to the caller's State — the "Running Schemes" tab for a Sales Officer. */
@@ -441,10 +563,12 @@ export async function runningSchemes(ctx: AuthContext): Promise<RunningScheme[]>
   const rows = (await prisma.scheme.findMany({
     where: { status: SchemeStatus.OPEN, ...stateFilter },
     orderBy: [{ isPerpetual: "desc" }, { endDate: "desc" }, { schemeName: "asc" }],
-    include: { states: { include: { group: { select: { name: true } } } } },
+    include: { states: { include: { group: { select: { name: true } } } }, installmentRules: true },
   })) as unknown as {
     id: string; schemeName: string; isPerpetual: boolean; startDate: Date | null; endDate: Date | null; bookingLastDate: Date | null;
     schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: unknown; schemeValueWithGST: unknown; documentUrl: string | null;
+    bookingAmount: unknown; otherBenefitDetails: string | null; allowMultipleSchemes: boolean;
+    installmentRules: { installmentNumber: number; calculationType: string; value: unknown; daysAfterBillingDate: number }[];
     states: { group: { name: string } }[];
   }[];
   return rows.map((s) => ({
@@ -460,6 +584,10 @@ export async function runningSchemes(ctx: AuthContext): Promise<RunningScheme[]>
     schemeValueWithoutGST: Number(s.schemeValueWithoutGST),
     schemeValueWithGST: Number(s.schemeValueWithGST),
     documentUrl: s.documentUrl,
+    bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount),
+    otherBenefitDetails: s.otherBenefitDetails,
+    allowMultipleSchemes: s.allowMultipleSchemes,
+    installments: s.installmentRules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value), daysAfterBillingDate: r.daysAfterBillingDate })),
   }));
 }
 
@@ -557,6 +685,10 @@ const draftSchema = z.object({
     expectedBillingDate: z.coerce.date().nullable().optional(),
     numberOfSchemes: z.coerce.number().int().min(1).max(10).optional(), // "Allow Multi Schemes" dealer count
   })).default([]),
+  // PARTIAL SUBMISSION (submit only). Which of `dealers` actually go forward for approval; everyone else in
+  // the working set is still persisted, but stays a Draft. Omitted → every dealer is submitted, i.e. exactly
+  // the previous all-or-nothing behaviour, so existing callers are unaffected.
+  submitDealerIds: z.array(z.string().min(1)).optional(),
 });
 
 // Statuses the owner may still edit (create/update/remove) as part of their working draft.
@@ -572,6 +704,10 @@ const EDITABLE = new Set<string>([SchemePlanState.DRAFT, SchemePlanState.RETURNE
  * Submission routing: a Sales Officer's plan goes to SUBMITTED (awaiting RM approval); a Regional
  * Manager IS the approver, so an RM-created plan skips RM approval and lands at RM_APPROVED (straight to
  * Admin document verification).
+ *
+ * Partial submission: on submit, `submitDealerIds` may name a SUBSET of `dealers` to send for approval. The
+ * rest of the working set is still written (as Draft), so an incomplete dealer is never discarded and never
+ * submitted. Omit `submitDealerIds` for the original all-or-nothing behaviour.
  */
 async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Promise<{ drafted: number; submitted: number }> {
   if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only a Sales Officer or Regional Manager can plan dealers");
@@ -600,9 +736,17 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
   };
 
   for (const d of data.dealers) if (!assigned.has(d.dealerId)) throw new ApiError(422, "A selected dealer is not assigned to the selected Sales Officer");
+
+  // Which dealers of the working set are going forward. Draft saves submit nobody; a submit without an
+  // explicit subset submits everybody (unchanged behaviour).
+  const inPayload = new Set(data.dealers.map((d) => d.dealerId));
+  const submitSet = new Set<string>(submit ? (data.submitDealerIds ?? [...inPayload]) : []);
+  const goesForward = (dealerId: string) => submitSet.has(dealerId);
   if (submit) {
-    if (data.dealers.length === 0) throw new ApiError(422, "Select at least one dealer to submit");
-    for (const d of data.dealers) if (!d.expectedBillingDate) throw new ApiError(422, "Every dealer needs a Conversion Date before submitting");
+    for (const id of submitSet) if (!inPayload.has(id)) throw new ApiError(422, "A dealer marked for submission is not part of this plan");
+    if (submitSet.size === 0) throw new ApiError(422, "Select at least one dealer to submit");
+    // Only the dealers actually going forward must be complete; the others stay in Draft on purpose.
+    for (const d of data.dealers) if (goesForward(d.dealerId) && !d.expectedBillingDate) throw new ApiError(422, "Every dealer needs a Conversion Date before submitting");
   }
 
   const existing = (await prisma.dealerSchemePlan.findMany({ where: { schemeId: data.schemeId, salesOfficerId: targetOfficerId }, select: { id: true, dealerId: true, planStatus: true } })) as { id: string; dealerId: string; planStatus: string }[];
@@ -611,23 +755,28 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
 
   let drafted = 0;
   let submitted = 0;
-  // Old status (kept in sync during migration) + new Part E planStatus.
+  // Old status (kept in sync during migration) + new Part E planStatus, resolved PER DEALER so a partial
+  // submission can promote some rows while the rest are written as Draft in the same call.
   // RM-created plans skip RM approval (RM is the approver) → Pending Approval (Admin). SO → Pending for RM.
-  const legacyNext = submit ? (isRm ? SchemePlanStatus.RM_APPROVED : SchemePlanStatus.SUBMITTED) : SchemePlanStatus.DRAFT;
-  const planNext = submit ? (isRm ? SchemePlanState.PENDING_APPROVAL : SchemePlanState.PENDING_RM) : SchemePlanState.DRAFT;
-  const submitStamp = submit ? { submittedAt: new Date(), ...(isRm ? { rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: null } : { rmActedById: null, rmActedAt: null, rmRemarks: null }) } : {};
+  const legacyNextFor = (forward: boolean) => (forward ? (isRm ? SchemePlanStatus.RM_APPROVED : SchemePlanStatus.SUBMITTED) : SchemePlanStatus.DRAFT);
+  const planNextFor = (forward: boolean) => (forward ? (isRm ? SchemePlanState.PENDING_APPROVAL : SchemePlanState.PENDING_RM) : SchemePlanState.DRAFT);
+  const submitStampFor = (forward: boolean) => (forward ? { submittedAt: new Date(), ...(isRm ? { rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: null } : { rmActedById: null, rmActedAt: null, rmRemarks: null }) } : {});
 
   for (const d of data.dealers) {
     const date = validateDate(d.expectedBillingDate ?? null);
     const count = countFor(d.numberOfSchemes);
     const total = gstValue * count;
+    const forward = goesForward(d.dealerId);
+    const legacyNext = legacyNextFor(forward);
+    const planNext = planNextFor(forward);
+    const submitStamp = submitStampFor(forward);
     const cur = byDealer.get(d.dealerId);
     if (!cur) {
-      await prisma.dealerSchemePlan.create({ data: { schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, ...(submit ? submitStamp : {}) } });
-      if (submit) submitted++; else drafted++;
+      await prisma.dealerSchemePlan.create({ data: { schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, ...submitStamp } });
+      if (forward) submitted++; else drafted++;
     } else if (EDITABLE.has(cur.planStatus)) {
-      await prisma.dealerSchemePlan.update({ where: { id: cur.id }, data: { expectedBillingDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...(submit ? submitStamp : {}) } });
-      if (submit) submitted++; else drafted++;
+      await prisma.dealerSchemePlan.update({ where: { id: cur.id }, data: { expectedBillingDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...submitStamp } });
+      if (forward) submitted++; else drafted++;
     }
     // else: locked (already in RM queue or beyond) — leave untouched.
   }
@@ -640,7 +789,7 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
   const affected = (await prisma.dealerSchemePlan.findMany({ where: { schemeId: data.schemeId, salesOfficerId: targetOfficerId, dealerId: { in: [...selected] } }, select: { id: true } })) as { id: string }[];
   for (const p of affected) await expandInstances(p.id);
 
-  await writeAudit({ userId: ctx.userId, action: submit ? "UPDATE" : "CREATE", entity: "dealerSchemePlan", entityId: data.schemeId, summary: submit ? `Scheme plan submitted (${submitted} dealers)` : `Scheme draft saved (${drafted} dealers)` });
+  await writeAudit({ userId: ctx.userId, action: submit ? "UPDATE" : "CREATE", entity: "dealerSchemePlan", entityId: data.schemeId, summary: submit ? `Scheme plan submitted (${submitted} dealers${drafted ? `, ${drafted} kept in draft` : ""})` : `Scheme draft saved (${drafted} dealers)` });
   return { drafted, submitted };
 }
 

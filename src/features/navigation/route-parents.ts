@@ -18,6 +18,8 @@ const PARENTS: Record<string, string> = {
   // Coming-soon modules live inside the Create Plan workspace.
   "/planning/recovery": "/planning/create",
   "/planning/scheme": "/planning/create",
+  "/planning/scheme/plans": "/planning/view", // …and browsed from View Plans
+  "/planning/scheme/follow-up": "/planning/view", // Follow-up Plans — recovery follow-up over enrolled schemes
   "/planning/party": "/planning/create",
   // Onboarding.
   "/onboarding/history": "/onboarding",

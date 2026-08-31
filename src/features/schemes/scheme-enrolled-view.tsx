@@ -2,24 +2,34 @@
 
 import { Fragment, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChevronRight, ChevronDown, Eye, FileText } from "lucide-react";
+import { ArrowLeft, ChevronRight, ChevronDown, Eye, FileText, IndianRupee } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { L } from "@/features/labels/label-ui";
 import { schemeTable } from "./scheme-table-theme";
 
 const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
 const CALC_LABEL: Record<string, string> = { PERCENTAGE: "Percentage", FIXED_AMOUNT: "Fixed Amount" };
 const STATUS_VARIANT: Record<string, "secondary" | "success" | "destructive" | "muted" | "default"> = {
   Enrolled: "secondary", "Installment Pending": "secondary", "Installment Received": "default", Completed: "success", Overdue: "destructive",
-  PENDING: "secondary", RECEIVED: "success", OVERDUE: "destructive",
+  PENDING: "secondary", RECEIVED: "success", OVERDUE: "destructive", PARTIAL: "default",
 };
-const StatusBadge = ({ s }: { s: string }) => <Badge variant={STATUS_VARIANT[s] ?? "muted"}>{s === "PENDING" ? "Pending" : s === "RECEIVED" ? "Received" : s === "OVERDUE" ? "Overdue" : s}</Badge>;
+const StatusBadge = ({ s }: { s: string }) => <Badge variant={STATUS_VARIANT[s] ?? "muted"}>{s === "PENDING" ? "Pending" : s === "RECEIVED" ? "Received" : s === "OVERDUE" ? "Overdue" : s === "PARTIAL" ? "Partial" : s}</Badge>;
+
+const pctOf = (received: number | null, planned: number) => (planned > 0 ? ((received ?? 0) / planned) * 100 : 0);
+/** Installment status as the Payment feature presents it: Settled (full) / Partial · % / Pending / Overdue. */
+function InstallmentStatusBadge({ i }: { i: Installment }) {
+  if (i.status === "PARTIAL") return <Badge variant="default">Partial · {pctOf(i.receivedAmount, i.plannedAmount).toFixed(2)}%</Badge>;
+  if (i.status === "RECEIVED") return <Badge variant="success">Settled</Badge>;
+  return <StatusBadge s={i.status} />;
+}
 
 interface Installment { id: string; installmentNumber: number; plannedAmount: number; plannedDate: string | null; receivedAmount: number | null; receivedDate: string | null; status: string }
 interface InstanceRow { instanceId: string; instanceNumber: number; billingDate: string | null; status: string; installments: Installment[] }
@@ -32,15 +42,16 @@ interface SchemeInfo {
 interface Detail { scheme: SchemeInfo; dealers: DealerRow[]; canEditPlanned: boolean; canEditReceived: boolean }
 interface ListRow { id: string; schemeName: string; enrolledDealers: number; startDate: string | null; endDate: string | null; isPerpetual: boolean; status: string }
 
-/** Enrolled Scheme — role-aware operational view. List of enrolled schemes → per-scheme installment tracker. */
-export function EnrolledSchemesView() {
+/** Enrolled Scheme — role-aware operational view. List of enrolled schemes → per-scheme installment tracker.
+ *  Optional `officerId` scopes an RM to one team Sales Officer (server-validated); omitted = full scope. */
+export function EnrolledSchemesView({ officerId }: { officerId?: string } = {}) {
   const [openScheme, setOpenScheme] = useState<{ id: string; name: string } | null>(null);
-  if (openScheme) return <EnrolledSchemeDetail schemeId={openScheme.id} onBack={() => setOpenScheme(null)} />;
-  return <EnrolledSchemeList onOpen={setOpenScheme} />;
+  if (openScheme) return <EnrolledSchemeDetail schemeId={openScheme.id} officerId={officerId} onBack={() => setOpenScheme(null)} />;
+  return <EnrolledSchemeList officerId={officerId} onOpen={setOpenScheme} />;
 }
 
-function EnrolledSchemeList({ onOpen }: { onOpen: (s: { id: string; name: string }) => void }) {
-  const { data, isLoading } = useQuery<ListRow[]>({ queryKey: ["enrolled-schemes"], queryFn: () => api.get("/api/schemes/enrolled") });
+function EnrolledSchemeList({ onOpen, officerId }: { onOpen: (s: { id: string; name: string }) => void; officerId?: string }) {
+  const { data, isLoading } = useQuery<ListRow[]>({ queryKey: ["enrolled-schemes", officerId ?? "all"], queryFn: () => api.get(`/api/schemes/enrolled${officerId ? `?officerId=${encodeURIComponent(officerId)}` : ""}`) });
   return (
     <div className="overflow-auto rounded-lg border bg-background">
       <Table>
@@ -75,14 +86,15 @@ function EnrolledSchemeList({ onOpen }: { onOpen: (s: { id: string; name: string
   );
 }
 
-function EnrolledSchemeDetail({ schemeId, onBack }: { schemeId: string; onBack: () => void }) {
+function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: string; onBack: () => void; officerId?: string }) {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery<Detail>({ queryKey: ["enrolled-scheme", schemeId], queryFn: () => api.get(`/api/schemes/${schemeId}/enrolled`) });
+  const { data, isLoading } = useQuery<Detail>({ queryKey: ["enrolled-scheme", schemeId, officerId ?? "all"], queryFn: () => api.get(`/api/schemes/${schemeId}/enrolled${officerId ? `?officerId=${encodeURIComponent(officerId)}` : ""}`) });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showDetails, setShowDetails] = useState(false);
   // Confirm-before-save for a billing-date change (per instance). resetKey remounts inputs to revert on Cancel.
   const [billingConfirm, setBillingConfirm] = useState<{ instanceId: string; date: string } | null>(null);
   const [resetKey, setResetKey] = useState(0);
+  const [payFor, setPayFor] = useState<DealerRow | null>(null); // Add Payment target dealer plan
   const invalidate = () => qc.invalidateQueries({ queryKey: ["enrolled-scheme", schemeId] });
 
   // Per-instance billing edit (Phase 2): editing one instance recomputes only that instance's schedule.
@@ -118,17 +130,18 @@ function EnrolledSchemeDetail({ schemeId, onBack }: { schemeId: string; onBack: 
             <TableHeader>
               <TableRow>
                 <TableHead className="w-8" />
-                <TableHead>Dealer Name</TableHead>
-                <TableHead>Billing Date</TableHead>
-                <TableHead className="text-right">Amount (Without GST)</TableHead>
-                <TableHead className="text-right">Amount (With GST)</TableHead>
-                <TableHead>Installments</TableHead>
-                <TableHead>Status</TableHead>
+                <TableHead><L k="scheme_planning.enrolled.col.dealer_name" /></TableHead>
+                <TableHead><L k="scheme_planning.enrolled.col.billing_date" /></TableHead>
+                <TableHead className="text-right"><L k="scheme_planning.enrolled.col.amount_without_gst" /></TableHead>
+                <TableHead className="text-right"><L k="scheme_planning.enrolled.col.amount_with_gst" /></TableHead>
+                <TableHead><L k="scheme_planning.enrolled.col.installments" /></TableHead>
+                <TableHead><L k="scheme_planning.enrolled.col.status" /></TableHead>
+                {data.canEditReceived && <TableHead className="text-right"><L k="scheme_planning.enrolled.col.actions" /></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
               {data.dealers.length === 0 ? (
-                <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No enrolled dealers.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={data.canEditReceived ? 8 : 7} className="py-10 text-center text-muted-foreground">No enrolled dealers.</TableCell></TableRow>
               ) : (
                 data.dealers.map((d) => {
                   const open = expanded.has(d.planId);
@@ -148,14 +161,19 @@ function EnrolledSchemeDetail({ schemeId, onBack }: { schemeId: string; onBack: 
                         <TableCell className="text-right tabular-nums">{formatCurrency(d.schemeValueWithGST)}</TableCell>
                         <TableCell><button type="button" className="inline-flex items-center gap-1 text-primary hover:underline" onClick={() => toggle(d.planId)}>{open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}{d.instances.reduce((a, x) => a + x.installments.length, 0)}</button></TableCell>
                         <TableCell><StatusBadge s={d.status} /></TableCell>
+                        {data.canEditReceived && (
+                          <TableCell className="text-right">
+                            <Button size="sm" variant="outline" onClick={() => setPayFor(d)}><IndianRupee className="h-4 w-4" /> Add Payment</Button>
+                          </TableCell>
+                        )}
                       </TableRow>
                       {open && (
                         <TableRow>
-                          <TableCell colSpan={7} className={schemeTable.nestedCell}>
+                          <TableCell colSpan={data.canEditReceived ? 8 : 7} className={schemeTable.nestedCell}>
                            <div className={schemeTable.nestedInset}>
                             {d.numberOfSchemes <= 1 ? (
                               <div className={schemeTable.nestedShell}>
-                                <InstallmentTable installments={d.instances[0]?.installments ?? []} canEditPlanned={data.canEditPlanned} canEditReceived={data.canEditReceived} onPatch={(id, body) => patchInst.mutate({ id, body })} />
+                                <InstallmentTable installments={d.instances[0]?.installments ?? []} canEditPlanned={data.canEditPlanned} onPatch={(id, body) => patchInst.mutate({ id, body })} />
                               </div>
                             ) : (
                               <div className="space-y-3">
@@ -171,7 +189,7 @@ function EnrolledSchemeDetail({ schemeId, onBack }: { schemeId: string; onBack: 
                                       </div>
                                     </div>
                                     <div className="p-2">
-                                      <InstallmentTable installments={inst.installments} canEditPlanned={data.canEditPlanned} canEditReceived={data.canEditReceived} onPatch={(id, body) => patchInst.mutate({ id, body })} />
+                                      <InstallmentTable installments={inst.installments} canEditPlanned={data.canEditPlanned} onPatch={(id, body) => patchInst.mutate({ id, body })} />
                                     </div>
                                   </div>
                                 ))}
@@ -191,6 +209,8 @@ function EnrolledSchemeDetail({ schemeId, onBack }: { schemeId: string; onBack: 
       )}
 
       {showDetails && scheme && <SchemeDetailsModal scheme={scheme} onClose={() => setShowDetails(false)} />}
+
+      {payFor && scheme && <AddPaymentDialog dealer={payFor} schemeName={scheme.schemeName} onClose={() => setPayFor(null)} onSaved={() => { setPayFor(null); invalidate(); }} />}
 
       {billingConfirm && (
         <Dialog open onOpenChange={(o) => { if (!o) { setBillingConfirm(null); setResetKey((k) => k + 1); } }}>
@@ -212,18 +232,18 @@ function EnrolledSchemeDetail({ schemeId, onBack }: { schemeId: string; onBack: 
 }
 
 /** One instance's installment schedule (shared by single- and multi-instance dealers). */
-function InstallmentTable({ installments, canEditPlanned, canEditReceived, onPatch }: { installments: Installment[]; canEditPlanned: boolean; canEditReceived: boolean; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+function InstallmentTable({ installments, canEditPlanned, onPatch }: { installments: Installment[]; canEditPlanned: boolean; onPatch: (id: string, body: Record<string, unknown>) => void }) {
   return (
     <div className="overflow-auto rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Installment</TableHead>
-            <TableHead className="text-right">Planned Amount</TableHead>
-            <TableHead>Planned Date</TableHead>
-            <TableHead className="text-right">Received Amount</TableHead>
-            <TableHead>Actual Date</TableHead>
-            <TableHead>Status</TableHead>
+            <TableHead><L k="scheme_planning.enrolled.inst.installment" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.enrolled.inst.planned_amount" /></TableHead>
+            <TableHead><L k="scheme_planning.enrolled.inst.planned_date" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.enrolled.inst.received_amount" /></TableHead>
+            <TableHead><L k="scheme_planning.enrolled.inst.actual_date" /></TableHead>
+            <TableHead><L k="scheme_planning.enrolled.inst.status" /></TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -243,17 +263,10 @@ function InstallmentTable({ installments, canEditPlanned, canEditReceived, onPat
                     <Input type="date" className="w-40" defaultValue={toDateInput(i.plannedDate)} onBlur={(e) => { const v = e.target.value; if (v !== toDateInput(i.plannedDate)) onPatch(i.id, { plannedDate: v || null }); }} />
                   ) : (i.plannedDate ? formatDate(i.plannedDate) : "—")}
                 </TableCell>
-                <TableCell className="text-right">
-                  {canEditReceived ? (
-                    <Input type="number" min="0" className="w-28 text-right" defaultValue={i.receivedAmount == null ? "" : String(i.receivedAmount)} placeholder="—" onBlur={(e) => { const raw = e.target.value.trim(); const v = raw === "" ? null : Number(raw); if (v !== i.receivedAmount) onPatch(i.id, { receivedAmount: v }); }} />
-                  ) : (i.receivedAmount == null ? "—" : formatCurrency(i.receivedAmount))}
-                </TableCell>
-                <TableCell>
-                  {canEditReceived ? (
-                    <Input type="date" className="w-40" defaultValue={toDateInput(i.receivedDate)} onBlur={(e) => { const v = e.target.value; if (v !== toDateInput(i.receivedDate)) onPatch(i.id, { receivedDate: v || null }); }} />
-                  ) : (i.receivedDate ? formatDate(i.receivedDate) : "—")}
-                </TableCell>
-                <TableCell><StatusBadge s={i.status} /></TableCell>
+                {/* Received amount / date are READ-ONLY — they are the rollup of recorded payments (Add Payment). */}
+                <TableCell className="text-right">{i.receivedAmount == null ? "—" : formatCurrency(i.receivedAmount)}</TableCell>
+                <TableCell>{i.receivedDate ? formatDate(i.receivedDate) : "—"}</TableCell>
+                <TableCell><InstallmentStatusBadge i={i} /></TableCell>
               </TableRow>
             ))
           )}
@@ -313,4 +326,92 @@ function ordinal(n: number): string {
   const s = ["th", "st", "nd", "rd"];
   const v = n % 100;
   return n + (s[(v - 20) % 10] ?? s[v] ?? s[0]);
+}
+
+/* --------------------------- Add Payment (per dealer, Super Admin) --------------------------- */
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+interface PreviewLine { instanceNumber: number; installmentNumber: number; allocated: number; plannedAmount: number; newReceived: number; settled: boolean }
+
+/** Client-side allocation preview — mirrors the server's `allocatePayment` so the modal shows exactly where
+ *  the money will go before confirming. The server re-computes and remains authoritative. */
+function previewAllocation(dealer: DealerRow, amount: number): { lines: PreviewLine[]; leftover: number; totalOutstanding: number } {
+  const items = dealer.instances
+    .flatMap((inst) => inst.installments.map((i) => ({ ...i, instanceNumber: inst.instanceNumber })))
+    .sort((a, b) => a.instanceNumber - b.instanceNumber || a.installmentNumber - b.installmentNumber);
+  const totalOutstanding = round2(items.reduce((s, i) => s + Math.max(0, round2(i.plannedAmount - (i.receivedAmount ?? 0))), 0));
+  let left = round2(amount);
+  const lines: PreviewLine[] = [];
+  for (const i of items) {
+    if (left <= 0.005) break;
+    const rem = round2(i.plannedAmount - (i.receivedAmount ?? 0));
+    if (rem <= 0.005) continue;
+    const allocated = round2(Math.min(left, rem));
+    const newReceived = round2((i.receivedAmount ?? 0) + allocated);
+    lines.push({ instanceNumber: i.instanceNumber, installmentNumber: i.installmentNumber, allocated, plannedAmount: i.plannedAmount, newReceived, settled: newReceived + 0.005 >= i.plannedAmount });
+    left = round2(left - allocated);
+  }
+  return { lines, leftover: round2(left), totalOutstanding };
+}
+
+function AddPaymentDialog({ dealer, schemeName, onClose, onSaved }: { dealer: DealerRow; schemeName: string; onClose: () => void; onSaved: () => void }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const amt = Number(amount);
+  const valid = amount.trim() !== "" && amt > 0 && !!date;
+  const preview = valid ? previewAllocation(dealer, amt) : null;
+  const overpay = preview ? preview.leftover > 0.005 : false;
+  const multi = dealer.numberOfSchemes > 1;
+
+  const save = useMutation({
+    mutationFn: () => api.post(`/api/scheme-plans/${dealer.planId}/payments`, { amount: amt, receivedDate: date }),
+    onSuccess: onSaved,
+    onError: (e) => setError((e as Error).message),
+  });
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !save.isPending) onClose(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader><DialogTitle>Add Payment</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div className="text-sm text-muted-foreground">Dealer: <span className="font-medium text-foreground">{dealer.dealerName}</span> · Scheme: <span className="font-medium text-foreground">{schemeName}</span></div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5"><Label>Payment Amount *</Label><Input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" autoFocus /></div>
+            <div className="space-y-1.5"><Label>Payment Received Date *</Label><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+          </div>
+          {preview && (
+            <div className="space-y-1.5">
+              <Label>Allocation Preview</Label>
+              <div className="overflow-hidden rounded-md border">
+                <Table>
+                  <TableHeader><TableRow><TableHead>Installment</TableHead><TableHead className="text-right">Allocated</TableHead><TableHead>Result</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {preview.lines.length === 0 ? (
+                      <TableRow><TableCell colSpan={3} className="py-3 text-center text-muted-foreground">Nothing outstanding to allocate.</TableCell></TableRow>
+                    ) : (
+                      preview.lines.map((l, idx) => (
+                        <TableRow key={idx}>
+                          <TableCell>{multi ? `S${l.instanceNumber} · ` : ""}{ordinal(l.installmentNumber)} Installment</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatCurrency(l.allocated)}</TableCell>
+                          <TableCell>{l.settled ? <Badge variant="success">Settled</Badge> : <Badge variant="default">Partial · {((l.newReceived / l.plannedAmount) * 100).toFixed(2)}%</Badge>}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+              <p className="text-xs text-muted-foreground">Outstanding balance: {formatCurrency(preview.totalOutstanding)}. Recorded date-time is added automatically.</p>
+              {overpay && <p className="text-xs text-destructive">Exceeds the outstanding balance by {formatCurrency(preview.leftover)}. Advance/excess payments are not supported — reduce the amount.</p>}
+            </div>
+          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" disabled={save.isPending} onClick={onClose}>Cancel</Button>
+          <Button disabled={!valid || overpay || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Add Payment"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }

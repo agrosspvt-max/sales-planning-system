@@ -48,6 +48,7 @@ model User {
   schemePlans            DealerSchemePlan[]       @relation("OfficerSchemePlans")
   rmActedSchemePlans     DealerSchemePlan[]       @relation("RmActedSchemePlans")
   enrolledSchemePlans    DealerSchemePlan[]       @relation("EnrolledSchemePlans")
+  schemePayments         SchemePayment[]          @relation("SchemePaymentCreatedBy")
   group                  UserGroup?               @relation(fields: [groupId], references: [id])
 
   @@index([role])
@@ -164,6 +165,7 @@ model DealerSchemePlan {
   rmActedBy        User?                  @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
   enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
   instances        DealerSchemeInstance[]
+  payments         SchemePayment[]
 
   @@unique([schemeId, dealerId])
   @@index([schemeId])
@@ -210,9 +212,52 @@ model DealerSchemeInstallment {
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
   instance           DealerSchemeInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  paymentAllocations SchemePaymentAllocation[]
 
   @@unique([instanceId, installmentNumber])
   @@index([instanceId])
+}
+
+/// A single actual money-received transaction for an enrolled dealer's scheme plan (Payment Management).
+/// The payment is the SOURCE OF TRUTH for money received; `receivedDate` is when the dealer paid and
+/// `recordedAt` is the system entry time. Its amount is allocated sequentially, from the earliest
+/// outstanding installment, into `SchemePaymentAllocation` rows within ONE transaction. The installment's
+/// own receivedAmount/receivedDate are maintained as a denormalised rollup of these allocations so the
+/// Enrolled Scheme view and Follow-up recovery figures keep reading them unchanged. Payments are never
+/// overwritten — every transaction stays permanently traceable.
+model SchemePayment {
+  id           String                    @id @default(cuid())
+  planId       String // the enrolled DealerSchemePlan (dealer + scheme)
+  amount       Decimal                   @db.Decimal(14, 2)
+  receivedDate DateTime // the date the dealer actually paid / money was received
+  recordedAt   DateTime                  @default(now()) // system entry date-time (auto, never user-entered)
+  createdById  String
+  note         String?
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+  plan         DealerSchemePlan          @relation(fields: [planId], references: [id], onDelete: Cascade)
+  createdBy    User                      @relation("SchemePaymentCreatedBy", fields: [createdById], references: [id])
+  allocations  SchemePaymentAllocation[]
+
+  @@index([planId])
+  @@index([recordedAt])
+  @@index([receivedDate])
+}
+
+/// Where one payment's money went: an amount allocated to a specific installment. Preserves the
+/// transaction-level allocation (a single payment may split across several installments) so the history
+/// can always explain exactly which installment(s) each payment settled.
+model SchemePaymentAllocation {
+  id            String                  @id @default(cuid())
+  paymentId     String
+  installmentId String
+  amount        Decimal                 @db.Decimal(14, 2)
+  createdAt     DateTime                @default(now())
+  payment       SchemePayment           @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  installment   DealerSchemeInstallment @relation(fields: [installmentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([installmentId])
 }
 
 /// A Scheme can be available in multiple existing State/UserGroup records.

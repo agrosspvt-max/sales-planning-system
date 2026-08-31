@@ -206,6 +206,9 @@ export async function deleteScheme(ctx: AuthContext, id: string, rawReason: unkn
     ]);
 
     // Explicit bottom-up deletion (leaf → root). Each layer is scoped to THIS scheme only.
+    // Payment transactions + allocations first (they reference installments and the plan).
+    await tx.schemePaymentAllocation.deleteMany({ where: { payment: { plan: { schemeId: id } } } });
+    await tx.schemePayment.deleteMany({ where: { plan: { schemeId: id } } });
     await tx.dealerSchemeInstallment.deleteMany({ where: { instance: { dealerSchemePlan: { schemeId: id } } } });
     await tx.dealerSchemeInstance.deleteMany({ where: { dealerSchemePlan: { schemeId: id } } });
     await tx.dealerSchemePlan.deleteMany({ where: { schemeId: id } });

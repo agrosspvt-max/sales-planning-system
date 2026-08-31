@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, FileText, Eye, Save, Send, Pencil } from "lucide-react";
+import { ArrowLeft, FileText, Eye, Save, Send } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -13,52 +14,82 @@ import { NativeSelect } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { PlanStateBadge, SchemeStatusBadge, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
-import { schemeTable, verifyTint } from "./scheme-table-theme";
-import { EnrolledSchemesView } from "./scheme-enrolled-view";
+import { L } from "@/features/labels/label-ui";
+import { type LabelKey } from "@/features/labels/labels";
+import { PlanStateBadge } from "./scheme-detail-dialog";
+import { SchemeCreatePlanWorkspace } from "./scheme-create-plan";
 
 const BENEFIT_LABEL: Record<string, string> = { DOMESTIC_TOUR: "Domestic Tour", DOMESTIC_COUPLE_TOUR: "Domestic Couple Tour", FOREIGN_TOUR: "Foreign Tour", CREDIT_NOTE: "Credit Note", OTHER: "Other" };
 const CALC_LABEL: Record<string, string> = { PERCENTAGE: "Percentage", FIXED_AMOUNT: "Fixed Amount" };
 const EDITABLE = new Set(["DRAFT", "RETURNED"]);
-const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
+export const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
 
 interface RunningScheme {
   id: string; schemeName: string; states: string[]; isPerpetual: boolean; startDate: string | null; endDate: string | null; bookingLastDate: string | null;
   schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number; documentUrl: string | null;
 }
 
-/** Sales Officer scheme planning: Running Schemes + My Schemes tabs, and the per-scheme planning page. */
+/**
+ * Sales Officer — the CREATE PLAN side of Scheme Planning (/planning/scheme). Every running scheme the
+ * officer may plan into is one collapsible row that expands to its planned dealers; dealers are added one at
+ * a time through "Add Dealer", and each scheme is saved or submitted on its own. Looking at schemes already
+ * planned lives on the View Plan route (/planning/scheme/plans), mirroring Sales and Recovery Planning.
+ */
 export function SchemeOfficerWorkspace() {
-  const [tab, setTab] = useState<"running" | "mine" | "enrolled">("running");
-  const [planningId, setPlanningId] = useState<string | null>(null);
-
-  if (planningId) return <SchemePlanningView schemeId={planningId} onBack={() => setPlanningId(null)} />;
-
   return (
     <div className="space-y-5">
-      <PageHeader crumbs={[{ label: "Planning" }, { label: "Scheme Planning" }]} title="Scheme Planning" subtitle="Plan your dealers into running schemes and submit for approval." />
-      <div className="flex gap-2">
-        <PillButton active={tab === "running"} onClick={() => setTab("running")}>Running Schemes</PillButton>
-        <PillButton active={tab === "mine"} onClick={() => setTab("mine")}>My Schemes</PillButton>
-        <PillButton active={tab === "enrolled"} onClick={() => setTab("enrolled")}>Enrolled Scheme</PillButton>
-      </div>
-      {tab === "running" ? <RunningSchemesTab onView={setPlanningId} /> : tab === "mine" ? <MySchemesTab onOpen={setPlanningId} /> : <EnrolledSchemesView />}
+      <PageHeader
+        crumbs={[{ label: "Planning" }, { label: "Create/View Plans", href: "/planning/create" }, { label: "Scheme Planning" }]}
+        title="Scheme Planning"
+        subtitle="Plan your dealers into running schemes and submit for approval."
+      />
+
+      {/* Level 1 — Create New Plan | View Plans | Follow-up Plans */}
+      <SchemePlanModeLinks mode="create" />
+
+      <SchemeCreatePlanWorkspace />
     </div>
   );
 }
 
-function PillButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+/**
+ * [Create New Plan | View Plans | Follow-up Plans] toggle rendered as links — each option is its own
+ * route, matching the Sales Planning and Recovery Planning modules. Follow-up Plans (Requirement 3) is an
+ * ADDITION alongside the existing two: nothing inside View Plans is renamed, moved or merged.
+ */
+export type SchemePlanMode = "create" | "view" | "followup";
+
+const MODE_LINKS: { mode: SchemePlanMode; href: string; labelKey: LabelKey }[] = [
+  { mode: "create", href: "/planning/scheme", labelKey: "scheme_planning.nav.create_plan" },
+  { mode: "view", href: "/planning/scheme/plans", labelKey: "scheme_planning.nav.view_plan" },
+  { mode: "followup", href: "/planning/scheme/follow-up", labelKey: "scheme_planning.nav.follow_up" },
+];
+
+export function SchemePlanModeLinks({ mode }: { mode: SchemePlanMode }) {
   return (
-    <button onClick={onClick} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium transition-colors", active ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>
-      {children}
-    </button>
+    <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
+      {MODE_LINKS.map((m) => (
+        <Link
+          key={m.mode}
+          href={m.href}
+          className={`rounded px-3 py-1.5 font-medium ${mode === m.mode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          <L k={m.labelKey} />
+        </Link>
+      ))}
+    </div>
   );
 }
 
 /* --------------------------------- Running Schemes --------------------------------- */
 
+/**
+ * The flat running-schemes list whose row action was "View Scheme". NOW UNREFERENCED: both call sites (the SO
+ * Create Plan page and the RM Running Schemes tab) render `SchemeCreatePlanWorkspace` instead, where the row
+ * action is Add Dealer and the scheme information moved to the row's ⋮ menu. Kept rather than deleted because
+ * removing it is not required by the redesign — flagged so it is not mistaken for live UI.
+ */
 export function RunningSchemesTab({ onView }: { onView: (id: string) => void }) {
   const { data, isLoading } = useQuery<RunningScheme[]>({ queryKey: ["running-schemes"], queryFn: () => api.get("/api/schemes/running") });
   return (
@@ -94,187 +125,6 @@ export function RunningSchemesTab({ onView }: { onView: (id: string) => void }) 
         </TableBody>
       </Table>
     </div>
-  );
-}
-
-/* --------------------------------- My Schemes --------------------------------- */
-
-function MySchemesTab({ onOpen }: { onOpen: (id: string) => void }) {
-  const qc = useQueryClient();
-  const { data, isLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "mine"], queryFn: () => api.get("/api/scheme-plans") });
-  const groups = useMemo(() => {
-    const map = new Map<string, { schemeId: string; schemeName: string; plans: SchemePlan[] }>();
-    for (const p of data ?? []) {
-      const g = map.get(p.schemeId) ?? { schemeId: p.schemeId, schemeName: p.schemeName, plans: [] };
-      g.plans.push(p);
-      map.set(p.schemeId, g);
-    }
-    return [...map.values()];
-  }, [data]);
-
-  const [convert, setConvert] = useState<SchemePlan | null>(null);
-  if (isLoading) return <Skeleton className="h-40 w-full" />;
-  if (groups.length === 0) return <div className="rounded-lg border bg-background py-10 text-center text-muted-foreground">You haven&apos;t planned any schemes yet.</div>;
-
-  return (
-    <div className="space-y-4">
-      {groups.map((g) => {
-        const editable = g.plans.some((p) => p.planStatus === "DRAFT" || p.planStatus === "RETURNED");
-        return (
-          <Card key={g.schemeId}>
-            <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
-              <CardTitle className="text-base">{g.schemeName} <span className="ml-2 text-sm font-normal text-muted-foreground">{g.plans.length} dealer{g.plans.length === 1 ? "" : "s"}</span></CardTitle>
-              <Button size="sm" variant="outline" onClick={() => onOpen(g.schemeId)}>{editable ? "Continue Planning" : "View"}</Button>
-            </CardHeader>
-            <CardContent>
-              <div className={schemeTable.nestedShell}>
-                <Table>
-                  <TableHeader>
-                    {/* Grouping band: plan info | Scheme Status | the four SO conversion details (Admin-final shown once verified). */}
-                    <TableRow className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      <TableHead colSpan={7} />
-                      <TableHead colSpan={4} className="border-l text-center">Conversion Details · SO / Admin-final</TableHead>
-                    </TableRow>
-                    <TableRow>
-                      <TableHead>Dealer</TableHead>
-                      <TableHead>Planned Conversion</TableHead>
-                      <TableHead className="text-right">Schemes</TableHead>
-                      <TableHead className="text-right">Total Amount</TableHead>
-                      <TableHead>Planning Date</TableHead>
-                      <TableHead>Plan Status</TableHead>
-                      <TableHead>Scheme Status</TableHead>
-                      <TableHead className={verifyTint.conversion.head}>Conversion Date</TableHead>
-                      <TableHead className={verifyTint.booking.head}>Booking Amount</TableHead>
-                      <TableHead className={verifyTint.document.head}>Document Status</TableHead>
-                      <TableHead className={verifyTint.billing.head}>Billing Date</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {g.plans.map((p) => (
-                      <TableRow key={p.id}>
-                        <TableCell className="font-medium">{p.dealerName}</TableCell>
-                        <TableCell>{p.expectedBillingDate ? formatDate(p.expectedBillingDate) : <span className="text-muted-foreground">—</span>}</TableCell>
-                        <TableCell className="text-right tabular-nums">{p.numberOfSchemes}</TableCell>
-                        <TableCell className="text-right tabular-nums">{formatCurrency(p.totalSchemeAmount)}</TableCell>
-                        <TableCell>{p.planningDate ? dateTime(p.planningDate) : <span className="text-muted-foreground">—</span>}</TableCell>
-                        <TableCell><PlanStateBadge status={p.planStatus} /></TableCell>
-                        <TableCell>
-                          {p.planStatus === "APPROVED" ? (
-                            <button type="button" className="inline-flex items-center gap-1" title="Set scheme status" onClick={() => setConvert(p)}>
-                              <SchemeStatusBadge plan={p} />
-                              <Pencil className="h-3 w-3 text-muted-foreground" />
-                            </button>
-                          ) : <span className="text-muted-foreground">—</span>}
-                        </TableCell>
-                        <TableCell className={cn("whitespace-nowrap", verifyTint.conversion.cell)}><MarkedValue v={conversionDateCell(p)} /></TableCell>
-                        <TableCell className={cn("whitespace-nowrap", verifyTint.booking.cell)}><MarkedValue v={bookingCell(p)} /></TableCell>
-                        <TableCell className={cn("whitespace-nowrap", verifyTint.document.cell)}><MarkedValue v={documentCell(p)} /></TableCell>
-                        <TableCell className={cn("whitespace-nowrap", verifyTint.billing.cell)}><MarkedValue v={billingDateCell(p)} /></TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
-        );
-      })}
-      {convert && <ConversionModal plan={convert} onClose={() => setConvert(null)} onSaved={() => { setConvert(null); qc.invalidateQueries({ queryKey: ["scheme-plans"] }); }} />}
-    </div>
-  );
-}
-
-const dateTime = (s: string) => new Date(s).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
-
-/** SO conversion entry: set Scheme Status and (when Converted) record conversion details + billing date(s). */
-function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose: () => void; onSaved: () => void }) {
-  const count = plan.numberOfSchemes || 1;
-  const multi = count > 1;
-  const [schemeStatus, setSchemeStatus] = useState(plan.schemeStatus === "PENDING" ? "CONVERTED" : plan.schemeStatus);
-  const [conversionDate, setConversionDate] = useState(toDateInput(plan.conversionDate));
-  const [booking, setBooking] = useState(plan.soBookingStatus ?? "RECEIVED");
-  const [bookingAmount, setBookingAmount] = useState(plan.soBookingAmount != null ? String(plan.soBookingAmount) : "");
-  const [doc, setDoc] = useState(plan.soDocumentStatus ?? "SIGNED_AND_SENT");
-  const [sameForAll, setSameForAll] = useState(plan.soBillingSameForAll ?? true);
-  const [billingDate, setBillingDate] = useState(toDateInput(plan.billingDate ?? plan.instances.find((i) => i.instanceNumber === 1)?.soBillingDate ?? null));
-  const [instDates, setInstDates] = useState<Record<number, string>>(() => {
-    const m: Record<number, string> = {};
-    for (const i of plan.instances) m[i.instanceNumber] = toDateInput(i.soBillingDate);
-    return m;
-  });
-  const [error, setError] = useState<string | null>(null);
-  const converting = schemeStatus === "CONVERTED";
-
-  const perInstance = multi && !sameForAll;
-  const instNums = Array.from({ length: count }, (_, i) => i + 1);
-  const billingComplete = !converting || (perInstance ? instNums.every((n) => !!instDates[n]) : !!billingDate);
-  const partialInvalid = converting && booking === "PARTIAL" && !bookingAmount;
-
-  const save = useMutation({
-    mutationFn: () => api.patch(`/api/scheme-plans/${plan.id}/conversion`, {
-      schemeStatus,
-      conversionDate: converting ? (conversionDate || null) : null,
-      soBookingStatus: converting ? booking : null,
-      soBookingAmount: converting && booking === "PARTIAL" ? Number(bookingAmount) : (converting && bookingAmount ? Number(bookingAmount) : null),
-      soDocumentStatus: converting ? doc : null,
-      billingSameForAll: !perInstance,
-      billingDate: converting && !perInstance ? (billingDate || null) : null,
-      billingDates: converting && perInstance ? instNums.map((n) => ({ instanceNumber: n, date: instDates[n] || null })) : undefined,
-    }),
-    onSuccess: onSaved,
-    onError: (e) => setError((e as Error).message),
-  });
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>{plan.schemeName} — {plan.dealerName}{multi ? ` · ${count} Schemes` : ""}</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label>Scheme Status *</Label>
-            <NativeSelect value={schemeStatus} onChange={(e) => setSchemeStatus(e.target.value)} options={[{ value: "PENDING", label: "Pending" }, { value: "CONVERTED", label: "Converted" }, { value: "DECLINED", label: "Declined" }]} />
-          </div>
-          {converting && (
-            <>
-              <div className="space-y-1.5"><Label>Conversion Date</Label><Input type="date" value={conversionDate} onChange={(e) => setConversionDate(e.target.value)} /></div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5"><Label>Booking Amount</Label><NativeSelect value={booking} onChange={(e) => setBooking(e.target.value)} options={[{ value: "RECEIVED", label: "Received" }, { value: "NOT_RECEIVED", label: "Not Received" }, { value: "PARTIAL", label: "Partial Received" }]} /></div>
-                {booking === "PARTIAL" && <div className="space-y-1.5"><Label>Partial Amount *</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} /></div>}
-              </div>
-              <div className="space-y-1.5"><Label>Document Status</Label><NativeSelect value={doc} onChange={(e) => setDoc(e.target.value)} options={[{ value: "SIGNED_BUT_NOT_SENT", label: "Signed but not Sent" }, { value: "SIGNED_AND_SENT", label: "Signed & Sent" }, { value: "DOC_RECEIVED", label: "Doc Received" }]} /></div>
-
-              {multi && (
-                <div className="space-y-1.5">
-                  <Label>Is Billing Date same for all schemes?</Label>
-                  <NativeSelect className="w-28" value={sameForAll ? "yes" : "no"} onChange={(e) => setSameForAll(e.target.value === "yes")} options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]} />
-                </div>
-              )}
-              {perInstance ? (
-                <div className="space-y-1.5">
-                  <Label>Billing Dates</Label>
-                  <div className="space-y-1.5 rounded-md border p-2">
-                    {instNums.map((n) => (
-                      <div key={n} className="flex items-center gap-2">
-                        <span className="w-20 text-sm text-muted-foreground">Scheme {n}</span>
-                        <Input type="date" value={instDates[n] ?? ""} onChange={(e) => setInstDates((p) => ({ ...p, [n]: e.target.value }))} />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-1.5"><Label>Billing Date{multi ? " (all schemes)" : ""}</Label><Input type="date" value={billingDate} onChange={(e) => setBillingDate(e.target.value)} /></div>
-              )}
-            </>
-          )}
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          <p className="text-xs text-muted-foreground">No approval is required after this — these values are visible to your RM and Admin, who verifies them.</p>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={save.isPending || partialInvalid || !billingComplete} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

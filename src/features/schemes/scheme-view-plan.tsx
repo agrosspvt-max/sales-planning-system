@@ -2,9 +2,9 @@
 
 import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Clock, Pencil } from "lucide-react";
+import { ChevronDown, ChevronRight, Clock, Info, Pencil } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { cn, formatCurrency, formatDateShort } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,14 +16,14 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PillNav } from "@/features/planning/plan-list-ui";
 import { L, useLabel } from "@/features/labels/label-ui";
-import { PlanStateBadge, SchemeStatusBadge, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
+import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, MarkedValue, conversionDateCell, bookingCell, documentCell, BillingDateValue, PlannedConversionCell, type SchemePlan } from "./scheme-detail-dialog";
+import { SchemeSummaryHeads, SchemeSummaryValueCells, ColumnFilterHead, SUMMARY_METRIC_COLS, ZERO_METRICS, EMPTY_SUMMARY_FILTERS, summaryFilterQuery, type SchemeWiseSummaryPayload, type SummaryFilters } from "./scheme-summary-cells";
 import { schemeTable, verifyTint } from "./scheme-table-theme";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 import { SchemePlanModeLinks, SchemePlanningView, toDateInput } from "./scheme-officer-workspace";
 
 type ViewTab = "scheme" | "dealer" | "enrolled";
 
-const dateTime = (s: string) => new Date(s).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 
 /**
  * Sales Officer — the VIEW PLAN side of Scheme Planning (/planning/scheme/plans), the counterpart to the
@@ -73,7 +73,7 @@ export function SchemeOfficerViewPlan() {
       ) : tab === "dealer" ? (
         <DealerWiseComingSoon />
       ) : (
-        <SchemeWiseCollapsibleView onOpen={setPlanningId} />
+        <SchemeWiseCollapsibleView onOpen={setPlanningId} salesOfficerView />
       )}
     </div>
   );
@@ -120,13 +120,41 @@ export function DealerWiseComingSoon() {
  *     RM's own rows first — the team-wide view. `ownUserId` identifies those own rows for ordering.
  * Defaults reproduce the exact Sales Officer behaviour, so the SO view is unchanged.
  */
-export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = false, ownUserId, showAction = true }: { onOpen: (id: string) => void; officerId?: string; groupByOfficer?: boolean; ownUserId?: string; showAction?: boolean }) {
+export function SchemeWiseCollapsibleView({ officerId, groupByOfficer = false, ownUserId, showOfficerCol = false, salesOfficerView = false }: { onOpen?: (id: string) => void; officerId?: string; groupByOfficer?: boolean; ownUserId?: string; showAction?: boolean; showOfficerCol?: boolean; salesOfficerView?: boolean }) {
   const qc = useQueryClient();
   const scopeKey = officerId ?? (groupByOfficer ? "team-all" : "mine");
-  const { data, isLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", scopeKey], queryFn: () => api.get(`/api/scheme-plans${officerId ? `?officerId=${encodeURIComponent(officerId)}` : ""}`) });
+  // View Plan shows only plans past the editable stage (Draft/Returned/Rejected live in Create Plan). The
+  // status split is enforced server-side via bucket=view; the key carries "view" so it never shares Create
+  // Plan's cache for the same scope.
+  const { data, isLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "view", scopeKey], queryFn: () => api.get(`/api/scheme-plans?bucket=view${officerId ? `&officerId=${encodeURIComponent(officerId)}` : ""}`) });
+  // Column filters (server-recalculated). Sales Officer filter shown for RM (showOfficer); Booking/Document
+  // for all. State filter is not shown here (SO/RM are single-state); it lives in the Admin table.
+  const [filters, setFilters] = useState<SummaryFilters>(EMPTY_SUMMARY_FILTERS);
+  const showOfficer = showOfficerCol || groupByOfficer; // Sales Officer column
+  // Rich summary (server aggregation) — per scheme, or per (officer, scheme) in the grouped All Plan View,
+  // where each row carries its OWN active-dealer denominator. Filters applied server-side (metrics recalc).
+  const filterQ = summaryFilterQuery(filters);
+  const summaryParams = [officerId ? `officerId=${encodeURIComponent(officerId)}` : "", groupByOfficer ? "groupByOfficer=true" : "", filterQ].filter(Boolean).join("&");
+  const { data: summary } = useQuery<SchemeWiseSummaryPayload>({
+    queryKey: ["scheme-summary", scopeKey, groupByOfficer, filterQ],
+    queryFn: () => api.get(`/api/scheme-plans/scheme-summary${summaryParams ? `?${summaryParams}` : ""}`),
+  });
+  const metricsByKey = useMemo(
+    () => new Map((summary?.rows ?? []).map((r) => [groupByOfficer ? `${r.salesOfficerId}::${r.schemeId}` : r.schemeId, r])),
+    [summary, groupByOfficer],
+  );
+  const officerOptions = useMemo(() => (summary?.filterOptions.officers ?? []).map((o) => ({ value: o.id, label: o.name })), [summary]);
+  // Filter the dealer-detail plans client-side by the SAME selection so expanded rows match the filtered
+  // summary (the metric NUMBERS come from the server; this only decides which rows/details are shown).
+  const planMatches = useMemo(() => (p: SchemePlan) =>
+    (filters.states.length === 0 || (p.state != null && filters.states.includes(p.state))) &&
+    (filters.officers.length === 0 || filters.officers.includes(p.salesOfficerId)) &&
+    (filters.booking.length === 0 || (p.adminBookingStatus != null && filters.booking.includes(p.adminBookingStatus))) &&
+    (filters.documents.length === 0 || (p.adminDocumentStatus != null && filters.documents.includes(p.adminDocumentStatus))),
+  [filters]);
   const groups = useMemo(() => {
     const map = new Map<string, { key: string; schemeId: string; schemeName: string; salesOfficerId: string | null; salesOfficerName: string | null; plans: SchemePlan[] }>();
-    for (const p of data ?? []) {
+    for (const p of (data ?? []).filter(planMatches)) {
       const key = groupByOfficer ? `${p.schemeId}::${p.salesOfficerId}` : p.schemeId;
       const g = map.get(key) ?? { key, schemeId: p.schemeId, schemeName: p.schemeName, salesOfficerId: groupByOfficer ? p.salesOfficerId : null, salesOfficerName: groupByOfficer ? p.salesOfficerName : null, plans: [] };
       g.plans.push(p);
@@ -142,9 +170,10 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
       });
     }
     return arr;
-  }, [data, groupByOfficer, ownUserId]);
+  }, [data, groupByOfficer, ownUserId, planMatches]);
 
-  const cols = groupByOfficer ? 5 : 4; // chevron + Scheme + Dealers (+ Sales Officer) + Actions
+  // chevron + Scheme (+ Sales Officer) + 8 metrics + Actions.
+  const cols = 2 + (showOfficer ? 1 : 0) + SUMMARY_METRIC_COLS;
   const [expanded, setExpanded] = useState<Set<string>>(new Set()); // collapsed by default
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -155,6 +184,7 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
     });
 
   const [convert, setConvert] = useState<SchemePlan | null>(null);
+  const [infoPlan, setInfoPlan] = useState<SchemePlan | null>(null);
 
   return (
     <>
@@ -164,9 +194,13 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
             <TableRow>
               <TableHead className="w-8" />
               <TableHead><L k="scheme_planning.col.scheme" /></TableHead>
-              <TableHead><L k="scheme_planning.col.dealers" /></TableHead>
-              {groupByOfficer && <TableHead><L k="scheme_planning.nested.sales_officer" /></TableHead>}
-              <TableHead className="text-right"><L k="scheme_planning.col.actions" /></TableHead>
+              {showOfficer && (
+                <ColumnFilterHead labelKey="scheme_planning.col.sales_officers" options={officerOptions} value={filters.officers} onApply={(v) => setFilters((f) => ({ ...f, officers: v }))} />
+              )}
+              <SchemeSummaryHeads
+                booking={{ value: filters.booking, onApply: (v) => setFilters((f) => ({ ...f, booking: v })) }}
+                documents={{ value: filters.documents, onApply: (v) => setFilters((f) => ({ ...f, documents: v })) }}
+              />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -176,7 +210,6 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
               <TableRow><TableCell colSpan={cols} className="py-10 text-center text-muted-foreground">No scheme plans yet.</TableCell></TableRow>
             ) : (
               groups.map((g) => {
-                const editable = g.plans.some((p) => p.planStatus === "DRAFT" || p.planStatus === "RETURNED");
                 const open = expanded.has(g.key);
                 return (
                   <Fragment key={g.key}>
@@ -184,12 +217,18 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
                     <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(g.key)}>
                       <TableCell>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
                       <TableCell className="font-semibold">{g.schemeName}</TableCell>
-                      <TableCell>{g.plans.length} Dealer{g.plans.length === 1 ? "" : "s"}</TableCell>
-                      {groupByOfficer && <TableCell>{g.salesOfficerName ?? "—"}{g.salesOfficerId === ownUserId && <span className="ml-1 text-xs text-muted-foreground">(you)</span>}</TableCell>}
-                      {/* stopPropagation so using the action never toggles the row underneath it. */}
-                      <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                        {showAction ? <Button size="sm" variant="outline" onClick={() => onOpen(g.schemeId)}>{editable ? "Continue Planning" : "View"}</Button> : <span className="text-xs text-muted-foreground">Expand to view</span>}
-                      </TableCell>
+                      {showOfficer && (
+                        <TableCell className="max-w-[14rem] truncate">
+                          {(groupByOfficer ? g.salesOfficerName : g.plans[0]?.salesOfficerName) ?? "—"}
+                          {groupByOfficer && g.salesOfficerId === ownUserId && <span className="ml-1 text-xs text-muted-foreground">(you)</span>}
+                        </TableCell>
+                      )}
+                      {/* Metrics from the shared server aggregation; grouped rows carry a per-officer active denom. */}
+                      {(() => {
+                        const key = groupByOfficer ? `${g.salesOfficerId}::${g.schemeId}` : g.schemeId;
+                        const row = metricsByKey.get(key);
+                        return <SchemeSummaryValueCells m={row ?? ZERO_METRICS} activeDealers={row?.activeDealers ?? 0} />;
+                      })()}
                     </TableRow>
                     {open && (
                       <TableRow>
@@ -220,11 +259,19 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
                               <TableBody>
                                 {g.plans.map((p) => (
                                   <TableRow key={p.id}>
-                                    <TableCell className="font-medium">{p.dealerName}</TableCell>
-                                    <TableCell>{p.expectedBillingDate ? formatDate(p.expectedBillingDate) : <span className="text-muted-foreground">—</span>}</TableCell>
+                                    <TableCell className="font-medium">
+                                      <div className="flex items-center gap-1.5">
+                                        <span>{p.dealerName}</span>
+                                        {/* Info: plan details + any Sales Officer note. Green when a note exists. */}
+                                        <button type="button" title={p.soNote ? "Info · note added" : "Info"} onClick={() => setInfoPlan(p)}>
+                                          <Info className={cn("h-3.5 w-3.5", p.soNote ? "text-success" : "text-muted-foreground")} />
+                                        </button>
+                                      </div>
+                                    </TableCell>
+                                    <TableCell><PlannedConversionCell plan={p} /></TableCell>
                                     <TableCell className="text-right tabular-nums">{p.numberOfSchemes}</TableCell>
                                     <TableCell className="text-right tabular-nums">{formatCurrency(p.totalSchemeAmount)}</TableCell>
-                                    <TableCell>{p.planningDate ? dateTime(p.planningDate) : <span className="text-muted-foreground">—</span>}</TableCell>
+                                    <TableCell>{p.planningDate ? formatDateShort(p.planningDate) : <span className="text-muted-foreground">—</span>}</TableCell>
                                     <TableCell><PlanStateBadge status={p.planStatus} /></TableCell>
                                     <TableCell>
                                       {p.planStatus === "APPROVED" ? (
@@ -237,7 +284,7 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
                                     <TableCell className={cn("whitespace-nowrap", verifyTint.conversion.cell)}><MarkedValue v={conversionDateCell(p)} /></TableCell>
                                     <TableCell className={cn("whitespace-nowrap", verifyTint.booking.cell)}><MarkedValue v={bookingCell(p)} /></TableCell>
                                     <TableCell className={cn("whitespace-nowrap", verifyTint.document.cell)}><MarkedValue v={documentCell(p)} /></TableCell>
-                                    <TableCell className={cn("whitespace-nowrap", verifyTint.billing.cell)}><MarkedValue v={billingDateCell(p)} /></TableCell>
+                                    <TableCell className={cn("whitespace-nowrap", verifyTint.billing.cell)}><BillingDateValue plan={p} /></TableCell>
                                   </TableRow>
                                 ))}
                               </TableBody>
@@ -254,7 +301,8 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
           </TableBody>
         </Table>
       </div>
-      {convert && <ConversionModal plan={convert} onClose={() => setConvert(null)} onSaved={() => { setConvert(null); qc.invalidateQueries({ queryKey: ["scheme-plans"] }); }} />}
+      {convert && <ConversionModal plan={convert} salesOfficerView={salesOfficerView} onClose={() => setConvert(null)} onSaved={() => { setConvert(null); qc.invalidateQueries({ queryKey: ["scheme-plans"] }); }} />}
+      {infoPlan && <SchemePlanDialog plan={infoPlan} canExtend onExtended={() => { setInfoPlan(null); qc.invalidateQueries({ queryKey: ["scheme-plans"] }); }} onClose={() => setInfoPlan(null)} />}
     </>
   );
 }
@@ -262,14 +310,16 @@ export function SchemeWiseCollapsibleView({ onOpen, officerId, groupByOfficer = 
 /* --------------------------------- SO conversion entry --------------------------------- */
 
 /** SO conversion entry: set Scheme Status and (when Converted) record conversion details + billing date(s). */
-function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose: () => void; onSaved: () => void }) {
+function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: { plan: SchemePlan; onClose: () => void; onSaved: () => void; salesOfficerView?: boolean }) {
   const count = plan.numberOfSchemes || 1;
   const multi = count > 1;
-  const [schemeStatus, setSchemeStatus] = useState(plan.schemeStatus === "PENDING" ? "CONVERTED" : plan.schemeStatus);
+  // Initialize strictly from persisted values; unsaved dropdowns stay empty ("") so they show a
+  // placeholder rather than auto-selecting a value. PENDING is the unset sentinel → treated as empty.
+  const [schemeStatus, setSchemeStatus] = useState(plan.schemeStatus === "PENDING" ? "" : plan.schemeStatus);
   const [conversionDate, setConversionDate] = useState(toDateInput(plan.conversionDate));
-  const [booking, setBooking] = useState(plan.soBookingStatus ?? "RECEIVED");
+  const [booking, setBooking] = useState(plan.soBookingStatus ?? "");
   const [bookingAmount, setBookingAmount] = useState(plan.soBookingAmount != null ? String(plan.soBookingAmount) : "");
-  const [doc, setDoc] = useState(plan.soDocumentStatus ?? "SIGNED_AND_SENT");
+  const [doc, setDoc] = useState(plan.soDocumentStatus ?? "");
   const [sameForAll, setSameForAll] = useState(plan.soBillingSameForAll ?? true);
   const [billingDate, setBillingDate] = useState(toDateInput(plan.billingDate ?? plan.instances.find((i) => i.instanceNumber === 1)?.soBillingDate ?? null));
   const [instDates, setInstDates] = useState<Record<number, string>>(() => {
@@ -285,13 +335,23 @@ function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose
   const billingComplete = !converting || (perInstance ? instNums.every((n) => !!instDates[n]) : !!billingDate);
   const partialInvalid = converting && booking === "PARTIAL" && !bookingAmount;
 
+  // Booking Amount options. Sales Officers may only choose Paid / Partially paid — "Not paid" is hidden.
+  // Exception: if a saved record is already Not paid, keep that option so opening the modal shows the real
+  // value and never silently changes it. RM/Admin always see the full set.
+  const bookingOptions = [
+    { value: "", label: "Choose booking amount" },
+    { value: "RECEIVED", label: "Paid" },
+    { value: "PARTIAL", label: "Partially paid" },
+    ...(!salesOfficerView || plan.soBookingStatus === "NOT_RECEIVED" ? [{ value: "NOT_RECEIVED", label: "Not paid" }] : []),
+  ];
+
   const save = useMutation({
     mutationFn: () => api.patch(`/api/scheme-plans/${plan.id}/conversion`, {
       schemeStatus,
       conversionDate: converting ? (conversionDate || null) : null,
-      soBookingStatus: converting ? booking : null,
-      soBookingAmount: converting && booking === "PARTIAL" ? Number(bookingAmount) : (converting && bookingAmount ? Number(bookingAmount) : null),
-      soDocumentStatus: converting ? doc : null,
+      soBookingStatus: converting && booking ? booking : null,
+      soBookingAmount: converting && booking === "PARTIAL" ? Number(bookingAmount) : (converting && booking && bookingAmount ? Number(bookingAmount) : null),
+      soDocumentStatus: converting && doc ? doc : null,
       billingSameForAll: !perInstance,
       billingDate: converting && !perInstance ? (billingDate || null) : null,
       billingDates: converting && perInstance ? instNums.map((n) => ({ instanceNumber: n, date: instDates[n] || null })) : undefined,
@@ -307,16 +367,16 @@ function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose
         <div className="space-y-3">
           <div className="space-y-1.5">
             <Label>Scheme Status *</Label>
-            <NativeSelect value={schemeStatus} onChange={(e) => setSchemeStatus(e.target.value)} options={[{ value: "PENDING", label: "Pending" }, { value: "CONVERTED", label: "Converted" }, { value: "DECLINED", label: "Declined" }]} />
+            <NativeSelect value={schemeStatus} onChange={(e) => setSchemeStatus(e.target.value)} options={[{ value: "", label: "Choose scheme status" }, { value: "PENDING", label: "Pending" }, { value: "CONVERTED", label: "Converted" }, { value: "DECLINED", label: "Declined" }]} />
           </div>
           {converting && (
             <>
               <div className="space-y-1.5"><Label>Conversion Date</Label><Input type="date" value={conversionDate} onChange={(e) => setConversionDate(e.target.value)} /></div>
               <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5"><Label>Booking Amount</Label><NativeSelect value={booking} onChange={(e) => setBooking(e.target.value)} options={[{ value: "RECEIVED", label: "Received" }, { value: "NOT_RECEIVED", label: "Not Received" }, { value: "PARTIAL", label: "Partial Received" }]} /></div>
+                <div className="space-y-1.5"><Label>Booking Amount</Label><NativeSelect value={booking} onChange={(e) => setBooking(e.target.value)} options={bookingOptions} /></div>
                 {booking === "PARTIAL" && <div className="space-y-1.5"><Label>Partial Amount *</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} /></div>}
               </div>
-              <div className="space-y-1.5"><Label>Document Status</Label><NativeSelect value={doc} onChange={(e) => setDoc(e.target.value)} options={[{ value: "SIGNED_BUT_NOT_SENT", label: "Signed but not Sent" }, { value: "SIGNED_AND_SENT", label: "Signed & Sent" }, { value: "DOC_RECEIVED", label: "Doc Received" }]} /></div>
+              <div className="space-y-1.5"><Label>Document Status</Label><NativeSelect value={doc} onChange={(e) => setDoc(e.target.value)} options={[{ value: "", label: "Choose document status" }, { value: "SIGNED_BUT_NOT_SENT", label: "Signed but not sent" }, { value: "SIGNED_AND_SENT", label: "Soft copy sent" }, { value: "HARD_COPY_SENT", label: "Hard copy sent" }, { value: "DOC_RECEIVED", label: "HO received hard copy" }]} /></div>
 
               {multi && (
                 <div className="space-y-1.5">
@@ -346,7 +406,7 @@ function ConversionModal({ plan, onClose, onSaved }: { plan: SchemePlan; onClose
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={save.isPending || partialInvalid || !billingComplete} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</Button>
+          <Button disabled={save.isPending || !schemeStatus || partialInvalid || !billingComplete} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

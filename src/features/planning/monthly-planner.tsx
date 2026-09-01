@@ -27,7 +27,7 @@ import { Th, ThPlain } from "@/features/labels/label-ui";
 import { useMonthlyEdit } from "./monthly-edit-context";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "./dealer-completion";
 import { DealerPlanningStatus } from "./dealer-status";
-import { CreateDealerButton, EditDealerButton, AdditionalProductsSection } from "./monthly-additional-ui";
+import { AddDealerButton, EditDealerButton, AdditionalProductsSection } from "./monthly-additional-ui";
 
 const OPTION_COLOR: Record<DealerPlanningStatus, string | undefined> = {
   [DealerPlanningStatus.COMPLETED]: "hsl(var(--success))",
@@ -154,9 +154,9 @@ export function MonthlyPlanner() {
           )}
           {/* NEW DEALER badge for dealers created from Monthly Planning. */}
           {isFirstClass && dealer?.isNewDealer && <Badge variant="default" className="bg-info text-info-foreground">NEW DEALER</Badge>}
-          {/* Create a dealer directly from Monthly Planning (reuses the Dealer model). */}
+          {/* Add an existing in-scope dealer or create a new one, directly from Monthly Planning. */}
           {isFirstClass && data.canEdit && monthlyPlanId && (
-            <CreateDealerButton monthlyPlanId={monthlyPlanId} onCreated={(id) => setDealerId(id)} />
+            <AddDealerButton monthlyPlanId={monthlyPlanId} onAdded={(id) => setDealerId(id)} />
           )}
           {/* Edit a pending dealer created here (DRAFT/RETURNED only). */}
           {isFirstClass && data.canEdit && monthlyPlanId && dealer?.isNewDealer && (

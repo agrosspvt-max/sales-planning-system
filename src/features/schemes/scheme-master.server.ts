@@ -44,6 +44,8 @@ const schemeInput = z.object({
   benefitDetails: z.string().trim().max(500).nullable().optional(),
   otherBenefitDetails: z.string().trim().max(500).nullable().optional(),
   allowMultipleSchemes: z.boolean(),
+  maxExtensionDays: z.coerce.number().int().min(0).max(365).optional().default(0),
+  maxExtensionAttempts: z.coerce.number().int().min(0).max(20).optional().default(0),
   documentUrl: z.string().max(5_000_000).nullable().optional(),
   installments: z.array(installmentInput).max(10).optional().default([]),
 }).superRefine((value, ctx) => {

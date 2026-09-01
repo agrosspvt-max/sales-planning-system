@@ -38,3 +38,16 @@ export function formatDate(value: Date | string | null | undefined): string {
     day: "numeric",
   });
 }
+
+/**
+ * Compact, date-only "DD Mon YY" (e.g. 02 Sep 26). Time is never shown. Shared formatter used across the
+ * Scheme Planning tables so every date reads the same. Display-only — never mutates the stored value.
+ */
+export function formatDateShort(value: Date | string | null | undefined): string {
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "2-digit",
+  });
+}

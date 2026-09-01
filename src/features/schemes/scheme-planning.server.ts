@@ -71,6 +71,14 @@ export interface SchemePlanRow {
   schemeStatus: string;
   numberOfSchemes: number;
   totalSchemeAmount: number;
+  soNote: string | null; // optional per-dealer Sales Officer note
+  // Conversion Date Extension. expectedBillingDate is the CURRENT planned conversion date; original is the
+  // baseline ceiling anchor; the scheme's max* are the configured limits; history lists each extension.
+  originalConversionDate: string | null;
+  conversionExtensionCount: number;
+  maxExtensionDays: number;
+  maxExtensionAttempts: number;
+  conversionExtensions: { extensionNumber: number; previousConversionDate: string; newConversionDate: string; daysAdded: number; extendedByName: string | null; createdAt: string }[];
   planningDate: string | null; // when the SO submitted the plan (= submittedAt)
   conversionDate: string | null;
   soBookingStatus: string | null;
@@ -94,23 +102,26 @@ type RawPlan = {
   id: string; schemeId: string; dealerId: string; salesOfficerId: string; planningStatus: string; enrollmentStatus: string;
   expectedBillingDate: Date | null; submittedAt: Date | null; rmActedAt: Date | null; rmRemarks: string | null; documentCompleted: boolean; documentType: string | null;
   verificationRemarks: string | null; enrolledAt: Date | null; createdAt: Date;
-  planStatus: string; schemeStatus: string; numberOfSchemes: number; totalSchemeAmount: unknown;
+  planStatus: string; schemeStatus: string; numberOfSchemes: number; totalSchemeAmount: unknown; soNote: string | null;
+  originalConversionDate: Date | null; conversionExtensionCount: number;
+  conversionExtensions: { extensionNumber: number; previousConversionDate: Date; newConversionDate: Date; daysAdded: number; createdAt: Date; extendedBy: { name: string } | null }[];
   conversionDate: Date | null; soBookingStatus: string | null; soBookingAmount: unknown; soDocumentStatus: string | null; billingDate: Date | null;
   adminConversionDate: Date | null; adminBookingStatus: string | null; adminBookingAmount: unknown; adminDocumentStatus: string | null; adminBillingDate: Date | null; adminVerifiedAt: Date | null;
   soBillingSameForAll: boolean; adminBillingSameForAll: boolean; instances: RawInstance[];
-  scheme: { schemeName: string; schemeValueWithGST: unknown };
+  scheme: { schemeName: string; schemeValueWithGST: unknown; maxExtensionDays: number; maxExtensionAttempts: number };
   dealer: { name: string };
   salesOfficer: { name: string; territory: string | null; group: { name: string } | null };
   rmActedBy: { name: string } | null;
   enrolledBy: { name: string } | null;
 };
 const PLAN_INCLUDE = {
-  scheme: { select: { schemeName: true, schemeValueWithGST: true } },
+  scheme: { select: { schemeName: true, schemeValueWithGST: true, maxExtensionDays: true, maxExtensionAttempts: true } },
   dealer: { select: { name: true } },
   salesOfficer: { select: { name: true, territory: true, group: { select: { name: true } } } },
   rmActedBy: { select: { name: true } },
   enrolledBy: { select: { name: true } },
   instances: { select: { instanceNumber: true, soBillingDate: true, adminBillingDate: true }, orderBy: { instanceNumber: "asc" } },
+  conversionExtensions: { select: { extensionNumber: true, previousConversionDate: true, newConversionDate: true, daysAdded: true, createdAt: true, extendedBy: { select: { name: true } } }, orderBy: { extensionNumber: "asc" } },
 } as const;
 
 const asNum = (v: unknown): number => (v == null ? 0 : Number(v.toString()));
@@ -144,6 +155,19 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
     schemeStatus: r.schemeStatus,
     numberOfSchemes: r.numberOfSchemes || 1,
     totalSchemeAmount: total,
+    soNote: r.soNote ?? null,
+    originalConversionDate: r.originalConversionDate?.toISOString() ?? null,
+    conversionExtensionCount: r.conversionExtensionCount ?? 0,
+    maxExtensionDays: r.scheme.maxExtensionDays ?? 0,
+    maxExtensionAttempts: r.scheme.maxExtensionAttempts ?? 0,
+    conversionExtensions: (r.conversionExtensions ?? []).map((e) => ({
+      extensionNumber: e.extensionNumber,
+      previousConversionDate: e.previousConversionDate.toISOString(),
+      newConversionDate: e.newConversionDate.toISOString(),
+      daysAdded: e.daysAdded,
+      extendedByName: e.extendedBy?.name ?? null,
+      createdAt: e.createdAt.toISOString(),
+    })),
     planningDate: r.submittedAt?.toISOString() ?? null,
     conversionDate: r.conversionDate?.toISOString() ?? null,
     soBookingStatus: r.soBookingStatus,
@@ -164,17 +188,27 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
 
 /* --------------------------------- Listing --------------------------------- */
 
+// The editable planning stage lives in Create Plan; everything past it lives in View Plan. This is the ONE
+// server-side source of that split, applied by `bucket` to both the plan list and the Scheme-wise summary.
+const EDITABLE_PLAN_STATES = [SchemePlanState.DRAFT, SchemePlanState.RETURNED, SchemePlanState.REJECTED];
+const planBucketWhere = (bucket?: "view" | "create") =>
+  bucket === "view" ? { planStatus: { notIn: EDITABLE_PLAN_STATES } }
+  : bucket === "create" ? { planStatus: { in: EDITABLE_PLAN_STATES } }
+  : {};
+
 /**
  * Scoped list: SO → own; RM → their team; Admin → all. Optional `schemeId` filter (for the detail view).
  * Optional `officerId` narrows an RM (or Admin) to a SINGLE Sales Officer — validated server-side against
  * the caller's scope, so it can only ever restrict, never widen, what `getOfficerScope` already allows.
+ * `bucket` enforces the Create Plan / View Plan separation: "create" = Draft/Returned/Rejected only;
+ * "view" = everything past the editable stage; omitted = all (e.g. the by-scheme detail dialog).
  */
-export async function listSchemePlans(ctx: AuthContext, schemeId?: string, officerId?: string): Promise<SchemePlanRow[]> {
+export async function listSchemePlans(ctx: AuthContext, schemeId?: string, officerId?: string, bucket?: "view" | "create"): Promise<SchemePlanRow[]> {
   const scope = await getOfficerScope(ctx);
   if (officerId) await assertOfficerInScope(ctx, officerId);
   const officerFilter = officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
   const rows = (await prisma.dealerSchemePlan.findMany({
-    where: { ...(schemeId ? { schemeId } : {}), ...officerFilter },
+    where: { ...(schemeId ? { schemeId } : {}), ...officerFilter, ...planBucketWhere(bucket) },
     include: PLAN_INCLUDE,
     orderBy: { createdAt: "desc" },
   })) as unknown as RawPlan[];
@@ -199,50 +233,81 @@ export async function listSchemePlans(ctx: AuthContext, schemeId?: string, offic
  * both rules give the same answer; they diverge only on legacy plans — precisely where the plan-level rule
  * would be claiming billing the data cannot evidence.
  */
+/**
+ * Rich per-scheme summary row for View Plan → Scheme-wise. One row per scheme; `DealerSchemePlan` is unique
+ * on (scheme, dealer), so a dealer never appears twice for one scheme and counts never double. Every metric
+ * respects the caller's scope (getOfficerScope) + optional officer filter. Lifecycle buckets are mutually
+ * exclusive: "Admin-confirmed converted" (schemeStatus CONVERTED && adminVerifiedAt set) is a SUBSET of
+ * "SO converted" (schemeStatus CONVERTED), so ratios like adminConverted/soConverted never double-count.
+ *
+ * Dealer-based vs unit-based: *Dealers metrics count plans (one dealer each); *Schemes metrics count units
+ * (Σ numberOfSchemes) so multi-scheme dealers are represented. They coincide when every dealer takes the
+ * scheme once.
+ */
 export interface SchemeWiseSummaryRow {
   schemeId: string;
   schemeName: string;
-  /** Dealer count. One plan exists per (scheme, dealer), so this is the plan count — NOT a unit count. */
-  dealersPlanned: number;
-  /** Σ numberOfSchemes over every plan in scope for this scheme. */
-  totalSchemes: number;
-  /** Σ numberOfSchemes where planStatus = APPROVED. */
-  approvedSchemes: number;
-  /** Converted units the Admin has NOT yet verified. */
-  unverifiedConversions: number;
-  /** Converted units the Admin HAS verified. */
-  verifiedConversions: number;
-  /**
-   * Billed units among the verified-converted ones: actual DealerSchemeInstance rows carrying an
-   * Admin-verified adminBillingDate, clamped to the plan's numberOfSchemes. Deliberately NOT
-   * Σ numberOfSchemes — see the note above.
-   */
-  billedSchemes: number;
+  salesOfficerNames: string[]; // distinct officers with a plan in this scheme (for the SO/State columns)
+  states: string[]; // distinct states (officer groups) represented
+  // Populated ONLY in groupByOfficer (All Plan View) mode — one row per (officer, scheme).
+  salesOfficerId: string | null;
+  salesOfficerName: string | null;
+  /** Active-dealer denominator for THIS row: scope-wide (per-scheme mode) or the officer's own (grouped). */
+  activeDealers: number;
+
+  plannedDealers: number; // dealers planned into this scheme in scope (plan count)
+  plannedSchemes: number; // Σ numberOfSchemes (units)
+
+  soConvertedDealers: number; // dealers with schemeStatus CONVERTED
+  adminConvertedDealers: number; // of those, Admin-confirmed (adminVerifiedAt set) — subset
+  soConvertedUnits: number; // Σ numberOfSchemes among SO-converted
+  adminConvertedUnits: number; // Σ numberOfSchemes among Admin-confirmed converted — subset
+
+  totalAmount: number; // Σ totalSchemeAmount over Admin-confirmed converted ONLY (authoritative with-GST total)
+
+  bookingReceived: number; // among SO-converted, adminBookingStatus RECEIVED (Received only)
+  documentReceived: number; // among SO-converted, adminDocumentStatus soft/hard received
+
+  soBillingFilled: number; // plans with an SO billing date filled
+  adminBillingFilled: number; // of those, Admin billing date also filled — subset
+}
+
+/** The summary payload: per-scheme rows + the scope-level active-dealer denominator (constant across rows). */
+export interface SchemeWiseSummary {
+  rows: SchemeWiseSummaryRow[];
+  /** Distinct ACTIVE dealers in scope (SO's own / RM's team / Admin org / a filtered officer). Denominator
+   *  of "Planned Dealers = planned/active". Active = Dealer.isActive && !deletedAt, currently assigned. */
+  activeDealers: number;
+  /** In-scope option lists for the column filters (unfiltered by the current selection, so the user can
+   *  always re-widen). Booking/Document values are fixed enums and supplied by the UI. */
+  filterOptions: { states: string[]; officers: { id: string; name: string }[] };
+}
+
+/** Server-side Scheme-wise filters. Applied BEFORE aggregation so displayed metrics reflect the filtered
+ *  population (§20). states/officers also narrow the active-dealer denominator; booking/documents narrow
+ *  only the dealer-scheme records (they are not dealer attributes). */
+export interface SchemeSummaryFilters {
+  states?: string[];
+  officerIds?: string[]; // validated ⊂ caller scope (RM Sales-Officer filter can't reach another team)
+  booking?: string[]; // SchemeBookingStatus values
+  documents?: string[]; // SchemeAdminDocStatus values
 }
 
 type SummaryRaw = {
   schemeId: string;
+  salesOfficerId: string;
   numberOfSchemes: number;
-  planStatus: string;
   schemeStatus: string;
   adminVerifiedAt: Date | null;
-  scheme: { schemeName: string };
-  instances: { adminBillingDate: Date | null }[];
+  adminBookingStatus: string | null;
+  adminDocumentStatus: string | null;
+  billingDate: Date | null;
+  adminBillingDate: Date | null;
+  totalSchemeAmount: unknown;
+  scheme: { schemeName: string; schemeValueWithGST: unknown };
+  salesOfficer: { name: string; group: { name: string } | null };
+  instances: { soBillingDate: Date | null; adminBillingDate: Date | null }[];
 };
-
-/**
- * Billed unit count for ONE Admin-verified plan = how many instance rows the plan ACTUALLY HAS that carry
- * an adminBillingDate, clamped to its planned unit count. `verifyScheme` writes adminBillingDate onto every
- * instance that exists (via `ensureInstances`, which never expands), so those rows are the only per-unit
- * billing evidence in the database. The plan-level `adminBillingDate` column cannot substitute: verifyScheme
- * deliberately leaves it null whenever billing is entered per instance.
- *
- * The clamp is defensive only. Instances outnumbering numberOfSchemes should be unreachable — expandInstances
- * prunes surplus instances only while a plan is still editable and refuses ENROLLED plans — but a numerator
- * larger than its own denominator would be a nonsense figure to render.
- */
-const billedInstanceUnits = (instances: { adminBillingDate: Date | null }[], units: number): number =>
-  Math.min(instances.filter((i) => i.adminBillingDate != null).length, units);
 
 /**
  * Scoped scheme-wise summary: SO → own plans; RM → their team; Admin → all (same `getOfficerScope`
@@ -251,45 +316,154 @@ const billedInstanceUnits = (instances: { adminBillingDate: Date | null }[], uni
  * READ-ONLY by construction — a single findMany reduced in memory. It must never call `ensureInstances`
  * or `expandInstances`: displaying a summary must not create or expand instances.
  */
-export async function schemeWiseSummary(ctx: AuthContext, officerId?: string): Promise<SchemeWiseSummaryRow[]> {
+const adminBookingReceived = (s: string | null) => s === SchemeBookingStatus.RECEIVED;
+const adminDocReceivedStatus = (s: string | null) => s === SchemeAdminDocStatus.RECEIVED_SOFT || s === SchemeAdminDocStatus.RECEIVED_HARD;
+
+export async function schemeWiseSummary(
+  ctx: AuthContext,
+  opts: { officerId?: string; groupByOfficer?: boolean; filters?: SchemeSummaryFilters } = {},
+): Promise<SchemeWiseSummary> {
+  const { officerId, groupByOfficer = false, filters = {} } = opts;
   const scope = await getOfficerScope(ctx);
   if (officerId) await assertOfficerInScope(ctx, officerId);
-  const officerFilter = officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
+  // RM Sales-Officer filter is restricted to the RM's own team — reject any officer outside scope.
+  if (filters.officerIds?.length && !scope.all) {
+    for (const id of filters.officerIds) if (!scope.ids.includes(id)) throw new ApiError(403, "That Sales Officer is not in your scope");
+  }
+
+  // Base scope + the officer/state filters (narrow BOTH plans and the active-dealer denominator). Booking/
+  // document filters narrow only the plan records.
+  const scopeOfficer = officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
+  const officerIdFilter = filters.officerIds?.length ? { salesOfficerId: { in: filters.officerIds } } : {};
+  const stateFilter = filters.states?.length ? { salesOfficer: { group: { name: { in: filters.states } } } } : {};
+  const bookingFilter = filters.booking?.length ? { adminBookingStatus: { in: filters.booking as SchemeBookingStatus[] } } : {};
+  const documentFilter = filters.documents?.length ? { adminDocumentStatus: { in: filters.documents as SchemeAdminDocStatus[] } } : {};
+
   const rows = (await prisma.dealerSchemePlan.findMany({
-    where: { ...officerFilter },
+    // View Plan only: Draft/Returned/Rejected belong to Create Plan and are excluded from the summary.
+    where: { ...scopeOfficer, ...officerIdFilter, ...stateFilter, ...bookingFilter, ...documentFilter, ...planBucketWhere("view") },
     select: {
       schemeId: true,
+      salesOfficerId: true,
       numberOfSchemes: true,
-      planStatus: true,
       schemeStatus: true,
       adminVerifiedAt: true,
-      scheme: { select: { schemeName: true } },
-      instances: { select: { adminBillingDate: true } },
+      adminBookingStatus: true,
+      adminDocumentStatus: true,
+      billingDate: true,
+      adminBillingDate: true,
+      totalSchemeAmount: true,
+      scheme: { select: { schemeName: true, schemeValueWithGST: true } },
+      salesOfficer: { select: { name: true, group: { select: { name: true } } } },
+      instances: { select: { soBillingDate: true, adminBillingDate: true } },
     },
   })) as unknown as SummaryRaw[];
 
+  // Active dealer denominator — distinct currently-assigned active dealers in scope, and per officer (for
+  // the grouped All Plan View, where each row's denominator is that Sales Officer's own active dealers).
+  // Officer relation filter shared by the active-dealer query: scope ∩ officer filter ∩ state filter.
+  const activeOfficerWhere = {
+    ...(officerId ? { id: officerId } : scope.all ? {} : { id: { in: scope.ids } }),
+    ...(filters.officerIds?.length ? { id: { in: filters.officerIds } } : {}),
+    ...(filters.states?.length ? { group: { name: { in: filters.states } } } : {}),
+  };
+  const activeAssignmentWhere = {
+    effectiveTo: null,
+    dealer: { isActive: true, deletedAt: null },
+    ...(Object.keys(activeOfficerWhere).length ? { officer: activeOfficerWhere } : {}),
+  };
+  const activeAssigns = (await prisma.dealerAssignment.findMany({ where: activeAssignmentWhere, select: { officerId: true, dealerId: true } })) as { officerId: string; dealerId: string }[];
+  const activeDealers = new Set(activeAssigns.map((a) => a.dealerId)).size;
+  const officerActive = new Map<string, number>();
+  if (groupByOfficer) {
+    const perOfficer = new Map<string, Set<string>>();
+    for (const a of activeAssigns) { if (!perOfficer.has(a.officerId)) perOfficer.set(a.officerId, new Set()); perOfficer.get(a.officerId)!.add(a.dealerId); }
+    for (const [k, v] of perOfficer) officerActive.set(k, v.size);
+  }
+
+  // Group key: per scheme (default) or per (officer, scheme) for the All Plan View.
+  const keyOf = (r: SummaryRaw) => (groupByOfficer ? `${r.salesOfficerId}::${r.schemeId}` : r.schemeId);
+  const blank = (r: SummaryRaw): SchemeWiseSummaryRow => ({
+    schemeId: r.schemeId, schemeName: r.scheme.schemeName, salesOfficerNames: [], states: [],
+    salesOfficerId: groupByOfficer ? r.salesOfficerId : null,
+    salesOfficerName: groupByOfficer ? r.salesOfficer.name : null,
+    activeDealers: groupByOfficer ? (officerActive.get(r.salesOfficerId) ?? 0) : activeDealers,
+    plannedDealers: 0, plannedSchemes: 0,
+    soConvertedDealers: 0, adminConvertedDealers: 0, soConvertedUnits: 0, adminConvertedUnits: 0,
+    totalAmount: 0, bookingReceived: 0, documentReceived: 0, soBillingFilled: 0, adminBillingFilled: 0,
+  });
   const byScheme = new Map<string, SchemeWiseSummaryRow>();
+  const officerSets = new Map<string, Set<string>>();
+  const stateSets = new Map<string, Set<string>>();
+
   for (const r of rows) {
-    const row =
-      byScheme.get(r.schemeId) ??
-      { schemeId: r.schemeId, schemeName: r.scheme.schemeName, dealersPlanned: 0, totalSchemes: 0, approvedSchemes: 0, unverifiedConversions: 0, verifiedConversions: 0, billedSchemes: 0 };
+    const key = keyOf(r);
+    const row = byScheme.get(key) ?? blank(r);
+    if (!officerSets.has(key)) { officerSets.set(key, new Set()); stateSets.set(key, new Set()); }
+    officerSets.get(key)!.add(r.salesOfficer.name);
+    if (r.salesOfficer.group?.name) stateSets.get(key)!.add(r.salesOfficer.group.name);
+
     const units = r.numberOfSchemes || 1;
-    row.dealersPlanned += 1;
-    row.totalSchemes += units;
-    if (r.planStatus === SchemePlanState.APPROVED) row.approvedSchemes += units;
-    // Conversion is only settable on an APPROVED plan (see setConversion), so converted ⊆ approved.
-    if (r.schemeStatus === SchemeConversionStatus.CONVERTED) {
-      if (r.adminVerifiedAt == null) {
-        row.unverifiedConversions += units;
-      } else {
-        row.verifiedConversions += units;
-        // Instance-level, NOT `units`: one billed legacy Instance 1 is one billed unit, never N.
-        row.billedSchemes += billedInstanceUnits(r.instances, units);
+    row.plannedDealers += 1;
+    row.plannedSchemes += units;
+
+    const converted = r.schemeStatus === SchemeConversionStatus.CONVERTED;
+    const adminConfirmed = converted && r.adminVerifiedAt != null;
+    if (converted) {
+      row.soConvertedDealers += 1;
+      row.soConvertedUnits += units;
+      if (adminBookingReceived(r.adminBookingStatus)) row.bookingReceived += 1;
+      if (adminDocReceivedStatus(r.adminDocumentStatus)) row.documentReceived += 1;
+    }
+    if (adminConfirmed) {
+      row.adminConvertedDealers += 1;
+      // Qualifying (counted) conversion = admin-ticked (✓: booking Paid + document Received) + question-mark
+      // (?: booking Paid + document Not Received). Both require booking Paid; every other admin state (❌
+      // crossed/failed) is excluded. The two are mutually exclusive (document is either received or not).
+      const bookingPaid = adminBookingReceived(r.adminBookingStatus);
+      const docReceived = adminDocReceivedStatus(r.adminDocumentStatus);
+      const docNotReceived = r.adminDocumentStatus === SchemeAdminDocStatus.NOT_RECEIVED;
+      const qualifies = bookingPaid && (docReceived || docNotReceived);
+      if (qualifies) {
+        row.adminConvertedUnits += units;
+        // Total Amount counts only qualifying (✅ or ❓) records — never crossed/failed ones.
+        row.totalAmount += r.totalSchemeAmount != null ? asNum(r.totalSchemeAmount) : asNum(r.scheme.schemeValueWithGST) * units;
       }
     }
-    byScheme.set(r.schemeId, row);
+
+    // Billing (per dealer record): SO filled = plan or any instance SO date; Admin filled = plan or any
+    // instance Admin date. Admin-filled is only counted when SO is also filled (numerator ⊂ denominator).
+    const soFilled = r.billingDate != null || r.instances.some((i) => i.soBillingDate != null);
+    const adminFilled = r.adminBillingDate != null || r.instances.some((i) => i.adminBillingDate != null);
+    if (soFilled) {
+      row.soBillingFilled += 1;
+      if (adminFilled) row.adminBillingFilled += 1;
+    }
+
+    byScheme.set(key, row);
   }
-  return [...byScheme.values()].sort((a, b) => a.schemeName.localeCompare(b.schemeName));
+
+  const out = [...byScheme.entries()].map(([key, row]) => ({
+    ...row,
+    salesOfficerNames: [...(officerSets.get(key) ?? [])].sort(),
+    states: [...(stateSets.get(key) ?? [])].sort(),
+  }));
+  // Grouped: own rows first (unknown here — the client orders by ownUserId), then officer, then scheme.
+  out.sort((a, b) => (a.salesOfficerName ?? "").localeCompare(b.salesOfficerName ?? "") || a.schemeName.localeCompare(b.schemeName));
+
+  // Filter options — Sales Officers in the caller's SCOPE (RM → own team only; Admin → all) and the
+  // distinct States among them. Deliberately NOT narrowed by the current selection, so the user can widen.
+  const scopeOfficers = (await prisma.user.findMany({
+    where: { role: Role.SALES_OFFICER, isActive: true, deletedAt: null, ...(scope.all ? {} : { id: { in: scope.ids } }) },
+    select: { id: true, name: true, group: { select: { name: true } } },
+    orderBy: { name: "asc" },
+  })) as { id: string; name: string; group: { name: string } | null }[];
+  const filterOptions = {
+    states: [...new Set(scopeOfficers.map((o) => o.group?.name).filter(Boolean) as string[])].sort(),
+    officers: scopeOfficers.map((o) => ({ id: o.id, name: o.name })),
+  };
+
+  return { rows: out, activeDealers, filterOptions };
 }
 
 export async function getSchemePlan(ctx: AuthContext, id: string): Promise<SchemePlanRow> {
@@ -497,7 +671,10 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
   if (data.adminBookingStatus === SchemeBookingStatus.PARTIAL && (data.adminBookingAmount == null || data.adminBookingAmount <= 0)) {
     throw new ApiError(422, "Enter the partial booking amount");
   }
-  const readyForBilling = data.adminBookingStatus === SchemeBookingStatus.RECEIVED && adminDocReceived(data.adminDocumentStatus);
+  // A billing date may be saved once booking is Paid — including the special "Question-Mark Converted" case
+  // (Paid + document Not Received). Document-received is NOT required to record the date; it remains required
+  // for enrollment (see `enrollmentEligible`), so a question-mark plan saves its date but does not enroll.
+  const readyForBilling = data.adminBookingStatus === SchemeBookingStatus.RECEIVED;
 
   const instances = await ensureInstances(id);
   // Resolve the Admin billing date per instance. Same-for-all (default) applies one date to every
@@ -510,7 +687,7 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
     return byNum.get(instanceNumber) ?? null;
   };
   if ((data.adminBillingDate || (data.adminBillingDates?.some((d) => d.date))) && !readyForBilling) {
-    throw new ApiError(422, "A billing date can only be set once booking and document are both Received");
+    throw new ApiError(422, "A billing date can only be set once booking is Paid");
   }
 
   // Persist per-instance admin billing dates.
@@ -684,6 +861,7 @@ const draftSchema = z.object({
     dealerId: z.string().min(1),
     expectedBillingDate: z.coerce.date().nullable().optional(),
     numberOfSchemes: z.coerce.number().int().min(1).max(10).optional(), // "Allow Multi Schemes" dealer count
+    note: z.string().max(2000).nullable().optional(), // optional per-dealer Sales Officer note
   })).default([]),
   // PARTIAL SUBMISSION (submit only). Which of `dealers` actually go forward for approval; everyone else in
   // the working set is still persisted, but stays a Draft. Omitted → every dealer is submitted, i.e. exactly
@@ -766,16 +944,20 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
     const date = validateDate(d.expectedBillingDate ?? null);
     const count = countFor(d.numberOfSchemes);
     const total = gstValue * count;
+    // Optional per-dealer note. Only applied when the payload carries the key (undefined = leave unchanged);
+    // an empty/whitespace note clears it. Notes never gate save/submit.
+    const noteData = d.note === undefined ? {} : { soNote: d.note?.trim() || null };
     const forward = goesForward(d.dealerId);
     const legacyNext = legacyNextFor(forward);
     const planNext = planNextFor(forward);
     const submitStamp = submitStampFor(forward);
     const cur = byDealer.get(d.dealerId);
     if (!cur) {
-      await prisma.dealerSchemePlan.create({ data: { schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, ...submitStamp } });
+      // While the plan is editable, the original (extension baseline) tracks the planned conversion date.
+      await prisma.dealerSchemePlan.create({ data: { schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, originalConversionDate: date, ...noteData, ...submitStamp } });
       if (forward) submitted++; else drafted++;
     } else if (EDITABLE.has(cur.planStatus)) {
-      await prisma.dealerSchemePlan.update({ where: { id: cur.id }, data: { expectedBillingDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...submitStamp } });
+      await prisma.dealerSchemePlan.update({ where: { id: cur.id }, data: { expectedBillingDate: date, originalConversionDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...noteData, ...submitStamp } });
       if (forward) submitted++; else drafted++;
     }
     // else: locked (already in RM queue or beyond) — leave untouched.
@@ -860,4 +1042,78 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
   });
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Scheme status set to ${data.schemeStatus}` });
   return { ok: true };
+}
+
+/* --------------------------------- Conversion Date Extension --------------------------------- */
+
+// Calendar-day difference, date-only (ignores time-of-day / timezone drift). b − a in whole days.
+const dayIndexUTC = (d: Date) => Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) / 86_400_000);
+const dayDiff = (a: Date, b: Date) => dayIndexUTC(b) - dayIndexUTC(a);
+
+const extendSchema = z.object({ newConversionDate: z.coerce.date() });
+
+/**
+ * Extend a dealer plan's planned Conversion Date. The ORIGINAL date is the permanent baseline: every
+ * extension is measured against it, so the allowance never resets. Enforced server-side:
+ *   - role SO/RM within scope (Admin cannot extend — view only); owner's plan
+ *   - scheme has extension configured (maxDays > 0 AND maxAttempts > 0)
+ *   - plan status still allows conversion-date changes (submitted, not converted, not Admin-verified)
+ *   - attempts remaining, cumulative days ≤ maxDays, new date ≤ original + maxDays, new date after current
+ * The write (history row + plan update + count increment) runs in one transaction; the unique
+ * (planId, extensionNumber) guards against a double-submit racing in a second extension.
+ */
+export async function extendConversionDate(ctx: AuthContext, planId: string, raw: unknown): Promise<{ ok: true; newConversionDate: string; extensionNumber: number }> {
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only the responsible Sales Officer can extend a conversion date");
+  const { newConversionDate } = extendSchema.parse(raw);
+  const scope = await getOfficerScope(ctx);
+  const plan = (await prisma.dealerSchemePlan.findUnique({
+    where: { id: planId },
+    select: {
+      salesOfficerId: true, planStatus: true, schemeStatus: true, adminVerifiedAt: true,
+      expectedBillingDate: true, originalConversionDate: true, conversionExtensionCount: true,
+      scheme: { select: { maxExtensionDays: true, maxExtensionAttempts: true } },
+    },
+  })) as {
+    salesOfficerId: string; planStatus: string; schemeStatus: string; adminVerifiedAt: Date | null;
+    expectedBillingDate: Date | null; originalConversionDate: Date | null; conversionExtensionCount: number;
+    scheme: { maxExtensionDays: number; maxExtensionAttempts: number };
+  } | null;
+  if (!plan) throw new ApiError(404, "Scheme plan not found");
+  if (!scope.all && !scope.ids.includes(plan.salesOfficerId)) throw new ApiError(403, "You cannot extend this scheme plan");
+
+  const maxDays = plan.scheme.maxExtensionDays ?? 0;
+  const maxAttempts = plan.scheme.maxExtensionAttempts ?? 0;
+  if (maxDays <= 0 || maxAttempts <= 0) throw new ApiError(422, "Conversion Date extension is not enabled for this scheme");
+
+  // Only extendable while the plan is live and the conversion has not been recorded/verified yet.
+  const statusOk = (plan.planStatus === SchemePlanState.PENDING_RM || plan.planStatus === SchemePlanState.PENDING_APPROVAL || plan.planStatus === SchemePlanState.APPROVED)
+    && plan.schemeStatus !== SchemeConversionStatus.CONVERTED && plan.adminVerifiedAt == null;
+  if (!statusOk) throw new ApiError(409, "The conversion date can no longer be extended for this plan");
+
+  const current = plan.expectedBillingDate;
+  if (!current) throw new ApiError(422, "This plan has no conversion date to extend");
+  const original = plan.originalConversionDate ?? current; // legacy plans: capture baseline now
+
+  const attemptsUsed = plan.conversionExtensionCount ?? 0;
+  if (attemptsUsed >= maxAttempts) throw new ApiError(422, "No extension attempts remaining");
+
+  const daysUsed = dayDiff(original, current); // ≥ 0
+  const ceiling = new Date(Date.UTC(original.getUTCFullYear(), original.getUTCMonth(), original.getUTCDate()) + maxDays * 86_400_000);
+  const daysAdded = dayDiff(current, newConversionDate);
+  if (daysAdded < 1) throw new ApiError(422, "The new date must be after the current conversion date");
+  if (dayDiff(newConversionDate, ceiling) < 0) throw new ApiError(422, "The new date exceeds the maximum allowed extension");
+  if (daysUsed + daysAdded > maxDays) throw new ApiError(422, `Only ${maxDays - daysUsed} extension day(s) remaining`);
+
+  const extensionNumber = attemptsUsed + 1;
+  await prisma.$transaction([
+    prisma.schemeConversionExtension.create({
+      data: { planId, extensionNumber, originalConversionDate: original, previousConversionDate: current, newConversionDate, daysAdded, extendedById: ctx.userId },
+    }),
+    prisma.dealerSchemePlan.update({
+      where: { id: planId },
+      data: { expectedBillingDate: newConversionDate, originalConversionDate: original, conversionExtensionCount: { increment: 1 } },
+    }),
+  ]);
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Conversion date extended (+${daysAdded}d, #${extensionNumber})` });
+  return { ok: true, newConversionDate: newConversionDate.toISOString(), extensionNumber };
 }

@@ -2,9 +2,9 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Copy, FileText, Info, MessageCircle, MoreVertical, Plus, Save, Send, Share2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, FileText, Info, MessageCircle, MoreVertical, Plus, Save, Send, Share2, StickyNote, X } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { cn, formatCurrency, formatDate, formatDateShort } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,6 +85,7 @@ interface DealerRow {
   planStatus: string | null;
   date: string;
   count: number;
+  note: string | null;
   storedTotal: number | null;
   editable: boolean;
 }
@@ -122,7 +123,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
   const { data: schemes, isLoading } = useQuery<RunningScheme[]>({ queryKey: ["running-schemes"], queryFn: () => api.get("/api/schemes/running") });
   // Same endpoint and cache namespace the other views use: "mine" for a Sales Officer, "all" for the manager
   // roles. Scoping happens server-side in `listSchemePlans` (getOfficerScope) — never in the browser.
-  const { data: plans } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", enableRmScope || readOnly ? "all" : "mine"], queryFn: () => api.get("/api/scheme-plans") });
+  const { data: plans } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "create", enableRmScope || readOnly ? "all" : "mine"], queryFn: () => api.get("/api/scheme-plans?bucket=create") });
 
   // Which officer's rows this screen is planning. A Sales Officer only ever receives their own plans and the
   // Admin panel is deliberately organization-wide, so neither narrows; an RM receives their whole team from
@@ -143,7 +144,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
     });
 
   // Working state layered OVER the server rows, so a refetch can never clobber an untouched edit.
-  const [edits, setEdits] = useState<Record<string, { date?: string; count?: number }>>({});
+  const [edits, setEdits] = useState<Record<string, { date?: string; count?: number; note?: string | null }>>({});
   const [added, setAdded] = useState<Record<string, { dealerId: string; dealerName: string }[]>>({});
   const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string | null>>({});
@@ -153,6 +154,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
   const [docFor, setDocFor] = useState<RunningScheme | null>(null);
   const [shareFor, setShareFor] = useState<RunningScheme | null>(null);
   const [confirm, setConfirm] = useState<{ scheme: RunningScheme; complete: DealerRow[]; incomplete: DealerRow[] } | null>(null);
+  const [noteFor, setNoteFor] = useState<{ schemeId: string; dealerId: string; dealerName: string; note: string } | null>(null);
 
   // Switching officer discards the (now irrelevant) working state rather than applying it to someone else.
   const resetWork = () => { setEdits({}); setAdded({}); setRemoved(new Set()); setErrors({}); };
@@ -172,6 +174,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
       const key = rowKey(scheme.id, p.dealerId);
       if (removed.has(key)) continue;
       const editable = EDITABLE.has(p.planStatus) && !readOnly;
+      const editNote = edits[key]?.note; // undefined = untouched → fall back to the stored note
       out.push({
         dealerId: p.dealerId,
         dealerName: p.dealerName,
@@ -179,13 +182,14 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
         planStatus: p.planStatus,
         date: edits[key]?.date ?? toDateInput(p.expectedBillingDate),
         count: edits[key]?.count ?? (p.numberOfSchemes || 1),
+        note: editNote !== undefined ? editNote : (p.soNote ?? null),
         storedTotal: p.totalSchemeAmount,
         editable,
       });
     }
     for (const a of added[scheme.id] ?? []) {
       const key = rowKey(scheme.id, a.dealerId);
-      out.push({ dealerId: a.dealerId, dealerName: a.dealerName, officerName: null, planStatus: null, date: edits[key]?.date ?? "", count: edits[key]?.count ?? 1, storedTotal: null, editable: true });
+      out.push({ dealerId: a.dealerId, dealerName: a.dealerName, officerName: null, planStatus: null, date: edits[key]?.date ?? "", count: edits[key]?.count ?? 1, note: edits[key]?.note ?? null, storedTotal: null, editable: true });
     }
     return out.sort((a, b) => a.dealerName.localeCompare(b.dealerName));
   };
@@ -194,6 +198,8 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
     setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], date } }; });
   const setCount = (schemeId: string, dealerId: string, count: number) =>
     setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], count } }; });
+  const setNote = (schemeId: string, dealerId: string, note: string) =>
+    setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], note: note.trim() || null } }; });
 
   /** Drop a dealer from the working set: an unsaved addition disappears, a saved draft/returned row is
    *  removed on the next save (which is what the existing server does with a de-selected editable row). */
@@ -213,7 +219,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
         schemeId: v.schemeId,
         officerId: targetOfficer || undefined,
         // The whole editable working set is always sent, so nothing the officer can still edit is dropped.
-        dealers: v.rows.map((r) => ({ dealerId: r.dealerId, expectedBillingDate: r.date || null, numberOfSchemes: r.count })),
+        dealers: v.rows.map((r) => ({ dealerId: r.dealerId, expectedBillingDate: r.date || null, numberOfSchemes: r.count, note: r.note })),
         ...(v.submitIds ? { submitDealerIds: v.submitIds } : {}),
       }),
     onSuccess: (_res, v) => {
@@ -295,15 +301,17 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
               <TableRow>
                 <TableHead className="w-8" />
                 <TableHead><L k="scheme_planning.col.scheme" /></TableHead>
-                <TableHead><L k="scheme_planning.col.dealers" /></TableHead>
+                <TableHead className="text-right"><L k="scheme_planning.col.no_of_dealers" /></TableHead>
+                <TableHead className="text-right"><L k="scheme_planning.col.no_of_schemes" /></TableHead>
+                <TableHead className="text-right"><L k="scheme_planning.col.total_amount" /></TableHead>
                 <TableHead className="text-right"><L k="scheme_planning.col.actions" /></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading ? (
-                <TableRow><TableCell colSpan={4}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
               ) : (schemes?.length ?? 0) === 0 ? (
-                <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">{readOnly ? "No running schemes." : "No running schemes for your State."}</TableCell></TableRow>
+                <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">{readOnly ? "No running schemes." : "No running schemes for your State."}</TableCell></TableRow>
               ) : (
                 schemes!.map((s) => {
                   const open = expanded.has(s.id);
@@ -320,7 +328,13 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                       <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(s.id)}>
                         <TableCell>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
                         <TableCell className="font-semibold">{s.schemeName}</TableCell>
-                        <TableCell>{rows.length} Dealer{rows.length === 1 ? "" : "s"}</TableCell>
+                        {/* No. of Dealers = dealers planned in this scheme (current scope). Total Amount reuses the
+                            SAME per-row planning total (schemeValueWithGST × count / stored total). One scheme per row. */}
+                        <TableCell className="text-right tabular-nums">{rows.length}</TableCell>
+                        {/* No. of Schemes = Σ each dealer row's Number of Schemes (derives from the live rows, so it
+                            recalculates immediately when a dealer's count changes). Total Amount uses the same counts. */}
+                        <TableCell className="text-right tabular-nums">{rows.reduce((sum, r) => sum + r.count, 0)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(rows.reduce((sum, r) => sum + (r.editable ? s.schemeValueWithGST * r.count : (r.storedTotal ?? s.schemeValueWithGST * r.count)), 0))}</TableCell>
                         {/* stopPropagation so using an action never toggles the row underneath it. */}
                         <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-1">
@@ -332,7 +346,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
 
                       {open && (
                         <TableRow>
-                          <TableCell colSpan={4} className={schemeTable.nestedCell}>
+                          <TableCell colSpan={6} className={schemeTable.nestedCell}>
                             <div className={schemeTable.nestedInset}>
                               <div className={schemeTable.nestedShell}>
                                 <Table>
@@ -359,7 +373,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                           <TableCell>
                                             {r.editable ? (
                                               <Input type="date" className="w-44" min={minDate} max={maxDate} value={r.date} onChange={(e) => setDate(s.id, r.dealerId, e.target.value)} />
-                                            ) : r.date ? formatDate(r.date) : <span className="text-muted-foreground">—</span>}
+                                            ) : r.date ? formatDateShort(r.date) : <span className="text-muted-foreground">—</span>}
                                           </TableCell>
                                           <TableCell>
                                             {r.editable && s.allowMultipleSchemes ? (
@@ -371,7 +385,12 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                           {!readOnly && (
                                             <TableCell className="text-right">
                                               {r.editable && (
-                                                <Button variant="ghost" size="sm" title="Remove this dealer from the plan" onClick={() => dropRow(s.id, r)}><X className="h-4 w-4" /></Button>
+                                                <div className="flex items-center justify-end gap-1">
+                                                  <Button variant="ghost" size="sm" title={r.note ? "Edit note" : "Add note"} onClick={() => setNoteFor({ schemeId: s.id, dealerId: r.dealerId, dealerName: r.dealerName, note: r.note ?? "" })}>
+                                                    <StickyNote className={cn("h-4 w-4", r.note && "text-success")} />
+                                                  </Button>
+                                                  <Button variant="ghost" size="sm" title="Remove this dealer from the plan" onClick={() => dropRow(s.id, r)}><X className="h-4 w-4" /></Button>
+                                                </div>
                                               )}
                                             </TableCell>
                                           )}
@@ -421,6 +440,14 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
             setAddFor(null);
           }}
           onClose={() => setAddFor(null)}
+        />
+      )}
+      {noteFor && (
+        <DealerNoteDialog
+          dealerName={noteFor.dealerName}
+          note={noteFor.note}
+          onClose={() => setNoteFor(null)}
+          onSave={(text) => { setNote(noteFor.schemeId, noteFor.dealerId, text); setNoteFor(null); }}
         />
       )}
       {infoFor && <SchemeInfoDialog scheme={infoFor} onClose={() => setInfoFor(null)} />}
@@ -514,6 +541,29 @@ function ChooseDealerDialog({ scheme, officerId, taken, onAdd, onClose }: {
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button disabled={!chosen} onClick={() => chosen && onAdd({ dealerId: chosen.id, dealerName: chosen.name })}>Add Dealer</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* --------------------------------- Dealer note --------------------------------- */
+
+/** Optional per-dealer note. Writable text box; Save stores it in the working set (persisted on Save Draft /
+ *  Submit). An empty note is allowed and clears any existing note. */
+function DealerNoteDialog({ dealerName, note, onClose, onSave }: { dealerName: string; note: string; onClose: () => void; onSave: (text: string) => void }) {
+  const [text, setText] = useState(note);
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Note — {dealerName}</DialogTitle></DialogHeader>
+        <div className="space-y-1.5">
+          <Label>Note (optional)</Label>
+          <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} placeholder="Add an optional note for this dealer…" maxLength={2000} />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => onSave(text)}>Save</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -748,7 +798,7 @@ function IncompleteSubmitDialog({ scheme, complete, incomplete, pending, onCance
             ) : (
               <ul className="space-y-1">
                 {complete.map((r) => (
-                  <li key={r.dealerId} className="flex justify-between gap-4"><span className="font-medium">{r.dealerName}</span><span className="text-muted-foreground">{formatDate(r.date)}</span></li>
+                  <li key={r.dealerId} className="flex justify-between gap-4"><span className="font-medium">{r.dealerName}</span><span className="text-muted-foreground">{formatDateShort(r.date)}</span></li>
                 ))}
               </ul>
             )}

@@ -48,6 +48,31 @@ export function DealerFormDialog({
   initial?: DealerFields;
   onDone: (dealerId?: string) => void;
 }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        {open && <DealerFormBody ctx={ctx} initial={initial} onClose={() => onOpenChange(false)} onDone={onDone} />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The Create/Edit Dealer form itself (header + duplicate-check flow + submit), WITHOUT the surrounding
+ * Dialog — so it can live either in its own dialog (`DealerFormDialog`) or as a tab inside the Monthly
+ * "Add Dealer" modal, reusing the exact same creation logic and duplicate guard.
+ */
+export function DealerFormBody({
+  ctx,
+  initial,
+  onClose,
+  onDone,
+}: {
+  ctx: Ctx;
+  initial?: DealerFields;
+  onClose: () => void;
+  onDone: (dealerId?: string) => void;
+}) {
   const qc = useQueryClient();
   const isEdit = ctx.variant === "monthly" && !!ctx.dealerId;
   const [form, setForm] = useState<DealerFields>({ name: "" });
@@ -56,9 +81,10 @@ export function DealerFormDialog({
   const [error, setError] = useState<string | null>(null);
   const set = (k: keyof DealerFields, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
+  // Reset when (re)mounted or the initial values change — the body only renders while its dialog/tab is open.
   useEffect(() => {
-    if (open) { setForm(initial ?? { name: "" }); setPhase("form"); setDuplicates([]); setError(null); }
-  }, [open, initial]);
+    setForm(initial ?? { name: "" }); setPhase("form"); setDuplicates([]); setError(null);
+  }, [initial]);
 
   const invalidate = () => {
     if (ctx.variant === "monthly") qc.invalidateQueries({ queryKey: ["monthly-plan", ctx.monthlyPlanId] });
@@ -79,7 +105,7 @@ export function DealerFormDialog({
       const r = res as { dealerId?: string; duplicates?: Probable[] };
       if (r.duplicates && r.duplicates.length > 0) { setDuplicates(r.duplicates); setPhase("duplicates"); return; }
       invalidate();
-      onOpenChange(false);
+      onClose();
       onDone(r.dealerId);
     },
     onError: (e) => setError((e as Error).message),
@@ -87,15 +113,14 @@ export function DealerFormDialog({
 
   const assignExisting = useMutation({
     mutationFn: (dealerId: string) => api.post("/api/dealers/assign", { dealerId, officerId: (ctx as { officerId: string }).officerId }),
-    onSuccess: () => { invalidate(); onOpenChange(false); onDone(); },
+    onSuccess: () => { invalidate(); onClose(); onDone(); },
     onError: (e) => setError((e as Error).message),
   });
 
   const title = isEdit ? "Edit Dealer" : "Create Dealer";
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+    <>
         <DialogHeader><DialogTitle>{phase === "form" ? title : "Possible Existing Dealer"}</DialogTitle></DialogHeader>
 
         {phase === "form" ? (
@@ -115,7 +140,7 @@ export function DealerFormDialog({
             <div className="space-y-1.5"><Label>Address</Label><Input value={form.address ?? ""} onChange={(e) => set("address", e.target.value)} /></div>
             {error && <p className="text-sm text-destructive">{error}</p>}
             <DialogFooter>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+              <Button variant="outline" onClick={onClose}>Cancel</Button>
               <Button onClick={() => submit.mutate(undefined)} disabled={!form.name.trim() || submit.isPending}>
                 {submit.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Saving…</> : isEdit ? "Save changes" : "Continue"}
               </Button>
@@ -146,7 +171,6 @@ export function DealerFormDialog({
             </DialogFooter>
           </div>
         )}
-      </DialogContent>
-    </Dialog>
+    </>
   );
 }

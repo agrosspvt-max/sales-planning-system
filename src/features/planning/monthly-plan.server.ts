@@ -578,14 +578,23 @@ export async function addDealerToActiveSeasonalPlan(tx: Tx, officerId: string, d
   const existing = await tx.planDealer.findUnique({ where: { seasonPlanId_dealerId: { seasonPlanId: plan.id, dealerId } }, select: { id: true } });
   if (existing) return { added: true }; // no duplicate PlanDealer
   const pd = await tx.planDealer.create({ data: { seasonPlanId: plan.id, dealerId, fromMonthlyPlan: false }, select: { id: true } });
-  // Seed lines from the officer's GROUP catalogue (active, group price snapshotted); Master fallback.
+  await seedSeasonalPlanLines(tx, pd.id, officerId);
+  return { added: true };
+}
+
+/**
+ * Seed a PlanDealer with one zero-quantity PlanLine per product in the officer's CURRENT seasonal-plan
+ * product set (their GROUP catalogue, group price snapshotted; Master fallback) — exactly how a seasonal
+ * dealer is seeded. This is what makes a newly added/created dealer show the current Seasonal Plan products
+ * (not an empty plan). Idempotent per (planDealer, product) is unnecessary here — the PlanDealer is new.
+ */
+async function seedSeasonalPlanLines(tx: Tx, planDealerId: string, officerId: string) {
   const products = await planningProductsForOfficer(officerId, tx);
   if (products.length > 0) {
     await tx.planLine.createMany({
-      data: products.map((p) => ({ planDealerId: pd.id, productId: p.productId, rateSnapshot: p.rate, nbvPercentSnapshot: p.nbvPercent })),
+      data: products.map((p) => ({ planDealerId, productId: p.productId, rateSnapshot: p.rate, nbvPercentSnapshot: p.nbvPercent })),
     });
   }
-  return { added: true };
 }
 
 /** Create the first DealerAlias from the dealer name (idempotent on the unique tallyKey). */
@@ -624,11 +633,64 @@ export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
     if (duplicates.length > 0) return { duplicates };
   }
 
-  const dealer = await prisma.dealer.create({
-    data: { ...dealerData(data), status: "PENDING", createdByUserId: ctx.userId, createdFrom: "MONTHLY_PLAN" },
+  // Create the dealer, its PlanDealer on THIS season plan, and seed the current Seasonal Plan product set
+  // (so the new dealer opens with the seasonal products, not an empty plan) — atomically.
+  const dealer = await prisma.$transaction(async (tx: Tx) => {
+    const d = await tx.dealer.create({
+      data: { ...dealerData(data), status: "PENDING", createdByUserId: ctx.userId, createdFrom: "MONTHLY_PLAN" },
+    });
+    const pd = await tx.planDealer.create({ data: { seasonPlanId: mp.seasonPlanId, dealerId: d.id, fromMonthlyPlan: true }, select: { id: true } });
+    await seedSeasonalPlanLines(tx, pd.id, mp.officerId);
+    return d;
   });
-  await prisma.planDealer.create({ data: { seasonPlanId: mp.seasonPlanId, dealerId: dealer.id, fromMonthlyPlan: true } });
   return { dealerId: dealer.id, dealerName: dealer.name };
+}
+
+/**
+ * List dealers the Sales Officer may ADD to this monthly plan: their CURRENTLY assigned, active,
+ * non-defaulter dealers (server-side scope) that are NOT already a PlanDealer on this season plan. Because
+ * the population is "all eligible dealers in the SO's scope" (not a frozen snapshot), dealers assigned
+ * after the seasonal plan was created are included.
+ */
+export async function listAddableDealers(ctx: AuthContext, monthlyPlanId: string): Promise<{ id: string; name: string }[]> {
+  const mp = await loadMonthlyPlanOr404(monthlyPlanId);
+  if (!(isPlanOwner(ctx, mp.officerId) || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  await assertOfficerInScope(ctx, mp.officerId);
+  const [assigns, present] = await Promise.all([
+    prisma.dealerAssignment.findMany({
+      where: { officerId: mp.officerId, effectiveTo: null, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
+      select: { dealer: { select: { id: true, name: true } } },
+    }) as Promise<{ dealer: { id: string; name: string } }[]>,
+    prisma.planDealer.findMany({ where: { seasonPlanId: mp.seasonPlanId }, select: { dealerId: true } }) as Promise<{ dealerId: string }[]>,
+  ]);
+  const inPlan = new Set(present.map((p) => p.dealerId));
+  return assigns.map((a) => a.dealer).filter((d) => !inPlan.has(d.id)).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Add an EXISTING in-scope dealer to this monthly plan's season plan (as a real seasonal dealer with the
+ * current Seasonal Plan products seeded at zero quantity). Owner Sales Officer / Super Admin; editable +
+ * live plan; the dealer must be currently assigned to the plan officer (scope enforced server-side).
+ * Idempotent — never creates a duplicate PlanDealer.
+ */
+export async function addExistingDealerToMonthlyPlan(ctx: AuthContext, monthlyPlanId: string, dealerId: string): Promise<{ added: boolean }> {
+  const mp = await loadMonthlyPlanOr404(monthlyPlanId);
+  if (!(isPlanOwner(ctx, mp.officerId) || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
+  assertMonthlyLive(mp);
+  await assertOfficerInScope(ctx, mp.officerId);
+  const assign = await prisma.dealerAssignment.findFirst({
+    where: { officerId: mp.officerId, dealerId, effectiveTo: null, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
+    select: { id: true },
+  });
+  if (!assign) throw new ApiError(422, "That dealer is not in your active dealer list");
+  const existing = await prisma.planDealer.findUnique({ where: { seasonPlanId_dealerId: { seasonPlanId: mp.seasonPlanId, dealerId } }, select: { id: true } });
+  if (existing) return { added: true }; // no duplicate — idempotent against double-submit
+  await prisma.$transaction(async (tx: Tx) => {
+    const pd = await tx.planDealer.create({ data: { seasonPlanId: mp.seasonPlanId, dealerId, fromMonthlyPlan: false }, select: { id: true } });
+    await seedSeasonalPlanLines(tx, pd.id, mp.officerId);
+  });
+  return { added: true };
 }
 
 const adminCreateSchema = dealerFieldsSchema.extend({

@@ -5,12 +5,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ChevronDown, ChevronRight, UserPlus, Pencil } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { NativeSelect } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 import { ClearanceTag } from "@/components/ui/clearance-tag";
 import { CategoryBadge } from "@/components/ui/category-badge";
 import { CategoryFilter } from "@/components/ui/category-filter";
 import { useCategories } from "@/lib/use-categories";
 import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
-import { DealerFormDialog, type DealerFields } from "./dealer-form-dialog";
+import { DealerFormDialog, DealerFormBody, type DealerFields } from "./dealer-form-dialog";
 import { useMonthlyEdit } from "./monthly-edit-context";
 
 interface Candidate { productId: string; productName: string; rate: number; nbvPercent: number; isClearance?: boolean; clearanceQty?: number | null; clearanceRemaining?: number | null }
@@ -29,6 +32,86 @@ export function CreateDealerButton({ monthlyPlanId, onCreated }: { monthlyPlanId
         ctx={{ variant: "monthly", monthlyPlanId }}
         onDone={(id) => id && onCreated(id)}
       />
+    </>
+  );
+}
+
+/**
+ * "+ Add Dealer" in Monthly Planning. One modal with two tabs:
+ *   • Add Dealer   — pick an existing in-scope dealer (not already in this plan) and add it immediately.
+ *   • Create Dealer — the existing create-dealer flow (reused via DealerFormBody, PENDING_APPROVAL).
+ * Either path makes the dealer appear in the dropdown / progress bar without a refresh (the monthly-plan
+ * query is invalidated), and selects it via `onAdded`.
+ */
+export function AddDealerButton({ monthlyPlanId, onAdded }: { monthlyPlanId: string; onAdded: (dealerId: string) => void }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<"add" | "create">("add");
+  const [pick, setPick] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const { data: addable, isFetching } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ["addable-dealers", monthlyPlanId],
+    queryFn: () => api.get(`/api/planning/monthly-plans/${monthlyPlanId}/dealers`),
+    enabled: open && tab === "add",
+  });
+
+  const addMut = useMutation({
+    mutationFn: (dealerId: string) => api.post(`/api/planning/monthly-plans/${monthlyPlanId}/dealers/add-existing`, { dealerId }),
+    onSuccess: (_r, dealerId) => {
+      qc.invalidateQueries({ queryKey: ["monthly-plan", monthlyPlanId] });
+      qc.invalidateQueries({ queryKey: ["addable-dealers", monthlyPlanId] });
+      setOpen(false); setPick(""); setError(null);
+      onAdded(dealerId);
+    },
+    onError: (e) => setError((e as Error).message),
+  });
+
+  const openModal = () => { setTab("add"); setPick(""); setError(null); setOpen(true); };
+  const Tab = ({ id, label }: { id: "add" | "create"; label: string }) => (
+    <button type="button" onClick={() => { setTab(id); setError(null); }}
+      className={cn("rounded-md px-3 py-1.5 text-sm font-medium", tab === id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}>{label}</button>
+  );
+
+  return (
+    <>
+      <Button variant="outline" size="sm" onClick={openModal}><Plus className="h-4 w-4" /> Add Dealer</Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle>Add Dealer</DialogTitle></DialogHeader>
+          <div className="flex gap-1 rounded-lg bg-muted/40 p-1">
+            <Tab id="add" label="Add Dealer" />
+            <Tab id="create" label="Create Dealer" />
+          </div>
+          {tab === "add" ? (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Choose one of your dealers not already in this monthly plan.</p>
+              {isFetching ? (
+                <p className="text-sm text-muted-foreground">Loading…</p>
+              ) : (addable?.length ?? 0) === 0 ? (
+                <p className="text-sm text-muted-foreground">All your dealers are already in this plan.</p>
+              ) : (
+                <NativeSelect
+                  value={pick}
+                  onChange={(e) => setPick(e.target.value)}
+                  options={[{ value: "", label: "Choose a dealer…" }, ...(addable ?? []).map((d) => ({ value: d.id, label: d.name }))]}
+                />
+              )}
+              {error && <p className="text-sm text-destructive">{error}</p>}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+                <Button disabled={!pick || addMut.isPending} onClick={() => addMut.mutate(pick)}>{addMut.isPending ? "Adding…" : "Add"}</Button>
+              </div>
+            </div>
+          ) : (
+            <DealerFormBody
+              ctx={{ variant: "monthly", monthlyPlanId }}
+              onClose={() => setOpen(false)}
+              onDone={(id) => { if (id) onAdded(id); }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

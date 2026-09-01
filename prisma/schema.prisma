@@ -49,6 +49,7 @@ model User {
   rmActedSchemePlans     DealerSchemePlan[]       @relation("RmActedSchemePlans")
   enrolledSchemePlans    DealerSchemePlan[]       @relation("EnrolledSchemePlans")
   schemePayments         SchemePayment[]          @relation("SchemePaymentCreatedBy")
+  conversionExtensions   SchemeConversionExtension[] @relation("ConversionExtendedBy")
   group                  UserGroup?               @relation(fields: [groupId], references: [id])
 
   @@index([role])
@@ -85,6 +86,9 @@ model Scheme {
   benefitDetails       String?
   otherBenefitDetails  String?
   allowMultipleSchemes Boolean         @default(false)
+  // Conversion Date Extension config. 0/unset on either ⇒ extension not available for this scheme.
+  maxExtensionDays     Int             @default(0) // total calendar days a dealer may push the ORIGINAL conversion date
+  maxExtensionAttempts Int             @default(0) // how many separate extensions are allowed
   documentUrl          String?
   status               SchemeStatus    @default(OPEN)
   createdById          String
@@ -125,7 +129,9 @@ model DealerSchemePlan {
   salesOfficerId   String
   planningStatus   SchemePlanStatus       @default(DRAFT)
   enrollmentStatus SchemeEnrollmentStatus @default(PENDING_DOCUMENT)
-  expectedBillingDate DateTime?
+  expectedBillingDate DateTime? // the CURRENT planned conversion date (moves when extended)
+  originalConversionDate DateTime? // baseline planned conversion date — never changes once set (extension ceiling anchor)
+  conversionExtensionCount Int   @default(0) // denormalized count for the list badge; history is the source of truth
   submittedAt      DateTime?
   rmActedById      String?
   rmActedAt        DateTime?
@@ -140,6 +146,7 @@ model DealerSchemePlan {
   schemeStatus     SchemeConversionStatus @default(PENDING) // appears only after Approved; SO-controlled
   numberOfSchemes  Int                    @default(1) // dealer takes the same scheme N times (Allow Multi Schemes = Yes)
   totalSchemeAmount Decimal?              @db.Decimal(14, 2) // schemeValueWithGST × numberOfSchemes
+  soNote           String?                // optional per-dealer note written by the Sales Officer in Create Plan
   // SO conversion entry (after Approved)
   conversionDate   DateTime?
   soBookingStatus  SchemeBookingStatus?
@@ -166,6 +173,7 @@ model DealerSchemePlan {
   enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
   instances        DealerSchemeInstance[]
   payments         SchemePayment[]
+  conversionExtensions SchemeConversionExtension[]
 
   @@unique([schemeId, dealerId])
   @@index([schemeId])
@@ -175,6 +183,25 @@ model DealerSchemePlan {
   @@index([enrollmentStatus])
   @@index([planStatus])
   @@index([schemeStatus])
+}
+
+/// One Conversion Date Extension event for a dealer plan. Immutable history — the source of truth for how
+/// many extensions were made and how many cumulative days were consumed against the ORIGINAL date.
+model SchemeConversionExtension {
+  id                     String           @id @default(cuid())
+  planId                 String
+  extensionNumber        Int              // 1, 2, 3 … within this plan
+  originalConversionDate DateTime         // baseline (same across all of a plan's extensions)
+  previousConversionDate DateTime         // the current date before this extension
+  newConversionDate      DateTime         // the date after this extension
+  daysAdded              Int              // newConversionDate − previousConversionDate, in calendar days
+  extendedById           String
+  createdAt              DateTime         @default(now())
+  plan                   DealerSchemePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  extendedBy             User             @relation("ConversionExtendedBy", fields: [extendedById], references: [id])
+
+  @@unique([planId, extensionNumber])
+  @@index([planId])
 }
 
 /// One scheme instance for a dealer plan. A plan with numberOfSchemes = N has N instances (1..N); each
@@ -1119,8 +1146,9 @@ enum SchemeBookingStatus {
 
 enum SchemeSoDocStatus {
   SIGNED_BUT_NOT_SENT
-  SIGNED_AND_SENT
-  DOC_RECEIVED
+  SIGNED_AND_SENT // displayed as "Soft copy sent"
+  HARD_COPY_SENT
+  DOC_RECEIVED // displayed as "HO received hard copy"
 }
 
 enum SchemeAdminDocStatus {

@@ -3,9 +3,9 @@
 import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { CornerUpLeft, Send, Eye, ShieldCheck, ChevronRight, ChevronLeft, ChevronDown } from "lucide-react";
+import { CornerUpLeft, Send, Eye, Info, ShieldCheck, ChevronRight, ChevronLeft, ChevronDown } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatDate, formatCurrency } from "@/lib/utils";
+import { cn, formatDateShort, formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,8 +18,9 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PillNav } from "@/features/planning/plan-list-ui";
 import { L, useLabel } from "@/features/labels/label-ui";
-import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, MarkedValue, conversionDateCell, bookingCell, documentCell, billingDateCell, type SchemePlan } from "./scheme-detail-dialog";
+import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, MarkedValue, conversionDateCell, bookingCell, documentCell, BillingDateValue, PlannedConversionCell, type SchemePlan } from "./scheme-detail-dialog";
 import { schemeTable, verifyTint } from "./scheme-table-theme";
+import { SchemeSummaryHeads, SchemeSummaryValueCells, ColumnFilterHead, SUMMARY_METRIC_COLS, ZERO_METRICS, EMPTY_SUMMARY_FILTERS, summaryFilterQuery, type SchemeWiseSummaryPayload, type SummaryFilters } from "./scheme-summary-cells";
 import { SchemeOfficerWorkspace, SchemePlanningView } from "./scheme-officer-workspace";
 import { SchemeCreatePlanWorkspace } from "./scheme-create-plan";
 import { SchemeOfficerViewPlan, DealerWiseComingSoon, SchemeWiseCollapsibleView } from "./scheme-view-plan";
@@ -205,6 +206,7 @@ function SchemeManagerViewPlans({ role, userId }: { role: Role; userId: string }
               groupByOfficer={scope === "all"}
               ownUserId={userId}
               showAction={scope === "self"}
+              showOfficerCol={scope !== "all"}
             />
           )}
         </>
@@ -303,7 +305,26 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
   const isManager = role === Role.REGIONAL_MANAGER;
   const isAdmin = role === Role.SUPER_ADMIN;
 
-  const { data: rows, isLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "all"], queryFn: () => api.get("/api/scheme-plans") });
+  // View Plan (Admin Scheme-wise + RM Review) excludes Draft/Returned/Rejected — those live in Create Plan.
+  const { data: rows, isLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "view", "all"], queryFn: () => api.get("/api/scheme-plans?bucket=view") });
+  // Admin View Plan → Scheme-wise: the rich server-aggregated summary (metrics + scope active-dealer denom).
+  // Same scope as the plan list; loaded only for Admin (RM Review keeps its approval columns).
+  // Column filters (State / Sales Officer / Booking / Document) recalculate the metrics server-side.
+  const [filters, setFilters] = useState<SummaryFilters>(EMPTY_SUMMARY_FILTERS);
+  const filterQ = summaryFilterQuery(filters);
+  const { data: summary } = useQuery<SchemeWiseSummaryPayload>({ queryKey: ["scheme-summary", "all", filterQ], queryFn: () => api.get(`/api/scheme-plans/scheme-summary${filterQ ? `?${filterQ}` : ""}`), enabled: isAdmin });
+  const summaryByScheme = useMemo(() => new Map((summary?.rows ?? []).map((r) => [r.schemeId, r])), [summary]);
+  const activeDealers = summary?.activeDealers ?? 0;
+  const stateOptions = useMemo(() => (summary?.filterOptions.states ?? []).map((s) => ({ value: s, label: s })), [summary]);
+  const officerOptions = useMemo(() => (summary?.filterOptions.officers ?? []).map((o) => ({ value: o.id, label: o.name })), [summary]);
+  // Filter the grouped rows client-side by the SAME selection (Admin only) so rows/detail match the filtered
+  // summary; the metric NUMBERS come from the server aggregation.
+  const planMatches = useMemo(() => (p: SchemePlan) =>
+    (filters.states.length === 0 || (p.state != null && filters.states.includes(p.state))) &&
+    (filters.officers.length === 0 || filters.officers.includes(p.salesOfficerId)) &&
+    (filters.booking.length === 0 || (p.adminBookingStatus != null && filters.booking.includes(p.adminBookingStatus))) &&
+    (filters.documents.length === 0 || (p.adminDocumentStatus != null && filters.documents.includes(p.adminDocumentStatus))),
+  [filters]);
   const [detail, setDetail] = useState<SchemePlan | null>(null);
   const [verify, setVerify] = useState<SchemePlan | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set()); // collapsed by default
@@ -321,13 +342,14 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
 
   const groups = useMemo<SchemeGroup[]>(() => {
     const map = new Map<string, SchemeGroup>();
-    for (const p of rows ?? []) {
+    // Admin filters narrow the population; RM has no filter UI so planMatches passes everything.
+    for (const p of (rows ?? []).filter(planMatches)) {
       const g = map.get(p.schemeId) ?? { schemeId: p.schemeId, schemeName: p.schemeName, plans: [] };
       g.plans.push(p);
       map.set(p.schemeId, g);
     }
     return [...map.values()].sort((a, b) => a.schemeName.localeCompare(b.schemeName));
-  }, [rows]);
+  }, [rows, planMatches]);
 
   const submit = useMutation({ mutationFn: (id: string) => api.post(`/api/scheme-plans/${id}/submit`, {}), onSuccess: invalidate, onError: (e) => alert((e as Error).message) });
   const act = useMutation({
@@ -361,7 +383,9 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
   // Dealers an RM may return in bulk for a scheme (plans pending for RM, not the RM's own).
   const rmReturnable = (g: SchemeGroup) => g.plans.filter((p) => isManager && p.salesOfficerId !== userId && p.planStatus === "PENDING_RM");
 
-  const COLS = 7;
+  // Admin View-Plan Scheme-wise: Scheme, State, Sales Officer(s), + 8 summary metrics, Actions.
+  // RM Review (unchanged): Scheme, Planned Dealers, Converted Dealers, Sales Officer(s), State, Plan Status, Scheme Status, Actions.
+  const COLS = isAdmin ? 3 + SUMMARY_METRIC_COLS : 8;
 
   return (
     <div className="space-y-5">
@@ -420,12 +444,27 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
             <TableRow>
               <TableHead className="w-8" />
               <TableHead><L k="scheme_planning.col.scheme" /></TableHead>
-              <TableHead><L k="scheme_planning.col.dealers" /></TableHead>
-              <TableHead><L k="scheme_planning.col.sales_officers" /></TableHead>
-              <TableHead><L k="scheme_planning.col.state" /></TableHead>
-              <TableHead><L k="scheme_planning.col.plan_status" /></TableHead>
-              <TableHead><L k="scheme_planning.col.scheme_status" /></TableHead>
-              <TableHead className="text-right"><L k="scheme_planning.col.actions" /></TableHead>
+              {isAdmin ? (
+                <>
+                  <ColumnFilterHead labelKey="scheme_planning.col.state" options={stateOptions} value={filters.states} onApply={(v) => setFilters((f) => ({ ...f, states: v }))} />
+                  <ColumnFilterHead labelKey="scheme_planning.col.sales_officers" options={officerOptions} value={filters.officers} onApply={(v) => setFilters((f) => ({ ...f, officers: v }))} />
+                  <SchemeSummaryHeads
+                    booking={{ value: filters.booking, onApply: (v) => setFilters((f) => ({ ...f, booking: v })) }}
+                    documents={{ value: filters.documents, onApply: (v) => setFilters((f) => ({ ...f, documents: v })) }}
+                  />
+                </>
+              ) : (
+                <>
+                  <TableHead className="text-right"><L k="scheme_planning.col.planned_dealers" /></TableHead>
+                  <TableHead className="text-right"><L k="scheme_planning.col.converted_dealers" /></TableHead>
+                  <TableHead><L k="scheme_planning.col.sales_officers" /></TableHead>
+                  <TableHead><L k="scheme_planning.col.state" /></TableHead>
+                  <TableHead><L k="scheme_planning.col.plan_status" /></TableHead>
+                  <TableHead><L k="scheme_planning.col.scheme_status" /></TableHead>
+                </>
+              )}
+              {/* Admin Scheme-wise has no Actions column; RM Review keeps its "Return Entire Scheme" action. */}
+              {!isAdmin && <TableHead className="text-right"><L k="scheme_planning.col.actions" /></TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -444,28 +483,42 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                     <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(g.schemeId)}>
                       <TableCell>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
                       <TableCell className="font-semibold">{g.schemeName}</TableCell>
-                      <TableCell>{g.plans.length} Dealer{g.plans.length === 1 ? "" : "s"}</TableCell>
-                      <TableCell className="max-w-[16rem] truncate" title={officers.join(", ")}>{officers.length <= 1 ? officers[0] ?? "—" : `${officers[0]} +${officers.length - 1}`}</TableCell>
-                      <TableCell>{states.length ? states.map((s) => <Badge key={s} variant="secondary" className="mr-1">{s}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{planSummary(g.plans)}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{schemeSummary(g.plans)}</TableCell>
-                      <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                        {isManager && returnable.length > 0 && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={bulkReturn.isPending}
-                            onClick={() => setReason({
-                              title: `Return entire scheme — ${g.schemeName}`,
-                              confirmLabel: `Return ${returnable.length} dealer${returnable.length === 1 ? "" : "s"}`,
-                              require: true,
-                              run: (remarks) => bulkReturn.mutate({ ids: returnable.map((p) => p.id), remarks }),
-                            })}
-                          >
-                            <CornerUpLeft className="h-4 w-4" /> Return Entire Scheme
-                          </Button>
-                        )}
-                      </TableCell>
+                      {isAdmin ? (
+                        <>
+                          <TableCell>{states.length ? states.map((s) => <Badge key={s} variant="secondary" className="mr-1">{s}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell>
+                          <TableCell className="max-w-[16rem] truncate" title={officers.join(", ")}>{officers.length <= 1 ? officers[0] ?? "—" : `${officers[0]} +${officers.length - 1}`}</TableCell>
+                          {/* Metrics from the shared server aggregation (admin-confirmed lifecycle, scope denom). */}
+                          <SchemeSummaryValueCells m={summaryByScheme.get(g.schemeId) ?? ZERO_METRICS} activeDealers={activeDealers} />
+                        </>
+                      ) : (
+                        <>
+                          <TableCell className="text-right tabular-nums">{g.plans.length}</TableCell>
+                          <TableCell className="text-right tabular-nums">{g.plans.filter((p) => p.schemeStatus === "CONVERTED").length}</TableCell>
+                          <TableCell className="max-w-[16rem] truncate" title={officers.join(", ")}>{officers.length <= 1 ? officers[0] ?? "—" : `${officers[0]} +${officers.length - 1}`}</TableCell>
+                          <TableCell>{states.length ? states.map((s) => <Badge key={s} variant="secondary" className="mr-1">{s}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{planSummary(g.plans)}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{schemeSummary(g.plans)}</TableCell>
+                        </>
+                      )}
+                      {!isAdmin && (
+                        <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                          {isManager && returnable.length > 0 && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={bulkReturn.isPending}
+                              onClick={() => setReason({
+                                title: `Return entire scheme — ${g.schemeName}`,
+                                confirmLabel: `Return ${returnable.length} dealer${returnable.length === 1 ? "" : "s"}`,
+                                require: true,
+                                run: (remarks) => bulkReturn.mutate({ ids: returnable.map((p) => p.id), remarks }),
+                              })}
+                            >
+                              <CornerUpLeft className="h-4 w-4" /> Return Entire Scheme
+                            </Button>
+                          )}
+                        </TableCell>
+                      )}
                     </TableRow>
                     {open && (
                       <TableRow>
@@ -500,10 +553,20 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                               <TableBody>
                                 {g.plans.map((r) => (
                                   <TableRow key={r.id}>
-                                    <TableCell className="font-medium">{r.dealerName}</TableCell>
+                                    <TableCell className="font-medium">
+                                      {isAdmin ? (
+                                        <div className="flex items-center gap-1.5">
+                                          <span>{r.dealerName}</span>
+                                          {/* Standalone Info — plan/scheme details + any Sales Officer note. Green when a note exists. */}
+                                          <button type="button" title={r.soNote ? "Info · note added" : "Info"} onClick={() => setDetail(r)}>
+                                            <Info className={cn("h-3.5 w-3.5", r.soNote ? "text-success" : "text-muted-foreground")} />
+                                          </button>
+                                        </div>
+                                      ) : r.dealerName}
+                                    </TableCell>
                                     <TableCell>{r.salesOfficerName}</TableCell>
                                     <TableCell>{r.state ? <Badge variant="secondary">{r.state}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
-                                    <TableCell>{r.expectedBillingDate ? formatDate(r.expectedBillingDate) : <span className="text-muted-foreground">—</span>}</TableCell>
+                                    <TableCell><PlannedConversionCell plan={r} /></TableCell>
                                     <TableCell><PlanStateBadge status={r.planStatus} /></TableCell>
                                     <TableCell>{r.planStatus === "APPROVED" ? <SchemeStatusBadge plan={r} /> : <span className="text-muted-foreground">—</span>}</TableCell>
                                     <TableCell className="border-l" />
@@ -512,7 +575,7 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                                         <TableCell className={cn("whitespace-nowrap", verifyTint.conversion.cell)}><MarkedValue v={conversionDateCell(r)} /></TableCell>
                                         <TableCell className={cn("whitespace-nowrap", verifyTint.booking.cell)}><MarkedValue v={bookingCell(r)} /></TableCell>
                                         <TableCell className={cn("whitespace-nowrap", verifyTint.document.cell)}><MarkedValue v={documentCell(r)} /></TableCell>
-                                        <TableCell className={cn("whitespace-nowrap", verifyTint.billing.cell)}><MarkedValue v={billingDateCell(r)} /></TableCell>
+                                        <TableCell className={cn("whitespace-nowrap", verifyTint.billing.cell)}><BillingDateValue plan={r} /></TableCell>
                                       </>
                                     )}
                                     <TableCell className="border-l text-right">
@@ -549,7 +612,8 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                                           />
                                         )}
                                         {canVerify(r) && <Button size="sm" variant="outline" onClick={() => setVerify(r)}><ShieldCheck className="h-4 w-4" /> Verify</Button>}
-                                        <Button size="sm" variant="ghost" onClick={() => setDetail(r)}><Eye className="h-4 w-4" /> Info</Button>
+                                        {/* Admin uses the standalone ⓘ next to the dealer name; RM Review keeps its Info button here. */}
+                                        {!isAdmin && <Button size="sm" variant="ghost" onClick={() => setDetail(r)}><Eye className="h-4 w-4" /> Info</Button>}
                                       </div>
                                     </TableCell>
                                   </TableRow>
@@ -602,8 +666,8 @@ function ReasonModal({ prompt, onClose }: { prompt: ReasonPrompt; onClose: () =>
 /* --------------------------- Admin three-column verification --------------------------- */
 
 const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
-const SO_BOOKING_LABEL: Record<string, string> = { RECEIVED: "Received", NOT_RECEIVED: "Not Received", PARTIAL: "Partial Received" };
-const SO_DOC_LABEL: Record<string, string> = { SIGNED_BUT_NOT_SENT: "Signed but not Sent", SIGNED_AND_SENT: "Signed & Sent", DOC_RECEIVED: "Doc Received" };
+const SO_BOOKING_LABEL: Record<string, string> = { RECEIVED: "Paid", NOT_RECEIVED: "Not paid", PARTIAL: "Partially paid" };
+const SO_DOC_LABEL: Record<string, string> = { SIGNED_BUT_NOT_SENT: "Signed but not sent", SIGNED_AND_SENT: "Soft copy sent", HARD_COPY_SENT: "Hard copy sent", DOC_RECEIVED: "HO received hard copy" };
 
 function AdminMark({ mark }: { mark: "" | "✓" | "!" | "✕" }) {
   if (!mark) return null;
@@ -636,13 +700,18 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
   const [remarks, setRemarks] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const docOk = doc === "RECEIVED_SOFT" || doc === "RECEIVED_HARD";
-  const billingEnabled = booking === "RECEIVED" && docOk; // billing only once payment + document Received
+  // Billing is allowed once booking is Paid AND a document status is chosen — including the special
+  // "Question-Mark Converted" case (Paid + Not Received). PARTIAL / Not-paid booking still block billing.
+  const canBill = (bk: string, dc: string) => bk === "RECEIVED" && (dc === "RECEIVED_SOFT" || dc === "RECEIVED_HARD" || dc === "NOT_RECEIVED");
+  const billingEnabled = canBill(booking, doc);
   const partialNeedsAmount = booking === "PARTIAL" && !(Number(bookingAmount) > 0);
   const coreComplete = !!convDate && !!booking && !!doc && !partialNeedsAmount;
   const perInstance = multi && !sameForAll;
   const billingComplete = billingEnabled && (perInstance ? instNums.every((n) => !!instDates[n]) : !!billDate);
-  const eligible = coreComplete && billingComplete; // all conditions incl. every instance → backend enrolls
+  // Enrollment still requires the document to be Received (soft/hard); the question-mark case (Paid + Not
+  // Received) can record a billing date but never enrolls — mirrors the server's `enrollmentEligible`.
+  const docReceived = doc === "RECEIVED_SOFT" || doc === "RECEIVED_HARD";
+  const eligible = coreComplete && billingComplete && booking === "RECEIVED" && docReceived;
 
   // Markers reflect the Admin's CURRENT selection (blank when nothing chosen yet).
   const bookingMark: "" | "✓" | "!" | "✕" = booking === "" ? "" : booking === "RECEIVED" ? "✓" : booking === "PARTIAL" ? "!" : "✕";
@@ -651,8 +720,8 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
 
   // When booking/document stop qualifying, clear the (now-disabled) billing dates.
   const clearBilling = () => { setBillDate(""); setInstDates({}); };
-  const onBooking = (v: string) => { setBooking(v); if (!(v === "RECEIVED" && docOk)) clearBilling(); };
-  const onDoc = (v: string) => { const ok = v === "RECEIVED_SOFT" || v === "RECEIVED_HARD"; setDoc(v); if (!(booking === "RECEIVED" && ok)) clearBilling(); };
+  const onBooking = (v: string) => { setBooking(v); if (!canBill(v, doc)) clearBilling(); };
+  const onDoc = (v: string) => { setDoc(v); if (!canBill(booking, v)) clearBilling(); };
 
   const mut = useMutation({
     mutationFn: () => api.post(`/api/scheme-plans/${plan.id}/verify`, {
@@ -686,7 +755,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
             <tbody>
               <tr>
                 <Cell><span className="font-medium">Conversion Date *</span></Cell>
-                <Cell>{plan.conversionDate ? formatDate(plan.conversionDate) : "—"}</Cell>
+                <Cell>{plan.conversionDate ? formatDateShort(plan.conversionDate) : "—"}</Cell>
                 <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={convDate} onChange={(e) => setConvDate(e.target.value)} /><AdminMark mark={convMark} /></div></Cell>
               </tr>
               <tr>
@@ -694,7 +763,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                 <Cell>{soBooking}</Cell>
                 <Cell>
                   <div className="flex items-center gap-2">
-                    <NativeSelect className="w-40" value={booking} onChange={(e) => onBooking(e.target.value)} options={[{ value: "", label: "Choose Booking Status" }, { value: "RECEIVED", label: "Received" }, { value: "NOT_RECEIVED", label: "Not Received" }, { value: "PARTIAL", label: "Partial Received" }]} />
+                    <NativeSelect className="w-40" value={booking} onChange={(e) => onBooking(e.target.value)} options={[{ value: "", label: "Choose Booking Status" }, { value: "RECEIVED", label: "Paid" }, { value: "PARTIAL", label: "Partially paid" }, { value: "NOT_RECEIVED", label: "Not paid" }]} />
                     {booking && booking !== "NOT_RECEIVED" && <Input type="number" min="0" className="w-28" placeholder="Amount" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} />}
                     <AdminMark mark={bookingMark} />
                   </div>
@@ -713,7 +782,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
               {!multi ? (
                 <tr>
                   <Cell><span className="font-medium">Billing Date</span></Cell>
-                  <Cell>{plan.billingDate ? formatDate(plan.billingDate) : "—"}</Cell>
+                  <Cell>{plan.billingDate ? formatDateShort(plan.billingDate) : "—"}</Cell>
                   <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={billDate} disabled={!billingEnabled} onChange={(e) => setBillDate(e.target.value)} /><AdminMark mark={billDate ? "✓" : ""} /></div></Cell>
                 </tr>
               ) : (
@@ -740,7 +809,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                       return (
                         <tr key={n}>
                           <Cell><span className="pl-3 text-muted-foreground">Scheme {n}</span></Cell>
-                          <Cell>{so ? formatDate(so) : "—"}</Cell>
+                          <Cell>{so ? formatDateShort(so) : "—"}</Cell>
                           <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={instDates[n] ?? ""} disabled={!billingEnabled} onChange={(e) => setInstDates((p) => ({ ...p, [n]: e.target.value }))} /><AdminMark mark={instDates[n] ? "✓" : ""} /></div></Cell>
                         </tr>
                       );
@@ -760,10 +829,10 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
           {!coreComplete
             ? "Select Conversion Date, Booking Amount and Document to update the verification."
             : eligible
-              ? "All four conditions are met — Update will enroll the dealer."
+              ? "All conditions are met — Update will enroll the dealer."
               : billingEnabled
-                ? "Add a Billing Date to enroll, or Update now to save without enrolling."
-                : "Booking and Document must both be Received before a Billing Date / enrollment."}
+                ? "You can record a Billing Date and Update. The dealer enrolls only once Booking is Paid and the Document is Received."
+                : "Booking must be Paid before a Billing Date can be recorded."}
         </p>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>

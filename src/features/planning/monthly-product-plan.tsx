@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { formatCurrency } from "@/lib/utils";
-import { figuresForMode } from "@/lib/calc";
+import { figuresForMode, nbv } from "@/lib/calc";
 import { Badge } from "@/components/ui/badge";
 import { ProductName } from "@/components/ui/product-name";
 import { CategoryFilter } from "@/components/ui/category-filter";
@@ -30,25 +30,28 @@ export function MonthlyProductPlan() {
   const monthIds = useMemo(() => resolveFilteredMonths(data.months, filter), [data.months, filter]);
 
   const rows = useMemo(() => {
-    const byProduct = new Map<string, { name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number; additional: boolean; isClearance: boolean; clearanceQty: number | null }>();
+    const byProduct = new Map<string, { name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number; saleAmount: number; additional: boolean; isClearance: boolean; clearanceQty: number | null }>();
     for (const d of data.dealers) {
       for (const p of d.products) {
         let r = byProduct.get(p.productId);
         if (!r) {
-          r = { name: p.productName, rate: p.rate, nbvPercent: p.nbvPercent, planInput: 0, saleInput: 0, additional: false, isClearance: p.isClearance ?? false, clearanceQty: p.clearanceQty ?? null };
+          r = { name: p.productName, rate: p.rate, nbvPercent: p.nbvPercent, planInput: 0, saleInput: 0, saleAmount: 0, additional: false, isClearance: p.isClearance ?? false, clearanceQty: p.clearanceQty ?? null };
           byProduct.set(p.productId, r);
         }
         if (p.isAdditional) r.additional = true;
         for (const mId of monthIds) {
           const c = cellFor(p.planLineId, mId);
           r.planInput += c.plan;
-          r.saleInput += c.sale;
+          r.saleInput += c.sale; // actual QUANTITY
+          // Actual SALES VALUE = the uploaded amount (authoritative saleValue), NEVER qty × rate — the
+          // same source the Dealer Monthly Plan uses (monthly[].saleAmount from buildMonthlyDealers).
+          r.saleAmount += p.monthly[mId]?.saleAmount ?? 0;
         }
       }
     }
     return Array.from(byProduct.entries()).map(([productId, r]) => {
       const plan = figuresForMode(monthlyMode, r.planInput, r.rate, r.nbvPercent);
-      const actual = figuresForMode(monthlyMode, r.saleInput, r.rate, r.nbvPercent);
+      const actual = figuresForMode(monthlyMode, r.saleInput, r.rate, r.nbvPercent); // quantity only
       return {
         productId,
         name: r.name,
@@ -60,8 +63,8 @@ export function MonthlyProductPlan() {
         planAmount: plan.amount ?? 0,
         planNbv: plan.nbv ?? 0,
         soldQty: actual.totalQty ?? 0,
-        actualAmount: actual.amount ?? 0,
-        actualNbv: actual.nbv ?? 0,
+        actualAmount: r.saleAmount,
+        actualNbv: nbv(r.saleAmount, r.nbvPercent),
       };
     }).sort((a, b) => b.planAmount - a.planAmount);
   }, [data, monthIds, monthlyMode, cellFor]);

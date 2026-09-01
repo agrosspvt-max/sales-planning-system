@@ -76,12 +76,14 @@ const SERVER: Partial<Record<Resource, ServerResource>> = {
     // untouched on update (not in the payload) so existing Brand links / Reports are preserved.
     createSchema: z.object({
       name: z.string().min(1),
+      canonicalName: optionalString, // Tally/Sales-Upload matching only
       technicalName: optionalString,
       rate: z.coerce.number().min(0),
       nbvPercent: z.coerce.number().min(0),
     }),
     updateSchema: z.object({
       name: z.string().min(1),
+      canonicalName: optionalString, // Tally/Sales-Upload matching only
       technicalName: optionalString,
       rate: z.coerce.number().min(0),
       nbvPercent: z.coerce.number().min(0),

@@ -350,6 +350,10 @@ model Brand {
 model Product {
   id            String     @id @default(cuid())
   name          String     @unique
+  // Optional canonical/Tally spelling used ONLY for Sales Upload matching. When set, a Tally product whose
+  // name resolves to this canonicalName is matched to the product whose own name equals the canonicalName
+  // (the master/canonical row), so alternate-spelling duplicates never win. Not unique; does not affect name.
+  canonicalName String?
   technicalName String?
   rate          Decimal    @db.Decimal(12, 2)
   nbvPercent    Decimal    @db.Decimal(6, 4)

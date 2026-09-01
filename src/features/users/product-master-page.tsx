@@ -23,7 +23,7 @@ interface GroupOpt { id: string; name: string }
 interface Opt { id: string; name: string }
 interface GroupPrice { price: number; isActive: boolean; isClearance: boolean; clearanceQty: number | null }
 interface Row {
-  productId: string; name: string; technicalName: string | null; masterPrice: number; nbvPercent: number; isActive: boolean;
+  productId: string; name: string; canonicalName: string | null; technicalName: string | null; masterPrice: number; nbvPercent: number; isActive: boolean;
   categoryId: string | null; brandId: string | null; groupPrices: Record<string, GroupPrice>;
 }
 interface MasterData { groups: GroupOpt[]; categories: Opt[]; brands: Opt[]; products: Row[] }
@@ -138,6 +138,7 @@ export function ProductMasterPage() {
 
 function EditProductDialog({ row, groups, onClose, onSaved }: { row: Row; groups: GroupOpt[]; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(row.name);
+  const [canonicalName, setCanonicalName] = useState(row.canonicalName ?? "");
   const [technicalName, setTechnicalName] = useState(row.technicalName ?? "");
   const [nbvPct, setNbvPct] = useState(String(Math.round(row.nbvPercent * 10000) / 100)); // percent
   const [masterPrice, setMasterPrice] = useState(String(row.masterPrice));
@@ -149,7 +150,7 @@ function EditProductDialog({ row, groups, onClose, onSaved }: { row: Row; groups
       const gp: Record<string, number> = {};
       for (const g of groups) { const v = groupPrices[g.id]?.trim(); if (v !== undefined && v !== "") gp[g.id] = Number(v); }
       return api.patch(`/api/products/master/${row.productId}`, {
-        name: name.trim(), technicalName: technicalName.trim() || null,
+        name: name.trim(), canonicalName: canonicalName.trim() || null, technicalName: technicalName.trim() || null,
         nbvPercent: Number(nbvPct) / 100, masterPrice: Number(masterPrice), groupPrices: gp,
       });
     },
@@ -168,6 +169,7 @@ function EditProductDialog({ row, groups, onClose, onSaved }: { row: Row; groups
             <div className="space-y-1.5"><Label>NBV %</Label><Input type="number" value={nbvPct} onChange={(e) => setNbvPct(e.target.value)} placeholder="e.g. 25" /><p className="text-xs text-muted-foreground">Category is set automatically from NBV%.</p></div>
             <div className="space-y-1.5"><Label>Master Price (₹)</Label><Input type="number" value={masterPrice} onChange={(e) => setMasterPrice(e.target.value)} /></div>
           </div>
+          <div className="space-y-1.5"><Label>Canonical Name <span className="font-normal text-muted-foreground">— used only for Tally / Sales Upload matching</span></Label><Input value={canonicalName} onChange={(e) => setCanonicalName(e.target.value)} placeholder="Tally's canonical spelling (e.g. ZACKER). Leave blank to keep existing matching." /></div>
           <div className="space-y-1.5">
             <Label>Group Pricing <span className="font-normal text-muted-foreground">— saves to the Group Catalogue</span></Label>
             <div className="grid grid-cols-2 gap-2">
@@ -192,6 +194,7 @@ function EditProductDialog({ row, groups, onClose, onSaved }: { row: Row; groups
 
 function CreateProductDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState("");
+  const [canonicalName, setCanonicalName] = useState("");
   const [technicalName, setTechnicalName] = useState("");
   const [nbvPct, setNbvPct] = useState("25");
   const [rate, setRate] = useState("");
@@ -199,7 +202,7 @@ function CreateProductDialog({ onClose, onSaved }: { onClose: () => void; onSave
 
   const create = useMutation({
     mutationFn: () => api.post("/api/resources/products", {
-      name: name.trim(), technicalName: technicalName.trim(),
+      name: name.trim(), canonicalName: canonicalName.trim() || undefined, technicalName: technicalName.trim(),
       nbvPercent: String(Number(nbvPct) / 100), rate: rate,
     }),
     onSuccess: onSaved,
@@ -215,6 +218,7 @@ function CreateProductDialog({ onClose, onSaved }: { onClose: () => void; onSave
           <div className="space-y-1.5"><Label>Technical Name</Label><Input value={technicalName} onChange={(e) => setTechnicalName(e.target.value)} /></div>
           <div className="space-y-1.5"><Label>NBV %</Label><Input type="number" value={nbvPct} onChange={(e) => setNbvPct(e.target.value)} /><p className="text-xs text-muted-foreground">Category is set automatically from NBV%.</p></div>
           <div className="space-y-1.5"><Label>Master Price (₹) *</Label><Input type="number" value={rate} onChange={(e) => setRate(e.target.value)} /></div>
+          <div className="col-span-2 space-y-1.5"><Label>Canonical Name <span className="font-normal text-muted-foreground">— used only for Tally / Sales Upload matching</span></Label><Input value={canonicalName} onChange={(e) => setCanonicalName(e.target.value)} placeholder="Tally's canonical spelling (optional). Leave blank to keep existing matching." /></div>
         </div>
         {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
         <DialogFooter>

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Role, ImportStatus, PlanStatus, SeasonStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { decorate, matchByName, similarity, type Keyed } from "@/lib/match-key";
+import { decorate, matchByName, similarity, tightKey, type Keyed } from "@/lib/match-key";
 import { withDbRetry } from "@/lib/db-retry";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { writeAudit } from "@/lib/audit";
@@ -17,6 +17,10 @@ const inputSchema = z.object({
   seasonMonthId: z.string().min(1, "Select a Target Month"),
   fromDate: z.string().optional(),
   toDate: z.string().optional(),
+  // "SELECT SALES OFFICER" mode: restrict matching to THIS existing officer's approved seasonal plan so
+  // the chosen officer takes precedence over the file-detected officer. Omitted = AUTO / USE DETECTED
+  // (unchanged behaviour — match across every officer's plan by dealer identity).
+  officerId: z.string().optional(),
 });
 export type SalesUploadInput = z.infer<typeof inputSchema>;
 
@@ -25,7 +29,7 @@ const commitInputSchema = inputSchema.extend({
   autoAddUnplanned: z.array(z.object({ officerId: z.string().min(1), productId: z.string().min(1) })).default([]),
 });
 
-type MasterItem = { id: string; name: string } & Keyed;
+type MasterItem = { id: string; name: string; canonicalName: string | null } & Keyed;
 
 interface ResolvedRow {
   planLineId: string;
@@ -140,8 +144,9 @@ const NO_PLAN_OFFICER = "— No approved seasonal plan —";
  * product correspond to a PlanLine in an APPROVED, active seasonal plan for the target month's
  * season — that PlanDealer IS the dealer → Sales Officer link, so no officer is ever chosen.
  */
-async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: string, opts: { withReport?: boolean } = {}): Promise<Resolution> {
+async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: string, opts: { withReport?: boolean; officerId?: string } = {}): Promise<Resolution> {
   const withReport = opts.withReport ?? false;
+  const officerId = opts.officerId; // when set, only this officer's approved seasonal plan is matched
   const month = await prisma.seasonMonth.findUnique({
     where: { id: seasonMonthId },
     include: { season: { select: { id: true, name: true, year: true } } },
@@ -150,10 +155,30 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
 
   const [resolver, productRows] = await Promise.all([
     loadDealerResolver(),
-    prisma.product.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
+    prisma.product.findMany({ where: { isActive: true }, select: { id: true, name: true, canonicalName: true } }),
   ]);
-  const products: MasterItem[] = decorate(productRows as { id: string; name: string }[]);
+  const products: MasterItem[] = decorate(productRows as { id: string; name: string; canonicalName: string | null }[]);
   const productNameById = new Map(products.map((p) => [p.id, p.name]));
+
+  // Canonical Name resolver (Tally matching). For each canonicalName group, the "target" is the product
+  // whose OWN name equals the canonicalName (the master/canonical row) — so an alternate spelling never
+  // becomes the selected product. Both the canonical name and every alternate spelling in that group point
+  // to the same target. If no self-canonical product exists, the group is skipped (no arbitrary pick) and
+  // matching falls back to the existing name logic. Products without canonicalName are never indexed here.
+  const canonicalTargetByKey = new Map<string, MasterItem>();
+  const selfCanonical = new Map<string, MasterItem>(); // tightKey(canonicalName) -> the master row
+  for (const p of products) {
+    if (p.canonicalName && tightKey(p.name) === tightKey(p.canonicalName)) selfCanonical.set(tightKey(p.canonicalName), p);
+  }
+  for (const p of products) {
+    if (!p.canonicalName) continue;
+    const target = selfCanonical.get(tightKey(p.canonicalName));
+    if (!target) continue; // canonical/master row not present → don't arbitrarily choose; fall back
+    canonicalTargetByKey.set(tightKey(p.name), target);            // Tally sends this spelling → canonical
+    canonicalTargetByKey.set(tightKey(p.canonicalName), target);   // Tally sends the canonical spelling → canonical
+  }
+  const resolveProduct = (rawName: string): MasterItem | null =>
+    canonicalTargetByKey.get(tightKey(rawName)) ?? matchByName(rawName, products, { fuzzy: true, threshold: 0.9 });
 
   // Approved active seasonal plans for this season → planLine lookup + dealers that have a plan.
   // Officer + dealer name are selected too (cheap joins) so the preview report can group by officer.
@@ -166,6 +191,8 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
         isActiveVersion: true,
         // Never post actual sales against a closed/deactivated (frozen/archived) seasonal plan.
         lifecycleState: "ACTIVE",
+        // SELECT SALES OFFICER: restrict to the chosen officer's plan (AUTO leaves this open).
+        ...(officerId ? { officerId } : {}),
       },
       // Only ACTIVE dealers participate — excludes still-pending dealers created in Monthly
       // Planning (their PlanDealer/additional lines must not receive imported actuals).
@@ -276,7 +303,8 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
     }
 
     for (const p of d.products) {
-      const product = matchByName(p.cleanName, products, { fuzzy: true, threshold: 0.9 });
+      // Canonical Name first (exact), else the existing tight → loose → fuzzy name match (unchanged).
+      const product = resolveProduct(p.cleanName);
       const rate = p.qty > 0 ? p.amount / p.qty : 0;
       if (!product) {
         unknownProducts.add(p.cleanName);
@@ -368,6 +396,10 @@ export interface SalesUploadAnalysis {
   dealersWithoutPlan: string[];
   rowsToImport: number;
   warnings: string[];
+  // Officer(s) detected from the matched dealers' plans (AUTO / USE DETECTED display). Empty when nothing
+  // matched. `selectedOfficerId` echoes the SELECT-SALES-OFFICER choice that was actually applied (if any).
+  detectedOfficers: string[];
+  selectedOfficerId: string | null;
   report: ImportPreviewReport | null;
 }
 
@@ -381,7 +413,7 @@ export async function analyzeSalesUpload(
   const input = inputSchema.parse(raw);
   const parsed = parseSalesWorkbook(buffer);
   if (parsed.dealers.length === 0) throw new ApiError(422, "No dealer rows were found — is this a Tally Sales Register export?");
-  const res = await resolveWorkbook(parsed, input.seasonMonthId, { withReport: true });
+  const res = await resolveWorkbook(parsed, input.seasonMonthId, { withReport: true, officerId: input.officerId });
 
   const warnings: string[] = [];
   if (res.unknownDealers.length > 0) warnings.push(`${res.unknownDealers.length} dealer(s) could not be matched — add a Dealer Alias or master.`);
@@ -399,6 +431,8 @@ export async function analyzeSalesUpload(
     unknownProducts: res.unknownProducts,
     dealersWithoutPlan: res.dealersWithoutPlan,
     rowsToImport: res.rows.length,
+    detectedOfficers: [...new Set((res.report?.officers ?? []).map((o) => o.officerName).filter((n) => n !== NO_PLAN_OFFICER))].sort(),
+    selectedOfficerId: input.officerId ?? null,
     warnings,
     report: res.report ?? null,
   };
@@ -528,7 +562,7 @@ export async function commitSalesUpload(
   const parsed = parseSalesWorkbook(buffer);
   if (parsed.dealers.length === 0) throw new ApiError(422, "No dealer rows were found in the workbook");
   // Resolve once to discover both importable rows AND matched-but-unplanned sales (unplannedPairs).
-  const first = await resolveWorkbook(parsed, input.seasonMonthId);
+  const first = await resolveWorkbook(parsed, input.seasonMonthId, { officerId: input.officerId });
   // AUTO ADDED lines are created BEFORE the import so the actuals post through the normal path:
   //  1. Automatic + dealer-specific — every sold product missing from that dealer's plan (the reported
   //     regression: these used to vanish; now they always become AUTO ADDED rows).
@@ -538,7 +572,7 @@ export async function commitSalesUpload(
   const selectionLines = await autoAddUnplannedProducts(ctx, input.seasonMonthId, input.autoAddUnplanned);
   const autoAddedLines = autoLines + selectionLines;
   // Re-resolve only if new lines exist, so their (dealer, product) now map to a PlanLine and import.
-  const res = autoAddedLines > 0 ? await resolveWorkbook(parsed, input.seasonMonthId) : first;
+  const res = autoAddedLines > 0 ? await resolveWorkbook(parsed, input.seasonMonthId, { officerId: input.officerId }) : first;
   const monthId = res.targetMonth.id;
 
   // One actual per (planLine, month) — the parser already merged duplicates per dealer, but a
@@ -663,6 +697,16 @@ export async function commitSalesUpload(
     unknownProducts: res.unknownProducts.length,
     autoAddedLines,
   };
+}
+
+/** Existing active Sales Officers for the "SELECT SALES OFFICER" dropdown (no new officer is ever created). */
+export async function listSalesOfficers(ctx: AuthContext): Promise<{ id: string; name: string }[]> {
+  assertAdmin(ctx);
+  return (await prisma.user.findMany({
+    where: { role: Role.SALES_OFFICER, isActive: true, deletedAt: null },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true },
+  })) as { id: string; name: string }[];
 }
 
 /** Target-month options for the upload screen (every season's months). */

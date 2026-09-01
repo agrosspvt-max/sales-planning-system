@@ -426,6 +426,7 @@ export async function productGroupOverview(ctx: AuthContext): Promise<ProductGro
 export interface ProductMasterRow {
   productId: string;
   name: string;
+  canonicalName: string | null;
   technicalName: string | null;
   masterPrice: number;
   nbvPercent: number;
@@ -444,7 +445,7 @@ export async function listProductMaster(ctx: AuthContext) {
     prisma.product.findMany({
       orderBy: { name: "asc" },
       select: {
-        id: true, name: true, technicalName: true, rate: true, nbvPercent: true, isActive: true, categoryId: true, brandId: true,
+        id: true, name: true, canonicalName: true, technicalName: true, rate: true, nbvPercent: true, isActive: true, categoryId: true, brandId: true,
         groupCatalogues: { select: { groupId: true, price: true, isActive: true, isClearance: true, clearanceQty: true } },
       },
     }),
@@ -452,7 +453,7 @@ export async function listProductMaster(ctx: AuthContext) {
     prisma.category.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.brand.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
   ])) as [
-    { id: string; name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown; isActive: boolean; categoryId: string | null; brandId: string | null;
+    { id: string; name: string; canonicalName: string | null; technicalName: string | null; rate: unknown; nbvPercent: unknown; isActive: boolean; categoryId: string | null; brandId: string | null;
       groupCatalogues: { groupId: string; price: unknown; isActive: boolean; isClearance: boolean; clearanceQty: number | null }[] }[],
     { id: string; name: string }[], { id: string; name: string }[], { id: string; name: string }[],
   ];
@@ -460,6 +461,7 @@ export async function listProductMaster(ctx: AuthContext) {
   const rows: ProductMasterRow[] = products.map((p) => ({
     productId: p.id,
     name: p.name,
+    canonicalName: p.canonicalName,
     technicalName: p.technicalName,
     masterPrice: num(p.rate),
     nbvPercent: num(p.nbvPercent),
@@ -473,6 +475,7 @@ export async function listProductMaster(ctx: AuthContext) {
 
 const productMasterUpdateSchema = z.object({
   name: z.string().min(1).max(200),
+  canonicalName: z.string().max(200).optional().nullable(), // Tally/Sales-Upload matching only
   technicalName: z.string().max(200).optional().nullable(),
   categoryId: z.string().optional().nullable(),
   brandId: z.string().optional().nullable(),
@@ -497,6 +500,7 @@ export async function updateProductMaster(ctx: AuthContext, productId: string, r
       where: { id: productId },
       data: {
         name: data.name.trim(),
+        canonicalName: data.canonicalName?.trim() || null,
         technicalName: data.technicalName?.trim() || null,
         categoryId,
         nbvPercent: data.nbvPercent,

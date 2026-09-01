@@ -25,6 +25,8 @@ interface Analysis {
   dealersWithoutPlan: string[];
   rowsToImport: number;
   warnings: string[];
+  detectedOfficers: string[];
+  selectedOfficerId: string | null;
   report: ImportPreviewReportData | null;
 }
 interface CommitResult {
@@ -65,12 +67,23 @@ export function SalesUploadWizard() {
   const [autoAdd, setAutoAdd] = useState(false);
   const [selectedUnplanned, setSelectedUnplanned] = useState<Set<string>>(new Set());
 
+  // Sales Officer handling. Default AUTO / USE DETECTED (unchanged behaviour). SELECT scopes the whole
+  // import to one existing officer's approved seasonal plan.
+  const [officerMode, setOfficerMode] = useState<"auto" | "select">("auto");
+  const [officerId, setOfficerId] = useState("");
+
   const { data: months } = useQuery<{ id: string; label: string }[]>({
     queryKey: ["sales-upload-months"],
     queryFn: () => api.get("/api/sales-upload/months"),
   });
+  const { data: officers } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ["sales-upload-officers"],
+    queryFn: () => api.get("/api/sales-upload/officers"),
+  });
+  const officerName = (id: string) => officers?.find((o) => o.id === id)?.name ?? "";
+  const effectiveOfficerId = () => (officerMode === "select" && officerId ? officerId : undefined);
 
-  const dataPayload = () => JSON.stringify({ seasonMonthId, fromDate: fromDate || undefined, toDate: toDate || undefined });
+  const dataPayload = () => JSON.stringify({ seasonMonthId, fromDate: fromDate || undefined, toDate: toDate || undefined, officerId: effectiveOfficerId() });
   // Only auto-addable entries (dealer has an approved seasonal plan → officerId present).
   const autoAddableKeys = () =>
     [...new Set((analysis?.report?.matchedNotPlanned ?? []).filter((r) => r.officerId).map((r) => `${r.officerId}|${r.productId}`))];
@@ -78,7 +91,7 @@ export function SalesUploadWizard() {
     const selections = autoAdd
       ? [...selectedUnplanned].map((k) => { const [officerId, productId] = k.split("|"); return { officerId, productId }; })
       : [];
-    return JSON.stringify({ seasonMonthId, fromDate: fromDate || undefined, toDate: toDate || undefined, autoAddUnplanned: selections });
+    return JSON.stringify({ seasonMonthId, fromDate: fromDate || undefined, toDate: toDate || undefined, officerId: effectiveOfficerId(), autoAddUnplanned: selections });
   };
 
   const analyzeMut = useMutation({
@@ -206,6 +219,42 @@ export function SalesUploadWizard() {
           <p className="text-sm text-muted-foreground">
             Target month: <span className="font-medium text-foreground">{analysis.targetMonth.seasonName} · {analysis.targetMonth.name}</span>
           </p>
+
+          {/* Sales Officer — AUTO / USE DETECTED (default) or SELECT an existing officer. Changing it
+              re-analyses so the preview + rows reflect the scoped matching, then Import uses the same choice. */}
+          <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Sales Officer</div>
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="radio" name="officerMode" checked={officerMode === "auto"}
+                  onChange={() => { setOfficerMode("auto"); setOfficerId(""); analyzeMut.mutate(); }} />
+                Auto / Use detected
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="radio" name="officerMode" checked={officerMode === "select"}
+                  onChange={() => setOfficerMode("select")} />
+                Select Sales Officer
+              </label>
+              {officerMode === "select" && (
+                <NativeSelect
+                  className="w-64"
+                  value={officerId}
+                  onChange={(e) => { const v = e.target.value; setOfficerId(v); if (v) analyzeMut.mutate(); }}
+                  options={[{ value: "", label: "Choose a Sales Officer…" }, ...((officers ?? []).map((o) => ({ value: o.id, label: o.name })))]}
+                />
+              )}
+            </div>
+            <p className="text-sm">
+              Will use:{" "}
+              <span className="font-medium text-foreground">
+                {officerMode === "select"
+                  ? (officerId ? officerName(officerId) : "— choose an officer —")
+                  : (analysis.detectedOfficers.length > 0 ? `${analysis.detectedOfficers.join(", ")} (detected)` : "Auto-detected from the file")}
+              </span>
+              {officerMode === "select" && <span className="text-muted-foreground"> — overrides the officer detected from the file; no new officer is created.</span>}
+            </p>
+          </div>
+
           <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <Stat label="Dealers Found" value={analysis.dealersFound} />
             <Stat label="Products Found" value={analysis.productsFound} />
@@ -242,7 +291,7 @@ export function SalesUploadWizard() {
             <Button variant="outline" onClick={() => setStep("upload")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            <Button onClick={() => commitMut.mutate()} disabled={commitMut.isPending || (analysis.rowsToImport === 0 && !(autoAdd && selectedUnplanned.size > 0))}>
+            <Button onClick={() => commitMut.mutate()} disabled={commitMut.isPending || analyzeMut.isPending || (officerMode === "select" && !officerId) || (analysis.rowsToImport === 0 && !(autoAdd && selectedUnplanned.size > 0))}>
               {commitMut.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Importing…</> : <><ArrowRight className="h-4 w-4" /> Import Sales</>}
             </Button>
           </div>

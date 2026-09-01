@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { formatCurrency, formatPercent } from "@/lib/utils";
-import { figuresForMode, achievement } from "@/lib/calc";
+import { figuresForMode, achievement, nbv } from "@/lib/calc";
 import {
   Table,
   TableBody,
@@ -24,18 +24,19 @@ export function MonthlyDealerSummary() {
     return data.dealers.map((d) => {
       let planAmount = 0, planNbv = 0, actualAmount = 0, actualNbv = 0;
       for (const p of d.products) {
-        let planInput = 0, saleInput = 0;
+        let planInput = 0, saleAmount = 0;
         for (const mId of monthIds) {
           const c = cellFor(p.planLineId, mId);
           planInput += c.plan;
-          saleInput += c.sale;
+          // Actual sales = the uploaded amount (authoritative saleValue), NEVER qty × rate — identical to
+          // the source the Dealer Monthly Plan reads (monthly[].saleAmount from buildMonthlyDealers).
+          saleAmount += p.monthly[mId]?.saleAmount ?? 0;
         }
         const plan = figuresForMode(monthlyMode, planInput, p.rate, p.nbvPercent);
-        const actual = figuresForMode(monthlyMode, saleInput, p.rate, p.nbvPercent);
         planAmount += plan.amount ?? 0;
         planNbv += plan.nbv ?? 0;
-        actualAmount += actual.amount ?? 0;
-        actualNbv += actual.nbv ?? 0;
+        actualAmount += saleAmount;
+        actualNbv += nbv(saleAmount, p.nbvPercent);
       }
       return { dealerId: d.dealerId, name: d.dealerName, planAmount, planNbv, actualAmount, actualNbv };
     }).sort((a, b) => b.planAmount - a.planAmount);

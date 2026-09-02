@@ -292,6 +292,15 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   // Clearance flags (group-specific, by the plan officer's group + productId) — display-only.
   const clearanceOfficer = (await prisma.user.findUnique({ where: { id: mp.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
   const clearance = await clearanceMapForGroup(clearanceOfficer?.groupId ?? null);
+  // Season Sales = TOTAL actual sales for the WHOLE season per plan line (every month), from the same
+  // authoritative MonthlyEntry.saleQty/saleValue used everywhere. Independent of the selected month.
+  const seasonSaleRows = (await prisma.monthlyEntry.groupBy({
+    by: ["planLineId"],
+    where: { planLine: { planDealer: { seasonPlanId: mp.seasonPlanId } } },
+    _sum: { saleQty: true, saleValue: true },
+  })) as { planLineId: string; _sum: { saleQty: number | null; saleValue: unknown } }[];
+  const seasonSaleByLine = new Map(seasonSaleRows.map((r) => [r.planLineId, { qty: r._sum.saleQty ?? 0, value: num(r._sum.saleValue ?? 0) }]));
+
   // Attach per-dealer completion (≥1 monthly plan value entered — the SAME "has a value" concept
   // Seasonal Planning uses) and the stored monthly No Plan state.
   const dealers = buildMonthlyDealers(planDealers, months, monthlyMode, clearance).map((d) => ({
@@ -300,6 +309,12 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
     noPlanReason: noPlanByDealer.get(d.dealerId) ?? null,
     completed: d.products.some((p) => (p.monthly[monthId]?.plan ?? 0) > 0),
     contact: contactByDealer.get(d.dealerId) ?? null,
+    // Whole-season actual sales per product (qty + value); the client picks the unit by planning mode.
+    products: d.products.map((p) => ({
+      ...p,
+      seasonSaleQty: seasonSaleByLine.get(p.planLineId)?.qty ?? 0,
+      seasonSaleValue: seasonSaleByLine.get(p.planLineId)?.value ?? 0,
+    })),
   }));
 
   return {

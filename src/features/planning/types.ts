@@ -157,6 +157,11 @@ export interface MonthlyProductRow {
   nbvPercent: number;
   /** Approved season target expressed in the active monthly unit (qty / amount / nbv). */
   target: number;
+  /** TOTAL actual sales for the WHOLE season (all months). qty for quantity modes, value for value modes. */
+  seasonSaleQty?: number;
+  seasonSaleValue?: number;
+  /** State Product Master NBV% (from Product master, not the plan snapshot) — drives Planned NBV. */
+  masterNbvPercent?: number;
   /**
    * Per-month figures in the active monthly unit. `sale` is the actual quantity (or value in
    * value modes); `saleAmount` is the actual SALES VALUE sourced from the uploaded Tally sheet
@@ -184,6 +189,8 @@ export interface MonthlyData {
   planId: string;
   seasonName: string;
   monthName?: string;
+  /** Status of the MonthlyPlan being viewed (first-class Monthly Plan). Actual-sales columns show only when APPROVED. */
+  status?: PlanStatus;
   canEdit: boolean;
   canAdminEdit?: boolean;
   /** Configured monthly planning mode for this workspace. */

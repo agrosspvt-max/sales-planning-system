@@ -141,6 +141,8 @@ export function buildMonthlyDealers(
             clearanceQty: clearance?.get(line.productId)?.clearanceQty ?? null,
             rate,
             nbvPercent,
+            // State Product Master NBV% (live master, ignores the plan snapshot) — used for Planned NBV.
+            masterNbvPercent: num(line.product.nbvPercent),
             target,
             monthly: Object.fromEntries(
               months.map((m) => {

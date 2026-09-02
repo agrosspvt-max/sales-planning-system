@@ -5,7 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Save, Ban, Plus } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
-import { amount, PLANNING_MODE_LABELS } from "@/lib/calc";
+import { amount, nbv, PLANNING_MODE_LABELS } from "@/lib/calc";
 import { MONTH_STATUS_LABELS } from "./planning-state";
 import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "./admin-edit-ui";
 import { Button } from "@/components/ui/button";
@@ -55,6 +55,9 @@ export function MonthlyPlanner() {
   const [monthId, setMonthId] = useState(data.months[0]?.id ?? "");
   const [noPlanOpen, setNoPlanOpen] = useState(false);
 
+  // Actual-sales columns (This Month Sold, Pending (MO), Actual Amount) show ONLY when the MonthlyPlan
+  // itself is APPROVED — never based on season/admin/completion/sales presence.
+  const isApproved = data.status === "APPROVED";
   const fmtUnit = (v: number) => (qtyMode ? String(Math.round(v)) : formatCurrency(v));
   const dealer = data.dealers.find((d) => d.dealerId === dealerId);
   const unitLabel = PLANNING_MODE_LABELS[monthlyMode];
@@ -223,17 +226,20 @@ export function MonthlyPlanner() {
               <ThPlain className="text-right">Season {qtyMode ? "Qty" : unitLabel}</ThPlain>
               <Th labelKey="monthly.plannedAllMonths" className="text-right" />
               <Th labelKey="monthly.remaining" className="text-right" />
+              <ThPlain className="text-right text-muted-foreground">Season Sales</ThPlain>
+              <ThPlain className="text-right">Pending</ThPlain>
               <Th labelKey="monthly.thisMonthPlan" className="text-center" />
-              <Th labelKey="monthly.thisMonthSold" className="text-center text-muted-foreground" />
-              <Th labelKey="monthly.pendingMo" className="text-right" />
+              {isApproved && <Th labelKey="monthly.thisMonthSold" className="text-center text-muted-foreground" />}
+              {isApproved && <Th labelKey="monthly.pendingMo" className="text-right" />}
               <Th labelKey="monthly.plannedAmount" className="text-right" />
-              <Th labelKey="monthly.actualAmount" className="text-right text-muted-foreground" />
+              <ThPlain className="text-right">Planned NBV</ThPlain>
+              {isApproved && <Th labelKey="monthly.actualAmount" className="text-right text-muted-foreground" />}
             </TableRow>
           </TableHeader>
           <TableBody>
             {!dealer || dealer.products.filter((p) => matchesCategoryFilter(p.nbvPercent, categoryFilter, categories)).length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
+                <TableCell colSpan={isApproved ? 12 : 9} className="py-8 text-center text-muted-foreground">
                   Nothing planned for this dealer in the approved season plan.
                 </TableCell>
               </TableRow>
@@ -247,6 +253,11 @@ export function MonthlyPlanner() {
                 const plannedAmount = qtyMode ? amount(cur.plan, p.rate) : cur.plan;
                 // Actual amount comes from the uploaded sales (saleValue) — not qty × rate.
                 const actualAmount = p.monthly[monthId]?.saleAmount ?? 0;
+                // Season Sales (whole season) + Pending (Season Qty − Season Sales); unit follows the mode.
+                const seasonSale = qtyMode ? (p.seasonSaleQty ?? 0) : (p.seasonSaleValue ?? 0);
+                const seasonPending = p.target - seasonSale;
+                // Planned NBV = Planned Amount × State Product Master NBV% (existing nbv() convention).
+                const plannedNbv = nbv(plannedAmount, p.masterNbvPercent ?? p.nbvPercent);
                 return (
                   <TableRow key={p.planLineId} className={cn(isOver && "bg-warning/10")}>
                     <TableCell className="font-medium">
@@ -265,6 +276,10 @@ export function MonthlyPlanner() {
                       )}
                     </TableCell>
                     <TableCell className={cn("text-right", remaining < 0 && "text-destructive")}>{fmtUnit(remaining)}</TableCell>
+                    {/* Season Sales = total actual sales for the WHOLE season (all months), from the server. */}
+                    <TableCell className="text-right tabular-nums text-muted-foreground">{fmtUnit(seasonSale)}</TableCell>
+                    {/* Pending = Season Qty − Season Sales (never clamped; negative = over-sold). */}
+                    <TableCell className={cn("text-right tabular-nums", seasonPending < 0 && "text-destructive")}>{fmtUnit(seasonPending)}</TableCell>
                     <TableCell className="p-1 text-center">
                       <Input
                         type="number"
@@ -277,11 +292,12 @@ export function MonthlyPlanner() {
                         onChange={(e) => onChangePlan(p.planLineId, e.target.value)}
                       />
                     </TableCell>
-                    {/* This Month Sold — read-only; sourced from the uploaded Sales Upload. */}
-                    <TableCell className="text-center tabular-nums text-muted-foreground">{fmtUnit(cur.sale)}</TableCell>
-                    <TableCell className="text-right text-muted-foreground">{fmtUnit(cur.plan - cur.sale)}</TableCell>
+                    {/* This Month Sold + Pending (MO) — actual-sales columns, only when the plan is APPROVED. */}
+                    {isApproved && <TableCell className="text-center tabular-nums text-muted-foreground">{fmtUnit(cur.sale)}</TableCell>}
+                    {isApproved && <TableCell className="text-right text-muted-foreground">{fmtUnit(cur.plan - cur.sale)}</TableCell>}
                     <TableCell className="text-right tabular-nums">{formatCurrency(plannedAmount)}</TableCell>
-                    <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(actualAmount)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatCurrency(plannedNbv)}</TableCell>
+                    {isApproved && <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(actualAmount)}</TableCell>}
                   </TableRow>
                 );
               })

@@ -294,12 +294,18 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const clearance = await clearanceMapForGroup(clearanceOfficer?.groupId ?? null);
   // Season Sales = TOTAL actual sales for the WHOLE season per plan line (every month), from the same
   // authoritative MonthlyEntry.saleQty/saleValue used everywhere. Independent of the selected month.
-  const seasonSaleRows = (await prisma.monthlyEntry.groupBy({
-    by: ["planLineId"],
+  // findMany + in-app aggregation (groupBy's relational-where typing is unreliable on Prisma 6.3.1).
+  const seasonEntries = (await prisma.monthlyEntry.findMany({
     where: { planLine: { planDealer: { seasonPlanId: mp.seasonPlanId } } },
-    _sum: { saleQty: true, saleValue: true },
-  })) as { planLineId: string; _sum: { saleQty: number | null; saleValue: unknown } }[];
-  const seasonSaleByLine = new Map(seasonSaleRows.map((r) => [r.planLineId, { qty: r._sum.saleQty ?? 0, value: num(r._sum.saleValue ?? 0) }]));
+    select: { planLineId: true, saleQty: true, saleValue: true },
+  })) as { planLineId: string; saleQty: number | null; saleValue: unknown }[];
+  const seasonSaleByLine = new Map<string, { qty: number; value: number }>();
+  for (const e of seasonEntries) {
+    const cur = seasonSaleByLine.get(e.planLineId) ?? { qty: 0, value: 0 };
+    cur.qty += e.saleQty ?? 0;
+    cur.value += num(e.saleValue ?? 0);
+    seasonSaleByLine.set(e.planLineId, cur);
+  }
 
   // Attach per-dealer completion (≥1 monthly plan value entered — the SAME "has a value" concept
   // Seasonal Planning uses) and the stored monthly No Plan state.

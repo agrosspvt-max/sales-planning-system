@@ -103,6 +103,17 @@ export interface GroupProductRow {
   actual: { qty: number; amount: number; nbv: number };
   byBucket: Record<StatusBucket, BucketTotal>;
   contributions: Contribution[];
+  // Product-detail drawer dataset: ONE row per (bucket, officer, dealer) carrying all three synchronized
+  // measures. Built from the baseline (Approved by default) seasonal plans + their monthly actuals, so it
+  // sums to the grid's season columns. The drawer's metric switcher just picks which triple to display.
+  drawer: DrawerContribution[];
+}
+export interface DrawerMeasure { qty: number; amount: number; nbv: number }
+export interface DrawerContribution {
+  bucket: StatusBucket; officerId: string; officerName: string; dealerId: string; dealerName: string;
+  seasonPlan: DrawerMeasure;   // approved seasonal plan figures
+  seasonSales: DrawerMeasure;  // TOTAL actual sales for the whole season
+  periodSales: DrawerMeasure;  // actual sales for the currently selected Territory Plan period
 }
 export interface OfficerRef {
   id: string;
@@ -243,10 +254,26 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         actual: { qty: 0, amount: 0, nbv: 0 },
         byBucket: emptyBucketTotals(),
         contributions: [],
+        drawer: [],
       };
       productRows.set(l.productId, row);
     }
     return row;
+  };
+
+  // Drawer dataset accumulator: productId → key(`bucket:officer:dealer`) → DrawerContribution.
+  const drawerByProduct = new Map<string, Map<string, DrawerContribution>>();
+  const ensureDrawer = (productId: string, bucket: StatusBucket, officerId: string, dealerId: string, dealerName: string): DrawerContribution => {
+    let m = drawerByProduct.get(productId);
+    if (!m) { m = new Map(); drawerByProduct.set(productId, m); }
+    const key = `${bucket}:${officerId}:${dealerId}`;
+    let dc = m.get(key);
+    if (!dc) {
+      dc = { bucket, officerId, officerName: officerName.get(officerId) ?? officerId, dealerId, dealerName,
+        seasonPlan: { qty: 0, amount: 0, nbv: 0 }, seasonSales: { qty: 0, amount: 0, nbv: 0 }, periodSales: { qty: 0, amount: 0, nbv: 0 } };
+      m.set(key, dc);
+    }
+    return dc;
   };
   const addContribution = (row: GroupProductRow, c: Contribution) => {
     row.contributions.push(c);
@@ -283,7 +310,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
             nbvPercentSnapshot: true,
             product: { select: { name: true, technicalName: true, rate: true, nbvPercent: true } },
             packs: { select: { quantity: true } },
-            monthlyEntries: { select: { saleQty: true, saleValue: true } },
+            monthlyEntries: { select: { seasonMonthId: true, saleQty: true, saleValue: true } },
           },
         },
       },
@@ -298,7 +325,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         nbvPercentSnapshot: unknown;
         product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
         packs: { quantity: number }[];
-        monthlyEntries: { saleQty: number; saleValue: unknown }[];
+        monthlyEntries: { seasonMonthId: string; saleQty: number; saleValue: unknown }[];
       }[];
     }[];
 
@@ -323,6 +350,18 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
           row.seasonAmount += fig.amount ?? 0;
           row.seasonSales += soldQty;
           row.seasonSalesAmount += soldAmt;
+          // Drawer dataset (per officer+dealer): season plan, whole-season sales, and selected-period sales.
+          const dBucket = bucketOfStatus(plan.status);
+          if (dBucket) {
+            let periodQty = 0, periodAmt = 0;
+            for (const e of l.monthlyEntries) {
+              if (isTotal || selectedMonthSet.has(e.seasonMonthId)) { periodQty += e.saleQty; periodAmt += num(e.saleValue ?? 0); }
+            }
+            const dc = ensureDrawer(row.productId, dBucket, plan.officerId, pd.dealer.id, pd.dealer.name);
+            dc.seasonPlan.qty += fig.totalQty ?? 0; dc.seasonPlan.amount += fig.amount ?? 0; dc.seasonPlan.nbv += fig.nbv ?? 0;
+            dc.seasonSales.qty += soldQty; dc.seasonSales.amount += soldAmt; dc.seasonSales.nbv += calcNbv(soldAmt, nbvPct);
+            dc.periodSales.qty += periodQty; dc.periodSales.amount += periodAmt; dc.periodSales.nbv += calcNbv(periodAmt, nbvPct);
+          }
         }
         // Period columns (Seasonal-Total view) — from the selected-bucket representative plans.
         if (isTotal && periodBucket) {
@@ -446,6 +485,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     const per: Record<StatusBucket, Set<string>> = { approved: new Set(), submitted: new Set(), draft: new Set() };
     for (const c of row.contributions) per[c.bucket].add(c.officerId);
     for (const b of ALL_BUCKETS) row.byBucket[b].officerCount = per[b].size;
+    row.drawer = [...(drawerByProduct.get(row.productId)?.values() ?? [])];
   }
 
   const officerBreakdown: GroupOfficerBreakdown = {

@@ -30,6 +30,12 @@ interface Contribution {
   monthId: string | null; monthName: string | null; qty: number; amount: number; nbv: number;
 }
 interface BucketTotal { qty: number; amount: number; nbv: number; officerCount: number }
+interface DrawerMeasure { qty: number; amount: number; nbv: number }
+interface DrawerContribution {
+  bucket: StatusBucket; officerId: string; officerName: string; dealerId: string; dealerName: string;
+  seasonPlan: DrawerMeasure; seasonSales: DrawerMeasure; periodSales: DrawerMeasure;
+}
+type MetricMode = "seasonPlan" | "seasonSales" | "periodSales";
 interface GroupProductRow {
   productId: string; productName: string; technicalName: string | null; rate: number; nbvPercent: number;
   isClearance?: boolean; clearanceQty?: number | null;
@@ -41,6 +47,7 @@ interface GroupProductRow {
   actual: { qty: number; amount: number; nbv: number };  // This Period Sold (qty) + Actual Amount/NBV
   byBucket: Record<StatusBucket, BucketTotal>;
   contributions: Contribution[];
+  drawer: DrawerContribution[];
 }
 export interface OfficerRef { id: string; name: string }
 export interface GroupOfficerBreakdown {
@@ -360,6 +367,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
 
       {drawerProduct && (
         <ProductDrawer
+          key={drawerProduct.productId}
           product={drawerProduct}
           seasonName={data.seasonName}
           filterLabel={`${view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range"} · ${buckets.map((b) => BUCKET_LABEL[b]).join(", ")}`}
@@ -439,30 +447,46 @@ export function OfficersBadge({ officers }: { officers: GroupOfficerBreakdown })
 
 /* ------------------------------ Product drawer ---------------------------- */
 
-interface OfficerGroup { officerId: string; officerName: string; qty: number; amount: number; nbv: number; plans: Set<string>; dealers: Map<string, { name: string; qty: number; amount: number; nbv: number }> }
+interface OfficerGroup { officerId: string; officerName: string; qty: number; amount: number; nbv: number; dealers: Map<string, { name: string; qty: number; amount: number; nbv: number }> }
+
+const METRIC_MODES: { id: MetricMode; label: string }[] = [
+  { id: "seasonPlan", label: "Season Plan" },
+  { id: "seasonSales", label: "Season Sales" },
+  { id: "periodSales", label: "Period Sales" },
+];
 
 function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product: GroupProductRow; seasonName: string; filterLabel: string; onClose: () => void }) {
   const [openBucket, setOpenBucket] = useState<StatusBucket | null>(null);
   const [openOfficer, setOpenOfficer] = useState<string | null>(null);
+  // Default to PERIOD SALES every time a product opens (the drawer remounts per product via `key`).
+  const [metricMode, setMetricMode] = useState<MetricMode>("periodSales");
 
-  // Group the SAME contributions the grid summed — so the drawer numbers add up to product.total exactly.
-  const byBucket = useMemo(() => {
+  // ONE dataset, three synchronized measures. The selected mode drives grand + officer + dealer alike, so
+  // levels can never mix plan and actual. Reuses the server's drawer aggregation (never re-derived here).
+  const { byBucket, bucketTotals, grand } = useMemo(() => {
     const out: Record<StatusBucket, OfficerGroup[]> = { approved: [], submitted: [], draft: [] };
+    const totals: Record<StatusBucket, DrawerMeasure & { officerCount: number }> = {
+      approved: { qty: 0, amount: 0, nbv: 0, officerCount: 0 }, submitted: { qty: 0, amount: 0, nbv: 0, officerCount: 0 }, draft: { qty: 0, amount: 0, nbv: 0, officerCount: 0 },
+    };
+    const g: DrawerMeasure = { qty: 0, amount: 0, nbv: 0 };
     for (const b of ALL_BUCKETS) {
       const officers = new Map<string, OfficerGroup>();
-      for (const c of product.contributions.filter((x) => x.bucket === b)) {
+      for (const c of product.drawer.filter((x) => x.bucket === b)) {
+        const m = c[metricMode];
         let og = officers.get(c.officerId);
-        if (!og) { og = { officerId: c.officerId, officerName: c.officerName, qty: 0, amount: 0, nbv: 0, plans: new Set(), dealers: new Map() }; officers.set(c.officerId, og); }
-        og.qty += c.qty; og.amount += c.amount; og.nbv += c.nbv;
-        og.plans.add(`${c.planType} v${c.version} · ${c.status}${c.monthName ? ` · ${c.monthName}` : ""}`);
+        if (!og) { og = { officerId: c.officerId, officerName: c.officerName, qty: 0, amount: 0, nbv: 0, dealers: new Map() }; officers.set(c.officerId, og); }
+        og.qty += m.qty; og.amount += m.amount; og.nbv += m.nbv;
         const d = og.dealers.get(c.dealerId) ?? { name: c.dealerName, qty: 0, amount: 0, nbv: 0 };
-        d.qty += c.qty; d.amount += c.amount; d.nbv += c.nbv;
+        d.qty += m.qty; d.amount += m.amount; d.nbv += m.nbv;
         og.dealers.set(c.dealerId, d);
+        totals[b].qty += m.qty; totals[b].amount += m.amount; totals[b].nbv += m.nbv;
+        g.qty += m.qty; g.amount += m.amount; g.nbv += m.nbv;
       }
+      totals[b].officerCount = officers.size;
       out[b] = [...officers.values()].sort((a, z) => z.amount - a.amount);
     }
-    return out;
-  }, [product]);
+    return { byBucket: out, bucketTotals: totals, grand: g };
+  }, [product, metricMode]);
 
   return (
     <div className="fixed inset-0 z-40" role="dialog" aria-modal="true">
@@ -476,15 +500,24 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
           <button onClick={onClose} className="rounded p-1 hover:bg-accent"><X className="h-4 w-4" /></button>
         </div>
 
+        {/* Metric switcher — controls BOTH the grand totals AND the officer/dealer breakdown below. */}
+        <div className="flex gap-1 border-b bg-muted/30 px-4 pt-3">
+          {METRIC_MODES.map((mm) => (
+            <button key={mm.id} type="button" onClick={() => setMetricMode(mm.id)}
+              className={cn("rounded-t-md border border-b-0 px-3 py-1.5 text-xs font-medium", metricMode === mm.id ? "border-border bg-background text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
+              {mm.label}
+            </button>
+          ))}
+        </div>
         <div className="grid grid-cols-3 gap-2 border-b bg-muted/30 p-4 text-center text-sm">
-          <div><div className="text-xs text-muted-foreground">Grand Qty</div><div className="font-semibold tabular-nums">{qtyFmt(product.total.qty)}</div></div>
-          <div><div className="text-xs text-muted-foreground">Grand Amount</div><div className="font-semibold tabular-nums">{formatCurrency(product.total.amount)}</div></div>
-          <div><div className="text-xs text-muted-foreground">Grand NBV</div><div className="font-semibold tabular-nums">{formatCurrency(product.total.nbv)}</div></div>
+          <div><div className="text-xs text-muted-foreground">Grand Qty</div><div className="font-semibold tabular-nums">{qtyFmt(grand.qty)}</div></div>
+          <div><div className="text-xs text-muted-foreground">Grand Amount</div><div className="font-semibold tabular-nums">{formatCurrency(grand.amount)}</div></div>
+          <div><div className="text-xs text-muted-foreground">Grand NBV</div><div className="font-semibold tabular-nums">{formatCurrency(grand.nbv)}</div></div>
         </div>
 
         <div className="flex-1 overflow-auto p-3 text-sm">
-          {ALL_BUCKETS.filter((b) => product.byBucket[b].officerCount > 0 || byBucket[b].length > 0).map((b) => {
-            const bt = product.byBucket[b];
+          {ALL_BUCKETS.filter((b) => byBucket[b].length > 0).map((b) => {
+            const bt = bucketTotals[b];
             return (
               <div key={b} className="mb-2 rounded-md border">
                 <button className="flex w-full items-center justify-between gap-2 p-2.5 text-left" onClick={() => setOpenBucket((x) => (x === b ? null : b))}>
@@ -505,7 +538,6 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
                             <span className="flex items-center gap-1.5">
                               <ChevronRight className={cn("h-3 w-3 transition-transform", openOfficer === key && "rotate-90")} />
                               <span className="font-medium">{og.officerName}</span>
-                              <span className="text-[11px] text-muted-foreground">{[...og.plans].join(" · ")}</span>
                             </span>
                             <span className="text-xs tabular-nums text-muted-foreground">{qtyFmt(og.qty)} · {formatCurrency(og.amount)} · {formatCurrency(og.nbv)}</span>
                           </button>

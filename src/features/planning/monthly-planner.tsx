@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Save, Ban, Plus } from "lucide-react";
 import { api } from "@/lib/api-client";
@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/table";
 import { Th, ThPlain } from "@/features/labels/label-ui";
 import { useMonthlyEdit } from "./monthly-edit-context";
+import type { MonthlyProductRow } from "./types";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "./dealer-completion";
 import { DealerPlanningStatus } from "./dealer-status";
 import { AddDealerButton, EditDealerButton, AdditionalProductsSection } from "./monthly-additional-ui";
@@ -99,6 +100,44 @@ export function MonthlyPlanner() {
     const parsed = Number(raw) || 0;
     setCell(planLineId, monthId, "plan", qtyMode ? Math.max(0, Math.floor(parsed)) : Math.max(0, parsed));
   };
+
+  // The product rows actually rendered (includes Additional Products, which live in dealer.products).
+  const visibleProducts = useMemo(
+    () => (dealer?.products ?? []).filter((p) => matchesCategoryFilter(p.nbvPercent, categoryFilter, categories)),
+    [dealer, categoryFilter, categories],
+  );
+  // ONE per-row derivation reused by both the body rows AND the Total footer (no second calc system).
+  const rowValues = useCallback((p: MonthlyProductRow) => {
+    const totalPlanned = data.months.reduce((s, m) => s + cellFor(p.planLineId, m.id).plan, 0);
+    const remaining = p.target - totalPlanned;
+    const excess = Math.max(0, totalPlanned - p.target);
+    const cur = cellFor(p.planLineId, monthId);
+    const plannedAmount = qtyMode ? amount(cur.plan, p.rate) : cur.plan;
+    const actualAmount = p.monthly[monthId]?.saleAmount ?? 0;
+    const seasonSale = qtyMode ? (p.seasonSaleQty ?? 0) : (p.seasonSaleValue ?? 0);
+    const seasonPending = p.target - seasonSale;
+    const plannedNbv = nbv(plannedAmount, p.masterNbvPercent ?? p.nbvPercent);
+    return { totalPlanned, remaining, excess, isOver: excess > 0, cur, plannedAmount, actualAmount, seasonSale, seasonPending, plannedNbv };
+  }, [cellFor, monthId, qtyMode, data.months]);
+  // Footer Total = mathematical aggregation of the SAME rendered rows (Additional Products included).
+  const totals = useMemo(() => {
+    const t = { seasonQty: 0, plannedAllMonths: 0, remaining: 0, seasonSale: 0, seasonPending: 0, thisMonthPlan: 0, thisMonthSold: 0, pendingMo: 0, plannedAmount: 0, plannedNbv: 0, actualAmount: 0 };
+    for (const p of visibleProducts) {
+      const v = rowValues(p);
+      t.seasonQty += p.target;
+      t.plannedAllMonths += v.totalPlanned;
+      t.remaining += v.remaining;
+      t.seasonSale += v.seasonSale;
+      t.seasonPending += v.seasonPending;
+      t.thisMonthPlan += v.cur.plan;
+      t.thisMonthSold += v.cur.sale;
+      t.pendingMo += v.cur.plan - v.cur.sale;
+      t.plannedAmount += v.plannedAmount;
+      t.plannedNbv += v.plannedNbv;
+      t.actualAmount += v.actualAmount;
+    }
+    return t;
+  }, [visibleProducts, rowValues]);
 
   return (
     <div className="space-y-3">
@@ -237,27 +276,15 @@ export function MonthlyPlanner() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {!dealer || dealer.products.filter((p) => matchesCategoryFilter(p.nbvPercent, categoryFilter, categories)).length === 0 ? (
+            {visibleProducts.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={isApproved ? 12 : 9} className="py-8 text-center text-muted-foreground">
                   Nothing planned for this dealer in the approved season plan.
                 </TableCell>
               </TableRow>
             ) : (
-              dealer.products.filter((p) => matchesCategoryFilter(p.nbvPercent, categoryFilter, categories)).map((p) => {
-                const totalPlanned = data.months.reduce((s, m) => s + cellFor(p.planLineId, m.id).plan, 0);
-                const remaining = p.target - totalPlanned;
-                const excess = Math.max(0, totalPlanned - p.target);
-                const isOver = excess > 0;
-                const cur = cellFor(p.planLineId, monthId);
-                const plannedAmount = qtyMode ? amount(cur.plan, p.rate) : cur.plan;
-                // Actual amount comes from the uploaded sales (saleValue) — not qty × rate.
-                const actualAmount = p.monthly[monthId]?.saleAmount ?? 0;
-                // Season Sales (whole season) + Pending (Season Qty − Season Sales); unit follows the mode.
-                const seasonSale = qtyMode ? (p.seasonSaleQty ?? 0) : (p.seasonSaleValue ?? 0);
-                const seasonPending = p.target - seasonSale;
-                // Planned NBV = Planned Amount × State Product Master NBV% (existing nbv() convention).
-                const plannedNbv = nbv(plannedAmount, p.masterNbvPercent ?? p.nbvPercent);
+              visibleProducts.map((p) => {
+                const { totalPlanned, remaining, excess, isOver, cur, plannedAmount, actualAmount, seasonSale, seasonPending, plannedNbv } = rowValues(p);
                 return (
                   <TableRow key={p.planLineId} className={cn(isOver && "bg-warning/10")}>
                     <TableCell className="font-medium">
@@ -303,6 +330,28 @@ export function MonthlyPlanner() {
               })
             )}
           </TableBody>
+          {/* Permanent Total footer — a dedicated summary row (NOT part of the product data array),
+              so it is ALWAYS the last row (after any Additional Products) and can never be edited.
+              Values are the aggregation of the SAME rowValues() used per row; the actual-sales
+              columns follow the exact same isApproved gating as the body. */}
+          {dealer && visibleProducts.length > 0 && (
+            <tfoot>
+              <TableRow className="border-t-2 bg-muted/60 font-semibold hover:bg-muted/60">
+                <TableCell className="font-semibold">Total</TableCell>
+                <TableCell className="text-right">{fmtUnit(totals.seasonQty)}</TableCell>
+                <TableCell className="text-right">{fmtUnit(totals.plannedAllMonths)}</TableCell>
+                <TableCell className={cn("text-right", totals.remaining < 0 && "text-destructive")}>{fmtUnit(totals.remaining)}</TableCell>
+                <TableCell className="text-right tabular-nums">{fmtUnit(totals.seasonSale)}</TableCell>
+                <TableCell className={cn("text-right tabular-nums", totals.seasonPending < 0 && "text-destructive")}>{fmtUnit(totals.seasonPending)}</TableCell>
+                <TableCell className="text-center tabular-nums">{fmtUnit(totals.thisMonthPlan)}</TableCell>
+                {isApproved && <TableCell className="text-center tabular-nums">{fmtUnit(totals.thisMonthSold)}</TableCell>}
+                {isApproved && <TableCell className="text-right">{fmtUnit(totals.pendingMo)}</TableCell>}
+                <TableCell className="text-right tabular-nums">{formatCurrency(totals.plannedAmount)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatCurrency(totals.plannedNbv)}</TableCell>
+                {isApproved && <TableCell className="text-right tabular-nums">{formatCurrency(totals.actualAmount)}</TableCell>}
+              </TableRow>
+            </tfoot>
+          )}
         </Table>
       </div>
       <p className="text-xs text-muted-foreground">

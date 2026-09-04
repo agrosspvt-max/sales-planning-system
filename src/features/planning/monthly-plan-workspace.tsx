@@ -15,6 +15,7 @@ import { MonthlyProductPlan } from "./monthly-product-plan";
 import { MonthlyDealerSummary } from "./monthly-dealer-summary";
 import { MonthlyPlanActions } from "./monthly-plan-actions";
 import { StatusBadge } from "./status-badge";
+import { MobileContextBar } from "@/components/layout/mobile-context-bar";
 import type { MonthlyData, PlanStatus, TimelineItem } from "./types";
 
 type Tab = "dealer" | "product" | "dealer-summary" | "history";
@@ -24,6 +25,7 @@ type MonthlyPlanDetail = MonthlyData & {
   status: PlanStatus;
   monthName: string;
   officerId: string;
+  officerName: string;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -79,22 +81,36 @@ export function MonthlyPlanWorkspace({
   };
 
   return (
-    <div className="space-y-4">
-      <PageHeader
-        backTo="/planning/sales"
-        crumbs={[
-          { label: "Planning" },
-          { label: "Create New Plan", href: "/planning/sales" },
-          { label: data.seasonName },
-          { label: `Monthly · ${data.monthName}` },
-        ]}
-        title={`${data.seasonName} — ${data.monthName}`}
-        subtitle="Monthly Plan. Fill monthly plans and record actual sales; Product Plan and Dealer Summary update live."
-        actions={<StatusBadge status={data.status} />}
-      />
-
-      {/* Desktop keeps the inline actions row; mobile uses the sticky bottom bar below (req #2). */}
+    // The data-grid tabs (Dealer Plan, Product Plan, Dealer Summary) take a DEFINITE viewport height
+    // (100dvh minus the fixed global header ≈3.5rem and the content padding), so the flex chain below can
+    // bound the grid into the one vertical scroll region and its column header can pin. History flows normally.
+    // gap-4 on mobile (unchanged); tighter gap-2 on desktop reclaims the wasted vertical space above the
+    // tabs — the recovered height flows straight to the flex-1 grid below.
+    <div className={cn(tab === "history" ? "space-y-4" : "flex h-[calc(100dvh-5.5rem)] flex-col gap-4 md:h-[calc(100dvh-6.5rem)] md:gap-2")}>
+      {/* Mobile: slim context bar only (Back · Season · Month · Officer). Desktop/tablet: full header. */}
+      <MobileContextBar backTo="/planning/sales" items={[data.seasonName, data.monthName, data.officerName]} />
       <div className="hidden sm:block">
+        <PageHeader
+          backTo="/planning/sales"
+          crumbs={[
+            { label: "Planning" },
+            { label: "Create New Plan", href: "/planning/sales" },
+            { label: data.seasonName },
+            { label: `Monthly · ${data.monthName}` },
+          ]}
+          title={`${data.seasonName} — ${data.monthName}`}
+          subtitle="Monthly Plan. Fill monthly plans and record actual sales; Product Plan and Dealer Summary update live."
+          actions={<StatusBadge status={data.status} />}
+          // In this flex-gap layout the container's gap is the sole spacer; drop the header's own bottom
+          // margin so it doesn't compound into a large desktop gap above the tabs.
+          className="!mb-0"
+        />
+      </div>
+
+      {/* Desktop keeps the inline actions row; mobile uses the sticky bottom bar below (req #2).
+          `empty:hidden` collapses this wrapper when MonthlyPlanActions renders nothing (e.g. an APPROVED
+          plan), so it no longer leaves an empty flex item with a gap on both sides. */}
+      <div className="hidden empty:hidden sm:block">
         <MonthlyPlanActions {...actionProps} />
       </div>
 
@@ -120,7 +136,7 @@ export function MonthlyPlanWorkspace({
         saveUrl={`/api/planning/monthly-plans/${monthlyPlanId}`}
         invalidateKey={["monthly-plan", monthlyPlanId]}
       >
-        <div className={tab === "dealer" ? "" : "hidden"}>
+        <div className={tab === "dealer" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <MonthlyPlanner />
           {/* Mobile-only sticky action bar (req #2 + #5): Save / Submit / Add Product stay reachable
               while scrolling the long planner, reusing the exact submit/approval logic. */}

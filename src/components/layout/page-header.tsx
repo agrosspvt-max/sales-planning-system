@@ -73,24 +73,26 @@ export function PageHeader({
   return (
     <div
       className={cn(
-        "sticky top-0 z-20 -mx-4 -mt-4 mb-4 border-b bg-muted/20 px-4 py-3 backdrop-blur md:-mx-6 md:-mt-6 md:px-6",
+        // Compact on phones (dense data app), full spacing from md up so desktop is unchanged.
+        "sticky top-0 z-20 -mx-4 -mt-4 mb-2 border-b bg-muted/20 px-4 py-2 backdrop-blur md:-mx-6 md:-mt-6 md:mb-4 md:px-6 md:py-3",
         className,
       )}
     >
       {(back || showBreadcrumbs) && (
-        <div className="mb-1.5 flex items-center gap-2">
+        <div className="mb-0.5 flex items-center gap-2 md:mb-1.5">
           {back && <BackButton to={backHref} label={backLabel} />}
           {showBreadcrumbs && (resolvedCrumbs ? <CrumbTrail crumbs={resolvedCrumbs} /> : <Breadcrumbs />)}
         </div>
       )}
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-2 md:gap-3">
         <div className="min-w-0">
-          <h1 className="truncate text-2xl font-semibold tracking-tight">{title}</h1>
-          {subtitle && <div className="mt-0.5 text-sm text-muted-foreground">{subtitle}</div>}
+          <h1 className="truncate text-lg font-semibold tracking-tight md:text-2xl">{title}</h1>
+          {/* Subtitle kept (not hidden) but tighter + smaller on phones; clamped to one line there. */}
+          {subtitle && <div className="mt-0 line-clamp-1 text-xs text-muted-foreground md:mt-0.5 md:line-clamp-none md:text-sm">{subtitle}</div>}
         </div>
         {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
-      {children && <div className="mt-3">{children}</div>}
+      {children && <div className="mt-2 md:mt-3">{children}</div>}
     </div>
   );
 }

@@ -57,7 +57,7 @@ function assignmentScope(groupId?: string, officerId?: string) {
   return {};
 }
 
-export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasFilter = "all", groupId?: string, officerId?: string) {
+export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasFilter = "all", groupId?: string, officerId?: string, search?: string) {
   assertAdmin(ctx);
   const [dealers, aliases, assignments] = await Promise.all([
     prisma.dealer.findMany({
@@ -147,11 +147,20 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
     pending: rows.filter((r) => isPending(r.status)).length,
   };
 
+  // Server-side search runs across the FULL scoped population (every row loaded above), BEFORE the row
+  // cap — so a matching dealer is found regardless of alphabetical position, on every tab. It matches the
+  // dealer's own name OR any of its alias (Tally) spellings, case-insensitively (boundary-trimmed). Counts
+  // are computed above over the whole scope and intentionally ignore the search (they stay scope totals).
+  const q = (search ?? "").trim().toLowerCase();
   const filtered = rows.filter((r) => {
-    if (filter === "with") return r.hasAlias;
-    if (filter === "without") return !r.hasAlias;
-    if (filter === "so-created") return r.soCreated;
-    if (filter === "pending") return isPending(r.status);
+    const inTab =
+      filter === "with" ? r.hasAlias
+      : filter === "without" ? !r.hasAlias
+      : filter === "so-created" ? r.soCreated
+      : filter === "pending" ? isPending(r.status)
+      : true;
+    if (!inTab) return false;
+    if (q && !(r.name.toLowerCase().includes(q) || r.aliases.some((a) => a.tallyName.toLowerCase().includes(q)))) return false;
     return true;
   });
   return { counts, dealers: filtered.slice(0, 500) };

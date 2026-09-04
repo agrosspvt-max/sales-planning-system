@@ -10,12 +10,26 @@ const Table = React.forwardRef<
      * grid opts in with this one prop; no table markup is duplicated.
      */
     stickyFirstColumn?: boolean;
+    /**
+     * Keep the column header (`<thead>`) pinned while rows scroll. The table's own wrapper is the
+     * single scroll region for the grid: it fills its (flex) parent's height, so the workspace lays
+     * this out as `… flex-1 min-h-0` and the wrapper becomes the one place the grid scrolls — the
+     * header stays put across every row (products, additional products, the Total footer) down to the
+     * very bottom, with no competing outer-page scroll. Header styling lives in `.sticky-head` in
+     * globals.css. Combine freely with `stickyFirstColumn`; the frozen corner cell layers above both.
+     */
+    stickyHeader?: boolean;
   }
->(({ className, stickyFirstColumn, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
+>(({ className, stickyFirstColumn, stickyHeader, ...props }, ref) => (
+  <div className={cn("relative w-full overflow-auto", stickyHeader && "h-full min-h-0 flex-1")}>
     <table
       ref={ref}
-      className={cn("w-full caption-bottom text-sm", stickyFirstColumn && "sticky-first-col", className)}
+      className={cn(
+        "w-full caption-bottom text-sm",
+        stickyFirstColumn && "sticky-first-col",
+        stickyHeader && "sticky-head",
+        className,
+      )}
       {...props}
     />
   </div>

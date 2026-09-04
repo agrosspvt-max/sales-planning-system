@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
+import { MobileContextBar } from "@/components/layout/mobile-context-bar";
 import {
   Table,
   TableBody,
@@ -259,14 +260,20 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
   ];
 
   return (
-    <div className="space-y-4">
-      <PageHeader
-        backTo="/planning/recovery"
-        crumbs={[{ label: "Planning" }, { label: "Recovery Planning", href: "/planning/recovery" }, { label: `${data.seasonName} · ${data.monthName}` }]}
-        title={`${data.seasonName} — ${data.monthName} Recovery`}
-        subtitle={`Cutoff ${formatDate(data.cutoffDate)} · ${data.officerName}`}
-        actions={<StatusBadge status={data.status} />}
-      />
+    // Month/Week grid tabs: root takes a definite viewport height so the flex chain bounds the grid into
+    // the single vertical scroll region (sticky header). History flows normally.
+    <div className={cn(tab === "month" || tab === "week" ? "flex h-[calc(100dvh-5.5rem)] flex-col gap-4 md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
+      {/* Mobile: slim context bar only (Back · Season · Month · Officer). Desktop/tablet: full header. */}
+      <MobileContextBar backTo="/planning/recovery" items={[data.seasonName, data.monthName, data.officerName]} />
+      <div className="hidden sm:block">
+        <PageHeader
+          backTo="/planning/recovery"
+          crumbs={[{ label: "Planning" }, { label: "Recovery Planning", href: "/planning/recovery" }, { label: `${data.seasonName} · ${data.monthName}` }]}
+          title={`${data.seasonName} — ${data.monthName} Recovery`}
+          subtitle={`Cutoff ${formatDate(data.cutoffDate)} · ${data.officerName}`}
+          actions={<StatusBadge status={data.status} />}
+        />
+      </div>
 
       <RecoveryActions
         id={id}
@@ -403,7 +410,9 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   ];
 
   return (
-    <div className="space-y-2">
+    // Flex column so the grid box fills remaining height and owns the single vertical scroll inside the
+    // full-height Month tab; falls back to normal flow otherwise.
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
       {canAdminEdit && !adminMode && (
         <div className="flex justify-end"><EditPlanButton onClick={enterAdminMode} /></div>
       )}
@@ -424,8 +433,8 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
           <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
         </div>
       )}
-      <div className="overflow-auto rounded-lg border bg-background">
-        <Table stickyFirstColumn>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background">
+        <Table stickyFirstColumn stickyHeader>
           {/* Excel-style sections (visual only — column ORDER reflows to the business layout; data,
               fields and calculations are unchanged). */}
           <SectionColgroup leading={1} sections={monthSections} />
@@ -571,7 +580,9 @@ function WeekView({ detail, isAdmin }: { detail: RecoveryDetail; isAdmin: boolea
   const selectedLocked = selectedLock?.locked ?? false;
 
   return (
-    <div className="space-y-2">
+    // Flex column so the grid box fills remaining height and owns the single vertical scroll inside the
+    // full-height Week tab; falls back to normal flow otherwise.
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mr-1 text-sm font-medium">Week:</span>
         {Array.from({ length: detail.weekCount }, (_, i) => i + 1).map((wk) => {
@@ -746,8 +757,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
           <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
         </div>
       )}
-      <div className="overflow-auto rounded-lg border bg-background">
-        <Table stickyFirstColumn>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background">
+        <Table stickyFirstColumn stickyHeader>
           {/* Excel-style sections (visual grouping only — columns, data and calculations unchanged). */}
           <SectionColgroup leading={1} sections={weekSections} />
           <TableHeader>

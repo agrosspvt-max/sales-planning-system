@@ -140,7 +140,10 @@ export function MonthlyPlanner() {
   }, [visibleProducts, rowValues]);
 
   return (
-    <div className="space-y-3">
+    // Flex column so the grid box (below) can fill the remaining height and own the single vertical
+    // scroll when this planner is mounted inside a full-height (flex) dealer tab; falls back to normal
+    // flow anywhere it is not.
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       {canAdminEdit && !adminMode && (
         <div className="flex justify-end"><EditPlanButton onClick={enterAdminMode} /></div>
       )}
@@ -244,7 +247,7 @@ export function MonthlyPlanner() {
         )}
       </div>
 
-      <p className="text-xs text-muted-foreground">
+      <p className="hidden text-xs text-muted-foreground sm:block">
         Monthly mode: <span className="font-medium">{unitLabel}</span> — officers enter{" "}
         {qtyMode ? "a quantity" : `a ${unitLabel.toLowerCase()} value`} per month. Product Plan and Dealer Summary update live.
       </p>
@@ -257,8 +260,8 @@ export function MonthlyPlanner() {
 
       {/* Horizontal scroll on small screens so the wide product grid never overflows the page (req #4).
           The Product column is frozen (stickyFirstColumn) so it stays visible while scrolling sideways. */}
-      <div className="overflow-x-auto rounded-lg border bg-background">
-        <Table stickyFirstColumn>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background">
+        <Table stickyFirstColumn stickyHeader>
           <TableHeader>
             <TableRow>
               <Th labelKey="col.product" className="min-w-[150px]" />
@@ -354,7 +357,7 @@ export function MonthlyPlanner() {
           )}
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="hidden text-xs text-muted-foreground sm:block">
         Over-planning is allowed. Rows where monthly plans exceed the approved season figure are highlighted; submission is never blocked.
       </p>
 

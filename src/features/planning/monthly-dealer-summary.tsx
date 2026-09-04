@@ -48,10 +48,12 @@ export function MonthlyDealerSummary() {
   );
 
   return (
-    <div className="space-y-3">
+    // Same single-scroll architecture as Dealer Monthly Plan: flex column, grid box fills the remaining
+    // height and owns the one vertical scroll so the column header can pin (see Table stickyHeader).
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       <MonthFilter months={data.months} state={filter} onChange={setFilter} />
-      <div className="overflow-auto rounded-lg border bg-background">
-        <Table stickyFirstColumn>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background">
+        <Table stickyFirstColumn stickyHeader>
           <TableHeader>
             <TableRow>
               <TableHead>Dealer</TableHead>

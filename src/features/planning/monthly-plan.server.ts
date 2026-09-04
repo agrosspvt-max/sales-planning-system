@@ -290,7 +290,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
     ]),
   );
   // Clearance flags (group-specific, by the plan officer's group + productId) — display-only.
-  const clearanceOfficer = (await prisma.user.findUnique({ where: { id: mp.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
+  const clearanceOfficer = (await prisma.user.findUnique({ where: { id: mp.officerId }, select: { groupId: true, name: true } })) as { groupId: string | null; name: string | null } | null;
   const clearance = await clearanceMapForGroup(clearanceOfficer?.groupId ?? null);
   // Season Sales = TOTAL actual sales for the WHOLE season per plan line (every month), from the same
   // authoritative MonthlyEntry.saleQty/saleValue used everywhere. Independent of the selected month.
@@ -327,6 +327,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
     monthlyPlanId: mp.id,
     planId: mp.seasonPlanId,
     officerId: mp.officerId,
+    officerName: clearanceOfficer?.name ?? "",
     status: mp.status,
     canEdit,
     canAdminEdit,

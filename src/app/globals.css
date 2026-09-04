@@ -159,6 +159,41 @@
 }
 
 /*
+ * Sticky ("frozen") column HEADER for scrollable tables. Opt-in via <Table stickyHeader> (which also
+ * bounds the wrapper height so the header has a scroll region to pin against — see table.tsx).
+ *
+ * Only the COLUMN-NAME row — the LAST row of <thead> — pins to the top of the scroll wrapper while the
+ * body rows scroll underneath. Any Excel-style grouped "section band" rendered ABOVE it (a shorter
+ * first header row) simply scrolls away behind the pinned row, so single-row and two-row headers both
+ * work with no hard-coded offsets. The pinned cells carry an OPAQUE copy of the header's muted tint
+ * (matching the translucent `bg-muted/40` on <thead>, composited over the surface) so rows never bleed
+ * through and the labels stay readable. Dividers are drawn as inset box-shadows that ride with the
+ * pinned cell (a plain border can hairline-flicker away while sticky). Breakpoint-independent — it
+ * relies only on the wrapper scroll, so it works on mobile, tablet and desktop.
+ *
+ * z-index: pinned header (4) sits above normal body cells and above the frozen first COLUMN body cell
+ * (2); the header/first-column CORNER (5) sits above everything so it never drops behind either axis.
+ */
+@layer components {
+  .sticky-head thead tr:last-child th {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    background-color: color-mix(in srgb, hsl(var(--muted)) 40%, hsl(var(--background)));
+    box-shadow: inset 0 -1px 0 0 hsl(var(--border));
+  }
+
+  /* When the first column is ALSO frozen, the top-left corner must beat both sticky axes. It keeps
+     the header tint (declared after the .sticky-first-col rules so it wins on equal specificity). */
+  .sticky-head.sticky-first-col thead tr:last-child th:first-child {
+    z-index: 5;
+    background-color: color-mix(in srgb, hsl(var(--muted)) 40%, hsl(var(--background)));
+    /* Preserve the frozen column's right divider alongside the header's bottom divider. */
+    box-shadow: inset -1px 0 0 0 hsl(var(--border)), inset 0 -1px 0 0 hsl(var(--border));
+  }
+}
+
+/*
  * Mobile only (below the `sm` 640px breakpoint): the frozen column just needs room for the product /
  * dealer NAME — the technical/scientific subtitle is hidden on phones (`hidden sm:block` in the
  * cells). So drop the desktop min-width floor, cap the width, and let long names wrap onto extra

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
@@ -53,6 +53,13 @@ function StatusBadge({ status }: { status: string }) {
 export function DealerCoveragePanel() {
   const [filter, setFilter] = useState<Filter>("without");
   const [search, setSearch] = useState("");
+  // Debounce the search box so we send ONE request after typing settles (search now runs server-side
+  // across the full scoped dealer population, so it must go to the API rather than filter loaded rows).
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
   const [groupId, setGroupId] = useState(""); // "" = All Groups
   const [officerId, setOfficerId] = useState(""); // "" = All Sales Officers
   const [editId, setEditId] = useState<string | null>(null); // the dealer open in the Edit dialog
@@ -64,11 +71,13 @@ export function DealerCoveragePanel() {
     queryFn: () => api.get(`/api/users/officers${groupId ? `?groupId=${groupId}` : ""}`),
   });
 
-  // Group → Sales Officer → tab → search. Group/officer are server-side (SQL); counts reflect them.
+  // Group → Sales Officer → tab → search. ALL server-side (SQL scope + counts; search filters the full
+  // scoped population BEFORE the row cap). Counts returned reflect the scope only, never the search.
   const scope = `${groupId ? `&group=${groupId}` : ""}${officerId ? `&officer=${officerId}` : ""}`;
+  const searchParam = debouncedSearch ? `&search=${encodeURIComponent(debouncedSearch)}` : "";
   const { data, isLoading } = useQuery<Resp>({
-    queryKey: ["dealer-coverage", filter, groupId, officerId],
-    queryFn: () => api.get<Resp>(`/api/dealer-alias/dealers?filter=${filter}${scope}`),
+    queryKey: ["dealer-coverage", filter, groupId, officerId, debouncedSearch],
+    queryFn: () => api.get<Resp>(`/api/dealer-alias/dealers?filter=${filter}${scope}${searchParam}`),
   });
 
   // The dealer being edited is derived from LIVE data so the dialog reflects alias add/remove at once.
@@ -77,16 +86,9 @@ export function DealerCoveragePanel() {
     ? { id: editRow.id, name: editRow.name, officerId: editRow.officerId, groupId: editRow.groupId, town: editRow.town, status: editRow.status, inActivePlan: editRow.inActivePlan, aliases: editRow.aliases }
     : null;
 
-  // Client-side search across the loaded dealers: matches the System Dealer name OR any alias name
-  // (case-insensitive, partial). Filter tabs and search compose.
-  const dealers = useMemo(() => {
-    const rows = data?.dealers ?? [];
-    const q = search.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter(
-      (d) => d.name.toLowerCase().includes(q) || d.aliases.some((a) => a.tallyName.toLowerCase().includes(q)),
-    );
-  }, [data?.dealers, search]);
+  // Rows are already tab-filtered AND search-filtered server-side (over the full scoped population,
+  // before the row cap), so render them directly — no client-side re-filtering.
+  const dealers = data?.dealers ?? [];
 
   return (
     <div className="space-y-2">

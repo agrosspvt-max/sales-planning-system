@@ -53,15 +53,22 @@ export async function loadDealerResolver(): Promise<DealerResolver> {
     // Defaulter dealers all participate in uploads/matching/recovery; only Inactive is excluded.
     // (Planning eligibility is enforced separately — see the DEFAULTER exclusions in planning queries.)
     prisma.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
-    prisma.dealerAlias.findMany({ select: { tallyKey: true, systemDealerId: true } }),
+    prisma.dealerAlias.findMany({ select: { tallyKey: true, tallyName: true, systemDealerId: true } }),
   ]);
   const dealers: DealerMatch[] = decorate(dealerRows as { id: string; name: string }[]).map((dealer) => ({
     ...dealer,
     profile: dealerNameProfile(dealer.name),
   }));
   const byId = new Map(dealers.map((d) => [d.id, d]));
+  // Key each alias by re-deriving tightKey from its stored Tally NAME (not the stored tallyKey), so the
+  // alias side is normalised with the exact same function used on the incoming raw name — leading/trailing
+  // (and, per tightKey's existing rules, all) whitespace can never cause a mismatch, even for any legacy
+  // row whose stored tallyKey was saved un-normalised. Falls back to the stored key if the name is blank.
   const aliasByKey = new Map<string, string>(
-    (aliasRows as { tallyKey: string; systemDealerId: string }[]).map((a) => [a.tallyKey, a.systemDealerId]),
+    (aliasRows as { tallyKey: string; tallyName: string; systemDealerId: string }[]).map((a) => [
+      tightKey(a.tallyName) || a.tallyKey,
+      a.systemDealerId,
+    ]),
   );
 
   // ONE matching implementation with reasons; resolve() is just the dealer-only projection of it.
@@ -173,9 +180,11 @@ export async function findProbableDealers(name: string, limit = 5): Promise<Prob
     if (!prev || score > prev.score) out.set(id, { id, name, reason, score });
   };
 
-  // 1. Alias (Tally name tightKey → system dealer).
+  // 1. Alias (Tally name → system dealer). Re-derive the alias key from the stored Tally NAME with the
+  // same tightKey used on the input, so both sides are normalised identically (whitespace-safe, robust to
+  // any legacy un-normalised stored key).
   for (const a of aliasRows as { tallyKey: string; systemDealerId: string; tallyName: string }[]) {
-    if (a.tallyKey === t) {
+    if ((tightKey(a.tallyName) || a.tallyKey) === t) {
       const d = byId.get(a.systemDealerId);
       if (d) add(d.id, d.name, "alias", 1);
     }

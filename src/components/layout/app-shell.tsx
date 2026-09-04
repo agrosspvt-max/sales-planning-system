@@ -207,12 +207,15 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
               <p className="text-sm font-medium leading-none">{user.name}</p>
               <p className="text-xs text-muted-foreground">@{user.username}</p>
             </div>
-            <Badge variant="secondary">{ROLE_LABELS[user.role]}</Badge>
+            {/* A Sales Officer sees their own name here (not the generic role); admins/others keep the role label. */}
+            <Badge variant="secondary">{user.role === Role.SALES_OFFICER ? user.name : ROLE_LABELS[user.role]}</Badge>
             <LogoutButton />
           </div>
         </header>
 
-        {/* Content — independent scroll region. PageHeader sticks to the top of THIS. */}
+        {/* Content — the page's single vertical scroll region. A workspace grid tab instead gives its
+            OWN root a definite viewport height (see the grids) so the data grid becomes the one bounded
+            scroll region and its sticky header can pin; plain pages just scroll here as normal. */}
         <main className="flex-1 overflow-y-auto">
           <div className="px-4 py-4 md:px-6 md:py-6">{children}</div>
         </main>

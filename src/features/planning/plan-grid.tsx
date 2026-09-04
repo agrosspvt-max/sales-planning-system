@@ -149,7 +149,9 @@ export function PlanGrid() {
   const selectedStatus = dealer ? statusByDealer.get(dealer.dealerId) : undefined;
 
   return (
-    <div className="space-y-3">
+    // Flex column so the grid box below fills remaining height and owns the single vertical scroll
+    // when mounted inside a full-height dealer tab; falls back to normal flow otherwise.
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       {/* Admin Override entry point / banner (Super Admin correcting an APPROVED plan). */}
       {canAdminEdit && !adminMode && (
         <div className="flex justify-end">
@@ -271,8 +273,8 @@ export function PlanGrid() {
           No active pack sizes are configured. Ask an administrator to add pack sizes.
         </div>
       ) : !dealer ? null : (
-        <div className="overflow-auto rounded-lg border bg-background">
-          <Table stickyFirstColumn>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background">
+          <Table stickyFirstColumn stickyHeader>
             {/* Excel-style sections (visual grouping only — the workbook layout). */}
             <SectionColgroup leading={1} sections={seasonalSections} />
             <TableHeader>

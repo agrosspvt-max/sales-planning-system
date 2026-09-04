@@ -20,6 +20,7 @@ import { PlanHistory } from "./plan-history";
 import { PlanEditProvider } from "./plan-edit-context";
 import { SelectMonthlyPlanDialog } from "./select-monthly-plan";
 import { PageHeader } from "@/components/layout/page-header";
+import { MobileContextBar } from "@/components/layout/mobile-context-bar";
 import type { PlanDetail } from "./types";
 
 // Seasonal Draft workspace tabs (Section: no Monthly / Workbook here — Monthly Planning is a
@@ -69,34 +70,48 @@ export function PlanWorkspace({
     { key: "history", label: "History" },
   ];
 
+  // Actions shared by the desktop header and the mobile-only actions row (one source of truth).
+  const workspaceActions = (
+    <>
+      {/* Monthly Planning is a separate, post-approval lifecycle. Opens a "Select
+          Monthly Plan" dialog (Draft / Approved) → first-class Monthly Plan. */}
+      {detail.status === "APPROVED" && detail.isActiveVersion && detail.planningType !== "YEARLY" && (
+        <Button variant="outline" onClick={() => setMonthlyOpen(true)}>
+          <CalendarClock className="h-4 w-4" /> Monthly Planning
+        </Button>
+      )}
+      <PlanActions detail={detail} role={role} userId={userId} />
+    </>
+  );
+
   return (
-    <div className="space-y-4">
-      <PageHeader
+    // Dealer grid tab: root takes a definite viewport height so the flex chain bounds the grid into the
+    // single vertical scroll region (sticky header). Other tabs flow normally.
+    <div className={cn(tab === "dealer" ? "flex h-[calc(100dvh-5.5rem)] flex-col gap-4 md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
+      {/* Mobile: slim context bar only (Back · Season · Officer). Desktop/tablet: full header. */}
+      <MobileContextBar
         backTo={detail.status === "APPROVED" ? "/planning/sales/plans" : "/planning/sales"}
-        title={`${detail.seasonName} — ${detail.officerName}`}
-        subtitle={
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary">{PLANNING_TYPE_LABELS[detail.planningType]}</Badge>
-            <Badge variant="secondary">v{detail.version}{detail.versionName ? ` · ${detail.versionName}` : ""}</Badge>
-            <StatusBadge status={detail.status} />
-            {detail.isActiveVersion && <Badge variant="success">Active</Badge>}
-            {detail.source === "IMPORT" && <Badge variant="muted">Imported</Badge>}
-            {!detail.seasonOpen && <Badge variant="muted">Season closed</Badge>}
-          </div>
-        }
-        actions={
-          <>
-            {/* Monthly Planning is a separate, post-approval lifecycle. Opens a "Select
-                Monthly Plan" dialog (Draft / Approved) → first-class Monthly Plan. */}
-            {detail.status === "APPROVED" && detail.isActiveVersion && detail.planningType !== "YEARLY" && (
-              <Button variant="outline" onClick={() => setMonthlyOpen(true)}>
-                <CalendarClock className="h-4 w-4" /> Monthly Planning
-              </Button>
-            )}
-            <PlanActions detail={detail} role={role} userId={userId} />
-          </>
-        }
+        items={[detail.seasonName, detail.officerName]}
       />
+      <div className="hidden sm:block">
+        <PageHeader
+          backTo={detail.status === "APPROVED" ? "/planning/sales/plans" : "/planning/sales"}
+          title={`${detail.seasonName} — ${detail.officerName}`}
+          subtitle={
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">{PLANNING_TYPE_LABELS[detail.planningType]}</Badge>
+              <Badge variant="secondary">v{detail.version}{detail.versionName ? ` · ${detail.versionName}` : ""}</Badge>
+              <StatusBadge status={detail.status} />
+              {detail.isActiveVersion && <Badge variant="success">Active</Badge>}
+              {detail.source === "IMPORT" && <Badge variant="muted">Imported</Badge>}
+              {!detail.seasonOpen && <Badge variant="muted">Season closed</Badge>}
+            </div>
+          }
+          actions={workspaceActions}
+        />
+      </div>
+      {/* Mobile-only actions row (kept out of the slim context bar): Save / Submit / Monthly Planning. */}
+      <div className="flex flex-wrap items-center gap-2 sm:hidden">{workspaceActions}</div>
 
       {(detail.status === "RETURNED" || detail.status === "REJECTED") && (
         <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">
@@ -131,7 +146,7 @@ export function PlanWorkspace({
       {/* One provider wraps all views so Dealer Plan edits recompute Product Plan / Dealer
           Summary instantly, and switching tabs never loses in-progress edits. */}
       <PlanEditProvider detail={detail}>
-        <div className={tab === "dealer" ? "" : "hidden"}>
+        <div className={tab === "dealer" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <PlanGrid />
         </div>
         {tab === "product" && <ProductPlan />}

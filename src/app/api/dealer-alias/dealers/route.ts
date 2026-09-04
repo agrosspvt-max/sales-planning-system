@@ -9,6 +9,7 @@ export async function GET(req: NextRequest) {
     const filter = (q.get("filter") ?? "all") as DealerAliasFilter;
     const groupId = q.get("group") || undefined;
     const officerId = q.get("officer") || undefined;
-    return ok(await listDealersForAlias(auth, filter, groupId, officerId));
+    const search = q.get("search") || undefined;
+    return ok(await listDealersForAlias(auth, filter, groupId, officerId, search));
   });
 }

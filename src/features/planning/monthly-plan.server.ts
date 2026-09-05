@@ -899,6 +899,8 @@ export async function recallMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
 
 async function assertMonthlyApprover(ctx: AuthContext, mp: MonthlyPlanRow) {
   if (mp.status === PlanStatus.PENDING_RM) {
+    // Super Admin override: may act on a submitted monthly plan directly, without waiting for the RM.
+    if (ctx.role === Role.SUPER_ADMIN) return;
     const managerId = await getCurrentManagerId(mp.officerId);
     if (ctx.userId !== managerId) throw new ApiError(403, "Only the assigned Regional Manager can act on this monthly plan");
   } else if (mp.status === PlanStatus.PENDING_ADMIN) {
@@ -913,7 +915,8 @@ export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string
   await assertMonthlyApprover(ctx, mp);
   assertMonthlyLive(mp);
 
-  if (mp.status === PlanStatus.PENDING_RM) {
+  // RM approving a Pending-RM monthly plan advances it to Pending Super Admin (RM workflow UNCHANGED).
+  if (mp.status === PlanStatus.PENDING_RM && ctx.role !== Role.SUPER_ADMIN) {
     await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.PENDING_ADMIN } });
     await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN);
     await notifyMany(await getSuperAdminIds(), {
@@ -926,8 +929,12 @@ export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string
     return { status: PlanStatus.PENDING_ADMIN };
   }
 
+  // Super Admin FINAL approval — from Pending Super Admin (normal) OR directly from Pending RM (override,
+  // RM step skipped). fromStatus reflects the true prior state for a truthful audit trail.
+  const overrodeRm = mp.status === PlanStatus.PENDING_RM;
+  const fromStatus = mp.status;
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.APPROVED, approvedAt: new Date() } });
-  await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_ADMIN, PlanStatus.APPROVED);
+  await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.APPROVE, fromStatus, PlanStatus.APPROVED, overrodeRm ? "Super Admin override approval (approved directly from Pending RM; RM approval skipped)" : undefined);
 
   // NOTE: Dealer approval is fully DECOUPLED from plan approval. Approving a monthly plan must never
   // change a dealer's status — SO-created dealers stay PENDING until an admin activates them from the

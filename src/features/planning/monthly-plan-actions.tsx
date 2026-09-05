@@ -100,8 +100,10 @@ export function MonthlyPlanActions({
 
   // Reviewer actions: RM approves PENDING_RM (unchanged). Super Admin approves PENDING_ADMIN and may also
   // Return the plan to the officer with a mandatory reason (SUBMITTED → RETURNED).
+  // Super Admin has full override authority: may approve/return from EITHER Pending RM or Pending Super
+  // Admin (approving a Pending-RM plan finalizes it directly, skipping the RM). RM/Officer flow unchanged.
   const isRmApprover = role === Role.REGIONAL_MANAGER && status === "PENDING_RM";
-  const isAdminApprover = role === Role.SUPER_ADMIN && status === "PENDING_ADMIN";
+  const isAdminApprover = role === Role.SUPER_ADMIN && (status === "PENDING_ADMIN" || status === "PENDING_RM");
   if (isRmApprover || isAdminApprover) {
     buttons.push(
       <Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>Approve</Button>,

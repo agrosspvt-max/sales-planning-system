@@ -161,14 +161,25 @@ function RecoveryApprovals({ role }: { role: Role }) {
   );
 }
 
-/** Monthly plans awaiting the current approver (RM → PENDING_RM, Admin → PENDING_ADMIN). */
+/**
+ * Monthly plans awaiting the current approver. RM sees only PENDING_RM (unchanged). Super Admin has FINAL
+ * authority and sees EVERY submitted plan — both PENDING_RM and PENDING_ADMIN — so a plan is never hidden
+ * from Admin just because the RM has not yet acted on it (matches Recovery).
+ */
 function MonthlyApprovals({ role }: { role: Role }) {
   const { data, isLoading } = useQuery<MonthlyInboxItem[]>({
     queryKey: ["monthly-plans", "PENDING_RM,PENDING_ADMIN"],
     queryFn: () => api.get<MonthlyInboxItem[]>("/api/planning/monthly-plans?status=PENDING_RM,PENDING_ADMIN"),
   });
-  const want = role === Role.REGIONAL_MANAGER ? "PENDING_RM" : "PENDING_ADMIN";
-  const rows = useMemo(() => (data ?? []).filter((m) => m.status === want), [data, want]);
+  const rows = useMemo(
+    () =>
+      (data ?? []).filter((m) =>
+        role === Role.REGIONAL_MANAGER
+          ? m.status === "PENDING_RM"
+          : m.status === "PENDING_RM" || m.status === "PENDING_ADMIN",
+      ),
+    [data, role],
+  );
   if (isLoading) return <Skeleton className="h-16 w-full" />;
   if (rows.length === 0) return null;
   return (

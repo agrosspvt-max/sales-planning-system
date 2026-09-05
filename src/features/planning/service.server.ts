@@ -712,6 +712,9 @@ export async function recallPlan(ctx: AuthContext, planId: string) {
 
 async function assertCurrentApprover(ctx: AuthContext, plan: { officerId: string; status: PlanStatus }) {
   if (plan.status === PlanStatus.PENDING_RM) {
+    // Super Admin has FINAL authority and may act on a submitted plan directly — RM approval is never a
+    // prerequisite for the admin (a plan sitting at Pending RM stays admin-actionable). RM flow unchanged.
+    if (ctx.role === Role.SUPER_ADMIN) return;
     const managerId = await getCurrentManagerId(plan.officerId);
     if (ctx.userId !== managerId) {
       throw new ApiError(403, "Only the assigned Regional Manager can act on this plan"); // V15
@@ -730,7 +733,8 @@ export async function approvePlan(ctx: AuthContext, planId: string) {
   await assertCurrentApprover(ctx, plan);
   assertLifecycleEditable(plan.lifecycleState);
 
-  if (plan.status === PlanStatus.PENDING_RM) {
+  // RM approving a Pending-RM plan advances it to Pending Super Admin (RM workflow UNCHANGED).
+  if (plan.status === PlanStatus.PENDING_RM && ctx.role !== Role.SUPER_ADMIN) {
     await prisma.seasonPlan.update({
       where: { id: planId },
       data: { status: PlanStatus.PENDING_ADMIN },
@@ -752,7 +756,10 @@ export async function approvePlan(ctx: AuthContext, planId: string) {
     return { status: PlanStatus.PENDING_ADMIN };
   }
 
-  // Super Admin final approval → snapshot prices, activate version, supersede prior.
+  // Super Admin FINAL approval → snapshot prices, activate version, supersede prior. Reachable from
+  // Pending Super Admin (normal) OR directly from Pending RM (Super Admin override — RM step skipped).
+  const overrodeRm = plan.status === PlanStatus.PENDING_RM; // admin approving before the RM
+  const fromStatus = plan.status;
   await prisma.$transaction(async (tx) => {
     await finalizeApproval(tx, plan);
   });
@@ -760,8 +767,9 @@ export async function approvePlan(ctx: AuthContext, planId: string) {
     planId,
     ctx.userId,
     ApprovalActionType.APPROVE,
-    PlanStatus.PENDING_ADMIN,
+    fromStatus,
     PlanStatus.APPROVED,
+    overrodeRm ? "Super Admin override approval (approved directly from Pending RM; RM approval skipped)" : undefined,
   );
   await createNotification({
     userId: plan.officerId,
@@ -1077,6 +1085,9 @@ export async function getApprovalsInbox(ctx: AuthContext) {
             // Closed/deactivated plans are frozen and never appear in the approval queue.
             lifecycleState: "ACTIVE",
             OR: [
+              // Super Admin override authority: RM-pending plans are also actionable by the admin
+              // directly, so they surface in the admin queue too (RM still sees/approves them normally).
+              { status: PlanStatus.PENDING_RM },
               { status: PlanStatus.PENDING_ADMIN },
               { status: PlanStatus.APPROVED, isActiveVersion: true, revisionRequested: true },
             ],

@@ -12,23 +12,24 @@ export default async function Page() {
     <AssignmentPage
       config={{
         title: "Dealer Assignments",
-        description: "Assign dealers to Sales Officers. History is preserved automatically.",
+        description: "Assign dealers to a Sales Officer or Regional Manager. History is preserved automatically.",
         endpoint: "/api/dealer-assignments",
         canManage: can(role, "dealerAssignments", "create"),
         columns: [
           { key: "dealerName", label: "Dealer" },
-          { key: "officerName", label: "Sales Officer" },
+          { key: "officerName", label: "Owner" },
           { key: "effectiveFrom", label: "Effective From" },
         ],
         fields: [
           { name: "dealerId", label: "Dealer", optionsKey: "dealers" },
-          { name: "officerId", label: "Sales Officer", optionsKey: "officers" },
+          // Owner may be a Sales Officer OR a Regional Manager (RMs own their own dealers too).
+          { name: "officerId", label: "Owner", optionsKey: "dealerOwners" },
         ],
         history: {
           param: "dealerId",
           idKey: "dealerId",
           nameKey: "officerName",
-          nameLabel: "Sales Officer",
+          nameLabel: "Owner",
           subjectKey: "dealerId",
         },
       }}

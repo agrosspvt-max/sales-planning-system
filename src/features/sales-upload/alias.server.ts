@@ -238,7 +238,9 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
   // Name → id lookups for the creation columns (loaded once — no per-row queries).
   const [groups, officers] = (await Promise.all([
     prisma.userGroup.findMany({ select: { id: true, name: true } }),
-    prisma.user.findMany({ where: { role: Role.SALES_OFFICER, isActive: true }, select: { id: true, name: true, groupId: true } }),
+    // A dealer's owner in the "Sales Officer" column may be a Sales Officer OR the group's Regional
+    // Manager (RMs own their own dealers) — resolve both so an RM name in that column assigns correctly.
+    prisma.user.findMany({ where: { role: { in: [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] }, isActive: true }, select: { id: true, name: true, groupId: true } }),
   ])) as [{ id: string; name: string }[], { id: string; name: string; groupId: string | null }[]];
   const norm = (s: string) => s.trim().toLowerCase();
   const groupByName = new Map(groups.map((g) => [norm(g.name), g.id] as const));

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { isDealerOwnerRole } from "@/lib/scope";
 import { tightKey } from "@/lib/match-key";
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
@@ -56,8 +57,9 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
   // Validate a reassignment target up front (active Sales Officer, and — if a group was supplied — in it).
   if (data.officerId) {
     const officer = await prisma.user.findUnique({ where: { id: data.officerId }, select: { role: true, isActive: true, groupId: true } });
-    if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) throw new ApiError(422, "The selected Sales Officer is missing or inactive");
-    if (data.groupId && officer.groupId !== data.groupId) throw new ApiError(422, "The selected Sales Officer does not belong to the selected group");
+    // Owner may be an active Sales Officer OR the group's Regional Manager (RMs own their own dealers too).
+    if (!officer || !isDealerOwnerRole(officer.role) || !officer.isActive) throw new ApiError(422, "The selected owner must be an active Sales Officer or Regional Manager");
+    if (data.groupId && officer.groupId !== data.groupId) throw new ApiError(422, "The selected owner does not belong to the selected group");
   }
   // Resolve the requested status → the 4-way `status` wins; a legacy `isActive` boolean maps to
   // ACTIVE/INACTIVE. `isActive` is always derived from status (only INACTIVE = inactive).

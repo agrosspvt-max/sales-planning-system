@@ -3,7 +3,7 @@ import { z } from "zod";
 import { PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { assertOfficerInScope, getCurrentManagerId, getOfficerScope, isPlanOwner } from "@/lib/scope";
+import { assertOfficerInScope, getCurrentManagerId, getOfficerScope, isDealerOwnerRole, isPlanOwner } from "@/lib/scope";
 import { createNotification, notifyMany, getSuperAdminIds } from "@/features/notifications/service.server";
 import { saveMonthlySchema } from "@/lib/validations/planning";
 import { isQuantityMode, type PlanningMode } from "@/lib/calc";
@@ -737,8 +737,10 @@ export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Pr
   if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can create a dealer for an officer");
   const data = adminCreateSchema.parse(raw);
   const officer = await prisma.user.findUnique({ where: { id: data.officerId }, select: { role: true, isActive: true, groupId: true } });
-  if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) throw new ApiError(422, "The selected Sales Officer is missing or inactive");
-  if (data.groupId && officer.groupId !== data.groupId) throw new ApiError(422, "The selected Sales Officer does not belong to the selected group");
+  // A dealer may be owned by an active Sales Officer OR the group's Regional Manager (RMs also plan/own
+  // their own dealers). Same DealerAssignment relationship for both — no separate RM-ownership path.
+  if (!officer || !isDealerOwnerRole(officer.role) || !officer.isActive) throw new ApiError(422, "The selected owner must be an active Sales Officer or Regional Manager");
+  if (data.groupId && officer.groupId !== data.groupId) throw new ApiError(422, "The selected owner does not belong to the selected group");
 
   // Duplicate-dealer guard (unchanged) …
   if (!data.force) {
@@ -783,12 +785,12 @@ export async function assignExistingDealer(ctx: AuthContext, dealerId: string, o
     prisma.user.findUnique({ where: { id: officerId }, select: { role: true, isActive: true } }),
   ]);
   if (!dealer) throw new ApiError(404, "Dealer not found");
-  if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) throw new ApiError(422, "Sales Officer missing or inactive");
+  if (!officer || !isDealerOwnerRole(officer.role) || !officer.isActive) throw new ApiError(422, "The selected owner must be an active Sales Officer or Regional Manager");
   await prisma.$transaction(async (tx: Tx) => {
     await applyDealerAssignment(tx, dealerId, officerId, new Date());
     await ensureDealerAlias(tx, dealerId, dealer.name);
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Admin assigned existing dealer "${dealer.name}" to a Sales Officer` });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Admin assigned existing dealer "${dealer.name}" to its owner` });
   return { dealerId };
 }
 

@@ -9,6 +9,17 @@ export interface OfficerScope {
 }
 
 /**
+ * Roles that may OWN a dealer (be the officer on a DealerAssignment). A Sales Officer manages their own
+ * dealers; a Regional Manager also plans/owns their own dealers (the app already treats the RM as a
+ * first-class planning contributor — see Territory Plan and `isPlanOwner`). Ownership uses the SAME
+ * `DealerAssignment.officerId` relationship for both — there is no separate RM-ownership model.
+ */
+export const DEALER_OWNER_ROLES: Role[] = [Role.SALES_OFFICER, Role.REGIONAL_MANAGER];
+export function isDealerOwnerRole(role: Role): boolean {
+  return role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
+}
+
+/**
  * The set of officer ids whose data the current user may access.
  * - Super Admin: everyone (all=true).
  * - Regional Manager: every Sales Officer in the RM's OWN group, PLUS the RM themselves — so the RM

@@ -33,7 +33,7 @@ type Row = Record<string, unknown> & { id: string; effectiveFrom: string };
 export interface AssignField {
   name: string;
   label: string;
-  optionsKey: "dealers" | "officers" | "managers";
+  optionsKey: "dealers" | "officers" | "managers" | "dealerOwners";
 }
 
 export interface AssignmentConfig {

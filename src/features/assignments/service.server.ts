@@ -6,6 +6,7 @@ import {
   rmAssignmentSchema,
 } from "@/lib/validations/assignments";
 import { ApiError } from "@/lib/http";
+import { isDealerOwnerRole } from "@/lib/scope";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Tx = any;
@@ -112,8 +113,9 @@ export async function assignDealer(raw: unknown) {
   const { dealerId, officerId, effectiveFrom } = dealerAssignmentSchema.parse(raw);
 
   const officer = await prisma.user.findUnique({ where: { id: officerId } });
-  if (!officer || officer.role !== Role.SALES_OFFICER || !officer.isActive) {
-    throw new ApiError(422, "Target must be an active Sales Officer");
+  // A dealer owner may be an active Sales Officer OR Regional Manager (RMs own their own dealers too).
+  if (!officer || !isDealerOwnerRole(officer.role) || !officer.isActive) {
+    throw new ApiError(422, "Target must be an active Sales Officer or Regional Manager");
   }
   const dealer = await prisma.dealer.findUnique({ where: { id: dealerId } });
   if (!dealer || !dealer.isActive) throw new ApiError(422, "Dealer must be active");
@@ -188,9 +190,16 @@ export async function loadAssignmentOptions() {
       orderBy: { name: "asc" },
     }),
   ]);
+  const label = (u: { role: Role; name: string }) => (u.role === Role.REGIONAL_MANAGER ? `${u.name} (RM)` : u.name);
   return {
     dealers: dealers.map((d) => ({ value: d.id, label: d.name })),
+    // Dealer→Officer assignment: SO only stays for the Officer→RM screen's "officers" list; dealer OWNERS
+    // may be a Sales Officer OR a Regional Manager, so expose a combined, role-tagged list for that field.
     officers: officers.map((o) => ({ value: o.id, label: o.name })),
     managers: managers.map((m) => ({ value: m.id, label: m.name })),
+    dealerOwners: [...officers, ...managers]
+      .map((u) => ({ value: u.id, label: label(u), sort: u.name.toLowerCase() }))
+      .sort((a, b) => a.sort.localeCompare(b.sort))
+      .map(({ value, label }) => ({ value, label })),
   };
 }

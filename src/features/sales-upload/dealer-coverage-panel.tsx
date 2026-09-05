@@ -68,7 +68,8 @@ export function DealerCoveragePanel() {
   const { data: groups } = useQuery<GroupOpt[]>({ queryKey: ["groups"], queryFn: () => api.get("/api/groups") });
   const { data: officers } = useQuery<OfficerOpt[]>({
     queryKey: ["officers", groupId],
-    queryFn: () => api.get(`/api/users/officers${groupId ? `?groupId=${groupId}` : ""}`),
+    // roles=all → dealer owners can be Sales Officers OR Regional Managers, so both are filterable here.
+    queryFn: () => api.get(`/api/users/officers?roles=all${groupId ? `&groupId=${groupId}` : ""}`),
   });
 
   // Group → Sales Officer → tab → search. ALL server-side (SQL scope + counts; search filters the full

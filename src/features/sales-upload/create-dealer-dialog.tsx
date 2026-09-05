@@ -75,7 +75,8 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
   const { data: groups } = useQuery<GroupOpt[]>({ queryKey: ["groups"], queryFn: () => api.get("/api/groups"), enabled: open });
   const { data: officers } = useQuery<OfficerOpt[]>({
     queryKey: ["officers", groupId],
-    queryFn: () => api.get(`/api/users/officers${groupId ? `?groupId=${groupId}` : ""}`),
+    // roles=all → the owner may be a Sales Officer OR the group's Regional Manager (RMs own dealers too).
+    queryFn: () => api.get(`/api/users/officers?roles=all${groupId ? `&groupId=${groupId}` : ""}`),
     enabled: open && !!groupId, // officer dropdown loads only after a group is chosen
   });
 

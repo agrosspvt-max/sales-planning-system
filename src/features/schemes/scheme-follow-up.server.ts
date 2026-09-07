@@ -5,6 +5,20 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { BUSINESS_WEEK_COUNT, businessWeekDayRange } from "@/features/recovery/service.server";
 import { derivedInstallmentSchedule, resolveInstanceBillingDate, type InstallmentRuleRow } from "./scheme-enrolled.server";
+// Phase 6: Product/Value achievement follow-up REUSES the Phase 4 authoritative engine (pure calculations)
+// and its batched DB loaders (requirements + active-scope sales). No achievement maths is duplicated here.
+import { loadSchemeRequirements, loadActiveSchemeSales } from "./scheme-achievement.server";
+import {
+  installmentPaidTotal,
+  schemeProductAchievement,
+  schemeValueAchievement,
+  combineDealerProduct,
+  combineDealerValue,
+  type DealerProductAchievement,
+  type DealerValueAchievement,
+  type SchemeProductAchievement,
+  type SchemeValueAchievement,
+} from "@/lib/scheme-achievement";
 
 /**
  * FOLLOW-UP PLANS — the recovery layer over enrolled schemes (Scheme Follow-up + Dealer Follow-up).
@@ -283,6 +297,9 @@ export interface FollowUpFigures {
   weekActual: number | null;
   installmentsTotal: number;
   installmentsReceived: number;
+  /** Phase 4 authoritative rule: an installment is FULLY PAID only when receivedAmount >= plannedAmount
+   *  (partial never counts). Displayed as "Scheme Installments = installmentsFullyPaid / installmentsTotal". */
+  installmentsFullyPaid: number;
   overdueCount: number;
   nextDueDate: string | null;
   lastPaymentDate: string | null;
@@ -333,6 +350,9 @@ function aggregate(rows: ScheduleRow[], schemeAmount: number, bookingAmount: num
   const due = round2(totalDue);
   const paidTotal = round2(installmentsPaid + bookingAmount); // booking is dateless and always counted
   const pending = round2(Math.max(due - paidTotal, 0));
+  // Scheme Installments (Paid / Total) — the shared Phase 4 rule over the SAME schedule rows (received >=
+  // planned; partial never counts). Independent of the Total Due / period snapshot maths above.
+  const fullyPaid = installmentPaidTotal(rows.map((r) => ({ plannedAmount: r.plannedAmount, receivedAmount: r.receivedAmount })));
   return {
     schemeAmount: round2(schemeAmount),
     bookingAmount: round2(bookingAmount),
@@ -347,6 +367,7 @@ function aggregate(rows: ScheduleRow[], schemeAmount: number, bookingAmount: num
     weekActual: w.week ? round2(weekActual) : null,
     installmentsTotal: rows.length,
     installmentsReceived: received,
+    installmentsFullyPaid: fullyPaid.paid,
     overdueCount: overdue,
     nextDueDate: nextDue ? (nextDue as Date).toISOString() : null,
     lastPaymentDate: lastPaid ? (lastPaid as Date).toISOString() : null,
@@ -403,6 +424,7 @@ function sumFigures(parts: FollowUpFigures[], w: Windows): FollowUpFigures {
   const pending = round2(parts.reduce((s, f) => s + f.pending, 0)); // per-row floors preserved
   const total = parts.reduce((s, f) => s + f.installmentsTotal, 0);
   const received = parts.reduce((s, f) => s + f.installmentsReceived, 0);
+  const fullyPaid = parts.reduce((s, f) => s + f.installmentsFullyPaid, 0);
   const overdue = parts.reduce((s, f) => s + f.overdueCount, 0);
   const nextDue = parts.map((f) => f.nextDueDate).filter(Boolean).sort() as string[];
   const lastPaid = parts.map((f) => f.lastPaymentDate).filter(Boolean).sort() as string[];
@@ -420,6 +442,7 @@ function sumFigures(parts: FollowUpFigures[], w: Windows): FollowUpFigures {
     weekActual: w.week ? add((f) => f.weekActual ?? 0) : null,
     installmentsTotal: total,
     installmentsReceived: received,
+    installmentsFullyPaid: fullyPaid,
     overdueCount: overdue,
     nextDueDate: nextDue[0] ?? null,
     lastPaymentDate: lastPaid[lastPaid.length - 1] ?? null,
@@ -641,6 +664,241 @@ export async function dealerFollowUpDetail(ctx: AuthContext, dealerId: string, q
     schemes,
     payments,
   };
+}
+
+/* ============================================================================================
+ * ACHIEVEMENT FOLLOW-UP (Phase 6) — Product Based + Value Based, for both Scheme and Dealer views.
+ *
+ * These consume the Phase 4 AUTHORITATIVE engine: requirements + ACTIVE-scope sales are loaded with the
+ * Phase 4 batched loaders, and every Required/Achieved/Remaining/Completed/Progress number is produced by
+ * the pure functions in `@/lib/scheme-achievement`. Nothing is recalculated here. The enrolled dealer set
+ * comes from `loadPlans` (the same ENROLLED + officer-scope loader the installment views use), so RM "Team
+ * → one Sales Officer" narrowing is honoured identically and non-enrolled dealers never contribute.
+ *
+ * Schemes with requirementType = NONE have no Product/Value requirement and are simply omitted from these
+ * views (the Installment view still lists them). A valid Product/Value scheme with zero SchemeSale rows,
+ * and enrolled dealers with zero sales, are RETAINED with achievement 0 (Phase 4 behaviour).
+ * ============================================================================================ */
+
+interface DealerMeta { dealerName: string; town: string | null; salesOfficerName: string; state: string | null; mobile: string | null }
+
+/** Batched product-name lookup for the requirement products shown in the expanded detail. One query. */
+async function loadProductNames(productIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (productIds.length === 0) return out;
+  const rows = (await prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, name: true } })) as { id: string; name: string }[];
+  for (const r of rows) out.set(r.id, r.name);
+  return out;
+}
+
+interface AchievementContext {
+  dealerMeta: Map<string, DealerMeta>;
+  schemeName: Map<string, string>;
+  enrolledByScheme: Map<string, Set<string>>;
+  requirements: Awaited<ReturnType<typeof loadSchemeRequirements>>;
+  sales: Awaited<ReturnType<typeof loadActiveSchemeSales>>;
+  relevant: string[]; // scheme ids whose requirementType matches the requested type
+  productName: Map<string, string>;
+}
+
+/**
+ * Shared loader for the achievement views: the caller's ENROLLED plans (scope + officer honoured), each
+ * scheme's requirement + ACTIVE sales, filtered to the requested requirement type, plus product names.
+ */
+async function loadAchievementContext(ctx: AuthContext, q: FollowUpQuery, type: "PRODUCT_BASED" | "VALUE_BASED"): Promise<AchievementContext> {
+  const plans = await loadPlans(ctx, { officerId: q.officerId });
+  const dealerMeta = new Map<string, DealerMeta>();
+  const schemeName = new Map<string, string>();
+  const enrolledByScheme = new Map<string, Set<string>>();
+  for (const p of plans) {
+    if (!dealerMeta.has(p.dealerId)) dealerMeta.set(p.dealerId, { dealerName: p.dealerName, town: p.town, salesOfficerName: p.salesOfficerName, state: p.state, mobile: p.mobile });
+    schemeName.set(p.schemeId, p.schemeName);
+    let set = enrolledByScheme.get(p.schemeId);
+    if (!set) { set = new Set(); enrolledByScheme.set(p.schemeId, set); }
+    set.add(p.dealerId);
+  }
+  const schemeIds = [...schemeName.keys()];
+  const [requirements, sales] = await Promise.all([loadSchemeRequirements(schemeIds), loadActiveSchemeSales(schemeIds)]);
+  const relevant = schemeIds.filter((id) => requirements.get(id)?.type === type);
+  const productIds = new Set<string>();
+  for (const id of relevant) for (const pr of requirements.get(id)!.products) productIds.add(pr.productId);
+  const productName = await loadProductNames([...productIds]);
+  return { dealerMeta, schemeName, enrolledByScheme, requirements, sales, relevant, productName };
+}
+
+const enrolledIdsOf = (c: AchievementContext, schemeId: string): string[] => [...(c.enrolledByScheme.get(schemeId) ?? [])];
+/** Pending-first ordering for achievement rows: still-remaining items surface to the top. */
+const remainingFirst = (aRemaining: number, bRemaining: number, aName: string, bName: string) =>
+  (bRemaining > 0 ? 1 : 0) - (aRemaining > 0 ? 1 : 0) || bRemaining - aRemaining || aName.localeCompare(bName);
+
+/* --------------------------------- Product Based --------------------------------- */
+
+export interface ProductLine { productId: string; productName: string; requiredQty: number; achievedQty: number; remainingQty: number; completed: boolean }
+export interface ProductDealerBlock {
+  dealerId: string; dealerName: string; town: string | null; salesOfficerName: string;
+  requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null;
+  products: ProductLine[];
+}
+export interface SchemeProductRow {
+  schemeId: string; schemeName: string; dealerCount: number; productCount: number;
+  requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null;
+  dealers: ProductDealerBlock[];
+}
+export interface DealerProductSchemeBlock {
+  schemeId: string; schemeName: string;
+  requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null;
+  products: ProductLine[];
+}
+export interface DealerProductRow {
+  dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; state: string | null;
+  schemeCount: number; requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null;
+  schemes: DealerProductSchemeBlock[];
+}
+
+const productLinesOf = (c: AchievementContext, ach: DealerProductAchievement): ProductLine[] =>
+  ach.items.map((it) => ({ productId: it.productId, productName: c.productName.get(it.productId) ?? it.productId, requiredQty: it.requiredQty, achievedQty: it.achievedQty, remainingQty: it.remainingQty, completed: it.completed }));
+
+/** SCHEME FOLLOW-UP → Product Based. One row per PRODUCT_BASED scheme, enrolled dealers nested. */
+export async function schemeProductFollowUp(ctx: AuthContext, q: FollowUpQuery): Promise<{ rows: SchemeProductRow[] }> {
+  const c = await loadAchievementContext(ctx, q, "PRODUCT_BASED");
+  const rows = c.relevant.map((schemeId) => {
+    const ach: SchemeProductAchievement = schemeProductAchievement(c.requirements.get(schemeId)!, c.sales.get(schemeId) ?? [], enrolledIdsOf(c, schemeId));
+    const dealers: ProductDealerBlock[] = ach.perDealer.map((pd) => {
+      const m = c.dealerMeta.get(pd.dealerId);
+      const a = pd.achievement;
+      return {
+        dealerId: pd.dealerId, dealerName: m?.dealerName ?? pd.dealerId, town: m?.town ?? null, salesOfficerName: m?.salesOfficerName ?? "",
+        requiredQty: a.requiredQty, achievedQty: a.achievedQty, remainingQty: a.remainingQty, productsCompleted: a.productsCompleted, productsTotal: a.productsTotal, progress: a.progress,
+        products: productLinesOf(c, a),
+      };
+    }).sort((x, y) => remainingFirst(x.remainingQty, y.remainingQty, x.dealerName, y.dealerName));
+    return {
+      schemeId, schemeName: c.schemeName.get(schemeId)!, dealerCount: ach.dealerCount, productCount: ach.productCount,
+      requiredQty: ach.requiredQty, achievedQty: ach.achievedQty, remainingQty: ach.remainingQty, productsCompleted: ach.productsCompleted, productsTotal: ach.productsTotal, progress: ach.progress,
+      dealers,
+    };
+  }).sort((a, b) => remainingFirst(a.remainingQty, b.remainingQty, a.schemeName, b.schemeName));
+  return { rows };
+}
+
+/** DEALER FOLLOW-UP → Product Based. One row per dealer aggregated across their PRODUCT_BASED schemes. */
+export async function dealerProductFollowUp(ctx: AuthContext, q: FollowUpQuery): Promise<{ rows: DealerProductRow[] }> {
+  const c = await loadAchievementContext(ctx, q, "PRODUCT_BASED");
+  // Compute each scheme's achievement once; dealer rows read their own slice from perDealer.
+  const perScheme = new Map<string, SchemeProductAchievement>();
+  for (const id of c.relevant) perScheme.set(id, schemeProductAchievement(c.requirements.get(id)!, c.sales.get(id) ?? [], enrolledIdsOf(c, id)));
+
+  const dealerIds = new Set<string>();
+  for (const id of c.relevant) for (const d of c.enrolledByScheme.get(id) ?? []) dealerIds.add(d);
+
+  const rows = [...dealerIds].map((dealerId) => {
+    const m = c.dealerMeta.get(dealerId);
+    const parts: DealerProductAchievement[] = [];
+    const schemes: DealerProductSchemeBlock[] = [];
+    for (const id of c.relevant) {
+      if (!c.enrolledByScheme.get(id)?.has(dealerId)) continue;
+      const a = perScheme.get(id)!.perDealer.find((x) => x.dealerId === dealerId)!.achievement;
+      parts.push(a);
+      schemes.push({
+        schemeId: id, schemeName: c.schemeName.get(id)!,
+        requiredQty: a.requiredQty, achievedQty: a.achievedQty, remainingQty: a.remainingQty, productsCompleted: a.productsCompleted, productsTotal: a.productsTotal, progress: a.progress,
+        products: productLinesOf(c, a),
+      });
+    }
+    schemes.sort((x, y) => remainingFirst(x.remainingQty, y.remainingQty, x.schemeName, y.schemeName));
+    const combined = combineDealerProduct(parts); // aggregate underlying facts — NOT an average of percentages
+    return {
+      dealerId, dealerName: m?.dealerName ?? dealerId, town: m?.town ?? null, salesOfficerName: m?.salesOfficerName ?? "", state: m?.state ?? null,
+      schemeCount: schemes.length, requiredQty: combined.requiredQty, achievedQty: combined.achievedQty, remainingQty: combined.remainingQty,
+      productsCompleted: combined.productsCompleted, productsTotal: combined.productsTotal, progress: combined.progress,
+      schemes,
+    };
+  }).sort((a, b) => remainingFirst(a.remainingQty, b.remainingQty, a.dealerName, b.dealerName));
+  return { rows };
+}
+
+/* --------------------------------- Value Based --------------------------------- */
+
+export interface ValueLine { productId: string; productName: string; requiredValue: number; achievedValue: number; remainingValue: number; completed: boolean }
+export interface ValueDealerBlock {
+  dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; mode: "INDIVIDUAL" | "COMBINED";
+  requiredValue: number; achievedValue: number; remainingValue: number; itemsCompleted: number; itemsTotal: number; progress: number | null;
+  products: ValueLine[];
+}
+export interface SchemeValueRow {
+  schemeId: string; schemeName: string; mode: "INDIVIDUAL" | "COMBINED"; dealerCount: number; productCount: number;
+  requiredValue: number; achievedValue: number; remainingValue: number; progress: number | null;
+  dealers: ValueDealerBlock[];
+}
+export interface DealerValueSchemeBlock {
+  schemeId: string; schemeName: string; mode: "INDIVIDUAL" | "COMBINED";
+  requiredValue: number; achievedValue: number; remainingValue: number; itemsCompleted: number; itemsTotal: number; progress: number | null;
+  products: ValueLine[];
+}
+export interface DealerValueRow {
+  dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; state: string | null;
+  schemeCount: number; requiredValue: number; achievedValue: number; remainingValue: number; progress: number | null;
+  schemes: DealerValueSchemeBlock[];
+}
+
+const valueLinesOf = (c: AchievementContext, ach: DealerValueAchievement): ValueLine[] =>
+  ach.items.map((it) => ({ productId: it.productId, productName: c.productName.get(it.productId) ?? it.productId, requiredValue: it.requiredValue, achievedValue: it.achievedValue, remainingValue: it.remainingValue, completed: it.completed }));
+
+/** SCHEME FOLLOW-UP → Value Based. One row per VALUE_BASED scheme (INDIVIDUAL or COMBINED), dealers nested. */
+export async function schemeValueFollowUp(ctx: AuthContext, q: FollowUpQuery): Promise<{ rows: SchemeValueRow[] }> {
+  const c = await loadAchievementContext(ctx, q, "VALUE_BASED");
+  const rows = c.relevant.map((schemeId) => {
+    const ach: SchemeValueAchievement = schemeValueAchievement(c.requirements.get(schemeId)!, c.sales.get(schemeId) ?? [], enrolledIdsOf(c, schemeId));
+    const dealers: ValueDealerBlock[] = ach.perDealer.map((pd) => {
+      const m = c.dealerMeta.get(pd.dealerId);
+      const a = pd.achievement;
+      return {
+        dealerId: pd.dealerId, dealerName: m?.dealerName ?? pd.dealerId, town: m?.town ?? null, salesOfficerName: m?.salesOfficerName ?? "", mode: a.mode,
+        requiredValue: a.requiredValue, achievedValue: a.achievedValue, remainingValue: a.remainingValue, itemsCompleted: a.itemsCompleted, itemsTotal: a.itemsTotal, progress: a.progress,
+        products: valueLinesOf(c, a),
+      };
+    }).sort((x, y) => remainingFirst(x.remainingValue, y.remainingValue, x.dealerName, y.dealerName));
+    return {
+      schemeId, schemeName: c.schemeName.get(schemeId)!, mode: ach.mode, dealerCount: ach.dealerCount, productCount: ach.productCount,
+      requiredValue: ach.requiredValue, achievedValue: ach.achievedValue, remainingValue: ach.remainingValue, progress: ach.progress,
+      dealers,
+    };
+  }).sort((a, b) => remainingFirst(a.remainingValue, b.remainingValue, a.schemeName, b.schemeName));
+  return { rows };
+}
+
+/** DEALER FOLLOW-UP → Value Based. One row per dealer aggregated across their VALUE_BASED schemes. */
+export async function dealerValueFollowUp(ctx: AuthContext, q: FollowUpQuery): Promise<{ rows: DealerValueRow[] }> {
+  const c = await loadAchievementContext(ctx, q, "VALUE_BASED");
+  const perScheme = new Map<string, SchemeValueAchievement>();
+  for (const id of c.relevant) perScheme.set(id, schemeValueAchievement(c.requirements.get(id)!, c.sales.get(id) ?? [], enrolledIdsOf(c, id)));
+
+  const dealerIds = new Set<string>();
+  for (const id of c.relevant) for (const d of c.enrolledByScheme.get(id) ?? []) dealerIds.add(d);
+
+  const rows = [...dealerIds].map((dealerId) => {
+    const m = c.dealerMeta.get(dealerId);
+    const parts: DealerValueAchievement[] = [];
+    const schemes: DealerValueSchemeBlock[] = [];
+    for (const id of c.relevant) {
+      if (!c.enrolledByScheme.get(id)?.has(dealerId)) continue;
+      const a = perScheme.get(id)!.perDealer.find((x) => x.dealerId === dealerId)!.achievement;
+      parts.push(a);
+      schemes.push({
+        schemeId: id, schemeName: c.schemeName.get(id)!, mode: a.mode,
+        requiredValue: a.requiredValue, achievedValue: a.achievedValue, remainingValue: a.remainingValue, itemsCompleted: a.itemsCompleted, itemsTotal: a.itemsTotal, progress: a.progress,
+        products: valueLinesOf(c, a),
+      });
+    }
+    schemes.sort((x, y) => remainingFirst(x.remainingValue, y.remainingValue, x.schemeName, y.schemeName));
+    const combined = combineDealerValue(parts); // aggregate underlying values — NOT an average of percentages
+    return {
+      dealerId, dealerName: m?.dealerName ?? dealerId, town: m?.town ?? null, salesOfficerName: m?.salesOfficerName ?? "", state: m?.state ?? null,
+      schemeCount: schemes.length, requiredValue: combined.requiredValue, achievedValue: combined.achievedValue, remainingValue: combined.remainingValue, progress: combined.progress,
+      schemes,
+    };
+  }).sort((a, b) => remainingFirst(a.remainingValue, b.remainingValue, a.dealerName, b.dealerName));
+  return { rows };
 }
 
 /* --------------------------------- Export --------------------------------- */

@@ -3,9 +3,10 @@ import { z } from "zod";
 import { Role, ImportStatus, PlanStatus, SeasonStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { decorate, matchByName, similarity, tightKey, type Keyed } from "@/lib/match-key";
+import { similarity } from "@/lib/match-key";
 import { withDbRetry } from "@/lib/db-retry";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
+import { loadProductResolver } from "@/lib/product-resolver";
 import { writeAudit } from "@/lib/audit";
 import { parseSalesWorkbook, type ParsedSalesWorkbook } from "./parser";
 
@@ -28,8 +29,6 @@ export type SalesUploadInput = z.infer<typeof inputSchema>;
 const commitInputSchema = inputSchema.extend({
   autoAddUnplanned: z.array(z.object({ officerId: z.string().min(1), productId: z.string().min(1) })).default([]),
 });
-
-type MasterItem = { id: string; name: string; canonicalName: string | null } & Keyed;
 
 interface ResolvedRow {
   planLineId: string;
@@ -153,32 +152,11 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
   });
   if (!month) throw new ApiError(422, "The selected Target Month does not exist");
 
-  const [resolver, productRows] = await Promise.all([
-    loadDealerResolver(),
-    prisma.product.findMany({ where: { isActive: true }, select: { id: true, name: true, canonicalName: true } }),
-  ]);
-  const products: MasterItem[] = decorate(productRows as { id: string; name: string; canonicalName: string | null }[]);
-  const productNameById = new Map(products.map((p) => [p.id, p.name]));
-
-  // Canonical Name resolver (Tally matching). For each canonicalName group, the "target" is the product
-  // whose OWN name equals the canonicalName (the master/canonical row) — so an alternate spelling never
-  // becomes the selected product. Both the canonical name and every alternate spelling in that group point
-  // to the same target. If no self-canonical product exists, the group is skipped (no arbitrary pick) and
-  // matching falls back to the existing name logic. Products without canonicalName are never indexed here.
-  const canonicalTargetByKey = new Map<string, MasterItem>();
-  const selfCanonical = new Map<string, MasterItem>(); // tightKey(canonicalName) -> the master row
-  for (const p of products) {
-    if (p.canonicalName && tightKey(p.name) === tightKey(p.canonicalName)) selfCanonical.set(tightKey(p.canonicalName), p);
-  }
-  for (const p of products) {
-    if (!p.canonicalName) continue;
-    const target = selfCanonical.get(tightKey(p.canonicalName));
-    if (!target) continue; // canonical/master row not present → don't arbitrarily choose; fall back
-    canonicalTargetByKey.set(tightKey(p.name), target);            // Tally sends this spelling → canonical
-    canonicalTargetByKey.set(tightKey(p.canonicalName), target);   // Tally sends the canonical spelling → canonical
-  }
-  const resolveProduct = (rawName: string): MasterItem | null =>
-    canonicalTargetByKey.get(tightKey(rawName)) ?? matchByName(rawName, products, { fuzzy: true, threshold: 0.9 });
+  // Dealer + product identity both come from the ONE shared resolver each (canonical → tight → loose →
+  // fuzzy for products). Behaviour is unchanged from the previous inline version — the product matcher was
+  // extracted verbatim to `loadProductResolver` so Sales Upload and Scheme Upload match identically.
+  const [resolver, productResolver] = await Promise.all([loadDealerResolver(), loadProductResolver()]);
+  const { products, productNameById, resolveProduct } = productResolver;
 
   // Approved active seasonal plans for this season → planLine lookup + dealers that have a plan.
   // Officer + dealer name are selected too (cheap joins) so the preview report can group by officer.

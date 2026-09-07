@@ -19,9 +19,18 @@ const Table = React.forwardRef<
      * globals.css. Combine freely with `stickyFirstColumn`; the frozen corner cell layers above both.
      */
     stickyHeader?: boolean;
+    /**
+     * Opt-in: an ANCESTOR is the scroll container (both axes), not this wrapper. Used where the whole
+     * page section is one scroll region so the surrounding content (e.g. a page header) can scroll away
+     * while the table's sticky header/first-column pin against that outer scroller. When set, the wrapper
+     * adds NO overflow and NO flex sizing — the `.sticky-head`/`.sticky-first-col` rules then resolve
+     * against the nearest scrolling ancestor the caller provides. Default (unset) is unchanged: this
+     * wrapper is the single scroll region, exactly as every existing grid relies on.
+     */
+    externalScroll?: boolean;
   }
->(({ className, stickyFirstColumn, stickyHeader, ...props }, ref) => (
-  <div className={cn("relative w-full overflow-auto", stickyHeader && "h-full min-h-0 flex-1")}>
+>(({ className, stickyFirstColumn, stickyHeader, externalScroll, ...props }, ref) => (
+  <div className={cn("relative w-full", !externalScroll && "overflow-auto", stickyHeader && !externalScroll && "h-full min-h-0 flex-1")}>
     <table
       ref={ref}
       className={cn(

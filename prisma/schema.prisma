@@ -50,6 +50,7 @@ model User {
   enrolledSchemePlans    DealerSchemePlan[]       @relation("EnrolledSchemePlans")
   schemePayments         SchemePayment[]          @relation("SchemePaymentCreatedBy")
   conversionExtensions   SchemeConversionExtension[] @relation("ConversionExtendedBy")
+  schemeUploadBatches    SchemeUploadBatch[]      @relation("SchemeUploadBatches")
   group                  UserGroup?               @relation(fields: [groupId], references: [id])
 
   @@index([role])
@@ -90,6 +91,11 @@ model Scheme {
   maxExtensionDays     Int             @default(0) // total calendar days a dealer may push the ORIGINAL conversion date
   maxExtensionAttempts Int             @default(0) // how many separate extensions are allowed
   documentUrl          String?
+  // --- Achievement Requirement (independent of installment tracking; NONE ⇒ installment-only scheme). ---
+  // Existing schemes default to NONE and keep working exactly as before — requirements are never inferred.
+  requirementType       SchemeRequirementType @default(NONE)
+  valueMode             SchemeValueMode?      // only for requirementType = VALUE_BASED
+  combinedRequiredValue Decimal?              @db.Decimal(14, 2) // only for VALUE_BASED + COMBINED (one target across products)
   status               SchemeStatus    @default(OPEN)
   createdById          String
   createdAt            DateTime        @default(now())
@@ -98,6 +104,8 @@ model Scheme {
   states               SchemeState[]
   installmentRules     SchemeInstallmentRule[]
   dealerPlans          DealerSchemePlan[]
+  requirementProducts  SchemeRequirementProduct[]
+  uploadScopes         SchemeUploadBatchScheme[]
 
   @@index([status])
   @@index([isPerpetual, endDate])
@@ -298,6 +306,95 @@ model SchemeState {
   @@index([groupId])
 }
 
+/// One required product for a Scheme's Achievement Requirement (shared by every enrolled dealer — the
+/// requirement belongs to the Scheme, never to a dealer plan). PRODUCT_BASED uses `requiredQty`;
+/// VALUE_BASED + INDIVIDUAL uses `requiredValue`; VALUE_BASED + COMBINED lists the participating products
+/// here (both null) with the single target on Scheme.combinedRequiredValue.
+model SchemeRequirementProduct {
+  id            String   @id @default(cuid())
+  schemeId      String
+  productId     String
+  requiredQty   Decimal? @db.Decimal(14, 3)
+  requiredValue Decimal? @db.Decimal(14, 2)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  scheme        Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  product       Product  @relation(fields: [productId], references: [id])
+
+  @@unique([schemeId, productId])
+  @@index([schemeId])
+  @@index([productId])
+}
+
+/// One Scheme Upload event: a date-range batch that may target one OR several schemes from a single
+/// uploaded file. Purely a scheme-tracking layer — it never writes MonthlyEntry or any normal Sales
+/// Planning actual. Superseded (not deleted) when a covered scheme+range is re-uploaded, for auditability.
+model SchemeUploadBatch {
+  id           String                  @id @default(cuid())
+  uploadedById String
+  fileName     String
+  startDate    DateTime                // authoritative tracking-period start (no fake per-row dates)
+  endDate      DateTime                // authoritative tracking-period end
+  summary      String?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  uploadedBy   User                    @relation("SchemeUploadBatches", fields: [uploadedById], references: [id])
+  scopes       SchemeUploadBatchScheme[]
+
+  @@index([createdAt])
+}
+
+/// The per-(scheme + date range) scope of an upload batch — the replacement/idempotency key. Re-uploading
+/// a scheme+range supersedes ONLY its own scope row + SchemeSale rows; other schemes in the same range or
+/// the same file are never affected. Also carries the analysis summary counts for history.
+model SchemeUploadBatchScheme {
+  id                 String                  @id @default(cuid())
+  batchId            String
+  schemeId           String
+  startDate          DateTime
+  endDate            DateTime
+  status             SchemeUploadStatus      @default(ACTIVE)
+  enrolledChecked    Int                     @default(0) // enrolled dealers considered
+  matchedQty         Decimal?                @db.Decimal(14, 3)
+  matchedValue       Decimal?                @db.Decimal(14, 2)
+  supersededAt       DateTime?
+  createdAt          DateTime                @default(now())
+  batch              SchemeUploadBatch       @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  scheme             Scheme                  @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  sales              SchemeSale[]
+
+  @@index([schemeId, startDate, endDate, status])
+  @@index([batchId])
+}
+
+/// One tracked scheme-achievement fact — an enrolled dealer's applicable sale of a required product within
+/// one upload scope. It hangs off exactly ONE `SchemeUploadBatchScheme` (the scope), which is the single
+/// source of truth for its batch + scheme + tracking date range + ACTIVE/SUPERSEDED state — so an invalid
+/// batch↔scheme combination is structurally impossible, and the fact carries NO per-row sale date (Decision
+/// A: the scope's start/end IS the authoritative period). Because each scheme has its own scope+sales, the
+/// SAME underlying sale contributes independently to every scheme (never globally consumed). Achievement
+/// reads only sales whose scope.status = ACTIVE; superseded scopes' sales are retained purely for audit.
+/// NEVER linked to MonthlyEntry or any normal Sales Planning actual.
+model SchemeSale {
+  id             String                  @id @default(cuid())
+  scopeId        String
+  dealerId       String
+  productId      String
+  qty            Decimal                 @db.Decimal(14, 3)
+  value          Decimal                 @db.Decimal(14, 2)
+  rawDealerName  String                  // original Tally spelling (audit)
+  rawProductName String                  // original Tally spelling (audit)
+  createdAt      DateTime                @default(now())
+  scope          SchemeUploadBatchScheme @relation(fields: [scopeId], references: [id], onDelete: Cascade)
+  dealer         Dealer                  @relation(fields: [dealerId], references: [id])
+  product        Product                 @relation(fields: [productId], references: [id])
+
+  @@index([scopeId])
+  @@index([scopeId, dealerId, productId])
+  @@index([dealerId])
+  @@index([productId])
+}
+
 /// Group-wise Product Catalogue: which Master Products are available in a group, at what group price,
 /// and whether they are active for that group's planning. The Master Product remains the single product
 /// identity (no product duplication); this is a per-(group, product) overlay. Plans SNAPSHOT the price
@@ -366,6 +463,8 @@ model Product {
   brand         Brand?     @relation(fields: [brandId], references: [id])
   category      Category?  @relation(fields: [categoryId], references: [id])
   groupCatalogues GroupProductCatalogue[]
+  schemeRequirements SchemeRequirementProduct[]
+  schemeSales        SchemeSale[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -395,6 +494,7 @@ model Dealer {
   recoveryPlanDealers RecoveryPlanDealer[]
   cnRequests          CnRequest[]
   schemePlans         DealerSchemePlan[]
+  schemeSales         SchemeSale[]
 
   @@index([isActive])
   @@index([status])
@@ -1159,6 +1259,25 @@ enum SchemeAdminDocStatus {
   RECEIVED_SOFT
   RECEIVED_HARD
   NOT_RECEIVED
+}
+
+// --- Scheme Achievement Requirement + Scheme Upload tracking ---
+enum SchemeRequirementType {
+  NONE
+  PRODUCT_BASED
+  VALUE_BASED
+}
+
+enum SchemeValueMode {
+  INDIVIDUAL
+  COMBINED
+}
+
+/// Lifecycle of a scheme-upload scope / its tracked sales: ACTIVE = authoritative; SUPERSEDED = replaced
+/// by a later upload of the same scheme+range (kept for audit, never counted).
+enum SchemeUploadStatus {
+  ACTIVE
+  SUPERSEDED
 }
 
 enum PlanStatus {

@@ -87,6 +87,15 @@ export type SchemePlanStatus = (typeof SchemePlanStatus)[keyof typeof SchemePlan
 export const SchemeEnrollmentStatus = { PENDING_DOCUMENT: "PENDING_DOCUMENT", ENROLLED: "ENROLLED" } as const;
 export type SchemeEnrollmentStatus = (typeof SchemeEnrollmentStatus)[keyof typeof SchemeEnrollmentStatus];
 
+export const SchemeRequirementType = { NONE: "NONE", PRODUCT_BASED: "PRODUCT_BASED", VALUE_BASED: "VALUE_BASED" } as const;
+export type SchemeRequirementType = (typeof SchemeRequirementType)[keyof typeof SchemeRequirementType];
+
+export const SchemeValueMode = { INDIVIDUAL: "INDIVIDUAL", COMBINED: "COMBINED" } as const;
+export type SchemeValueMode = (typeof SchemeValueMode)[keyof typeof SchemeValueMode];
+
+export const SchemeUploadStatus = { ACTIVE: "ACTIVE", SUPERSEDED: "SUPERSEDED" } as const;
+export type SchemeUploadStatus = (typeof SchemeUploadStatus)[keyof typeof SchemeUploadStatus];
+
 export const SchemeDocType = { SOFT_COPY: "SOFT_COPY", HARD_COPY: "HARD_COPY" } as const;
 export type SchemeDocType = (typeof SchemeDocType)[keyof typeof SchemeDocType];
 

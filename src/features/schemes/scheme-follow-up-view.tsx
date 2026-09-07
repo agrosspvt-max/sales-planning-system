@@ -56,6 +56,7 @@ interface Figures {
   weekActual: number | null;
   installmentsTotal: number;
   installmentsReceived: number;
+  installmentsFullyPaid: number; // Phase 4 rule: received >= planned (partial never counts)
   overdueCount: number;
   nextDueDate: string | null;
   lastPaymentDate: string | null;
@@ -96,6 +97,33 @@ interface DealerDetail {
   schemes: (DealerSchemeFigures & { installments: InstallmentRow[] })[];
   payments: PaymentRow[];
 }
+
+/* --------------------------------- Achievement shapes (Phase 6 — mirror the follow-up service) --------------------------------- */
+
+interface ProductLine { productId: string; productName: string; requiredQty: number; achievedQty: number; remainingQty: number; completed: boolean }
+interface ProductDealerBlock { dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null; products: ProductLine[] }
+interface SchemeProductRow { schemeId: string; schemeName: string; dealerCount: number; productCount: number; requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null; dealers: ProductDealerBlock[] }
+interface DealerProductSchemeBlock { schemeId: string; schemeName: string; requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null; products: ProductLine[] }
+interface DealerProductRow { dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; state: string | null; schemeCount: number; requiredQty: number; achievedQty: number; remainingQty: number; productsCompleted: number; productsTotal: number; progress: number | null; schemes: DealerProductSchemeBlock[] }
+interface SchemeProductList { rows: SchemeProductRow[] }
+interface DealerProductList { rows: DealerProductRow[] }
+
+interface ValueLine { productId: string; productName: string; requiredValue: number; achievedValue: number; remainingValue: number; completed: boolean }
+interface ValueDealerBlock { dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; mode: "INDIVIDUAL" | "COMBINED"; requiredValue: number; achievedValue: number; remainingValue: number; itemsCompleted: number; itemsTotal: number; progress: number | null; products: ValueLine[] }
+interface SchemeValueRow { schemeId: string; schemeName: string; mode: "INDIVIDUAL" | "COMBINED"; dealerCount: number; productCount: number; requiredValue: number; achievedValue: number; remainingValue: number; progress: number | null; dealers: ValueDealerBlock[] }
+interface DealerValueSchemeBlock { schemeId: string; schemeName: string; mode: "INDIVIDUAL" | "COMBINED"; requiredValue: number; achievedValue: number; remainingValue: number; itemsCompleted: number; itemsTotal: number; progress: number | null; products: ValueLine[] }
+interface DealerValueRow { dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; state: string | null; schemeCount: number; requiredValue: number; achievedValue: number; remainingValue: number; progress: number | null; schemes: DealerValueSchemeBlock[] }
+interface SchemeValueList { rows: SchemeValueRow[] }
+interface DealerValueList { rows: DealerValueRow[] }
+
+type FollowUpMode = "installments" | "product" | "value";
+
+// Quantities: show whole numbers plainly, fractions up to 3 dp with no trailing zeros (no forced decimals).
+const qtyFmt = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 });
+const formatQty = (n: number) => qtyFmt.format(n);
+// Progress as a whole-number percent, capped at 100% for display (achievement can exceed required).
+const progressCell = (p: number | null) => (p == null ? "—" : `${Math.min(100, Math.round(p * 100))}%`);
+const completionCell = (done: number, total: number) => `${done} / ${total}`;
 
 /* --------------------------------- Presentation helpers --------------------------------- */
 
@@ -151,12 +179,22 @@ function MoneyHeads({ period }: { period: Period | null }) {
       <TableHead className="text-right">Month Actual</TableHead>
       <TableHead className="text-right">{weekDue}</TableHead>
       <TableHead className="text-right">Week Actual</TableHead>
-      <TableHead>Status</TableHead>
+      {/* Phase 6: Status replaced by Scheme Installments = fully-paid / total (Phase 4 full-payment rule). */}
+      <TableHead className="text-right"><L k="scheme_planning.col.scheme_installments" /></TableHead>
     </>
   );
 }
 
-function MoneyCells({ f, hideStatus }: { f: Figures; hideStatus?: boolean }) {
+/** Paid / Total installments, where Paid counts only fully-paid (received >= planned) installments. */
+const InstallmentsCell = ({ f }: { f: Figures }) => (
+  <TableCell className="text-right tabular-nums font-medium">
+    <span className={cn(f.installmentsFullyPaid >= f.installmentsTotal && f.installmentsTotal > 0 ? "text-emerald-600" : f.installmentsFullyPaid > 0 && "text-amber-600")}>
+      {f.installmentsFullyPaid} / {f.installmentsTotal}
+    </span>
+  </TableCell>
+);
+
+function MoneyCells({ f }: { f: Figures; hideStatus?: boolean }) {
   return (
     <>
       <TableCell className="text-right tabular-nums">{formatCurrency(f.schemeAmount)}</TableCell>
@@ -169,7 +207,7 @@ function MoneyCells({ f, hideStatus }: { f: Figures; hideStatus?: boolean }) {
       <TableCell className="text-right tabular-nums">{cell(f.monthActual)}</TableCell>
       <TableCell className="text-right tabular-nums">{cell(f.weekDue)}</TableCell>
       <TableCell className="text-right tabular-nums">{cell(f.weekActual)}</TableCell>
-      <TableCell>{hideStatus ? <span className="text-muted-foreground">—</span> : <StatusBadge s={f.status} />}</TableCell>
+      <InstallmentsCell f={f} />
     </>
   );
 }
@@ -354,29 +392,64 @@ export function SchemeFollowUpPage({ role }: { role: Role }) {
 
 function FollowUpWorkspace({ officerId }: { officerId?: string } = {}) {
   const [tab, setTab] = useState<FollowUpTab>("scheme");
+  const [mode, setMode] = useState<FollowUpMode>("installments"); // Installments is the default sub-view
   const [month, setMonth] = useState<string>(currentMonthKey); // default: the current month's snapshot
   const [week, setWeek] = useState<string>("all");
   const [drillDealer, setDrillDealer] = useState<string | null>(null);
   const [share, setShare] = useState<ShareTarget | null>(null);
 
+  const instLbl = useLabel("scheme_planning.view.installments");
+  const prodLbl = useLabel("scheme_planning.view.product_based");
+  const valLbl = useLabel("scheme_planning.view.value_based");
+  const MODES: { value: FollowUpMode; label: string }[] = [
+    { value: "installments", label: instLbl },
+    { value: "product", label: prodLbl },
+    { value: "value", label: valLbl },
+  ];
+
   const officerParam = officerId ? `&officerId=${encodeURIComponent(officerId)}` : "";
   const params = `month=${encodeURIComponent(month)}&week=${encodeURIComponent(week)}${officerParam}`;
+  const achParams = officerId ? `officerId=${encodeURIComponent(officerId)}` : "";
   const officerKey = officerId ?? "all";
   const dealers = useQuery<DealerList>({
     queryKey: ["scheme-follow-up", "dealers", month, week, officerKey],
     queryFn: () => api.get(`/api/scheme-follow-up/dealers?${params}`),
-    enabled: tab === "dealer",
+    enabled: tab === "dealer" && mode === "installments",
   });
   const schemes = useQuery<SchemeList>({
     queryKey: ["scheme-follow-up", "schemes", month, week, officerKey],
     queryFn: () => api.get(`/api/scheme-follow-up/schemes?${params}`),
-    enabled: tab === "scheme",
+    enabled: tab === "scheme" && mode === "installments",
+  });
+  // Achievement queries (Product/Value) — independent of the month/week snapshot (achievement is cumulative).
+  const schemeProduct = useQuery<SchemeProductList>({
+    queryKey: ["scheme-follow-up", "product", "scheme", officerKey],
+    queryFn: () => api.get(`/api/scheme-follow-up/product?view=scheme&${achParams}`),
+    enabled: tab === "scheme" && mode === "product",
+  });
+  const dealerProduct = useQuery<DealerProductList>({
+    queryKey: ["scheme-follow-up", "product", "dealer", officerKey],
+    queryFn: () => api.get(`/api/scheme-follow-up/product?view=dealer&${achParams}`),
+    enabled: tab === "dealer" && mode === "product",
+  });
+  const schemeValue = useQuery<SchemeValueList>({
+    queryKey: ["scheme-follow-up", "value", "scheme", officerKey],
+    queryFn: () => api.get(`/api/scheme-follow-up/value?view=scheme&${achParams}`),
+    enabled: tab === "scheme" && mode === "value",
+  });
+  const dealerValue = useQuery<DealerValueList>({
+    queryKey: ["scheme-follow-up", "value", "dealer", officerKey],
+    queryFn: () => api.get(`/api/scheme-follow-up/value?view=dealer&${achParams}`),
+    enabled: tab === "dealer" && mode === "value",
   });
 
   const meta: DealerList | SchemeList | undefined = tab === "dealer" ? dealers.data : schemes.data;
   const period = meta?.period ?? null;
-  const isLoading = tab === "dealer" ? dealers.isLoading : schemes.isLoading;
-  const error = (tab === "dealer" ? dealers.error : schemes.error) as Error | null;
+  const activeQuery = mode === "installments" ? (tab === "dealer" ? dealers : schemes)
+    : mode === "product" ? (tab === "dealer" ? dealerProduct : schemeProduct)
+    : (tab === "dealer" ? dealerValue : schemeValue);
+  const isLoading = activeQuery.isLoading;
+  const error = activeQuery.error as Error | null;
 
   const monthOptions = useMemo(() => {
     const fromServer = meta?.months ?? [];
@@ -396,38 +469,55 @@ function FollowUpWorkspace({ officerId }: { officerId?: string } = {}) {
         <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">View</div>
         <div className="flex flex-wrap items-center gap-3">
           <PillNav value={tab} onChange={setTab} items={TABS} />
+          {/* Sub-view: Installments (default) | Product Based | Value Based — same pattern for both tabs. */}
+          <PillNav value={mode} onChange={setMode} items={MODES} />
         </div>
-        <div className="flex flex-wrap items-end gap-3 pt-1">
-          <div className="space-y-1.5">
-            <Label htmlFor="fu-month">Month</Label>
-            <NativeSelect id="fu-month" className="w-44" options={monthOptions} value={month} onChange={(e) => onMonth(e.target.value)} />
+        {/* Month/Week snapshot + Excel export apply to the Installments view only; achievement is cumulative. */}
+        {mode === "installments" && (
+          <div className="flex flex-wrap items-end gap-3 pt-1">
+            <div className="space-y-1.5">
+              <Label htmlFor="fu-month">Month</Label>
+              <NativeSelect id="fu-month" className="w-44" options={monthOptions} value={month} onChange={(e) => onMonth(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="fu-week">Week</Label>
+              <NativeSelect id="fu-week" className="w-40" options={WEEK_OPTIONS} value={week} disabled={month === "all"} onChange={(e) => setWeek(e.target.value)} />
+            </div>
+            {period && (
+              <p className="pb-1.5 text-xs text-muted-foreground">
+                Position as at <span className="font-medium">{formatDate(period.snapshotDate)}</span>
+                {period.weekFrom && period.weekTo && <> · {period.weekLabel}: {formatDate(period.weekFrom)} – {formatDate(period.weekTo)}</>}
+                <br />
+                Total Due is cumulative up to {formatDate(period.dueCutoff)}; Month/Week columns show that period only.
+              </p>
+            )}
+            <div className="ml-auto pb-1">
+              <Button asChild variant="outline" size="sm">
+                <a href={exportHref}><Download className="h-4 w-4" /> Export to Excel</a>
+              </Button>
+            </div>
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="fu-week">Week</Label>
-            <NativeSelect id="fu-week" className="w-40" options={WEEK_OPTIONS} value={week} disabled={month === "all"} onChange={(e) => setWeek(e.target.value)} />
-          </div>
-          {period && (
-            <p className="pb-1.5 text-xs text-muted-foreground">
-              Position as at <span className="font-medium">{formatDate(period.snapshotDate)}</span>
-              {period.weekFrom && period.weekTo && <> · {period.weekLabel}: {formatDate(period.weekFrom)} – {formatDate(period.weekTo)}</>}
-              <br />
-              Total Due is cumulative up to {formatDate(period.dueCutoff)}; Month/Week columns show that period only.
-            </p>
-          )}
-          <div className="ml-auto pb-1">
-            <Button asChild variant="outline" size="sm">
-              <a href={exportHref}><Download className="h-4 w-4" /> Export to Excel</a>
-            </Button>
-          </div>
-        </div>
+        )}
       </div>
 
       {error && <p className="text-sm text-destructive">{error.message}</p>}
 
-      {tab === "dealer" ? (
-        <DealerCollapsibleView data={dealers.data} period={period} isLoading={isLoading} onOpen={setDrillDealer} onShare={setShare} />
+      {mode === "installments" ? (
+        tab === "dealer" ? (
+          <DealerCollapsibleView data={dealers.data} period={period} isLoading={isLoading} onOpen={setDrillDealer} onShare={setShare} />
+        ) : (
+          <SchemeCollapsibleView data={schemes.data} period={period} isLoading={isLoading} onOpen={setDrillDealer} onShare={setShare} />
+        )
+      ) : mode === "product" ? (
+        tab === "dealer" ? (
+          <DealerProductView data={dealerProduct.data} isLoading={isLoading} />
+        ) : (
+          <SchemeProductView data={schemeProduct.data} isLoading={isLoading} />
+        )
+      ) : tab === "dealer" ? (
+        <DealerValueView data={dealerValue.data} isLoading={isLoading} />
       ) : (
-        <SchemeCollapsibleView data={schemes.data} period={period} isLoading={isLoading} onOpen={setDrillDealer} onShare={setShare} />
+        <SchemeValueView data={schemeValue.data} isLoading={isLoading} />
       )}
 
       {drillDealer && <DealerDetailDialog dealerId={drillDealer} month={month} week={week} onClose={() => setDrillDealer(null)} onShare={setShare} />}
@@ -616,6 +706,335 @@ function SchemeCollapsibleView({ data, period, isLoading, onOpen, onShare }: {
               );
             })
           )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+/* ============================================================================================
+ * ACHIEVEMENT VIEWS (Phase 6) — Product Based + Value Based, collapsible like the installment views.
+ * Every number is served by the Phase 4 engine; these components only present it (no recomputation).
+ * ============================================================================================ */
+
+const useExpanded = () => {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (id: string) => setExpanded((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  return { expanded, toggle };
+};
+
+const Chevron = ({ open }: { open: boolean }) => (open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />);
+
+/** Small per-product breakdown table used inside an expanded dealer/scheme block (Product Based). */
+function ProductLines({ products }: { products: ProductLine[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead><L k="scheme_planning.col.products" /></TableHead>
+          <TableHead className="text-right"><L k="scheme_planning.col.required_qty" /></TableHead>
+          <TableHead className="text-right"><L k="scheme_planning.col.sale_qty" /></TableHead>
+          <TableHead className="text-right"><L k="scheme_planning.col.remaining_qty" /></TableHead>
+          <TableHead className="text-right"><L k="scheme_planning.col.completion" /></TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {products.map((p) => (
+          <TableRow key={p.productId}>
+            <TableCell className="font-medium">{p.productName}</TableCell>
+            <TableCell className="text-right tabular-nums">{formatQty(p.requiredQty)}</TableCell>
+            <TableCell className="text-right tabular-nums">{formatQty(p.achievedQty)}</TableCell>
+            <TableCell className={cn("text-right tabular-nums", p.remainingQty > 0 && "text-destructive")}>{formatQty(p.remainingQty)}</TableCell>
+            <TableCell className="text-right"><Badge variant={p.completed ? "success" : "muted"}>{p.completed ? "Complete" : formatQty(p.achievedQty) + " / " + formatQty(p.requiredQty)}</Badge></TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+/** Small per-product breakdown table used inside an expanded dealer/scheme block (Value Based). */
+function ValueLines({ products, combined }: { products: ValueLine[]; combined: boolean }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead><L k="scheme_planning.col.products" /></TableHead>
+          {!combined && <TableHead className="text-right"><L k="scheme_planning.col.required_value" /></TableHead>}
+          <TableHead className="text-right"><L k="scheme_planning.col.achieved_value" /></TableHead>
+          {!combined && <TableHead className="text-right"><L k="scheme_planning.col.remaining_value" /></TableHead>}
+          {!combined && <TableHead className="text-right"><L k="scheme_planning.col.completion" /></TableHead>}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {products.map((p) => (
+          <TableRow key={p.productId}>
+            <TableCell className="font-medium">{p.productName}</TableCell>
+            {!combined && <TableCell className="text-right tabular-nums">{formatCurrency(p.requiredValue)}</TableCell>}
+            <TableCell className="text-right tabular-nums">{formatCurrency(p.achievedValue)}</TableCell>
+            {!combined && <TableCell className={cn("text-right tabular-nums", p.remainingValue > 0 && "text-destructive")}>{formatCurrency(p.remainingValue)}</TableCell>}
+            {!combined && <TableCell className="text-right"><Badge variant={p.completed ? "success" : "muted"}>{p.completed ? "Complete" : "Pending"}</Badge></TableCell>}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+/* --------------------------------- Scheme → Product Based --------------------------------- */
+
+function SchemeProductView({ data, isLoading }: { data: SchemeProductList | undefined; isLoading: boolean }) {
+  const { expanded, toggle } = useExpanded();
+  const COLS = 9;
+  return (
+    <div className={schemeTable.outer}>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8" />
+            <TableHead>Scheme</TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.dealers" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.products" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.required_qty" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.sale_qty" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.products_completed" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.remaining_qty" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.progress" /></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {isLoading || !data ? <SkeletonRow cols={COLS} /> : data.rows.length === 0 ? <EmptyRow cols={COLS} text="No Product Based schemes to follow up." /> : data.rows.map((r) => {
+            const open = expanded.has(r.schemeId);
+            return (
+              <Fragment key={r.schemeId}>
+                <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.schemeId)}>
+                  <TableCell><Chevron open={open} /></TableCell>
+                  <TableCell className="font-semibold">{r.schemeName}</TableCell>
+                  <TableCell className="text-right">{r.dealerCount}</TableCell>
+                  <TableCell className="text-right">{r.productCount}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatQty(r.requiredQty)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatQty(r.achievedQty)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{completionCell(r.productsCompleted, r.productsTotal)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", r.remainingQty > 0 && "text-destructive")}>{formatQty(r.remainingQty)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{progressCell(r.progress)}</TableCell>
+                </TableRow>
+                {open && (
+                  <TableRow>
+                    <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
+                      <div className={schemeTable.nestedInset}>
+                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}>
+                          {r.dealers.map((d) => (
+                            <div key={d.dealerId} className="rounded-md border bg-background p-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
+                                <span className="font-semibold">{d.dealerName}{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
+                                <span className="text-xs text-muted-foreground">{d.salesOfficerName} · Products Completed {completionCell(d.productsCompleted, d.productsTotal)} · Required {formatQty(d.requiredQty)} · Sale {formatQty(d.achievedQty)} · Remaining {formatQty(d.remainingQty)} · {progressCell(d.progress)}</span>
+                              </div>
+                              <ProductLines products={d.products} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </Fragment>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+/* --------------------------------- Dealer → Product Based --------------------------------- */
+
+function DealerProductView({ data, isLoading }: { data: DealerProductList | undefined; isLoading: boolean }) {
+  const { expanded, toggle } = useExpanded();
+  const COLS = 9;
+  return (
+    <div className={schemeTable.outer}>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8" />
+            <TableHead>Dealer</TableHead>
+            <TableHead>Sales Officer</TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.no_of_schemes_fu" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.required_qty" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.sale_qty" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.products_completed" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.remaining_qty" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.progress" /></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {isLoading || !data ? <SkeletonRow cols={COLS} /> : data.rows.length === 0 ? <EmptyRow cols={COLS} text="No dealers with Product Based schemes." /> : data.rows.map((r) => {
+            const open = expanded.has(r.dealerId);
+            return (
+              <Fragment key={r.dealerId}>
+                <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
+                  <TableCell><Chevron open={open} /></TableCell>
+                  <TableCell className="font-semibold">{r.dealerName}{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
+                  <TableCell>{r.salesOfficerName}</TableCell>
+                  <TableCell className="text-right">{r.schemeCount}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatQty(r.requiredQty)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatQty(r.achievedQty)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{completionCell(r.productsCompleted, r.productsTotal)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", r.remainingQty > 0 && "text-destructive")}>{formatQty(r.remainingQty)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{progressCell(r.progress)}</TableCell>
+                </TableRow>
+                {open && (
+                  <TableRow>
+                    <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
+                      <div className={schemeTable.nestedInset}>
+                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}>
+                          {r.schemes.map((s) => (
+                            <div key={s.schemeId} className="rounded-md border bg-background p-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
+                                <span className="font-semibold">{s.schemeName}</span>
+                                <span className="text-xs text-muted-foreground">Products Completed {completionCell(s.productsCompleted, s.productsTotal)} · Required {formatQty(s.requiredQty)} · Sale {formatQty(s.achievedQty)} · Remaining {formatQty(s.remainingQty)} · {progressCell(s.progress)}</span>
+                              </div>
+                              <ProductLines products={s.products} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </Fragment>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+/* --------------------------------- Scheme → Value Based --------------------------------- */
+
+const ModeBadge = ({ mode }: { mode: "INDIVIDUAL" | "COMBINED" }) => <Badge variant="secondary">{mode === "COMBINED" ? "Combined" : "Individual"}</Badge>;
+
+function SchemeValueView({ data, isLoading }: { data: SchemeValueList | undefined; isLoading: boolean }) {
+  const { expanded, toggle } = useExpanded();
+  const COLS = 9;
+  return (
+    <div className={schemeTable.outer}>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8" />
+            <TableHead>Scheme</TableHead>
+            <TableHead>Mode</TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.dealers" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.products" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.required_value" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.achieved_value" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.remaining_value" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.progress" /></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {isLoading || !data ? <SkeletonRow cols={COLS} /> : data.rows.length === 0 ? <EmptyRow cols={COLS} text="No Value Based schemes to follow up." /> : data.rows.map((r) => {
+            const open = expanded.has(r.schemeId);
+            return (
+              <Fragment key={r.schemeId}>
+                <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.schemeId)}>
+                  <TableCell><Chevron open={open} /></TableCell>
+                  <TableCell className="font-semibold">{r.schemeName}</TableCell>
+                  <TableCell><ModeBadge mode={r.mode} /></TableCell>
+                  <TableCell className="text-right">{r.dealerCount}</TableCell>
+                  <TableCell className="text-right">{r.productCount}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatCurrency(r.requiredValue)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatCurrency(r.achievedValue)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", r.remainingValue > 0 && "text-destructive")}>{formatCurrency(r.remainingValue)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{progressCell(r.progress)}</TableCell>
+                </TableRow>
+                {open && (
+                  <TableRow>
+                    <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
+                      <div className={schemeTable.nestedInset}>
+                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}>
+                          {r.dealers.map((d) => (
+                            <div key={d.dealerId} className="rounded-md border bg-background p-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
+                                <span className="font-semibold">{d.dealerName}{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
+                                <span className="text-xs text-muted-foreground">{d.salesOfficerName} · Required {formatCurrency(d.requiredValue)} · Achieved {formatCurrency(d.achievedValue)} · Remaining {formatCurrency(d.remainingValue)} · {progressCell(d.progress)}</span>
+                              </div>
+                              <ValueLines products={d.products} combined={d.mode === "COMBINED"} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </Fragment>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+/* --------------------------------- Dealer → Value Based --------------------------------- */
+
+function DealerValueView({ data, isLoading }: { data: DealerValueList | undefined; isLoading: boolean }) {
+  const { expanded, toggle } = useExpanded();
+  const COLS = 8;
+  return (
+    <div className={schemeTable.outer}>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8" />
+            <TableHead>Dealer</TableHead>
+            <TableHead>Sales Officer</TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.no_of_schemes_fu" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.required_value" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.achieved_value" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.remaining_value" /></TableHead>
+            <TableHead className="text-right"><L k="scheme_planning.col.progress" /></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {isLoading || !data ? <SkeletonRow cols={COLS} /> : data.rows.length === 0 ? <EmptyRow cols={COLS} text="No dealers with Value Based schemes." /> : data.rows.map((r) => {
+            const open = expanded.has(r.dealerId);
+            return (
+              <Fragment key={r.dealerId}>
+                <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
+                  <TableCell><Chevron open={open} /></TableCell>
+                  <TableCell className="font-semibold">{r.dealerName}{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
+                  <TableCell>{r.salesOfficerName}</TableCell>
+                  <TableCell className="text-right">{r.schemeCount}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatCurrency(r.requiredValue)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatCurrency(r.achievedValue)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", r.remainingValue > 0 && "text-destructive")}>{formatCurrency(r.remainingValue)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{progressCell(r.progress)}</TableCell>
+                </TableRow>
+                {open && (
+                  <TableRow>
+                    <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
+                      <div className={schemeTable.nestedInset}>
+                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}>
+                          {r.schemes.map((s) => (
+                            <div key={s.schemeId} className="rounded-md border bg-background p-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
+                                <span className="font-semibold">{s.schemeName} <ModeBadge mode={s.mode} /></span>
+                                <span className="text-xs text-muted-foreground">Required {formatCurrency(s.requiredValue)} · Achieved {formatCurrency(s.achievedValue)} · Remaining {formatCurrency(s.remainingValue)} · {progressCell(s.progress)}</span>
+                              </div>
+                              <ValueLines products={s.products} combined={s.mode === "COMBINED"} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </Fragment>
+            );
+          })}
         </TableBody>
       </Table>
     </div>

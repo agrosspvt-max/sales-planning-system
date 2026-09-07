@@ -259,43 +259,52 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
     { key: "history", label: "History" },
   ];
 
+  const gridTab = tab === "month" || tab === "week";
   return (
-    // Month/Week grid tabs: root takes a definite viewport height so the flex chain bounds the grid into
-    // the single vertical scroll region (sticky header). History flows normally.
-    <div className={cn(tab === "month" || tab === "week" ? "flex h-[calc(100dvh-5.5rem)] flex-col gap-4 md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
-      {/* Mobile: slim context bar only (Back · Season · Month · Officer). Desktop/tablet: full header. */}
-      <MobileContextBar backTo="/planning/recovery" items={[data.seasonName, data.monthName, data.officerName]} />
-      <div className="hidden sm:block">
-        <PageHeader
-          backTo="/planning/recovery"
-          crumbs={[{ label: "Planning" }, { label: "Recovery Planning", href: "/planning/recovery" }, { label: `${data.seasonName} · ${data.monthName}` }]}
-          title={`${data.seasonName} — ${data.monthName} Recovery`}
-          subtitle={`Cutoff ${formatDate(data.cutoffDate)} · ${data.officerName}`}
-          actions={<StatusBadge status={data.status} />}
+    // Month/Week grid tabs: the ROOT is the single scroll region (definite viewport height, both axes).
+    // The upper section scrolls UP and completely off (it is not pinned vertically); only the dealer table's
+    // own sticky header + sticky first column pin against this same scroller. History flows normally.
+    <div className={cn(gridTab ? "h-[calc(100dvh-5.5rem)] space-y-4 overflow-auto md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
+      {/*
+        Upper section (breadcrumb/title/cutoff, Transfer, business update + guidance, progress, tabs). On the
+        grid tabs it is `sticky left-0` ONLY — so horizontal table scrolling never drags it sideways, while it
+        still scrolls fully off the top vertically. Nothing here stays pinned to the top of the viewport.
+      */}
+      <div className={cn("space-y-4", gridTab && "sticky left-0 z-10 bg-background")}>
+        {/* Mobile: slim context bar only (Back · Season · Month · Officer). Desktop/tablet: full header. */}
+        <MobileContextBar backTo="/planning/recovery" items={[data.seasonName, data.monthName, data.officerName]} />
+        <div className="hidden sm:block">
+          <PageHeader
+            backTo="/planning/recovery"
+            crumbs={[{ label: "Planning" }, { label: "Recovery Planning", href: "/planning/recovery" }, { label: `${data.seasonName} · ${data.monthName}` }]}
+            title={`${data.seasonName} — ${data.monthName} Recovery`}
+            subtitle={`Cutoff ${formatDate(data.cutoffDate)} · ${data.officerName}`}
+            actions={<StatusBadge status={data.status} />}
+          />
+        </div>
+
+        <RecoveryActions
+          id={id}
+          status={data.status}
+          officerId={data.officerId}
+          role={role}
+          userId={userId}
+          remainingCount={remaining.length}
+          totalDealers={data.dealers.length}
+          noPlanDealers={noPlanDealers.map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason, noPlanReasonDetail: d.noPlanReasonDetail }))}
         />
-      </div>
 
-      <RecoveryActions
-        id={id}
-        status={data.status}
-        officerId={data.officerId}
-        role={role}
-        userId={userId}
-        remainingCount={remaining.length}
-        totalDealers={data.dealers.length}
-        noPlanDealers={noPlanDealers.map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason, noPlanReasonDetail: d.noPlanReasonDetail }))}
-      />
+        <GuidancePanel data={data} />
 
-      <GuidancePanel data={data} />
+        <DealerProgressBar counts={counts} />
 
-      <DealerProgressBar counts={counts} />
-
-      <div className="flex items-center gap-1 border-b">
-        {tabs.map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)} className={cn("border-b-2 px-3 py-2 text-sm font-medium transition-colors", tab === t.key ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
-            {t.label}
-          </button>
-        ))}
+        <div className="flex items-center gap-1 border-b">
+          {tabs.map((t) => (
+            <button key={t.key} onClick={() => setTab(t.key)} className={cn("border-b-2 px-3 py-2 text-sm font-medium transition-colors", tab === t.key ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {tab === "month" && <MonthView key={data.id + data.status} detail={data} />}
@@ -410,9 +419,9 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   ];
 
   return (
-    // Flex column so the grid box fills remaining height and owns the single vertical scroll inside the
-    // full-height Month tab; falls back to normal flow otherwise.
-    <div className="flex min-h-0 flex-1 flex-col gap-2">
+    // Normal flow inside the workspace's single scroll region: the grid scrolls WITH the page (the upper
+    // section can leave the viewport), and the table's own sticky header/first column pin to that scroller.
+    <div className="space-y-2">
       {canAdminEdit && !adminMode && (
         <div className="flex justify-end"><EditPlanButton onClick={enterAdminMode} /></div>
       )}
@@ -433,8 +442,8 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
           <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
         </div>
       )}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background">
-        <Table stickyFirstColumn stickyHeader>
+      <div className="w-max min-w-full rounded-lg border bg-background">
+        <Table stickyFirstColumn stickyHeader externalScroll>
           {/* Excel-style sections (visual only — column ORDER reflows to the business layout; data,
               fields and calculations are unchanged). */}
           <SectionColgroup leading={1} sections={monthSections} />
@@ -580,9 +589,9 @@ function WeekView({ detail, isAdmin }: { detail: RecoveryDetail; isAdmin: boolea
   const selectedLocked = selectedLock?.locked ?? false;
 
   return (
-    // Flex column so the grid box fills remaining height and owns the single vertical scroll inside the
-    // full-height Week tab; falls back to normal flow otherwise.
-    <div className="flex min-h-0 flex-1 flex-col gap-2">
+    // Normal flow inside the workspace's single scroll region (see MonthView): the week selector + grid
+    // scroll with the page; the table's own sticky header/first column pin to that scroller.
+    <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mr-1 text-sm font-medium">Week:</span>
         {Array.from({ length: detail.weekCount }, (_, i) => i + 1).map((wk) => {
@@ -757,8 +766,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
           <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
         </div>
       )}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background">
-        <Table stickyFirstColumn stickyHeader>
+      <div className="w-max min-w-full rounded-lg border bg-background">
+        <Table stickyFirstColumn stickyHeader externalScroll>
           {/* Excel-style sections (visual grouping only — columns, data and calculations unchanged). */}
           <SectionColgroup leading={1} sections={weekSections} />
           <TableHeader>

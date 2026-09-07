@@ -1,9 +1,10 @@
 import "server-only";
-import { SchemeBenefit, SchemeStatus, SchemeCalcType, Role } from "@prisma/client";
+import { SchemeBenefit, SchemeStatus, SchemeCalcType, SchemeRequirementType, SchemeValueMode, Role } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
+import { validateSchemeRequirement, normalizeSchemeRequirement } from "@/lib/scheme-requirement";
 
 // One installment of the payout schedule for Scheme Value (With GST).
 const installmentInput = z.object({
@@ -30,6 +31,14 @@ function validateInstallments(rules: z.infer<typeof installmentInput>[], schemeV
   }
 }
 
+// One row of a Scheme Requirement. requiredQty (Product Based) / requiredValue (Value Based Individual)
+// are optional here; the exact combination is enforced by validateSchemeRequirement in the superRefine.
+const requirementProductInput = z.object({
+  productId: z.string().min(1),
+  requiredQty: z.coerce.number().nullable().optional(),
+  requiredValue: z.coerce.number().nullable().optional(),
+});
+
 const schemeInput = z.object({
   schemeName: z.string().trim().min(1, "Scheme Name is required").max(200),
   stateIds: z.array(z.string().min(1)).min(1, "Select at least one State"),
@@ -48,6 +57,12 @@ const schemeInput = z.object({
   maxExtensionAttempts: z.coerce.number().int().min(0).max(20).optional().default(0),
   documentUrl: z.string().max(5_000_000).nullable().optional(),
   installments: z.array(installmentInput).max(10).optional().default([]),
+  // Scheme Requirement (Phase 5). Belongs to the Scheme, not to individual dealers. Defaults to NONE so
+  // existing/historical schemes stay installment-only unless an admin explicitly configures a requirement.
+  requirementType: z.nativeEnum(SchemeRequirementType).optional().default(SchemeRequirementType.NONE),
+  valueMode: z.nativeEnum(SchemeValueMode).nullable().optional(),
+  combinedRequiredValue: z.coerce.number().nullable().optional(),
+  requirementProducts: z.array(requirementProductInput).max(200).optional().default([]),
 }).superRefine((value, ctx) => {
   if (!value.isPerpetual && (!value.startDate || !value.endDate || !value.bookingLastDate)) {
     for (const field of ["startDate", "endDate", "bookingLastDate"] as const) if (!value[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: "This date is required unless the scheme is perpetual" });
@@ -55,6 +70,16 @@ const schemeInput = z.object({
   if (!value.isPerpetual && value.startDate && value.endDate && value.endDate < value.startDate) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endDate"], message: "End Date must be on or after Start Date" });
   if (value.schemeBenefit === SchemeBenefit.OTHER && !value.benefitDetails) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["benefitDetails"], message: "Benefit Details are required when Benefit is Other" });
   validateInstallments(value.installments ?? [], value.schemeValueWithGST, ctx);
+  // Server-side requirement validation — rejects every ambiguous/invalid combination even if the client
+  // allowed it. Single source of truth shared with the client (src/lib/scheme-requirement.ts).
+  for (const message of validateSchemeRequirement({
+    requirementType: value.requirementType,
+    valueMode: value.valueMode ?? null,
+    combinedRequiredValue: value.combinedRequiredValue ?? null,
+    products: value.requirementProducts ?? [],
+  })) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requirementProducts"], message });
+  }
 });
 
 function assertAdmin(ctx: AuthContext) {
@@ -72,22 +97,25 @@ export async function refreshSchemeStatuses(now = new Date()) {
 type InstallmentRow = { installmentNumber: number; calculationType: SchemeCalcType; value: unknown; daysAfterBillingDate: number };
 const mapInstallments = (rules: InstallmentRow[]) => rules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value), daysAfterBillingDate: r.daysAfterBillingDate }));
 
+type RequirementProductRow = { productId: string; requiredQty: unknown; requiredValue: unknown };
+const mapRequirementProducts = (rows: RequirementProductRow[]) => rows.map((r) => ({ productId: r.productId, requiredQty: r.requiredQty == null ? null : Number(r.requiredQty), requiredValue: r.requiredValue == null ? null : Number(r.requiredValue) }));
+
 export async function listSchemes(ctx: AuthContext, filters: { status?: string | null; stateId?: string | null }) {
   await refreshSchemeStatuses();
   const status = filters.status === SchemeStatus.OPEN || filters.status === SchemeStatus.CLOSED ? filters.status : undefined;
   const rows = await prisma.scheme.findMany({
     where: { status, ...(filters.stateId ? { states: { some: { groupId: filters.stateId } } } : {}) },
-    include: { states: { include: { group: { select: { id: true, name: true } } } }, createdBy: { select: { name: true } }, installmentRules: true },
+    include: { states: { include: { group: { select: { id: true, name: true } } } }, createdBy: { select: { name: true } }, installmentRules: true, requirementProducts: true },
     orderBy: [{ isPerpetual: "desc" }, { endDate: "desc" }, { updatedAt: "desc" }],
   });
-  return rows.map((s) => ({ ...s, schemeValueWithoutGST: Number(s.schemeValueWithoutGST), schemeValueWithGST: Number(s.schemeValueWithGST), bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount), states: s.states.map((x) => x.group), installments: mapInstallments(s.installmentRules) }));
+  return rows.map((s) => ({ ...s, schemeValueWithoutGST: Number(s.schemeValueWithoutGST), schemeValueWithGST: Number(s.schemeValueWithGST), bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount), combinedRequiredValue: s.combinedRequiredValue == null ? null : Number(s.combinedRequiredValue), states: s.states.map((x) => x.group), installments: mapInstallments(s.installmentRules), requirementProducts: mapRequirementProducts(s.requirementProducts) }));
 }
 
 export async function getScheme(ctx: AuthContext, id: string) {
   await refreshSchemeStatuses();
-  const row = await prisma.scheme.findUnique({ where: { id }, include: { states: { include: { group: { select: { id: true, name: true } } } }, installmentRules: true } });
+  const row = await prisma.scheme.findUnique({ where: { id }, include: { states: { include: { group: { select: { id: true, name: true } } } }, installmentRules: true, requirementProducts: true } });
   if (!row) throw new ApiError(404, "Scheme not found");
-  return { ...row, schemeValueWithoutGST: Number(row.schemeValueWithoutGST), schemeValueWithGST: Number(row.schemeValueWithGST), bookingAmount: row.bookingAmount == null ? null : Number(row.bookingAmount), stateIds: row.states.map((x) => x.groupId), states: row.states.map((x) => x.group), installments: mapInstallments(row.installmentRules) };
+  return { ...row, schemeValueWithoutGST: Number(row.schemeValueWithoutGST), schemeValueWithGST: Number(row.schemeValueWithGST), bookingAmount: row.bookingAmount == null ? null : Number(row.bookingAmount), combinedRequiredValue: row.combinedRequiredValue == null ? null : Number(row.combinedRequiredValue), stateIds: row.states.map((x) => x.groupId), states: row.states.map((x) => x.group), installments: mapInstallments(row.installmentRules), requirementProducts: mapRequirementProducts(row.requirementProducts) };
 }
 
 export async function schemeStateOptions() {
@@ -97,8 +125,9 @@ export async function schemeStateOptions() {
 export async function createScheme(ctx: AuthContext, raw: unknown) {
   assertAdmin(ctx);
   const data = schemeInput.parse(raw);
-  const { stateIds, installments, ...schemeData } = data;
+  const { stateIds, installments, requirementType, valueMode, combinedRequiredValue, requirementProducts, ...schemeData } = data;
   const normalized = schemeData.isPerpetual ? { ...schemeData, startDate: null, endDate: null, bookingLastDate: null } : schemeData;
+  const req = normalizeSchemeRequirement({ requirementType, valueMode: valueMode ?? null, combinedRequiredValue: combinedRequiredValue ?? null, products: requirementProducts });
   const scheme = await prisma.scheme.create({
     data: {
       ...normalized,
@@ -106,9 +135,13 @@ export async function createScheme(ctx: AuthContext, raw: unknown) {
       benefitDetails: normalized.schemeBenefit === SchemeBenefit.OTHER ? normalized.benefitDetails : null,
       otherBenefitDetails: normalized.otherBenefitDetails || null,
       documentUrl: normalized.documentUrl || null,
+      requirementType: req.requirementType,
+      valueMode: req.valueMode,
+      combinedRequiredValue: req.combinedRequiredValue,
       createdById: ctx.userId,
       states: { create: stateIds.map((groupId) => ({ groupId })) },
       installmentRules: { create: installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
+      requirementProducts: { create: req.products.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
     },
   });
   await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "scheme", entityId: scheme.id, summary: `Created scheme ${scheme.schemeName}` });
@@ -118,8 +151,9 @@ export async function createScheme(ctx: AuthContext, raw: unknown) {
 export async function updateScheme(ctx: AuthContext, id: string, raw: unknown) {
   assertAdmin(ctx);
   const data = schemeInput.parse(raw);
-  const { stateIds, installments, ...schemeData } = data;
+  const { stateIds, installments, requirementType, valueMode, combinedRequiredValue, requirementProducts, ...schemeData } = data;
   const normalized = schemeData.isPerpetual ? { ...schemeData, startDate: null, endDate: null, bookingLastDate: null } : schemeData;
+  const req = normalizeSchemeRequirement({ requirementType, valueMode: valueMode ?? null, combinedRequiredValue: combinedRequiredValue ?? null, products: requirementProducts });
   const scheme = await prisma.scheme.update({
     where: { id },
     data: {
@@ -128,8 +162,14 @@ export async function updateScheme(ctx: AuthContext, id: string, raw: unknown) {
       benefitDetails: normalized.schemeBenefit === SchemeBenefit.OTHER ? normalized.benefitDetails : null,
       otherBenefitDetails: normalized.otherBenefitDetails || null,
       documentUrl: normalized.documentUrl || null,
+      requirementType: req.requirementType,
+      valueMode: req.valueMode,
+      combinedRequiredValue: req.combinedRequiredValue,
       states: { deleteMany: {}, create: stateIds.map((groupId) => ({ groupId })) },
       installmentRules: { deleteMany: {}, create: installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
+      // Replace the requirement DEFINITION rows only. SchemeRequirementProduct is separate from SchemeSale
+      // (sales reference an upload scope, not these rows), so this NEVER deletes achievement history.
+      requirementProducts: { deleteMany: {}, create: req.products.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
     },
   });
   await refreshSchemeStatuses();

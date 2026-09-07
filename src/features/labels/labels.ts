@@ -126,6 +126,10 @@ export const DEFAULT_LABELS = {
   "scheme_planning.view.all_plans": "All Plans",
   "scheme_planning.view.review": "Review",
   "scheme_planning.view.running_schemes": "Running Schemes",
+  // Follow-up sub-view switch (Installments default) — Product/Value achievement views (Phase 6)
+  "scheme_planning.view.installments": "Installments",
+  "scheme_planning.view.product_based": "Product Based",
+  "scheme_planning.view.value_based": "Value Based",
 
   // Review / summary table column headers
   "scheme_planning.col.scheme": "Scheme",
@@ -145,6 +149,20 @@ export const DEFAULT_LABELS = {
   "scheme_planning.col.plan_status": "Plan Status",
   "scheme_planning.col.scheme_status": "Scheme Status",
   "scheme_planning.col.actions": "Actions",
+
+  // Follow-up achievement columns (Phase 6) — Product Based / Value Based / Installments
+  "scheme_planning.col.scheme_installments": "Scheme Installments",
+  "scheme_planning.col.products": "Products",
+  "scheme_planning.col.required_qty": "Required Qty",
+  "scheme_planning.col.sale_qty": "Sale Qty",
+  "scheme_planning.col.products_completed": "Products Completed",
+  "scheme_planning.col.remaining_qty": "Remaining Qty",
+  "scheme_planning.col.progress": "Progress",
+  "scheme_planning.col.required_value": "Required Value",
+  "scheme_planning.col.achieved_value": "Achieved Value",
+  "scheme_planning.col.remaining_value": "Remaining Value",
+  "scheme_planning.col.completion": "Completion",
+  "scheme_planning.col.no_of_schemes_fu": "No. of Schemes",
 
   // Nested / collapsible dealer-table column headers (Review + Scheme-wise expanded rows)
   "scheme_planning.nested.dealer": "Dealer",
@@ -178,6 +196,101 @@ export const DEFAULT_LABELS = {
   "scheme_planning.enrolled.inst.received_amount": "Received Amount",
   "scheme_planning.enrolled.inst.actual_date": "Actual Date",
   "scheme_planning.enrolled.inst.status": "Status",
+
+  /* =====================================================================================
+   * SCHEME MASTER — Scheme Requirement configuration (Phase 5). Structural labels only:
+   * section title, field labels, requirement-type / value-mode option text, and the
+   * requirement product table column headers. Display text is customizable here; the
+   * underlying enum values (NONE / PRODUCT_BASED / VALUE_BASED / INDIVIDUAL / COMBINED)
+   * are DB constants and are never renamed.
+   * ===================================================================================== */
+  "scheme_master.requirement.section": "Scheme Requirement",
+  "scheme_master.requirement.type": "Requirement Type",
+  "scheme_master.requirement.type.none": "None",
+  "scheme_master.requirement.type.product": "Product Based",
+  "scheme_master.requirement.type.value": "Value Based",
+  "scheme_master.requirement.value_mode": "Value Mode",
+  "scheme_master.requirement.value_mode.individual": "Individual",
+  "scheme_master.requirement.value_mode.combined": "Combined",
+  "scheme_master.requirement.combined_value": "Combined Required Value",
+  "scheme_master.requirement.applicable_products": "Applicable Products",
+  "scheme_master.requirement.add_product": "Add Product",
+  "scheme_master.requirement.col.product": "Product",
+  "scheme_master.requirement.col.required_qty": "Required Quantity",
+  "scheme_master.requirement.col.required_value": "Required Value",
+
+  /* =====================================================================================
+   * SCHEME MASTER — full form / table / action labels (Phase 8). Centrally editable, user-visible
+   * text only; never data and never DB enum values.
+   * ===================================================================================== */
+  // Page + list
+  "scheme_master.page.title": "Scheme Master",
+  "scheme_master.page.subtitle_manage": "Create and manage commercial schemes by State.",
+  "scheme_master.page.subtitle_view": "Available commercial schemes by State.",
+  "scheme_master.filter.all_status": "All status",
+  "scheme_master.filter.all_states": "All states",
+  "scheme_master.action.new_scheme": "New Scheme",
+  "scheme_master.view.view_scheme": "View Scheme",
+  "scheme_master.view.enrolled_scheme": "Enrolled Scheme",
+  // List table columns
+  "scheme_master.col.scheme_name": "Scheme Name",
+  "scheme_master.col.states": "States",
+  "scheme_master.col.scheme_period": "Scheme Period",
+  "scheme_master.col.last_booking_date": "Last Booking Date",
+  "scheme_master.col.without_gst": "Without GST",
+  "scheme_master.col.with_gst": "With GST",
+  "scheme_master.col.benefit": "Benefit",
+  "scheme_master.col.status": "Status",
+  "scheme_master.col.actions": "Actions",
+  // Row menu / actions
+  "scheme_master.action.info": "Info",
+  "scheme_master.action.view_document": "View Document",
+  "scheme_master.action.share": "Share",
+  "scheme_master.action.edit_scheme": "Edit Scheme",
+  "scheme_master.action.delete_scheme": "Delete Scheme",
+  // Create/Edit dialog — titles + buttons
+  "scheme_master.form.create_title": "Create Scheme",
+  "scheme_master.form.edit_title": "Edit Scheme",
+  "scheme_master.form.cancel": "Cancel",
+  "scheme_master.form.save_scheme": "Save Scheme",
+  "scheme_master.form.save_changes": "Save Changes",
+  // Create/Edit dialog — field labels
+  "scheme_master.form.scheme_name": "Scheme Name",
+  "scheme_master.form.applicable_states": "Applicable States",
+  "scheme_master.form.perpetual": "Perpetual Scheme",
+  "scheme_master.form.scheme_start": "Scheme Start",
+  "scheme_master.form.scheme_end": "Scheme End",
+  "scheme_master.form.last_booking_date": "Last Booking Date",
+  "scheme_master.form.booking_amount": "Booking Amount",
+  "scheme_master.form.value_without_gst": "Scheme Value (Without GST)",
+  "scheme_master.form.value_with_gst": "Scheme Value (With GST)",
+  "scheme_master.form.scheme_benefit": "Scheme Benefit",
+  "scheme_master.form.allow_multiple": "Allow Multiple Schemes",
+  "scheme_master.form.max_extension_days": "Maximum Extension Days",
+  "scheme_master.form.max_extension_attempts": "Maximum Extension Attempts",
+  "scheme_master.form.benefit_details": "Enter Benefit Details",
+  "scheme_master.form.other_benefit_details": "Other Benefit Details",
+  "scheme_master.form.installment_builder": "Installment Rule Builder",
+  "scheme_master.form.no_of_installments": "No. of Installments",
+  "scheme_master.form.calculation_type": "Calculation Type",
+  "scheme_master.form.col_percentage": "Percentage (%)",
+  "scheme_master.form.col_amount": "Amount (₹)",
+  "scheme_master.form.days_after_billing": "Days after Billing Date",
+  "scheme_master.form.scheme_document": "Scheme Document",
+
+  /* =====================================================================================
+   * SCHEME UPLOAD (Phase 7) — the dedicated date-range achievement upload tab. Structural
+   * labels only (tab, step headings, field labels). Never data. Never renames DB enums.
+   * ===================================================================================== */
+  "scheme_upload.tab": "Scheme Upload",
+  "scheme_upload.title": "Scheme Upload",
+  "scheme_upload.select_schemes": "Select Schemes",
+  "scheme_upload.start_date": "Start Date",
+  "scheme_upload.end_date": "End Date",
+  "scheme_upload.file": "Sales Register (.xlsx)",
+  "scheme_upload.analyze": "Analyze",
+  "scheme_upload.review": "Review",
+  "scheme_upload.confirm_import": "Confirm Import",
 } as const;
 
 export type LabelKey = keyof typeof DEFAULT_LABELS;
@@ -189,7 +302,7 @@ export type LabelKey = keyof typeof DEFAULT_LABELS;
  * prefix so the management page can show them too, and so Sales/Recovery extend without a new mechanism.
  * ------------------------------------------------------------------------------------------------- */
 
-export type LabelGroup = "Navigation / Flip Buttons" | "View Buttons" | "Table Columns" | "Nested/Collapsible Table Columns" | "Sections";
+export type LabelGroup = "Navigation / Flip Buttons" | "View Buttons" | "Table Columns" | "Nested/Collapsible Table Columns" | "Sections" | "Form Fields";
 
 interface LabelMeta { module: string; group: LabelGroup }
 
@@ -212,6 +325,13 @@ const SCHEME_PLANNING_META: Partial<Record<LabelKey, LabelMeta>> = {} as Partial
 export function labelMeta(key: LabelKey): LabelMeta {
   const explicit = SCHEME_PLANNING_META[key];
   if (explicit) return explicit;
+  if (key.startsWith("scheme_master.requirement.col.")) return { module: "Scheme Master", group: "Table Columns" };
+  if (key.startsWith("scheme_master.requirement.section")) return { module: "Scheme Master", group: "Sections" };
+  if (key.startsWith("scheme_master.form.")) return { module: "Scheme Master", group: "Form Fields" };
+  if (key.startsWith("scheme_master.col.")) return { module: "Scheme Master", group: "Table Columns" };
+  if (key.startsWith("scheme_master.page.") || key.startsWith("scheme_master.action.") || key.startsWith("scheme_master.filter.") || key.startsWith("scheme_master.view.")) return { module: "Scheme Master", group: "View Buttons" };
+  if (key.startsWith("scheme_master.")) return { module: "Scheme Master", group: "View Buttons" };
+  if (key.startsWith("scheme_upload.")) return { module: "Scheme Upload", group: "View Buttons" };
   if (key.startsWith("recovery.")) return { module: "Recovery Planning", group: key.includes(".section.") ? "Sections" : "Table Columns" };
   if (key.startsWith("col.") || key.startsWith("seasonal.") || key.startsWith("monthView.") || key.startsWith("monthly.") || key.startsWith("summary.") || key.startsWith("dealerSummary.") || key.startsWith("productPlan.")) {
     return { module: "Sales Planning", group: key.includes(".section.") ? "Sections" : "Table Columns" };

@@ -81,12 +81,13 @@ export function MonthlyPlanWorkspace({
   };
 
   return (
-    // The data-grid tabs (Dealer Plan, Product Plan, Dealer Summary) take a DEFINITE viewport height
-    // (100dvh minus the fixed global header ≈3.5rem and the content padding), so the flex chain below can
-    // bound the grid into the one vertical scroll region and its column header can pin. History flows normally.
-    // gap-4 on mobile (unchanged); tighter gap-2 on desktop reclaims the wasted vertical space above the
-    // tabs — the recovered height flows straight to the flex-1 grid below.
-    <div className={cn(tab === "history" ? "space-y-4" : "flex h-[calc(100dvh-5.5rem)] flex-col gap-4 md:h-[calc(100dvh-6.5rem)] md:gap-2")}>
+    // The data-grid tabs (Dealer Plan, Product Plan, Dealer Summary): the ROOT is the single scroll region
+    // (definite viewport height, both axes). The upper section scrolls fully off the top; only each table's
+    // own sticky header/first column pin against this scroller. History flows normally.
+    <div className={cn(tab === "history" ? "space-y-4" : "h-[calc(100dvh-5.5rem)] space-y-4 overflow-auto md:h-[calc(100dvh-6.5rem)]")}>
+      {/* Upper section — on the grid tabs it is `sticky left-0` ONLY, so it never drifts sideways with a wide
+          table yet still scrolls completely off the top vertically. */}
+      <div className={cn("space-y-4", tab !== "history" && "sticky left-0 z-10 bg-background")}>
       {/* Mobile: slim context bar only (Back · Season · Month · Officer). Desktop/tablet: full header. */}
       <MobileContextBar backTo="/planning/sales" items={[data.seasonName, data.monthName, data.officerName]} />
       <div className="hidden sm:block">
@@ -128,6 +129,7 @@ export function MonthlyPlanWorkspace({
           </button>
         ))}
       </div>
+      </div>
 
       <MonthlyEditProvider
         planId={data.planId}
@@ -136,7 +138,7 @@ export function MonthlyPlanWorkspace({
         saveUrl={`/api/planning/monthly-plans/${monthlyPlanId}`}
         invalidateKey={["monthly-plan", monthlyPlanId]}
       >
-        <div className={tab === "dealer" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+        <div className={tab === "dealer" ? "" : "hidden"}>
           <MonthlyPlanner />
           {/* Mobile-only sticky action bar (req #2 + #5): Save / Submit / Add Product stay reachable
               while scrolling the long planner, reusing the exact submit/approval logic. */}

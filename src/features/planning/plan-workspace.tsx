@@ -85,9 +85,13 @@ export function PlanWorkspace({
   );
 
   return (
-    // Dealer grid tab: root takes a definite viewport height so the flex chain bounds the grid into the
-    // single vertical scroll region (sticky header). Other tabs flow normally.
-    <div className={cn(tab === "dealer" ? "flex h-[calc(100dvh-5.5rem)] flex-col gap-4 md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
+    // Dealer grid tab: the ROOT is the single scroll region (definite viewport height, both axes). The upper
+    // section scrolls fully off the top; only the dealer table's own sticky header/first column pin against
+    // this scroller. Other tabs flow normally in the page.
+    <div className={cn(tab === "dealer" ? "h-[calc(100dvh-5.5rem)] space-y-4 overflow-auto md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
+      {/* Upper section — on the grid tab it is `sticky left-0` ONLY, so it never drifts sideways with the
+          wide table yet still scrolls completely off the top vertically (nothing stays pinned to the top). */}
+      <div className={cn("space-y-4", tab === "dealer" && "sticky left-0 z-10 bg-background")}>
       {/* Mobile: slim context bar only (Back · Season · Officer). Desktop/tablet: full header. */}
       <MobileContextBar
         backTo={detail.status === "APPROVED" ? "/planning/sales/plans" : "/planning/sales"}
@@ -142,11 +146,12 @@ export function PlanWorkspace({
           </button>
         ))}
       </div>
+      </div>
 
       {/* One provider wraps all views so Dealer Plan edits recompute Product Plan / Dealer
           Summary instantly, and switching tabs never loses in-progress edits. */}
       <PlanEditProvider detail={detail}>
-        <div className={tab === "dealer" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+        <div className={tab === "dealer" ? "" : "hidden"}>
           <PlanGrid />
         </div>
         {tab === "product" && <ProductPlan />}

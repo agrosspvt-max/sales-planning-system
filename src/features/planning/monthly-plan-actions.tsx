@@ -55,7 +55,12 @@ export function MonthlyPlanActions({
   const [returnReason, setReturnReason] = useState("");
 
   const base = `/api/planning/monthly-plans/${monthlyPlanId}`;
-  const isOwner = role === Role.SALES_OFFICER && officerId === userId;
+  // Owner = the officer the plan belongs to, whether a Sales Officer OR a Regional Manager planning their
+  // own dealers. Mirrors the server's `isPlanOwner` (SO or RM with officerId === userId), so the Submit
+  // control matches exactly who the submit endpoint authorizes — an RM's own Draft plan can now be
+  // submitted (it routes to PENDING_ADMIN via getCurrentManagerId, unchanged). An RM viewing a team
+  // member's plan is NOT the owner (officerId !== userId) and still sees only the reviewer actions.
+  const isOwner = (role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER) && officerId === userId;
 
   function refresh() {
     qc.invalidateQueries({ queryKey: ["monthly-plan", monthlyPlanId] });

@@ -13,6 +13,7 @@ import { getRecoveryConfig } from "@/lib/recovery-config";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
+import { zeroPopulationDealers } from "@/lib/recovery-population";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Tx = any;
@@ -24,6 +25,48 @@ function assertAdmin(ctx: AuthContext) {
 }
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
+}
+
+/* ------------------- Authoritative Sales Officer → Dealer population ------------------- */
+// WHO appears in a Recovery Plan is decided by the Sales Officer's assigned dealers — NEVER by the
+// Aging file, the Daybook, or which dealers already have Recovery rows. Aging/Daybook only decide the
+// VALUES. This reuses the ONE existing authoritative relationship (DealerAssignment, effectiveTo=null)
+// that Seasonal/Monthly planning already use — no new dealer-assignment mechanism is introduced. The
+// `dealer.isActive` filter matches the Recovery read filter (getRecoveryPlan), so the population equals
+// exactly the set Recovery displays.
+
+/** Every ACTIVE dealer currently assigned to an officer — the authoritative Recovery population. */
+async function assignedDealerIdsForOfficer(officerId: string, db: Tx = prisma): Promise<string[]> {
+  const rows = (await db.dealerAssignment.findMany({
+    where: { officerId, effectiveTo: null, dealer: { isActive: true } },
+    select: { dealerId: true },
+  })) as { dealerId: string }[];
+  return rows.map((r) => r.dealerId);
+}
+
+/**
+ * Ensure a plan holds a RecoveryPlanDealer row for EVERY assigned dealer of its officer. Missing dealers
+ * are inserted with ZERO values (no aging, no Daybook) — a normal empty Recovery row, NOT a fake Aging
+ * record (no AgingSnapshot* row is created). Idempotent: existing rows are never touched, so aging,
+ * Daybook (srCr/liveRecovery) and officer-entered planning values are all preserved. Returns how many
+ * zero rows were added. This is the single lever that keeps a plan's population = ALL the officer's
+ * dealers, backfilling plans that were created before this rule existed or after new dealers were assigned.
+ */
+async function ensureOfficerDealerRows(tx: Tx, planId: string, officerId: string): Promise<number> {
+  const assigned = await assignedDealerIdsForOfficer(officerId, tx);
+  if (assigned.length === 0) return 0;
+  const existing = (await tx.recoveryPlanDealer.findMany({
+    where: { recoveryPlanId: planId },
+    select: { dealerId: true },
+  })) as { dealerId: string }[];
+  const have = existing.map((d) => d.dealerId);
+  const missing = zeroPopulationDealers(have, assigned); // assigned dealers with no row yet
+  if (missing.length === 0) return 0;
+  await tx.recoveryPlanDealer.createMany({
+    data: missing.map((dealerId) => ({ recoveryPlanId: planId, dealerId, outstanding: 0, overdue: 0, due: 0, running: 0, runningTillDate: 0 })),
+    skipDuplicates: true,
+  });
+  return missing.length;
 }
 
 /**
@@ -443,11 +486,16 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   if (scopeSet) {
     for (const o of [...res.byOfficer.keys()]) if (!scopeSet.has(o)) res.byOfficer.delete(o);
   }
-  if (res.byOfficer.size === 0) throw new ApiError(422, "No matched, assigned dealers to plan recovery for");
+  // WHO gets a Recovery Plan: an EXPLICIT scope (Single / Selected / Seasonal) plans exactly those
+  // officers — even one with ZERO matched aging dealers still gets a plan, populated with ALL their
+  // assigned dealers at zero (per the requirement: the Aging file must never decide the population).
+  // ALL-scope still derives officers from the report (a file that names nobody can't plan everyone).
+  let plannedOfficerIds = scopeSet ? [...scopeSet] : [...res.byOfficer.keys()];
+  if (plannedOfficerIds.length === 0) throw new ApiError(422, "No matched, assigned dealers to plan recovery for");
 
   // Guard: a recovery plan for this month must not already exist for any affected officer.
   const existing = await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: month.id, officerId: { in: [...res.byOfficer.keys()] } },
+    where: { seasonMonthId: month.id, officerId: { in: plannedOfficerIds } },
     select: { officerId: true },
   });
   if (existing.length > 0) {
@@ -462,7 +510,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   // plan for this season (active version preferred). Officers WITHOUT a seasonal plan are skipped
   // so no orphan (null-parent) recovery plan is ever created.
   const seasonalPlans = await prisma.seasonPlan.findMany({
-    where: { seasonId: month.seasonId, planningType: "SEASONAL", officerId: { in: [...res.byOfficer.keys()] } },
+    where: { seasonId: month.seasonId, planningType: "SEASONAL", officerId: { in: plannedOfficerIds } },
     select: { id: true, officerId: true, isActiveVersion: true, version: true },
     orderBy: [{ isActiveVersion: "desc" }, { version: "desc" }],
   });
@@ -470,13 +518,26 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   for (const sp of seasonalPlans as { id: string; officerId: string }[]) {
     if (!seasonPlanByOfficer.has(sp.officerId)) seasonPlanByOfficer.set(sp.officerId, sp.id);
   }
-  const officersWithoutSeasonal = [...res.byOfficer.keys()].filter((o) => !seasonPlanByOfficer.has(o));
-  for (const o of officersWithoutSeasonal) res.byOfficer.delete(o);
-  if (res.byOfficer.size === 0) {
+  plannedOfficerIds = plannedOfficerIds.filter((o) => seasonPlanByOfficer.has(o));
+  if (plannedOfficerIds.length === 0) {
     throw new ApiError(
       422,
       "No matched officer has a Seasonal plan for this season. Create the Seasonal plan(s) first — recovery must belong to a seasonal plan.",
     );
+  }
+
+  // AUTHORITATIVE population: every ACTIVE dealer assigned to each planned officer (DealerAssignment,
+  // effectiveTo=null) — the SAME relationship planning uses. The Aging file only supplies VALUES; a
+  // dealer absent from Aging still appears, with zero values (and no fake aging snapshot row).
+  const assignmentRows = (await prisma.dealerAssignment.findMany({
+    where: { officerId: { in: plannedOfficerIds }, effectiveTo: null, dealer: { isActive: true } },
+    select: { officerId: true, dealerId: true },
+  })) as { officerId: string; dealerId: string }[];
+  const assignedByOfficer = new Map<string, string[]>();
+  for (const a of assignmentRows) {
+    const arr = assignedByOfficer.get(a.officerId) ?? [];
+    arr.push(a.dealerId);
+    assignedByOfficer.set(a.officerId, arr);
   }
 
   const recoveryPlanRows: { id: string; seasonId: string; seasonMonthId: string; officerId: string; seasonPlanId: string | null; cutoffDate: Date; status: PlanStatus }[] = [];
@@ -489,15 +550,18 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   let dealerCount = 0;
   let billCount = 0;
 
-  for (const [officerId, dealersFor] of res.byOfficer) {
+  for (const officerId of plannedOfficerIds) {
     const seasonPlanId = seasonPlanByOfficer.get(officerId);
     if (!seasonPlanId) continue; // guaranteed present (officers without a seasonal plan were removed)
+    const dealersFor = res.byOfficer.get(officerId) ?? []; // aging dealers for this officer (may be empty)
     const planId = randomUUID();
     const snapshotId = randomUUID();
     planIds.push(planId);
     recoveryPlanRows.push({ id: planId, seasonId: month.seasonId, seasonMonthId: month.id, officerId, seasonPlanId, cutoffDate: cutoff, status: PlanStatus.DRAFT });
     agingSnapshotRows.push({ id: snapshotId, recoveryPlanId: planId, weekNo: 0, cutoffDate: cutoff, workbookName: filename, uploadedById: ctx.userId });
+    const agingIds = new Set<string>();
     for (const d of dealersFor) {
+      agingIds.add(d.dealerId);
       const snapDealerId = randomUUID();
       agingSnapshotDealerRows.push({ id: snapDealerId, snapshotId, dealerId: d.dealerId, outstanding: d.aging.outstanding, overdue: d.aging.overdue, due: d.aging.due, running: d.aging.running });
       // NORMAL create: seed the live aging + the Running O/S opening (runningTillDate) only. It does NOT
@@ -508,6 +572,12 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
         agingSnapshotBillRows.push({ snapshotId, snapshotDealerId: snapDealerId, dealerId: d.dealerId, billDate: b.billDate, refNo: b.refNo, amount: b.amount, dueDate: b.dueDate, bucket: b.bucket });
       }
       billCount += d.aging.bills.length;
+      dealerCount += 1;
+    }
+    // Assigned dealers with NO aging in this report still belong to the officer → add a normal ZERO
+    // Recovery row (NOT an aging snapshot row, so no fake aging data is fabricated).
+    for (const dealerId of zeroPopulationDealers(agingIds, assignedByOfficer.get(officerId) ?? [])) {
+      recoveryPlanDealerRows.push({ recoveryPlanId: planId, dealerId, outstanding: 0, overdue: 0, due: 0, running: 0, runningTillDate: 0 });
       dealerCount += 1;
     }
   }
@@ -737,7 +807,12 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         prevAging: prev,
         changed,
         // Present in the plan but absent from the newest Aging snapshot → last-known values are stale.
-        missingInLatestAging: latestSnapshot ? !latestDealerIds.has(d.dealerId) : false,
+        // A dealer that only ever existed as a ZERO population row (assigned but never in any Aging
+        // report) is NOT "stale" — it is a normal empty row, so the badge is suppressed when all four
+        // aging figures are zero. Genuine drop-outs keep their non-zero last-known values and stay flagged.
+        missingInLatestAging: latestSnapshot
+          ? !latestDealerIds.has(d.dealerId) && (cur.outstanding !== 0 || cur.overdue !== 0 || cur.due !== 0 || cur.running !== 0)
+          : false,
       };
     }),
   };
@@ -971,7 +1046,7 @@ export async function uploadWeeklyAging(ctx: AuthContext, buffer: Buffer, filena
 
   await prisma.$transaction(
     async (tx: Tx) => {
-      await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, input.weekNo, ctx.userId, summary);
+      await writeRefreshSnapshot(tx, plan.id, plan.officerId, forOfficer, cutoff, filename, input.weekNo, ctx.userId, summary);
       await tx.recoveryPlan.update({ where: { id: plan.id }, data: { cutoffDate: cutoff, weeklyEditEnabled: input.allowWeeklyEdit } });
     },
     { timeout: 60000, maxWait: 10000 },
@@ -996,6 +1071,7 @@ export async function uploadWeeklyAging(ctx: AuthContext, buffer: Buffer, filena
 async function writeRefreshSnapshot(
   tx: Tx,
   planId: string,
+  officerId: string,
   forOfficer: ResolvedDealer[],
   cutoff: Date,
   filename: string,
@@ -1030,6 +1106,10 @@ async function writeRefreshSnapshot(
       },
     });
   }
+  // Population authority (not the Aging file): guarantee a row for EVERY assigned dealer of the officer.
+  // Any assigned dealer absent from this report is backfilled as a normal ZERO row — so a refresh also
+  // heals plans created before this rule and picks up dealers newly assigned since creation.
+  await ensureOfficerDealerRows(tx, planId, officerId);
   return snapshot.id;
 }
 
@@ -1172,7 +1252,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
       const weekNo = await nextSnapshotWeekNo(plan.id);
       await prisma.$transaction(
         async (tx: Tx) => {
-          await writeRefreshSnapshot(tx, plan.id, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
+          await writeRefreshSnapshot(tx, plan.id, plan.officerId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
           await tx.recoveryPlan.update({ where: { id: plan.id }, data: { cutoffDate: cutoff, weeklyEditEnabled: input.allowWeeklyEdit } });
         },
         { timeout: 60000, maxWait: 10000 },
@@ -1481,7 +1561,7 @@ async function replaceRecoveryPlanAtomic(
       await tx.recoveryWeekPlan.deleteMany({ where: { recoveryPlanDealer: { recoveryPlanId: planId } } });
       await tx.recoveryPlanDealer.updateMany({ where: { recoveryPlanId: planId }, data: { monthRecoveryPlan: null, monthRunningRecovery: null, noPlan: false, noPlanReason: null } });
       // (b) … and write the replacement snapshot + refresh aging, in the SAME commit.
-      await writeRefreshSnapshot(tx, planId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
+      await writeRefreshSnapshot(tx, planId, officerId, forOfficer, cutoff, filename, weekNo, ctx.userId, { ...summary, weekNo });
       await tx.recoveryPlan.update({ where: { id: planId }, data: { status: PlanStatus.DRAFT, cutoffDate: cutoff, weeklyEditEnabled: allowWeeklyEdit } });
     },
     { timeout: 60000, maxWait: 10000 },
@@ -1772,11 +1852,12 @@ interface DaybookResolution {
   monthName: string;
   seasonName: string;
   totalRows: number;
-  // dealerId → aggregated Day Book totals + the month's RecoveryPlanDealer row it maps to.
-  matched: Map<string, { rpdId: string; dealerName: string; officerName: string; receipt: number; srCr: number }>;
+  // dealerId → aggregated Day Book totals + the plan it belongs to. rpdId is null when the dealer is a
+  // valid (assigned) recovery dealer that does not yet have a RecoveryPlanDealer row — commit creates it.
+  matched: Map<string, { planId: string; rpdId: string | null; dealerName: string; officerName: string; receipt: number; srCr: number }>;
   skippedUnknown: string[]; // raw names with no Dealer Alias / master match
-  skippedNoPlan: { dealerName: string }[]; // resolved, but no Recovery Plan for this month
-  monthRpdIds: string[]; // ALL RecoveryPlanDealer ids in the month (for the reupload reset)
+  skippedNoPlan: { dealerName: string }[]; // resolved, but not assigned to any officer planned this month
+  monthRpdIds: string[]; // EXISTING RecoveryPlanDealer ids in the month (for the reupload reset)
 }
 
 /** Resolve a parsed Day Book against the month's Recovery Plans (NO writes). Shared by analyze+commit. */
@@ -1791,16 +1872,39 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
     loadDealerResolver(),
     prisma.recoveryPlan.findMany({
       where: { seasonMonthId },
-      select: { officer: { select: { name: true } }, dealers: { select: { id: true, dealerId: true, dealer: { select: { name: true } } } } },
+      select: { id: true, officerId: true, officer: { select: { name: true } }, dealers: { select: { id: true, dealerId: true, dealer: { select: { name: true } } } } },
     }),
   ]);
-  // dealerId → its RecoveryPlanDealer row for this month (a dealer belongs to exactly one officer).
-  const rpdByDealer = new Map<string, { rpdId: string; dealerName: string; officerName: string }>();
+  // dealerId → the plan + (existing) RecoveryPlanDealer row it maps to for this month. A dealer belongs
+  // to exactly one officer, hence one plan.
+  const rpdByDealer = new Map<string, { planId: string; rpdId: string | null; dealerName: string; officerName: string }>();
+  const planIdByOfficer = new Map<string, string>();
+  const officerNameByOfficer = new Map<string, string>();
   const monthRpdIds: string[] = [];
-  for (const p of plans as { officer: { name: string }; dealers: { id: string; dealerId: string; dealer: { name: string } }[] }[]) {
+  for (const p of plans as { id: string; officerId: string; officer: { name: string }; dealers: { id: string; dealerId: string; dealer: { name: string } }[] }[]) {
+    planIdByOfficer.set(p.officerId, p.id);
+    officerNameByOfficer.set(p.officerId, p.officer.name);
     for (const d of p.dealers) {
       monthRpdIds.push(d.id);
-      rpdByDealer.set(d.dealerId, { rpdId: d.id, dealerName: d.dealer.name, officerName: p.officer.name });
+      rpdByDealer.set(d.dealerId, { planId: p.id, rpdId: d.id, dealerName: d.dealer.name, officerName: p.officer.name });
+    }
+  }
+
+  // Assignment-aware scope — the KEY fix: a Day Book dealer is valid when it is CURRENTLY ASSIGNED to
+  // one of the month's officers, EVEN IF it has no aging/recovery row yet (it had no Aging record, no
+  // recovery value, or no previously-populated row). commit will create the zero row and populate it.
+  // Daybook scope therefore = the Sales Officer's full dealer list, never "who's already in the plan".
+  const officerIds = [...planIdByOfficer.keys()];
+  if (officerIds.length > 0) {
+    const assigns = (await prisma.dealerAssignment.findMany({
+      where: { officerId: { in: officerIds }, effectiveTo: null, dealer: { isActive: true } },
+      select: { officerId: true, dealerId: true, dealer: { select: { name: true } } },
+    })) as { officerId: string; dealerId: string; dealer: { name: string } }[];
+    for (const a of assigns) {
+      if (rpdByDealer.has(a.dealerId)) continue; // already has an existing recovery row
+      const planId = planIdByOfficer.get(a.officerId);
+      if (!planId) continue;
+      rpdByDealer.set(a.dealerId, { planId, rpdId: null, dealerName: a.dealer.name, officerName: officerNameByOfficer.get(a.officerId) ?? "" });
     }
   }
 
@@ -1822,17 +1926,17 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
     byDealer.set(match.dealer.id, acc);
   }
 
-  const matched = new Map<string, { rpdId: string; dealerName: string; officerName: string; receipt: number; srCr: number }>();
+  const matched = new Map<string, { planId: string; rpdId: string | null; dealerName: string; officerName: string; receipt: number; srCr: number }>();
   const skippedNoPlan: { dealerName: string }[] = [];
   for (const [dealerId, totals] of byDealer) {
     const rpd = rpdByDealer.get(dealerId);
     if (!rpd) {
-      // Resolved to a master dealer, but that dealer has no Recovery Plan for this month.
+      // Resolved to a master dealer, but that dealer is not assigned to any officer planned this month.
       const name = resolver.dealers.find((x) => x.id === dealerId)?.name ?? dealerId;
       skippedNoPlan.push({ dealerName: name });
       continue;
     }
-    matched.set(dealerId, { rpdId: rpd.rpdId, dealerName: rpd.dealerName, officerName: rpd.officerName, ...totals });
+    matched.set(dealerId, { planId: rpd.planId, rpdId: rpd.rpdId, dealerName: rpd.dealerName, officerName: rpd.officerName, ...totals });
   }
 
   return {
@@ -1884,16 +1988,22 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
   if (parsed.rows.length === 0) throw new ApiError(422, "No voucher rows were found in the Day Book");
   const res = await resolveDaybook(parsed, input.seasonMonthId);
 
-  const matched = [...res.matched.values()];
+  const matched = [...res.matched.entries()].map(([dealerId, m]) => ({ dealerId, ...m }));
   await prisma.$transaction(
     async (tx: Tx) => {
       // Reset the two Daybook-owned columns for the WHOLE month first (clears any prior upload).
       if (res.monthRpdIds.length > 0) {
         await tx.recoveryPlanDealer.updateMany({ where: { id: { in: res.monthRpdIds } }, data: { srCr: 0, liveRecovery: 0 } });
       }
-      // Then set the matched dealers' totals (ONLY srCr + liveRecovery).
+      // Then set the matched dealers' totals (ONLY srCr + liveRecovery). UPSERT by (plan, dealer) so a
+      // valid assigned dealer that had NO Recovery row yet (no Aging record) is CREATED with zero aging
+      // and its Daybook values — never skipped. Existing rows keep all their aging/planning values.
       for (const m of matched) {
-        await tx.recoveryPlanDealer.update({ where: { id: m.rpdId }, data: { srCr: m.srCr, liveRecovery: m.receipt } });
+        await tx.recoveryPlanDealer.upsert({
+          where: { recoveryPlanId_dealerId: { recoveryPlanId: m.planId, dealerId: m.dealerId } },
+          update: { srCr: m.srCr, liveRecovery: m.receipt },
+          create: { recoveryPlanId: m.planId, dealerId: m.dealerId, srCr: m.srCr, liveRecovery: m.receipt, outstanding: 0, overdue: 0, due: 0, running: 0, runningTillDate: 0 },
+        });
       }
     },
     { timeout: 60000, maxWait: 10000 },

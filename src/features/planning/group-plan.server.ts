@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { figuresForMode, nbv as calcNbv, isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { clearanceMapForGroup } from "@/features/users/catalogue.server";
+import { loadEffectiveProduct } from "@/features/products/merge.server";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -227,17 +228,25 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     if (baselineBuckets.has(b)) baselineRepIds.add(p.id);
   }
 
+  // Product Merge (Phase 12): resolve each line's product to its EFFECTIVE (survivor) identity so a
+  // merged source (e.g. TAANDAB) aggregates into its survivor (TANDAB) as ONE territory row. Figures
+  // are still computed per line with the line's own snapshot rate and summed, so combined amounts equal
+  // the sum of the sources' amounts. Display metadata (name/technical/rate/NBV%) is the survivor's.
+  const eff = await loadEffectiveProduct();
+
   const productRows = new Map<string, GroupProductRow>();
   const contributions: Contribution[] = [];
   const ensureRow = (l: { productId: string; product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown } }): GroupProductRow => {
-    let row = productRows.get(l.productId);
+    const effId = eff.effId(l.productId);
+    const m = eff.meta(effId);
+    let row = productRows.get(effId);
     if (!row) {
       row = {
-        productId: l.productId,
-        productName: l.product.name,
-        technicalName: l.product.technicalName,
-        rate: num(l.product.rate),
-        nbvPercent: num(l.product.nbvPercent),
+        productId: effId,
+        productName: m?.name ?? l.product.name,
+        technicalName: m?.technicalName ?? l.product.technicalName,
+        rate: m?.rate ?? num(l.product.rate),
+        nbvPercent: m?.nbvPercent ?? num(l.product.nbvPercent),
         isClearance: false,
         clearanceQty: null,
         seasonQty: 0,
@@ -256,7 +265,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         contributions: [],
         drawer: [],
       };
-      productRows.set(l.productId, row);
+      productRows.set(effId, row);
     }
     return row;
   };

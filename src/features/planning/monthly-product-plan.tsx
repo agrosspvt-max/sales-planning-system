@@ -30,13 +30,25 @@ export function MonthlyProductPlan() {
   const monthIds = useMemo(() => resolveFilteredMonths(data.months, filter), [data.months, filter]);
 
   const rows = useMemo(() => {
-    const byProduct = new Map<string, { name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number; saleAmount: number; additional: boolean; isClearance: boolean; clearanceQty: number | null }>();
+    // Pass 1 — accumulate plan/sale inputs at the RAW product level (each raw product has a single
+    // rate/NBV%), so figures are computed with the correct per-product rate.
+    const byRaw = new Map<string, { effId: string; effName: string; name: string; rate: number; nbvPercent: number; planInput: number; saleInput: number; saleAmount: number; additional: boolean; isClearance: boolean; clearanceQty: number | null }>();
     for (const d of data.dealers) {
       for (const p of d.products) {
-        let r = byProduct.get(p.productId);
+        let r = byRaw.get(p.productId);
         if (!r) {
-          r = { name: p.productName, rate: p.rate, nbvPercent: p.nbvPercent, planInput: 0, saleInput: 0, saleAmount: 0, additional: false, isClearance: p.isClearance ?? false, clearanceQty: p.clearanceQty ?? null };
-          byProduct.set(p.productId, r);
+          r = {
+            effId: p.effectiveProductId ?? p.productId,
+            effName: p.effectiveProductName ?? p.productName,
+            name: p.productName,
+            rate: p.rate,
+            nbvPercent: p.nbvPercent,
+            planInput: 0, saleInput: 0, saleAmount: 0,
+            additional: false,
+            isClearance: p.isClearance ?? false,
+            clearanceQty: p.clearanceQty ?? null,
+          };
+          byRaw.set(p.productId, r);
         }
         if (p.isAdditional) r.additional = true;
         for (const mId of monthIds) {
@@ -49,24 +61,45 @@ export function MonthlyProductPlan() {
         }
       }
     }
-    return Array.from(byProduct.entries()).map(([productId, r]) => {
+    // Pass 2 — Product Merge (Phase 12): fold raw products into their EFFECTIVE (survivor) identity.
+    // Figures (amount/NBV) are summed from each source's own rate-based computation so the combined
+    // amount equals the sum of the sources' amounts (survivor + merged-in), never a re-derivation
+    // from combined quantity × a single rate. A merged source collapses into ONE survivor row.
+    type Row = { productId: string; name: string; nbvPercent: number; additional: boolean; isClearance: boolean; clearanceQty: number | null; planQty: number; planAmount: number; planNbv: number; soldQty: number; actualAmount: number; actualNbv: number };
+    const byEff = new Map<string, Row>();
+    for (const [rawId, r] of byRaw.entries()) {
       const plan = figuresForMode(monthlyMode, r.planInput, r.rate, r.nbvPercent);
       const actual = figuresForMode(monthlyMode, r.saleInput, r.rate, r.nbvPercent); // quantity only
-      return {
-        productId,
-        name: r.name,
-        nbvPercent: r.nbvPercent,
-        additional: r.additional,
-        isClearance: r.isClearance,
-        clearanceQty: r.clearanceQty,
-        planQty: plan.totalQty ?? 0,
-        planAmount: plan.amount ?? 0,
-        planNbv: plan.nbv ?? 0,
-        soldQty: actual.totalQty ?? 0,
-        actualAmount: r.saleAmount,
-        actualNbv: nbv(r.saleAmount, r.nbvPercent),
-      };
-    }).sort((a, b) => b.planAmount - a.planAmount);
+      const isSurvivorLine = r.effId === rawId;
+      let row = byEff.get(r.effId);
+      if (!row) {
+        row = {
+          productId: r.effId,
+          name: r.effName,
+          nbvPercent: r.nbvPercent,
+          additional: false,
+          isClearance: r.isClearance,
+          clearanceQty: r.clearanceQty,
+          planQty: 0, planAmount: 0, planNbv: 0, soldQty: 0, actualAmount: 0, actualNbv: 0,
+        };
+        byEff.set(r.effId, row);
+      }
+      // Survivor wins: the surviving product's display metadata takes precedence.
+      if (isSurvivorLine) {
+        row.name = r.effName;
+        row.nbvPercent = r.nbvPercent;
+        row.isClearance = r.isClearance;
+        row.clearanceQty = r.clearanceQty;
+      }
+      row.additional = row.additional || r.additional;
+      row.planQty += plan.totalQty ?? 0;
+      row.planAmount += plan.amount ?? 0;
+      row.planNbv += plan.nbv ?? 0;
+      row.soldQty += actual.totalQty ?? 0;
+      row.actualAmount += r.saleAmount;
+      row.actualNbv += nbv(r.saleAmount, r.nbvPercent);
+    }
+    return Array.from(byEff.values()).sort((a, b) => b.planAmount - a.planAmount);
   }, [data, monthIds, monthlyMode, cellFor]);
 
   const totals = rows.reduce(

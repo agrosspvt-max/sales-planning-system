@@ -10,6 +10,7 @@ import {
   isPlanOwner,
 } from "@/lib/scope";
 import { planningProductsForOfficer, clearanceMapForGroup } from "@/features/users/catalogue.server";
+import { loadEffectiveProduct } from "@/features/products/merge.server";
 import { saveLinesSchema, remarksSchema, revisionRequestSchema } from "@/lib/validations/planning";
 import { NotificationType } from "@prisma/client";
 import { findOrCreateSeason } from "@/features/seasons/service.server";
@@ -370,6 +371,11 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
     : [];
   const columnPacks = [...planningPacks, ...extraPacks].sort((a, b) => a.displayOrder - b.displayOrder);
 
+  // Product Merge (Phase 12): resolve each line's OPERATIONAL identity (survivor) once. Raw productId /
+  // planLineId are kept untouched (editing + cell keys), but read/aggregation views group by the effective
+  // identity so a merged source (e.g. TAANDAB) rolls up under the survivor (TANDAB) with no double counting.
+  const eff = await loadEffectiveProduct();
+
   const isOwner = isPlanOwner(ctx, plan.officerId);
   const canEdit = isOwner && EDITABLE.includes(plan.status) && plan.season.status === SeasonStatus.OPEN;
   // Admin Override: a Super Admin may correct the APPROVED, active version (read-only flag only).
@@ -417,6 +423,9 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
             planLineId: l.id,
             productId: l.productId,
             productName: l.product.name,
+            // Operational identity for read/aggregation grouping (survivor after a Product Merge; itself otherwise).
+            effectiveProductId: eff.effId(l.productId),
+            effectiveProductName: eff.meta(eff.effId(l.productId))?.name ?? l.product.name,
             technicalName: l.product.technicalName,
             productActive: l.product.isActive,
             isClearance: clearance.has(l.productId),

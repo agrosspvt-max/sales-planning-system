@@ -1,10 +1,11 @@
 import "server-only";
-import { SchemeBenefit, SchemeStatus, SchemeCalcType, SchemeRequirementType, SchemeValueMode, Role } from "@prisma/client";
+import { SchemeBenefit, SchemeStatus, SchemeCalcType, SchemeRequirementType, SchemeValueMode, SchemeStructure, SchemeOptionAchievementType, Role } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { validateSchemeRequirement, normalizeSchemeRequirement } from "@/lib/scheme-requirement";
+import { validateMultipleOptions, normalizeOption, type OptionAchievementType } from "@/lib/scheme-options";
 
 // One installment of the payout schedule for Scheme Value (With GST).
 const installmentInput = z.object({
@@ -39,6 +40,16 @@ const requirementProductInput = z.object({
   requiredValue: z.coerce.number().nullable().optional(),
 });
 
+// One Multiple Options row (Phase 10). id present ⇒ an existing option (update path); absent ⇒ new option.
+const schemeOptionInput = z.object({
+  id: z.string().optional(),
+  label: z.string().trim().max(100).nullable().optional(),
+  target: z.coerce.number().nullable().optional(),
+  valueWithoutGST: z.coerce.number().nullable().optional(),
+  valueWithGST: z.coerce.number().nullable().optional(),
+  isActive: z.boolean().optional().default(true),
+});
+
 const schemeInput = z.object({
   schemeName: z.string().trim().min(1, "Scheme Name is required").max(200),
   stateIds: z.array(z.string().min(1)).min(1, "Select at least one State"),
@@ -46,8 +57,9 @@ const schemeInput = z.object({
   startDate: z.coerce.date().nullable().optional(),
   endDate: z.coerce.date().nullable().optional(),
   bookingLastDate: z.coerce.date().nullable().optional(),
-  schemeValueWithoutGST: z.coerce.number().min(0, "Scheme Value (Without GST) cannot be negative"),
-  schemeValueWithGST: z.coerce.number().min(0, "Scheme Value (With GST) cannot be negative"),
+  // FIXED: required (enforced in superRefine). MULTIPLE_OPTIONS: null (values live on each option).
+  schemeValueWithoutGST: z.coerce.number().min(0, "Scheme Value (Without GST) cannot be negative").nullable().optional(),
+  schemeValueWithGST: z.coerce.number().min(0, "Scheme Value (With GST) cannot be negative").nullable().optional(),
   bookingAmount: z.coerce.number().min(0, "Booking Amount cannot be negative").nullable().optional(),
   schemeBenefit: z.nativeEnum(SchemeBenefit),
   benefitDetails: z.string().trim().max(500).nullable().optional(),
@@ -55,6 +67,8 @@ const schemeInput = z.object({
   allowMultipleSchemes: z.boolean(),
   maxExtensionDays: z.coerce.number().int().min(0).max(365).optional().default(0),
   maxExtensionAttempts: z.coerce.number().int().min(0).max(20).optional().default(0),
+  // Pre-placement MASTER ceiling (Phase 11). 0 ⇒ not available. Actual per-dealer days are chosen in planning.
+  prePlacementMaxDays: z.coerce.number().int().min(0).max(365).optional().default(0),
   documentUrl: z.string().max(5_000_000).nullable().optional(),
   installments: z.array(installmentInput).max(10).optional().default([]),
   // Scheme Requirement (Phase 5). Belongs to the Scheme, not to individual dealers. Defaults to NONE so
@@ -63,22 +77,50 @@ const schemeInput = z.object({
   valueMode: z.nativeEnum(SchemeValueMode).nullable().optional(),
   combinedRequiredValue: z.coerce.number().nullable().optional(),
   requirementProducts: z.array(requirementProductInput).max(200).optional().default([]),
+  // Scheme Structure (Phase 10). FIXED (default) keeps the requirement* fields above; MULTIPLE_OPTIONS uses
+  // optionAchievementType + eligibleProductIds + options.
+  structure: z.nativeEnum(SchemeStructure).optional().default(SchemeStructure.FIXED),
+  optionAchievementType: z.nativeEnum(SchemeOptionAchievementType).nullable().optional(),
+  eligibleProductIds: z.array(z.string().min(1)).max(500).optional().default([]),
+  options: z.array(schemeOptionInput).max(50).optional().default([]),
 }).superRefine((value, ctx) => {
   if (!value.isPerpetual && (!value.startDate || !value.endDate || !value.bookingLastDate)) {
     for (const field of ["startDate", "endDate", "bookingLastDate"] as const) if (!value[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: "This date is required unless the scheme is perpetual" });
   }
   if (!value.isPerpetual && value.startDate && value.endDate && value.endDate < value.startDate) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endDate"], message: "End Date must be on or after Start Date" });
   if (value.schemeBenefit === SchemeBenefit.OTHER && !value.benefitDetails) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["benefitDetails"], message: "Benefit Details are required when Benefit is Other" });
-  validateInstallments(value.installments ?? [], value.schemeValueWithGST, ctx);
-  // Server-side requirement validation — rejects every ambiguous/invalid combination even if the client
-  // allowed it. Single source of truth shared with the client (src/lib/scheme-requirement.ts).
-  for (const message of validateSchemeRequirement({
-    requirementType: value.requirementType,
-    valueMode: value.valueMode ?? null,
-    combinedRequiredValue: value.combinedRequiredValue ?? null,
-    products: value.requirementProducts ?? [],
-  })) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requirementProducts"], message });
+
+  if (value.structure === SchemeStructure.MULTIPLE_OPTIONS) {
+    // MULTIPLE_OPTIONS: scheme-level values must be null (they live on each option); no Fixed requirement.
+    if (value.schemeValueWithGST != null || value.schemeValueWithoutGST != null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithGST"], message: "A Multiple Options scheme has no scheme-level value — values belong to each option" });
+    }
+    for (const message of validateMultipleOptions({
+      achievementType: (value.optionAchievementType ?? "QUANTITY_BASED") as OptionAchievementType,
+      eligibleProductIds: value.eligibleProductIds ?? [],
+      options: value.options ?? [],
+      installmentCalcTypes: (value.installments ?? []).map((i) => i.calculationType),
+    })) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["options"], message });
+    }
+    if (value.optionAchievementType == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["optionAchievementType"], message: "Select an achievement type" });
+    // Percentage total must still be 100% (installments are percentage-only for options, checked above).
+    validateInstallments(value.installments ?? [], 0, ctx);
+  } else {
+    // FIXED: scheme-level values required (unchanged behaviour), plus installment + requirement validation.
+    if (value.schemeValueWithoutGST == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithoutGST"], message: "Scheme Value (Without GST) is required" });
+    if (value.schemeValueWithGST == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithGST"], message: "Scheme Value (With GST) is required" });
+    validateInstallments(value.installments ?? [], value.schemeValueWithGST ?? 0, ctx);
+    // Server-side requirement validation — rejects every ambiguous/invalid combination even if the client
+    // allowed it. Single source of truth shared with the client (src/lib/scheme-requirement.ts).
+    for (const message of validateSchemeRequirement({
+      requirementType: value.requirementType,
+      valueMode: value.valueMode ?? null,
+      combinedRequiredValue: value.combinedRequiredValue ?? null,
+      products: value.requirementProducts ?? [],
+    })) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requirementProducts"], message });
+    }
   }
 });
 
@@ -100,80 +142,143 @@ const mapInstallments = (rules: InstallmentRow[]) => rules.slice().sort((a, b) =
 type RequirementProductRow = { productId: string; requiredQty: unknown; requiredValue: unknown };
 const mapRequirementProducts = (rows: RequirementProductRow[]) => rows.map((r) => ({ productId: r.productId, requiredQty: r.requiredQty == null ? null : Number(r.requiredQty), requiredValue: r.requiredValue == null ? null : Number(r.requiredValue) }));
 
+const numOrNull = (v: unknown): number | null => (v == null ? null : Number(v.toString()));
+type OptionRow = { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; sortOrder: number; isActive: boolean };
+const mapOptions = (rows: OptionRow[]) => rows.slice().sort((a, b) => a.sortOrder - b.sortOrder).map((o) => ({
+  id: o.id, label: o.label, target: numOrNull(o.targetQty) ?? numOrNull(o.targetValue), targetQty: numOrNull(o.targetQty), targetValue: numOrNull(o.targetValue),
+  valueWithoutGST: Number(o.valueWithoutGST), valueWithGST: Number(o.valueWithGST), sortOrder: o.sortOrder, isActive: o.isActive,
+}));
+const OPTION_INCLUDE = { options: { orderBy: { sortOrder: "asc" } as const }, eligibleProducts: { select: { productId: true } } };
+
 export async function listSchemes(ctx: AuthContext, filters: { status?: string | null; stateId?: string | null }) {
   await refreshSchemeStatuses();
   const status = filters.status === SchemeStatus.OPEN || filters.status === SchemeStatus.CLOSED ? filters.status : undefined;
   const rows = await prisma.scheme.findMany({
     where: { status, ...(filters.stateId ? { states: { some: { groupId: filters.stateId } } } : {}) },
-    include: { states: { include: { group: { select: { id: true, name: true } } } }, createdBy: { select: { name: true } }, installmentRules: true, requirementProducts: true },
+    include: { states: { include: { group: { select: { id: true, name: true } } } }, createdBy: { select: { name: true } }, installmentRules: true, requirementProducts: true, ...OPTION_INCLUDE },
     orderBy: [{ isPerpetual: "desc" }, { endDate: "desc" }, { updatedAt: "desc" }],
   });
-  return rows.map((s) => ({ ...s, schemeValueWithoutGST: Number(s.schemeValueWithoutGST), schemeValueWithGST: Number(s.schemeValueWithGST), bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount), combinedRequiredValue: s.combinedRequiredValue == null ? null : Number(s.combinedRequiredValue), states: s.states.map((x) => x.group), installments: mapInstallments(s.installmentRules), requirementProducts: mapRequirementProducts(s.requirementProducts) }));
+  return rows.map((s) => ({ ...s, schemeValueWithoutGST: numOrNull(s.schemeValueWithoutGST), schemeValueWithGST: numOrNull(s.schemeValueWithGST), bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount), combinedRequiredValue: s.combinedRequiredValue == null ? null : Number(s.combinedRequiredValue), states: s.states.map((x) => x.group), installments: mapInstallments(s.installmentRules), requirementProducts: mapRequirementProducts(s.requirementProducts), options: mapOptions(s.options as OptionRow[]), eligibleProductIds: (s.eligibleProducts as { productId: string }[]).map((e) => e.productId) }));
 }
 
 export async function getScheme(ctx: AuthContext, id: string) {
   await refreshSchemeStatuses();
-  const row = await prisma.scheme.findUnique({ where: { id }, include: { states: { include: { group: { select: { id: true, name: true } } } }, installmentRules: true, requirementProducts: true } });
+  const row = await prisma.scheme.findUnique({ where: { id }, include: { states: { include: { group: { select: { id: true, name: true } } } }, installmentRules: true, requirementProducts: true, ...OPTION_INCLUDE } });
   if (!row) throw new ApiError(404, "Scheme not found");
-  return { ...row, schemeValueWithoutGST: Number(row.schemeValueWithoutGST), schemeValueWithGST: Number(row.schemeValueWithGST), bookingAmount: row.bookingAmount == null ? null : Number(row.bookingAmount), combinedRequiredValue: row.combinedRequiredValue == null ? null : Number(row.combinedRequiredValue), stateIds: row.states.map((x) => x.groupId), states: row.states.map((x) => x.group), installments: mapInstallments(row.installmentRules), requirementProducts: mapRequirementProducts(row.requirementProducts) };
+  return { ...row, schemeValueWithoutGST: numOrNull(row.schemeValueWithoutGST), schemeValueWithGST: numOrNull(row.schemeValueWithGST), bookingAmount: row.bookingAmount == null ? null : Number(row.bookingAmount), combinedRequiredValue: row.combinedRequiredValue == null ? null : Number(row.combinedRequiredValue), stateIds: row.states.map((x) => x.groupId), states: row.states.map((x) => x.group), installments: mapInstallments(row.installmentRules), requirementProducts: mapRequirementProducts(row.requirementProducts), options: mapOptions(row.options as OptionRow[]), eligibleProductIds: (row.eligibleProducts as { productId: string }[]).map((e) => e.productId) };
 }
 
 export async function schemeStateOptions() {
   return prisma.userGroup.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } });
 }
 
-export async function createScheme(ctx: AuthContext, raw: unknown) {
-  assertAdmin(ctx);
-  const data = schemeInput.parse(raw);
-  const { stateIds, installments, requirementType, valueMode, combinedRequiredValue, requirementProducts, ...schemeData } = data;
-  const normalized = schemeData.isPerpetual ? { ...schemeData, startDate: null, endDate: null, bookingLastDate: null } : schemeData;
-  const req = normalizeSchemeRequirement({ requirementType, valueMode: valueMode ?? null, combinedRequiredValue: combinedRequiredValue ?? null, products: requirementProducts });
-  const scheme = await prisma.scheme.create({
-    data: {
+type SchemeData = z.infer<typeof schemeInput>;
+
+/** Structure-aware scalar fields shared by create/update. FIXED keeps its value pair + Fixed requirement;
+ *  MULTIPLE_OPTIONS nulls the scheme-level value pair + requirement fields (values live on each option). */
+function schemeScalarData(data: SchemeData) {
+  const { stateIds, installments, requirementType, valueMode, combinedRequiredValue, requirementProducts,
+    structure, optionAchievementType, eligibleProductIds, options, schemeValueWithoutGST, schemeValueWithGST, ...rest } = data;
+  void stateIds; void installments; void eligibleProductIds; void options;
+  const normalized = rest.isPerpetual ? { ...rest, startDate: null, endDate: null, bookingLastDate: null } : rest;
+  const isOptions = structure === SchemeStructure.MULTIPLE_OPTIONS;
+  const req = isOptions ? null : normalizeSchemeRequirement({ requirementType, valueMode: valueMode ?? null, combinedRequiredValue: combinedRequiredValue ?? null, products: requirementProducts });
+  return {
+    scalar: {
       ...normalized,
       bookingAmount: normalized.bookingAmount ?? null,
       benefitDetails: normalized.schemeBenefit === SchemeBenefit.OTHER ? normalized.benefitDetails : null,
       otherBenefitDetails: normalized.otherBenefitDetails || null,
       documentUrl: normalized.documentUrl || null,
-      requirementType: req.requirementType,
-      valueMode: req.valueMode,
-      combinedRequiredValue: req.combinedRequiredValue,
+      structure,
+      optionAchievementType: isOptions ? (optionAchievementType ?? null) : null,
+      schemeValueWithoutGST: isOptions ? null : (schemeValueWithoutGST ?? null),
+      schemeValueWithGST: isOptions ? null : (schemeValueWithGST ?? null),
+      requirementType: isOptions ? SchemeRequirementType.NONE : req!.requirementType,
+      valueMode: isOptions ? null : req!.valueMode,
+      combinedRequiredValue: isOptions ? null : req!.combinedRequiredValue,
+    },
+    isOptions,
+    reqProducts: isOptions ? [] : req!.products,
+    achievementType: (optionAchievementType ?? "QUANTITY_BASED") as OptionAchievementType,
+  };
+}
+
+const optionCreateRows = (options: SchemeData["options"], achievementType: OptionAchievementType) =>
+  (options ?? []).map((o, i) => {
+    const nrm = normalizeOption(o, achievementType);
+    return { label: nrm.label, targetQty: nrm.targetQty, targetValue: nrm.targetValue, valueWithoutGST: nrm.valueWithoutGST, valueWithGST: nrm.valueWithGST, sortOrder: i, isActive: o.isActive ?? true };
+  });
+
+export async function createScheme(ctx: AuthContext, raw: unknown) {
+  assertAdmin(ctx);
+  const data = schemeInput.parse(raw);
+  const { scalar, isOptions, reqProducts, achievementType } = schemeScalarData(data);
+  const eligible = [...new Set(data.eligibleProductIds ?? [])];
+  const scheme = await prisma.scheme.create({
+    data: {
+      ...scalar,
       createdById: ctx.userId,
-      states: { create: stateIds.map((groupId) => ({ groupId })) },
-      installmentRules: { create: installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
-      requirementProducts: { create: req.products.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
+      states: { create: data.stateIds.map((groupId) => ({ groupId })) },
+      installmentRules: { create: data.installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
+      requirementProducts: { create: reqProducts.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
+      eligibleProducts: { create: isOptions ? eligible.map((productId) => ({ productId })) : [] },
+      options: { create: isOptions ? optionCreateRows(data.options, achievementType) : [] },
     },
   });
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "scheme", entityId: scheme.id, summary: `Created scheme ${scheme.schemeName}` });
+  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "scheme", entityId: scheme.id, summary: `Created scheme ${scheme.schemeName} (${data.structure})` });
   return { id: scheme.id };
 }
 
 export async function updateScheme(ctx: AuthContext, id: string, raw: unknown) {
   assertAdmin(ctx);
   const data = schemeInput.parse(raw);
-  const { stateIds, installments, requirementType, valueMode, combinedRequiredValue, requirementProducts, ...schemeData } = data;
-  const normalized = schemeData.isPerpetual ? { ...schemeData, startDate: null, endDate: null, bookingLastDate: null } : schemeData;
-  const req = normalizeSchemeRequirement({ requirementType, valueMode: valueMode ?? null, combinedRequiredValue: combinedRequiredValue ?? null, products: requirementProducts });
-  const scheme = await prisma.scheme.update({
-    where: { id },
-    data: {
-      ...normalized,
-      bookingAmount: normalized.bookingAmount ?? null,
-      benefitDetails: normalized.schemeBenefit === SchemeBenefit.OTHER ? normalized.benefitDetails : null,
-      otherBenefitDetails: normalized.otherBenefitDetails || null,
-      documentUrl: normalized.documentUrl || null,
-      requirementType: req.requirementType,
-      valueMode: req.valueMode,
-      combinedRequiredValue: req.combinedRequiredValue,
-      states: { deleteMany: {}, create: stateIds.map((groupId) => ({ groupId })) },
-      installmentRules: { deleteMany: {}, create: installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
-      // Replace the requirement DEFINITION rows only. SchemeRequirementProduct is separate from SchemeSale
-      // (sales reference an upload scope, not these rows), so this NEVER deletes achievement history.
-      requirementProducts: { deleteMany: {}, create: req.products.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
-    },
+  const { scalar, isOptions, reqProducts, achievementType } = schemeScalarData(data);
+  const eligible = [...new Set(data.eligibleProductIds ?? [])];
+
+  // Structure can only change while NO dealer has been planned into the scheme (protects committed snapshots).
+  const existing = (await prisma.scheme.findUnique({ where: { id }, select: { structure: true, _count: { select: { dealerPlans: true } } } })) as { structure: string; _count: { dealerPlans: number } } | null;
+  if (!existing) throw new ApiError(404, "Scheme not found");
+  if (existing.structure !== data.structure && existing._count.dealerPlans > 0) {
+    throw new ApiError(409, "The scheme structure cannot be changed after dealers have been planned into this scheme.");
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.scheme.update({
+      where: { id },
+      data: {
+        ...scalar,
+        states: { deleteMany: {}, create: data.stateIds.map((groupId) => ({ groupId })) },
+        installmentRules: { deleteMany: {}, create: data.installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
+        // Requirement/eligible rows carry no plan FK, so replace is safe and never touches SchemeSale history.
+        requirementProducts: { deleteMany: {}, create: reqProducts.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
+        eligibleProducts: { deleteMany: {}, create: isOptions ? eligible.map((productId) => ({ productId })) : [] },
+      },
+    });
+
+    // Options need a RECONCILE (not deleteMany+create): an option selected by a dealer is FK-Restricted and
+    // must be DISCONTINUED (isActive=false), never deleted — preserving the dealer's committed snapshot.
+    const current = (await tx.schemeOption.findMany({ where: { schemeId: id }, select: { id: true, _count: { select: { dealerPlans: true } } } })) as { id: string; _count: { dealerPlans: number } }[];
+    const incoming = isOptions ? (data.options ?? []) : [];
+    const incomingIds = new Set(incoming.filter((o) => o.id).map((o) => o.id as string));
+    // Remove/discontinue options no longer present.
+    for (const cur of current) {
+      if (incomingIds.has(cur.id)) continue;
+      if (cur._count.dealerPlans > 0) await tx.schemeOption.update({ where: { id: cur.id }, data: { isActive: false, discontinuedAt: new Date() } });
+      else await tx.schemeOption.delete({ where: { id: cur.id } });
+    }
+    // Update existing + create new (sortOrder = payload order).
+    for (let i = 0; i < incoming.length; i++) {
+      const o = incoming[i];
+      const nrm = normalizeOption(o, achievementType);
+      const row = { label: nrm.label, targetQty: nrm.targetQty, targetValue: nrm.targetValue, valueWithoutGST: nrm.valueWithoutGST, valueWithGST: nrm.valueWithGST, sortOrder: i, isActive: o.isActive ?? true };
+      if (o.id) await tx.schemeOption.update({ where: { id: o.id }, data: row });
+      else await tx.schemeOption.create({ data: { ...row, schemeId: id } });
+    }
   });
+
   await refreshSchemeStatuses();
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "scheme", entityId: id, summary: `Updated scheme ${scheme.schemeName}` });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "scheme", entityId: id, summary: `Updated scheme ${data.schemeName} (${data.structure})` });
   return { id };
 }
 

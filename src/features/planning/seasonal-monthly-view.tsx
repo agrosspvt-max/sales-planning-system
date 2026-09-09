@@ -23,6 +23,9 @@ const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n
 interface AMProduct {
   productId: string;
   productName: string;
+  // Product Merge (Phase 12): operational (survivor) identity for grouping; falls back to raw when unset.
+  effectiveProductId?: string;
+  effectiveProductName?: string;
   rate: number;
   nbvPercent: number;
   isClearance?: boolean;
@@ -106,13 +109,25 @@ export function SeasonalMonthlyView({
     const acc = new Map<string, AggRow>();
     for (const d of data.dealers) {
       for (const p of d.products) {
-        const key = groupBy === "product" ? p.productId : d.dealerId;
-        const name = groupBy === "product" ? p.productName : d.dealerName;
+        // Product Merge (Phase 12): group products by their EFFECTIVE (survivor) identity so a
+        // merged source folds into its survivor as ONE row. Figures are still computed per raw
+        // product (own rate) and summed, so combined amounts = Σ of the sources' amounts.
+        const effId = p.effectiveProductId ?? p.productId;
+        const effName = p.effectiveProductName ?? p.productName;
+        const key = groupBy === "product" ? effId : d.dealerId;
+        const name = groupBy === "product" ? effName : d.dealerName;
         let row = acc.get(key);
         if (!row) {
           row = { id: key, name, planQty: 0, planAmount: 0, planNbv: 0, soldQty: 0, soldAmount: 0, soldNbv: 0 };
           if (groupBy === "product") { row.nbvPercent = p.nbvPercent; row.isClearance = p.isClearance ?? false; row.clearanceQty = p.clearanceQty ?? null; }
           acc.set(key, row);
+        }
+        // Survivor wins: the surviving product's own display metadata takes precedence.
+        if (groupBy === "product" && effId === p.productId) {
+          row.name = effName;
+          row.nbvPercent = p.nbvPercent;
+          row.isClearance = p.isClearance ?? false;
+          row.clearanceQty = p.clearanceQty ?? null;
         }
         let planInput = 0;
         let saleInput = 0;

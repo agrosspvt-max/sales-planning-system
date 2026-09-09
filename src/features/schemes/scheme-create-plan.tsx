@@ -63,12 +63,21 @@ const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0
 
 /** A running scheme, as returned by `/api/schemes/running`. Exported so the Scheme Master menu can reuse
  *  the exact same Info / Document / Share dialogs (its rows are adapted to this shape). */
+export interface SchemeOptionDto { id: string; label: string | null; target: number | null; valueWithoutGST: number; valueWithGST: number; isActive: boolean }
 export interface RunningScheme {
   id: string; schemeName: string; states: string[]; isPerpetual: boolean; startDate: string | null; endDate: string | null; bookingLastDate: string | null;
-  schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number; documentUrl: string | null;
+  schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: number | null; schemeValueWithGST: number | null; documentUrl: string | null;
   bookingAmount: number | null; otherBenefitDetails: string | null; allowMultipleSchemes: boolean;
+  prePlacementMaxDays?: number; // Phase 11: master ceiling; 0/absent ⇒ dealer pre-placement not available
   installments: { installmentNumber: number; calculationType: string; value: number; daysAfterBillingDate: number }[];
+  // Multiple Options (Phase 10). structure defaults FIXED; options/eligibleProductIds populated for MULTIPLE_OPTIONS.
+  structure?: "FIXED" | "MULTIPLE_OPTIONS";
+  optionAchievementType?: "QUANTITY_BASED" | "VALUE_BASED" | null;
+  options?: SchemeOptionDto[];
+  eligibleProductIds?: string[];
 }
+/** Currency-or-"Per option" for a scheme-level value that is null on Multiple Options schemes. */
+export const schemeValueText = (v: number | null | undefined) => (v == null ? "Per option" : formatCurrency(v));
 
 /** The planning context for one scheme — used only to populate "Choose Dealer". */
 interface PlanningCtx {
@@ -88,9 +97,25 @@ interface DealerRow {
   note: string | null;
   storedTotal: number | null;
   editable: boolean;
+  // Multiple Options (Phase 10). The dealer's chosen option (null for FIXED schemes / not yet chosen).
+  optionId: string | null;
+  // Pre-placement (Phase 11). Requested days within the scheme ceiling (null ⇒ none).
+  prePlacementDays: number | null;
 }
 
 const rowKey = (schemeId: string, dealerId: string) => `${schemeId}:${dealerId}`;
+
+/** Per-row With-GST value: the selected option's value for MULTIPLE_OPTIONS schemes, else the scheme value.
+ *  Never `?? 0` in a Fixed calculation path — Fixed schemes always carry a scheme-level value. */
+const rowValueWithGST = (scheme: RunningScheme, optionId: string | null): number => {
+  if (scheme.structure === "MULTIPLE_OPTIONS") {
+    const o = scheme.options?.find((x) => x.id === optionId);
+    return o ? o.valueWithGST : 0; // 0 until an option is chosen (row is incomplete / not submittable)
+  }
+  return scheme.schemeValueWithGST ?? 0;
+};
+/** A row's total = per-scheme/option value × count, or its stored total for locked rows. */
+const rowTotal = (scheme: RunningScheme, r: DealerRow): number => (r.editable ? rowValueWithGST(scheme, r.optionId) * r.count : (r.storedTotal ?? rowValueWithGST(scheme, r.optionId) * r.count));
 
 /* --------------------------------- Workspace --------------------------------- */
 
@@ -144,7 +169,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
     });
 
   // Working state layered OVER the server rows, so a refetch can never clobber an untouched edit.
-  const [edits, setEdits] = useState<Record<string, { date?: string; count?: number; note?: string | null }>>({});
+  const [edits, setEdits] = useState<Record<string, { date?: string; count?: number; note?: string | null; optionId?: string | null; prePlacementDays?: number | null }>>({});
   const [added, setAdded] = useState<Record<string, { dealerId: string; dealerName: string }[]>>({});
   const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string | null>>({});
@@ -185,11 +210,13 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
         note: editNote !== undefined ? editNote : (p.soNote ?? null),
         storedTotal: p.totalSchemeAmount,
         editable,
+        optionId: edits[key]?.optionId !== undefined ? edits[key]!.optionId! : (p.selectedOptionId ?? null),
+        prePlacementDays: edits[key]?.prePlacementDays !== undefined ? edits[key]!.prePlacementDays! : (p.prePlacementDays ?? null),
       });
     }
     for (const a of added[scheme.id] ?? []) {
       const key = rowKey(scheme.id, a.dealerId);
-      out.push({ dealerId: a.dealerId, dealerName: a.dealerName, officerName: null, planStatus: null, date: edits[key]?.date ?? "", count: edits[key]?.count ?? 1, note: edits[key]?.note ?? null, storedTotal: null, editable: true });
+      out.push({ dealerId: a.dealerId, dealerName: a.dealerName, officerName: null, planStatus: null, date: edits[key]?.date ?? "", count: edits[key]?.count ?? 1, note: edits[key]?.note ?? null, storedTotal: null, editable: true, optionId: edits[key]?.optionId ?? null, prePlacementDays: edits[key]?.prePlacementDays ?? null });
     }
     return out.sort((a, b) => a.dealerName.localeCompare(b.dealerName));
   };
@@ -200,6 +227,10 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
     setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], count } }; });
   const setNote = (schemeId: string, dealerId: string, note: string) =>
     setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], note: note.trim() || null } }; });
+  const setOption = (schemeId: string, dealerId: string, optionId: string) =>
+    setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], optionId: optionId || null } }; });
+  const setPrePlacement = (schemeId: string, dealerId: string, days: string) =>
+    setEdits((prev) => { const k = rowKey(schemeId, dealerId); const n = Number(days); return { ...prev, [k]: { ...prev[k], prePlacementDays: days === "" || !Number.isFinite(n) || n <= 0 ? null : Math.floor(n) } }; });
 
   /** Drop a dealer from the working set: an unsaved addition disappears, a saved draft/returned row is
    *  removed on the next save (which is what the existing server does with a de-selected editable row). */
@@ -219,7 +250,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
         schemeId: v.schemeId,
         officerId: targetOfficer || undefined,
         // The whole editable working set is always sent, so nothing the officer can still edit is dropped.
-        dealers: v.rows.map((r) => ({ dealerId: r.dealerId, expectedBillingDate: r.date || null, numberOfSchemes: r.count, note: r.note })),
+        dealers: v.rows.map((r) => ({ dealerId: r.dealerId, expectedBillingDate: r.date || null, numberOfSchemes: r.count, note: r.note, optionId: r.optionId, prePlacementDays: r.prePlacementDays })),
         ...(v.submitIds ? { submitDealerIds: v.submitIds } : {}),
       }),
     onSuccess: (_res, v) => {
@@ -334,7 +365,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                         {/* No. of Schemes = Σ each dealer row's Number of Schemes (derives from the live rows, so it
                             recalculates immediately when a dealer's count changes). Total Amount uses the same counts. */}
                         <TableCell className="text-right tabular-nums">{rows.reduce((sum, r) => sum + r.count, 0)}</TableCell>
-                        <TableCell className="text-right tabular-nums">{formatCurrency(rows.reduce((sum, r) => sum + (r.editable ? s.schemeValueWithGST * r.count : (r.storedTotal ?? s.schemeValueWithGST * r.count)), 0))}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(rows.reduce((sum, r) => sum + rowTotal(s, r), 0))}</TableCell>
                         {/* stopPropagation so using an action never toggles the row underneath it. */}
                         <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-1">
@@ -355,7 +386,9 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                       <TableHead>Dealer Name</TableHead>
                                       {/* Organization-wide panel only: whose plan each dealer row is. */}
                                       {readOnly && <TableHead>Sales Officer</TableHead>}
+                                      {s.structure === "MULTIPLE_OPTIONS" && <TableHead>Scheme Option</TableHead>}
                                       <TableHead>Conversion Date</TableHead>
+                                      {(s.prePlacementMaxDays ?? 0) > 0 && <TableHead>Pre-placement (days)</TableHead>}
                                       <TableHead>Number of Schemes</TableHead>
                                       <TableHead className="text-right">Total Amount</TableHead>
                                       <TableHead>Status</TableHead>
@@ -370,17 +403,38 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                         <TableRow key={r.dealerId}>
                                           <TableCell className="font-medium">{r.dealerName}</TableCell>
                                           {readOnly && <TableCell>{r.officerName ?? "—"}</TableCell>}
+                                          {s.structure === "MULTIPLE_OPTIONS" && (
+                                            <TableCell>
+                                              {r.editable ? (
+                                                <NativeSelect
+                                                  className="w-52"
+                                                  value={r.optionId ?? ""}
+                                                  onChange={(e) => setOption(s.id, r.dealerId, e.target.value)}
+                                                  options={[{ value: "", label: "Choose option…" }, ...(s.options ?? []).filter((o) => o.isActive).map((o) => ({ value: o.id, label: `${o.label ? `${o.label} — ` : ""}${o.target ?? ""}${s.optionAchievementType === "VALUE_BASED" ? "" : ""} · ${formatCurrency(o.valueWithGST)}` }))]}
+                                                />
+                                              ) : (
+                                                <span>{s.options?.find((o) => o.id === r.optionId)?.label ?? (r.optionId ? "Selected" : "—")}</span>
+                                              )}
+                                            </TableCell>
+                                          )}
                                           <TableCell>
                                             {r.editable ? (
                                               <Input type="date" className="w-44" min={minDate} max={maxDate} value={r.date} onChange={(e) => setDate(s.id, r.dealerId, e.target.value)} />
                                             ) : r.date ? formatDateShort(r.date) : <span className="text-muted-foreground">—</span>}
                                           </TableCell>
+                                          {(s.prePlacementMaxDays ?? 0) > 0 && (
+                                            <TableCell>
+                                              {r.editable ? (
+                                                <Input type="number" min="0" max={s.prePlacementMaxDays} className="w-24" value={r.prePlacementDays == null ? "" : String(r.prePlacementDays)} placeholder={`0–${s.prePlacementMaxDays}`} onChange={(e) => setPrePlacement(s.id, r.dealerId, e.target.value)} />
+                                              ) : <span className="tabular-nums">{r.prePlacementDays ?? "—"}</span>}
+                                            </TableCell>
+                                          )}
                                           <TableCell>
                                             {r.editable && s.allowMultipleSchemes ? (
                                               <NativeSelect className="w-20" value={String(r.count)} onChange={(e) => setCount(s.id, r.dealerId, Number(e.target.value))} options={Array.from({ length: 10 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))} />
                                             ) : <span className="tabular-nums">{r.count}</span>}
                                           </TableCell>
-                                          <TableCell className="text-right tabular-nums">{formatCurrency(r.editable ? s.schemeValueWithGST * r.count : r.storedTotal ?? s.schemeValueWithGST * r.count)}</TableCell>
+                                          <TableCell className="text-right tabular-nums">{formatCurrency(rowTotal(s, r))}</TableCell>
                                           <TableCell>{r.planStatus ? <PlanStateBadge status={r.planStatus} /> : <Badge variant="muted">New</Badge>}</TableCell>
                                           {!readOnly && (
                                             <TableCell className="text-right">
@@ -583,8 +637,8 @@ export function SchemeInfoDialog({ scheme, onClose }: { scheme: RunningScheme; o
           <div className="grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2">
             <InfoRow label="Booking Amount" value={scheme.bookingAmount == null ? "—" : formatCurrency(scheme.bookingAmount)} />
             <InfoRow label="Scheme Benefit" value={`${BENEFIT_LABEL[scheme.schemeBenefit] ?? scheme.schemeBenefit}${scheme.benefitDetails ? ` · ${scheme.benefitDetails}` : ""}`} />
-            <InfoRow label="Scheme Value (Without GST)" value={formatCurrency(scheme.schemeValueWithoutGST)} />
-            <InfoRow label="Scheme Value (With GST)" value={formatCurrency(scheme.schemeValueWithGST)} />
+            <InfoRow label="Scheme Value (Without GST)" value={schemeValueText(scheme.schemeValueWithoutGST)} />
+            <InfoRow label="Scheme Value (With GST)" value={schemeValueText(scheme.schemeValueWithGST)} />
             <InfoRow label="Scheme Period" value={scheme.isPerpetual ? "Perpetual" : `${formatDate(scheme.startDate)} – ${formatDate(scheme.endDate)}`} />
             <InfoRow label="Last Booking Date" value={scheme.isPerpetual ? "—" : formatDate(scheme.bookingLastDate)} />
             <InfoRow label="State(s)" value={scheme.states.length ? scheme.states.join(", ") : "—"} />
@@ -605,6 +659,26 @@ export function SchemeInfoDialog({ scheme, onClose }: { scheme: RunningScheme; o
                         <TableCell>{CALC_LABEL[r.calculationType] ?? r.calculationType}</TableCell>
                         <TableCell className="text-right tabular-nums">{r.calculationType === "PERCENTAGE" ? `${r.value}%` : formatCurrency(r.value)}</TableCell>
                         <TableCell className="text-right tabular-nums">{r.daysAfterBillingDate}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
+          {scheme.structure === "MULTIPLE_OPTIONS" && (scheme.options?.length ?? 0) > 0 && (
+            <div>
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Options ({scheme.optionAchievementType === "VALUE_BASED" ? "Value Based" : "Quantity Based"})</p>
+              <div className="overflow-auto rounded-md border">
+                <Table>
+                  <TableHeader><TableRow><TableHead>Option</TableHead><TableHead className="text-right">Target</TableHead><TableHead className="text-right">Without GST</TableHead><TableHead className="text-right">With GST</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {(scheme.options ?? []).filter((o) => o.isActive).map((o) => (
+                      <TableRow key={o.id}>
+                        <TableCell className="font-medium">{o.label ?? "—"}</TableCell>
+                        <TableCell className="text-right tabular-nums">{o.target ?? "—"}{scheme.optionAchievementType === "VALUE_BASED" && o.target != null ? "" : ""}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(o.valueWithoutGST)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(o.valueWithGST)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -684,8 +758,8 @@ export function schemeShareText(scheme: RunningScheme): string {
   if (!scheme.isPerpetual) out.push(`Last Booking Date: ${formatDate(scheme.bookingLastDate)}`);
   out.push(
     `Benefit: ${BENEFIT_LABEL[scheme.schemeBenefit] ?? scheme.schemeBenefit}${scheme.benefitDetails ? ` · ${scheme.benefitDetails}` : ""}`,
-    `Scheme Value (Without GST): ${formatCurrency(scheme.schemeValueWithoutGST)}`,
-    `Scheme Value (With GST): ${formatCurrency(scheme.schemeValueWithGST)}`,
+    `Scheme Value (Without GST): ${schemeValueText(scheme.schemeValueWithoutGST)}`,
+    `Scheme Value (With GST): ${schemeValueText(scheme.schemeValueWithGST)}`,
   );
   if (scheme.bookingAmount != null) out.push(`Booking Amount: ${formatCurrency(scheme.bookingAmount)}`);
   if (scheme.installments.length > 0) out.push(`Installments: ${scheme.installments.length}`);

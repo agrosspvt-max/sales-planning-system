@@ -95,6 +95,18 @@ export interface SchemePlanRow {
   soBillingSameForAll: boolean;
   adminBillingSameForAll: boolean;
   instances: { instanceNumber: number; soBillingDate: string | null; adminBillingDate: string | null }[];
+  // Multiple Options (Phase 10). structure carried from the scheme; selectedOptionId + snapshot from the plan.
+  structure: string;
+  selectedOptionId: string | null;
+  optionLabel: string | null;
+  optionTargetQty: number | null;
+  optionTargetValue: number | null;
+  optionValueWithoutGST: number | null;
+  optionValueWithGST: number | null;
+  // Pre-placement (Phase 11): SO/dealer requested + Admin confirmed days (null ⇒ 0).
+  prePlacementDays: number | null;
+  adminPrePlacementDays: number | null;
+  prePlacementMaxDays: number; // scheme ceiling, carried for the UI
 }
 
 type RawInstance = { instanceNumber: number; soBillingDate: Date | null; adminBillingDate: Date | null };
@@ -108,14 +120,16 @@ type RawPlan = {
   conversionDate: Date | null; soBookingStatus: string | null; soBookingAmount: unknown; soDocumentStatus: string | null; billingDate: Date | null;
   adminConversionDate: Date | null; adminBookingStatus: string | null; adminBookingAmount: unknown; adminDocumentStatus: string | null; adminBillingDate: Date | null; adminVerifiedAt: Date | null;
   soBillingSameForAll: boolean; adminBillingSameForAll: boolean; instances: RawInstance[];
-  scheme: { schemeName: string; schemeValueWithGST: unknown; maxExtensionDays: number; maxExtensionAttempts: number };
+  selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithoutGST: unknown; optionValueWithGST: unknown;
+  prePlacementDays: number | null; adminPrePlacementDays: number | null;
+  scheme: { schemeName: string; schemeValueWithGST: unknown; structure: string; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays: number };
   dealer: { name: string };
   salesOfficer: { name: string; territory: string | null; group: { name: string } | null };
   rmActedBy: { name: string } | null;
   enrolledBy: { name: string } | null;
 };
 const PLAN_INCLUDE = {
-  scheme: { select: { schemeName: true, schemeValueWithGST: true, maxExtensionDays: true, maxExtensionAttempts: true } },
+  scheme: { select: { schemeName: true, schemeValueWithGST: true, structure: true, maxExtensionDays: true, maxExtensionAttempts: true, prePlacementMaxDays: true } },
   dealer: { select: { name: true } },
   salesOfficer: { select: { name: true, territory: true, group: { select: { name: true } } } },
   rmActedBy: { select: { name: true } },
@@ -183,6 +197,16 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
     soBillingSameForAll: r.soBillingSameForAll,
     adminBillingSameForAll: r.adminBillingSameForAll,
     instances: (r.instances ?? []).map((i) => ({ instanceNumber: i.instanceNumber, soBillingDate: i.soBillingDate?.toISOString() ?? null, adminBillingDate: i.adminBillingDate?.toISOString() ?? null })),
+    structure: r.scheme.structure,
+    selectedOptionId: r.selectedOptionId ?? null,
+    optionLabel: r.optionLabel ?? null,
+    optionTargetQty: r.optionTargetQty == null ? null : asNum(r.optionTargetQty),
+    optionTargetValue: r.optionTargetValue == null ? null : asNum(r.optionTargetValue),
+    optionValueWithoutGST: r.optionValueWithoutGST == null ? null : asNum(r.optionValueWithoutGST),
+    optionValueWithGST: r.optionValueWithGST == null ? null : asNum(r.optionValueWithGST),
+    prePlacementDays: r.prePlacementDays ?? null,
+    adminPrePlacementDays: r.adminPrePlacementDays ?? null,
+    prePlacementMaxDays: r.scheme.prePlacementMaxDays ?? 0,
   };
 }
 
@@ -639,6 +663,9 @@ const verifySchema = z.object({
   adminBillingSameForAll: z.boolean().optional(),
   adminBillingDate: z.coerce.date().nullable().optional(), // single (same-for-all) — legacy/compat
   adminBillingDates: z.array(z.object({ instanceNumber: z.coerce.number().int().min(1).max(10), date: z.coerce.date().nullable() })).optional(),
+  // Pre-placement (Phase 11): Admin confirmed/override days. Omitted ⇒ leave unchanged; null ⇒ fall back to
+  // the dealer's requested days. Drives the installment schedule start (billing + confirmed days).
+  adminPrePlacementDays: z.coerce.number().int().min(0).max(365).nullable().optional(),
   remarks: z.string().max(500).optional(),
 });
 
@@ -707,6 +734,9 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
       adminBillingSameForAll: sameForAll,
       // Parent adminBillingDate kept for compat: the single same-for-all date, else null.
       adminBillingDate: sameForAll && readyForBilling ? (data.adminBillingDate ?? null) : null,
+      // Pre-placement (Phase 11): only touch when the key is present (undefined ⇒ leave as-is). A non-positive
+      // value clears the override so the dealer's requested days apply.
+      ...(data.adminPrePlacementDays === undefined ? {} : { adminPrePlacementDays: (data.adminPrePlacementDays ?? 0) > 0 ? data.adminPrePlacementDays : null }),
       verificationRemarks: data.remarks?.trim() || null,
       adminVerifiedById: ctx.userId,
       adminVerifiedAt: new Date(),
@@ -721,15 +751,23 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
 
 /* --------------------------------- Running Schemes (Sales Officer) --------------------------------- */
 
+export interface RunningSchemeOption {
+  id: string; label: string | null; target: number | null; valueWithoutGST: number; valueWithGST: number; isActive: boolean;
+}
+
 export interface RunningScheme {
   id: string; schemeName: string; states: string[]; isPerpetual: boolean;
   startDate: string | null; endDate: string | null; bookingLastDate: string | null;
-  schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number;
+  // MULTIPLE_OPTIONS schemes carry no scheme-level value (null → "Per option"); FIXED schemes always have both.
+  schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: number | null; schemeValueWithGST: number | null;
   documentUrl: string | null;
   // Scheme Information shown by Create Plan's "Info" panel + the fields its dealer rows calculate from.
   // Carried on this one list read so opening Info or expanding a scheme needs no further request (and so
   // cannot trigger `refreshSchemeStatuses`, which writes).
   bookingAmount: number | null; otherBenefitDetails: string | null; allowMultipleSchemes: boolean;
+  prePlacementMaxDays: number; // Phase 11: master ceiling; 0 ⇒ dealer pre-placement not available
+  structure: "FIXED" | "MULTIPLE_OPTIONS"; optionAchievementType: "QUANTITY_BASED" | "VALUE_BASED" | null;
+  options: RunningSchemeOption[]; eligibleProductIds: string[];
   installments: { installmentNumber: number; calculationType: string; value: number; daysAfterBillingDate: number }[];
 }
 
@@ -740,14 +778,18 @@ export async function runningSchemes(ctx: AuthContext): Promise<RunningScheme[]>
   const rows = (await prisma.scheme.findMany({
     where: { status: SchemeStatus.OPEN, ...stateFilter },
     orderBy: [{ isPerpetual: "desc" }, { endDate: "desc" }, { schemeName: "asc" }],
-    include: { states: { include: { group: { select: { name: true } } } }, installmentRules: true },
+    include: { states: { include: { group: { select: { name: true } } } }, installmentRules: true, options: { orderBy: { sortOrder: "asc" } }, eligibleProducts: { select: { productId: true } } },
   })) as unknown as {
     id: string; schemeName: string; isPerpetual: boolean; startDate: Date | null; endDate: Date | null; bookingLastDate: Date | null;
     schemeBenefit: string; benefitDetails: string | null; schemeValueWithoutGST: unknown; schemeValueWithGST: unknown; documentUrl: string | null;
-    bookingAmount: unknown; otherBenefitDetails: string | null; allowMultipleSchemes: boolean;
+    bookingAmount: unknown; otherBenefitDetails: string | null; allowMultipleSchemes: boolean; prePlacementMaxDays: number;
+    structure: string; optionAchievementType: string | null;
     installmentRules: { installmentNumber: number; calculationType: string; value: unknown; daysAfterBillingDate: number }[];
     states: { group: { name: string } }[];
+    options: { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; sortOrder: number; isActive: boolean }[];
+    eligibleProducts: { productId: string }[];
   }[];
+  const opt = (v: unknown) => (v == null ? null : Number((v as { toString(): string }).toString()));
   return rows.map((s) => ({
     id: s.id,
     schemeName: s.schemeName,
@@ -758,12 +800,17 @@ export async function runningSchemes(ctx: AuthContext): Promise<RunningScheme[]>
     bookingLastDate: s.bookingLastDate?.toISOString() ?? null,
     schemeBenefit: s.schemeBenefit,
     benefitDetails: s.benefitDetails,
-    schemeValueWithoutGST: Number(s.schemeValueWithoutGST),
-    schemeValueWithGST: Number(s.schemeValueWithGST),
+    schemeValueWithoutGST: opt(s.schemeValueWithoutGST),
+    schemeValueWithGST: opt(s.schemeValueWithGST),
     documentUrl: s.documentUrl,
     bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount),
     otherBenefitDetails: s.otherBenefitDetails,
     allowMultipleSchemes: s.allowMultipleSchemes,
+    prePlacementMaxDays: s.prePlacementMaxDays ?? 0,
+    structure: s.structure as "FIXED" | "MULTIPLE_OPTIONS",
+    optionAchievementType: (s.optionAchievementType ?? null) as "QUANTITY_BASED" | "VALUE_BASED" | null,
+    options: s.options.map((o) => ({ id: o.id, label: o.label, target: opt(o.targetQty) ?? opt(o.targetValue), valueWithoutGST: Number(o.valueWithoutGST), valueWithGST: Number(o.valueWithGST), isActive: o.isActive })),
+    eligibleProductIds: s.eligibleProducts.map((e) => e.productId),
     installments: s.installmentRules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value), daysAfterBillingDate: r.daysAfterBillingDate })),
   }));
 }
@@ -840,8 +887,8 @@ export async function planningContext(ctx: AuthContext, schemeId: string, office
       endDate: scheme.endDate?.toISOString() ?? null,
       bookingLastDate: scheme.bookingLastDate?.toISOString() ?? null,
       bookingAmount: scheme.bookingAmount == null ? null : Number(scheme.bookingAmount),
-      schemeValueWithoutGST: Number(scheme.schemeValueWithoutGST),
-      schemeValueWithGST: Number(scheme.schemeValueWithGST),
+      schemeValueWithoutGST: scheme.schemeValueWithoutGST == null ? 0 : Number(scheme.schemeValueWithoutGST),
+      schemeValueWithGST: scheme.schemeValueWithGST == null ? 0 : Number(scheme.schemeValueWithGST),
       schemeBenefit: scheme.schemeBenefit,
       benefitDetails: scheme.benefitDetails,
       otherBenefitDetails: scheme.otherBenefitDetails,
@@ -862,6 +909,8 @@ const draftSchema = z.object({
     expectedBillingDate: z.coerce.date().nullable().optional(),
     numberOfSchemes: z.coerce.number().int().min(1).max(10).optional(), // "Allow Multi Schemes" dealer count
     note: z.string().max(2000).nullable().optional(), // optional per-dealer Sales Officer note
+    optionId: z.string().nullable().optional(), // Multiple Options: the dealer's chosen option (null for FIXED)
+    prePlacementDays: z.coerce.number().int().min(0).max(365).nullable().optional(), // Phase 11: SO/dealer requested pre-placement days (within the scheme ceiling)
   })).default([]),
   // PARTIAL SUBMISSION (submit only). Which of `dealers` actually go forward for approval; everyone else in
   // the working set is still persisted, but stays a Draft. Omitted → every dealer is submitted, i.e. exactly
@@ -894,12 +943,17 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
   const targetOfficerId = await resolveTargetOfficer(ctx, data.officerId);
   const isRm = ctx.role === Role.REGIONAL_MANAGER;
 
-  const scheme = (await prisma.scheme.findUnique({ where: { id: data.schemeId }, select: { status: true, isPerpetual: true, startDate: true, endDate: true, allowMultipleSchemes: true, schemeValueWithGST: true, states: { select: { groupId: true } } } })) as
-    { status: string; isPerpetual: boolean; startDate: Date | null; endDate: Date | null; allowMultipleSchemes: boolean; schemeValueWithGST: unknown; states: { groupId: string }[] } | null;
+  const scheme = (await prisma.scheme.findUnique({ where: { id: data.schemeId }, select: { status: true, isPerpetual: true, startDate: true, endDate: true, allowMultipleSchemes: true, schemeValueWithGST: true, structure: true, prePlacementMaxDays: true, states: { select: { groupId: true } }, options: { select: { id: true, label: true, targetQty: true, targetValue: true, valueWithoutGST: true, valueWithGST: true, isActive: true } } } })) as
+    { status: string; isPerpetual: boolean; startDate: Date | null; endDate: Date | null; allowMultipleSchemes: boolean; schemeValueWithGST: unknown; structure: string; prePlacementMaxDays: number; states: { groupId: string }[]; options: { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; isActive: boolean }[] } | null;
   if (!scheme) throw new ApiError(404, "Scheme not found");
   if (scheme.status !== SchemeStatus.OPEN) throw new ApiError(422, "This scheme is closed");
   if (ctx.groupId && !scheme.states.some((s) => s.groupId === ctx.groupId)) throw new ApiError(422, "This scheme is not applicable to your State");
-  const gstValue = Number((scheme.schemeValueWithGST as { toString(): string }).toString());
+  const isOptions = scheme.structure === "MULTIPLE_OPTIONS";
+  const optionsById = new Map(scheme.options.map((o) => [o.id, o]));
+  const fixedGst = scheme.schemeValueWithGST == null ? 0 : Number((scheme.schemeValueWithGST as { toString(): string }).toString());
+  // Effective With-GST value for a dealer row: the chosen option's value for MULTIPLE_OPTIONS, else the
+  // scheme-level value. Feeds totalSchemeAmount and (post-enrollment) the installment schedule.
+  const effGstFor = (optionId?: string | null) => (isOptions ? (optionId && optionsById.get(optionId) ? Number((optionsById.get(optionId)!.valueWithGST as { toString(): string }).toString()) : 0) : fixedGst);
   // Number of schemes only applies when the scheme allows it; otherwise every dealer is exactly 1.
   const countFor = (n?: number) => (scheme.allowMultipleSchemes ? Math.min(Math.max(n ?? 1, 1), 10) : 1);
 
@@ -925,7 +979,18 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
     if (submitSet.size === 0) throw new ApiError(422, "Select at least one dealer to submit");
     // Only the dealers actually going forward must be complete; the others stay in Draft on purpose.
     for (const d of data.dealers) if (goesForward(d.dealerId) && !d.expectedBillingDate) throw new ApiError(422, "Every dealer needs a Conversion Date before submitting");
+    // Multiple Options: a dealer being submitted must have selected exactly one ACTIVE option (server-enforced).
+    if (isOptions) {
+      for (const d of data.dealers) {
+        if (!goesForward(d.dealerId)) continue;
+        const opt = d.optionId ? optionsById.get(d.optionId) : null;
+        if (!opt) throw new ApiError(422, "Every dealer must select a scheme option before submitting");
+        if (!opt.isActive) throw new ApiError(422, "A selected option has been discontinued — choose an active option");
+      }
+    }
   }
+  // Even on draft save, a provided option must belong to this scheme (never trust the client).
+  if (isOptions) for (const d of data.dealers) if (d.optionId && !optionsById.has(d.optionId)) throw new ApiError(422, "Selected option does not belong to this scheme");
 
   const existing = (await prisma.dealerSchemePlan.findMany({ where: { schemeId: data.schemeId, salesOfficerId: targetOfficerId }, select: { id: true, dealerId: true, planStatus: true } })) as { id: string; dealerId: string; planStatus: string }[];
   const byDealer = new Map(existing.map((e) => [e.dealerId, e]));
@@ -940,24 +1005,43 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
   const planNextFor = (forward: boolean) => (forward ? (isRm ? SchemePlanState.PENDING_APPROVAL : SchemePlanState.PENDING_RM) : SchemePlanState.DRAFT);
   const submitStampFor = (forward: boolean) => (forward ? { submittedAt: new Date(), ...(isRm ? { rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: null } : { rmActedById: null, rmActedAt: null, rmRemarks: null }) } : {});
 
+  const num = (v: unknown) => (v == null ? null : Number((v as { toString(): string }).toString()));
   for (const d of data.dealers) {
     const date = validateDate(d.expectedBillingDate ?? null);
     const count = countFor(d.numberOfSchemes);
-    const total = gstValue * count;
+    const forward = goesForward(d.dealerId);
+    // Effective per-scheme value: option value (Multiple Options) or scheme value (Fixed).
+    const total = effGstFor(d.optionId) * count;
+    // Option fields. Always store selectedOptionId (draft may be incomplete → null). Freeze the snapshot
+    // ONLY when the row goes forward (submit) so master option edits during approval can't move a committed
+    // dealer; refresh the snapshot from the live option on each (re)submission (e.g. after RETURNED).
+    const opt = isOptions && d.optionId ? optionsById.get(d.optionId) : null;
+    const optionData = isOptions
+      ? {
+          selectedOptionId: d.optionId ?? null,
+          ...(forward && opt
+            ? { optionLabel: opt.label, optionTargetQty: num(opt.targetQty), optionTargetValue: num(opt.targetValue), optionValueWithoutGST: num(opt.valueWithoutGST), optionValueWithGST: num(opt.valueWithGST) }
+            : {}),
+        }
+      : {};
     // Optional per-dealer note. Only applied when the payload carries the key (undefined = leave unchanged);
     // an empty/whitespace note clears it. Notes never gate save/submit.
     const noteData = d.note === undefined ? {} : { soNote: d.note?.trim() || null };
-    const forward = goesForward(d.dealerId);
+    // Pre-placement (Phase 11): SO/dealer requested days, clamped to the scheme ceiling. undefined ⇒ leave
+    // unchanged; only meaningful when the scheme allows pre-placement (prePlacementMaxDays > 0).
+    const preData = d.prePlacementDays === undefined
+      ? {}
+      : { prePlacementDays: scheme.prePlacementMaxDays > 0 && (d.prePlacementDays ?? 0) > 0 ? Math.min(d.prePlacementDays as number, scheme.prePlacementMaxDays) : null };
     const legacyNext = legacyNextFor(forward);
     const planNext = planNextFor(forward);
     const submitStamp = submitStampFor(forward);
     const cur = byDealer.get(d.dealerId);
     if (!cur) {
       // While the plan is editable, the original (extension baseline) tracks the planned conversion date.
-      await prisma.dealerSchemePlan.create({ data: { schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, originalConversionDate: date, ...noteData, ...submitStamp } });
+      await prisma.dealerSchemePlan.create({ data: { schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, originalConversionDate: date, ...noteData, ...optionData, ...preData, ...submitStamp } });
       if (forward) submitted++; else drafted++;
     } else if (EDITABLE.has(cur.planStatus)) {
-      await prisma.dealerSchemePlan.update({ where: { id: cur.id }, data: { expectedBillingDate: date, originalConversionDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...noteData, ...submitStamp } });
+      await prisma.dealerSchemePlan.update({ where: { id: cur.id }, data: { expectedBillingDate: date, originalConversionDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...noteData, ...optionData, ...preData, ...submitStamp } });
       if (forward) submitted++; else drafted++;
     }
     // else: locked (already in RM queue or beyond) — leave untouched.

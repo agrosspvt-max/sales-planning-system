@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope, isPlanOwner } from "@/lib/scope";
 import { clearanceMapForGroup } from "@/features/users/catalogue.server";
+import { loadEffectiveProduct, type EffectiveProductResolver } from "@/features/products/merge.server";
 import { saveMonthlySchema } from "@/lib/validations/planning";
 import { figuresForMode, isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { getEditableMonthMap, assertMonthOpen } from "./planning-state.server";
@@ -64,6 +65,8 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
   // Clearance flags (group-specific, by the plan officer's group + productId) — display-only.
   const officer = (await prisma.user.findUnique({ where: { id: plan.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
   const clearance = await clearanceMapForGroup(officer?.groupId ?? null);
+  // Product Merge (Phase 12): operational identity per line (survivor after a merge) for read/aggregation grouping.
+  const eff = await loadEffectiveProduct();
 
   return {
     planId: plan.id,
@@ -74,7 +77,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
       const status = ((m as { status?: string }).status as MonthStatus) ?? "OPEN";
       return { id: m.id, name: m.name, order: m.order, status, editable: isMonthEditable(status) };
     }),
-    dealers: buildMonthlyDealers(planDealers, months, monthlyMode, clearance),
+    dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance),
   };
 }
 
@@ -88,6 +91,7 @@ export function buildMonthlyDealers(
   planDealers: MonthlyPlanDealerRow[],
   months: { id: string }[],
   monthlyMode: PlanningMode,
+  eff: EffectiveProductResolver, // Product Merge (Phase 12): operational identity per line, for read/aggregation grouping
   clearance?: Map<string, { clearanceQty: number | null }>, // group-specific clearance (by productId), display-only
 ) {
   const valueMode = !isQuantityMode(monthlyMode);
@@ -135,6 +139,8 @@ export function buildMonthlyDealers(
             planLineId: line.id,
             productId: line.productId,
             productName: line.product.name,
+            effectiveProductId: eff.effId(line.productId),
+            effectiveProductName: eff.meta(eff.effId(line.productId))?.name ?? line.product.name,
             isAdditional: line.isAdditional ?? false,
             isAutoAdded: line.isAutoAdded ?? false,
             isClearance: clearance?.has(line.productId) ?? false,

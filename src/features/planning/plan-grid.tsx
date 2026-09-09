@@ -312,7 +312,10 @@ export function PlanGrid() {
                 return (
                   <TableRow key={l.productId}>
                     <TableCell className="font-medium">
-                      <ProductName name={l.productName} nbvPercent={l.nbvPercent} categories={categories} isClearance={l.isClearance} clearanceQty={l.clearanceQty}>
+                      {/* Product Merge (Phase 12): a merged source line shows its SURVIVOR name (operational
+                          identity) while staying an individually editable row keyed by its own raw productId —
+                          no PlanLine is merged, so neither line's quantities are lost. */}
+                      <ProductName name={l.effectiveProductName ?? l.productName} nbvPercent={l.nbvPercent} categories={categories} isClearance={l.isClearance} clearanceQty={l.clearanceQty}>
                         {l.isAutoAdded && <span className="ml-1.5 rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info" title="Added by Sales Upload for an unplanned sold product">Auto Added</span>}
                       </ProductName>
                       {/* Technical/scientific name — hidden on phones to keep the frozen column narrow. */}

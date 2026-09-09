@@ -116,6 +116,19 @@ interface DealerValueRow { dealerId: string; dealerName: string; town: string | 
 interface SchemeValueList { rows: SchemeValueRow[] }
 interface DealerValueList { rows: DealerValueRow[] }
 
+// Multiple Options (Phase 10) — mirror the follow-up service option shapes.
+type OptionAchType = "QUANTITY_BASED" | "VALUE_BASED";
+interface OptionContribLine { productId: string; productName: string; achievedQty: number; achievedValue: number }
+interface OptionDealerBlock { dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; optionId: string | null; optionLabel: string | null; achievementType: OptionAchType; target: number; achieved: number; remaining: number; completed: boolean; progress: number | null; contributions: OptionContribLine[] }
+interface OptionGroupBlock { optionId: string | null; optionLabel: string | null; target: number; dealerCount: number; completedCount: number; dealers: OptionDealerBlock[] }
+interface SchemeOptionRow { schemeId: string; schemeName: string; achievementType: OptionAchType; dealerCount: number; optionCount: number; completedCount: number; groups: OptionGroupBlock[] }
+interface DealerOptionSchemeBlock { schemeId: string; schemeName: string; achievementType: OptionAchType; optionId: string | null; optionLabel: string | null; target: number; achieved: number; remaining: number; completed: boolean; progress: number | null; contributions: OptionContribLine[] }
+interface DealerOptionRow { dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; state: string | null; schemeCount: number; completedCount: number; schemes: DealerOptionSchemeBlock[] }
+interface SchemeOptionList { rows: SchemeOptionRow[] }
+interface DealerOptionList { rows: DealerOptionRow[] }
+
+// Multiple Options schemes are monitored INSIDE Product Based (Quantity Based options) and Value Based
+// (Value Based options) — each option renders as a virtual "Scheme [Label]" row. There is no separate tab.
 type FollowUpMode = "installments" | "product" | "value";
 
 // Quantities: show whole numbers plainly, fractions up to 3 dp with no trailing zeros (no forced decimals).
@@ -442,14 +455,28 @@ function FollowUpWorkspace({ officerId }: { officerId?: string } = {}) {
     queryFn: () => api.get(`/api/scheme-follow-up/value?view=dealer&${achParams}`),
     enabled: tab === "dealer" && mode === "value",
   });
+  // Multiple Options data feeds BOTH achievement tabs (Quantity Based → Product, Value Based → Value),
+  // rendered as virtual "Scheme [Label]" rows beneath the Fixed rows. Fetched whenever an achievement tab is open.
+  const isAchievement = mode === "product" || mode === "value";
+  const schemeOption = useQuery<SchemeOptionList>({
+    queryKey: ["scheme-follow-up", "option", "scheme", officerKey],
+    queryFn: () => api.get(`/api/scheme-follow-up/option?view=scheme&${achParams}`),
+    enabled: tab === "scheme" && isAchievement,
+  });
+  const dealerOption = useQuery<DealerOptionList>({
+    queryKey: ["scheme-follow-up", "option", "dealer", officerKey],
+    queryFn: () => api.get(`/api/scheme-follow-up/option?view=dealer&${achParams}`),
+    enabled: tab === "dealer" && isAchievement,
+  });
 
   const meta: DealerList | SchemeList | undefined = tab === "dealer" ? dealers.data : schemes.data;
   const period = meta?.period ?? null;
   const activeQuery = mode === "installments" ? (tab === "dealer" ? dealers : schemes)
     : mode === "product" ? (tab === "dealer" ? dealerProduct : schemeProduct)
     : (tab === "dealer" ? dealerValue : schemeValue);
-  const isLoading = activeQuery.isLoading;
-  const error = activeQuery.error as Error | null;
+  const optionQuery = tab === "dealer" ? dealerOption : schemeOption;
+  const isLoading = activeQuery.isLoading || (isAchievement && optionQuery.isLoading);
+  const error = (activeQuery.error ?? (isAchievement ? optionQuery.error : null)) as Error | null;
 
   const monthOptions = useMemo(() => {
     const fromServer = meta?.months ?? [];
@@ -509,15 +536,35 @@ function FollowUpWorkspace({ officerId }: { officerId?: string } = {}) {
           <SchemeCollapsibleView data={schemes.data} period={period} isLoading={isLoading} onOpen={setDrillDealer} onShare={setShare} />
         )
       ) : mode === "product" ? (
+        // Product Based = Fixed PRODUCT_BASED schemes + Multiple Options (Quantity Based) as virtual rows.
         tab === "dealer" ? (
-          <DealerProductView data={dealerProduct.data} isLoading={isLoading} />
+          <>
+            <DealerProductView data={dealerProduct.data} isLoading={dealerProduct.isLoading} hideEmpty />
+            <DealerOptionView data={dealerOption.data} type="QUANTITY_BASED" />
+            <AchievementEmpty show={!isLoading && (dealerProduct.data?.rows.length ?? 0) === 0 && dealerOptionCount(dealerOption.data, "QUANTITY_BASED") === 0} text="No Product Based schemes to follow up." />
+          </>
         ) : (
-          <SchemeProductView data={schemeProduct.data} isLoading={isLoading} />
+          <>
+            <SchemeProductView data={schemeProduct.data} isLoading={schemeProduct.isLoading} hideEmpty />
+            <SchemeOptionView data={schemeOption.data} type="QUANTITY_BASED" />
+            <AchievementEmpty show={!isLoading && (schemeProduct.data?.rows.length ?? 0) === 0 && schemeOptionCount(schemeOption.data, "QUANTITY_BASED") === 0} text="No Product Based schemes to follow up." />
+          </>
         )
-      ) : tab === "dealer" ? (
-        <DealerValueView data={dealerValue.data} isLoading={isLoading} />
       ) : (
-        <SchemeValueView data={schemeValue.data} isLoading={isLoading} />
+        // Value Based = Fixed VALUE_BASED schemes + Multiple Options (Value Based) as virtual rows.
+        tab === "dealer" ? (
+          <>
+            <DealerValueView data={dealerValue.data} isLoading={dealerValue.isLoading} hideEmpty />
+            <DealerOptionView data={dealerOption.data} type="VALUE_BASED" />
+            <AchievementEmpty show={!isLoading && (dealerValue.data?.rows.length ?? 0) === 0 && dealerOptionCount(dealerOption.data, "VALUE_BASED") === 0} text="No Value Based schemes to follow up." />
+          </>
+        ) : (
+          <>
+            <SchemeValueView data={schemeValue.data} isLoading={schemeValue.isLoading} hideEmpty />
+            <SchemeOptionView data={schemeOption.data} type="VALUE_BASED" />
+            <AchievementEmpty show={!isLoading && (schemeValue.data?.rows.length ?? 0) === 0 && schemeOptionCount(schemeOption.data, "VALUE_BASED") === 0} text="No Value Based schemes to follow up." />
+          </>
+        )
       )}
 
       {drillDealer && <DealerDetailDialog dealerId={drillDealer} month={month} week={week} onClose={() => setDrillDealer(null)} onShare={setShare} />}
@@ -783,9 +830,11 @@ function ValueLines({ products, combined }: { products: ValueLine[]; combined: b
 
 /* --------------------------------- Scheme → Product Based --------------------------------- */
 
-function SchemeProductView({ data, isLoading }: { data: SchemeProductList | undefined; isLoading: boolean }) {
+function SchemeProductView({ data, isLoading, hideEmpty }: { data: SchemeProductList | undefined; isLoading: boolean; hideEmpty?: boolean }) {
   const { expanded, toggle } = useExpanded();
   const COLS = 9;
+  // When rendered alongside Multiple-Options rows, let the parent own the combined empty state.
+  if (hideEmpty && !isLoading && data && data.rows.length === 0) return null;
   return (
     <div className={schemeTable.outer}>
       <Table>
@@ -848,9 +897,10 @@ function SchemeProductView({ data, isLoading }: { data: SchemeProductList | unde
 
 /* --------------------------------- Dealer → Product Based --------------------------------- */
 
-function DealerProductView({ data, isLoading }: { data: DealerProductList | undefined; isLoading: boolean }) {
+function DealerProductView({ data, isLoading, hideEmpty }: { data: DealerProductList | undefined; isLoading: boolean; hideEmpty?: boolean }) {
   const { expanded, toggle } = useExpanded();
   const COLS = 9;
+  if (hideEmpty && !isLoading && data && data.rows.length === 0) return null;
   return (
     <div className={schemeTable.outer}>
       <Table>
@@ -915,9 +965,10 @@ function DealerProductView({ data, isLoading }: { data: DealerProductList | unde
 
 const ModeBadge = ({ mode }: { mode: "INDIVIDUAL" | "COMBINED" }) => <Badge variant="secondary">{mode === "COMBINED" ? "Combined" : "Individual"}</Badge>;
 
-function SchemeValueView({ data, isLoading }: { data: SchemeValueList | undefined; isLoading: boolean }) {
+function SchemeValueView({ data, isLoading, hideEmpty }: { data: SchemeValueList | undefined; isLoading: boolean; hideEmpty?: boolean }) {
   const { expanded, toggle } = useExpanded();
   const COLS = 9;
+  if (hideEmpty && !isLoading && data && data.rows.length === 0) return null;
   return (
     <div className={schemeTable.outer}>
       <Table>
@@ -980,9 +1031,10 @@ function SchemeValueView({ data, isLoading }: { data: SchemeValueList | undefine
 
 /* --------------------------------- Dealer → Value Based --------------------------------- */
 
-function DealerValueView({ data, isLoading }: { data: DealerValueList | undefined; isLoading: boolean }) {
+function DealerValueView({ data, isLoading, hideEmpty }: { data: DealerValueList | undefined; isLoading: boolean; hideEmpty?: boolean }) {
   const { expanded, toggle } = useExpanded();
   const COLS = 8;
+  if (hideEmpty && !isLoading && data && data.rows.length === 0) return null;
   return (
     <div className={schemeTable.outer}>
       <Table>
@@ -1037,6 +1089,229 @@ function DealerValueView({ data, isLoading }: { data: DealerValueList | undefine
           })}
         </TableBody>
       </Table>
+    </div>
+  );
+}
+
+/* ============================================================================================
+ * MULTIPLE OPTIONS VIEWS (Phase 10) — combined achievement over the eligible pool vs each dealer's
+ * FROZEN snapshot target. Scheme-wise groups dealers by their SELECTED option; every row shows the
+ * option + a per-product contribution breakdown. All numbers are served (no client recomputation).
+ * ============================================================================================ */
+
+/** Format an option target/achieved amount by achievement type (qty vs currency). */
+const optAmount = (t: OptionAchType, n: number) => (t === "QUANTITY_BASED" ? formatQty(n) : formatCurrency(n));
+
+/**
+ * Eligible-product contribution table for a committed option dealer. Mirrors the Fixed Product/Value detail
+ * columns (Products · Required · Sale/Achieved · Remaining · Completion) so both feel like one system — but
+ * the option has NO per-product requirement: Required/Remaining/Completion are "—" per product because the
+ * eligible products contribute COLLECTIVELY toward the option's single target. Every eligible product is
+ * listed (zero contribution shown before any sale). A footer Total row carries the collective figures.
+ */
+function OptionContribLines({ type, contributions, target, achieved, remaining, progress, completed }: {
+  type: OptionAchType; contributions: OptionContribLine[]; target: number; achieved: number; remaining: number; progress: number | null; completed: boolean;
+}) {
+  const isQty = type === "QUANTITY_BASED";
+  const fmt = (n: number) => (isQty ? formatQty(n) : formatCurrency(n));
+  const dash = <span className="text-muted-foreground">—</span>;
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead><L k="scheme_planning.col.products" /></TableHead>
+          <TableHead className="text-right">{isQty ? <L k="scheme_planning.col.required_qty" /> : <L k="scheme_planning.col.required_value" />}</TableHead>
+          <TableHead className="text-right">{isQty ? <L k="scheme_planning.col.sale_qty" /> : <L k="scheme_planning.col.achieved_value" />}</TableHead>
+          <TableHead className="text-right">{isQty ? <L k="scheme_planning.col.remaining_qty" /> : <L k="scheme_planning.col.remaining_value" />}</TableHead>
+          <TableHead className="text-right"><L k="scheme_planning.col.completion" /></TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {contributions.map((c) => (
+          <TableRow key={c.productId}>
+            <TableCell className="font-medium">{c.productName}</TableCell>
+            <TableCell className="text-right">{dash}</TableCell>
+            <TableCell className="text-right tabular-nums">{fmt(isQty ? c.achievedQty : c.achievedValue)}</TableCell>
+            <TableCell className="text-right">{dash}</TableCell>
+            <TableCell className="text-right">{dash}</TableCell>
+          </TableRow>
+        ))}
+        {/* Collective target row — the eligible products above sum toward this single option target. */}
+        <TableRow className="border-t font-medium">
+          <TableCell>Total</TableCell>
+          <TableCell className="text-right tabular-nums">{fmt(target)}</TableCell>
+          <TableCell className="text-right tabular-nums">{fmt(achieved)}</TableCell>
+          <TableCell className={cn("text-right tabular-nums", remaining > 0 && "text-destructive")}>{fmt(remaining)}</TableCell>
+          <TableCell className="text-right"><Badge variant={completed ? "success" : "muted"}>{completed ? "Complete" : progressCell(progress)}</Badge></TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
+  );
+}
+
+/* --------------------------------- Scheme → Options --------------------------------- */
+
+/** Count of virtual option rows (one per selected option group) for an achievement type. */
+const schemeOptionCount = (data: SchemeOptionList | undefined, type: OptionAchType) =>
+  (data?.rows ?? []).filter((r) => r.achievementType === type).reduce((n, r) => n + r.groups.length, 0);
+const dealerOptionCount = (data: DealerOptionList | undefined, type: OptionAchType) =>
+  (data?.rows ?? []).filter((r) => r.schemes.some((s) => s.achievementType === type)).length;
+
+/** Shared empty state shown only when neither Fixed nor Multiple-Options rows exist for the tab. */
+function AchievementEmpty({ show, text }: { show: boolean; text: string }) {
+  if (!show) return null;
+  return <div className={schemeTable.outer}><div className="py-10 text-center text-muted-foreground">{text}</div></div>;
+}
+
+/**
+ * SCHEME → Multiple Options, rendered INSIDE Product Based (type=QUANTITY_BASED) and Value Based
+ * (type=VALUE_BASED). Each selected option is a virtual "Scheme [Label]" row; the dealers who chose that
+ * option nest under it with their eligible-product contribution breakdown. Returns null when there are none
+ * (the parent owns the combined empty state). Target shown is the option target (per dealer); Achieved /
+ * Remaining / Progress aggregate across that option's committed dealers.
+ */
+function SchemeOptionView({ data, type }: { data: SchemeOptionList | undefined; type: OptionAchType }) {
+  const { expanded, toggle } = useExpanded();
+  const COLS = 8;
+  const flat = (data?.rows ?? [])
+    .filter((r) => r.achievementType === type)
+    .flatMap((r) =>
+      r.groups.map((g) => {
+        const achieved = g.dealers.reduce((s, d) => s + d.achieved, 0);
+        const remaining = g.dealers.reduce((s, d) => s + d.remaining, 0);
+        const required = g.dealers.reduce((s, d) => s + d.target, 0); // Σ per-dealer snapshot target
+        return {
+          key: `${r.schemeId}::${g.optionId ?? `${g.optionLabel ?? ""}|${g.target}`}`,
+          name: `${r.schemeName} [${g.optionLabel ?? optAmount(type, g.target)}]`,
+          group: g, achieved, remaining, target: g.target,
+          progress: required > 0 ? achieved / required : null,
+        };
+      }),
+    );
+  if (!data || flat.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Multiple Options</p>
+      <div className={schemeTable.outer}>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-8" />
+              <TableHead>Scheme</TableHead>
+              <TableHead className="text-right"><L k="scheme_planning.col.dealers" /></TableHead>
+              <TableHead className="text-right">Target</TableHead>
+              <TableHead className="text-right">Achieved</TableHead>
+              <TableHead className="text-right"><L k="scheme_planning.col.remaining_qty" /></TableHead>
+              <TableHead className="text-right"><L k="scheme_planning.col.completion" /></TableHead>
+              <TableHead className="text-right"><L k="scheme_planning.col.progress" /></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {flat.map((row) => {
+              const g = row.group;
+              const open = expanded.has(row.key);
+              return (
+                <Fragment key={row.key}>
+                  <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(row.key)}>
+                    <TableCell><Chevron open={open} /></TableCell>
+                    <TableCell className="font-semibold">{row.name}</TableCell>
+                    <TableCell className="text-right">{g.dealerCount}</TableCell>
+                    <TableCell className="text-right tabular-nums">{optAmount(type, row.target)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{optAmount(type, row.achieved)}</TableCell>
+                    <TableCell className={cn("text-right tabular-nums", row.remaining > 0 && "text-destructive")}>{optAmount(type, row.remaining)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{completionCell(g.completedCount, g.dealerCount)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{progressCell(row.progress)}</TableCell>
+                  </TableRow>
+                  {open && (
+                    <TableRow>
+                      <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
+                        <div className={schemeTable.nestedInset}>
+                          <div className={cn(schemeTable.nestedShell, "space-y-2 p-3")}>
+                            {g.dealers.map((d) => (
+                              <div key={d.dealerId} className="rounded-md border bg-background p-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
+                                  <span className="font-semibold">{d.dealerName}{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
+                                  <span className="text-xs text-muted-foreground">{d.salesOfficerName} · Target {optAmount(type, d.target)} · Achieved {optAmount(type, d.achieved)} · Remaining {optAmount(type, d.remaining)} · {progressCell(d.progress)} {d.completed && <Badge variant="success" className="ml-1">Complete</Badge>}</span>
+                                </div>
+                                <OptionContribLines type={type} contributions={d.contributions} target={d.target} achieved={d.achieved} remaining={d.remaining} progress={d.progress} completed={d.completed} />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </Fragment>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------- Dealer → Options --------------------------------- */
+
+function DealerOptionView({ data, type }: { data: DealerOptionList | undefined; type: OptionAchType }) {
+  const { expanded, toggle } = useExpanded();
+  const COLS = 5;
+  const rows = (data?.rows ?? [])
+    .map((r) => ({ ...r, schemes: r.schemes.filter((s) => s.achievementType === type) }))
+    .filter((r) => r.schemes.length > 0);
+  if (!data || rows.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Multiple Options</p>
+      <div className={schemeTable.outer}>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-8" />
+              <TableHead>Dealer</TableHead>
+              <TableHead>Sales Officer</TableHead>
+              <TableHead className="text-right"><L k="scheme_planning.col.no_of_schemes_fu" /></TableHead>
+              <TableHead className="text-right"><L k="scheme_planning.col.completion" /></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r) => {
+              const open = expanded.has(r.dealerId);
+              const completed = r.schemes.filter((s) => s.completed).length;
+              return (
+                <Fragment key={r.dealerId}>
+                  <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
+                    <TableCell><Chevron open={open} /></TableCell>
+                    <TableCell className="font-semibold">{r.dealerName}{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
+                    <TableCell>{r.salesOfficerName}</TableCell>
+                    <TableCell className="text-right">{r.schemes.length}</TableCell>
+                    <TableCell className="text-right tabular-nums">{completionCell(completed, r.schemes.length)}</TableCell>
+                  </TableRow>
+                  {open && (
+                    <TableRow>
+                      <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
+                        <div className={schemeTable.nestedInset}>
+                          <div className={cn(schemeTable.nestedShell, "space-y-2 p-3")}>
+                            {r.schemes.map((s) => (
+                              <div key={s.schemeId} className="rounded-md border bg-background p-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
+                                  <span className="font-semibold">{s.schemeName}{s.optionLabel && <Badge variant="default" className="ml-2">{s.optionLabel}</Badge>}</span>
+                                  <span className="text-xs text-muted-foreground">Target {optAmount(type, s.target)} · Achieved {optAmount(type, s.achieved)} · Remaining {optAmount(type, s.remaining)} · {progressCell(s.progress)} {s.completed && <Badge variant="success" className="ml-1">Complete</Badge>}</span>
+                                </div>
+                                <OptionContribLines type={type} contributions={s.contributions} target={s.target} achieved={s.achieved} remaining={s.remaining} progress={s.progress} completed={s.completed} />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </Fragment>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
     </div>
   );
 }

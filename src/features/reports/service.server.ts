@@ -3,6 +3,7 @@ import { PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
+import { loadProductMergeMap, terminalSurvivor } from "@/features/products/merge.server";
 import { achievement, nbv, figuresForMode, isQuantityMode, pendingQty, type PlanningMode } from "@/lib/calc";
 import type {
   ReportColumn,
@@ -93,6 +94,17 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
   });
   const rmByOfficer = new Map(rmRows.map((r) => [r.officerId, r.manager]));
 
+  // Product Merge (Phase 12): fold each plan line's product to its TERMINAL survivor at read time, so a
+  // merged source's historical plan lines aggregate under the surviving product (id + name + brand +
+  // category). Zero-cost when no merges exist; historical PlanLine/MonthlyEntry rows are never rewritten.
+  const mergeMap = await loadProductMergeMap();
+  const survivorMeta = new Map<string, { name: string; brandName: string; categoryName: string }>();
+  if (mergeMap.size > 0) {
+    const metas = (await prisma.product.findMany({ select: { id: true, name: true, brand: { select: { name: true } }, category: { select: { name: true } } } })) as { id: string; name: string; brand: { name: string } | null; category: { name: string } | null }[];
+    for (const m of metas) survivorMeta.set(m.id, { name: m.name, brandName: m.brand?.name ?? "—", categoryName: m.category?.name ?? "—" });
+  }
+  const effProduct = (id: string) => (mergeMap.size > 0 ? terminalSurvivor(id, mergeMap) : id);
+
   const facts: Fact[] = [];
   for (const plan of plans) {
     const rm = rmByOfficer.get(plan.officerId) as { id: string; name: string } | undefined;
@@ -153,10 +165,16 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
           managerName: rm?.name ?? "Direct to Super Admin",
           dealerId: pd.dealerId,
           dealerName: pd.dealer.name,
-          productId: l.productId,
-          productName: l.product.name,
-          brandName: l.product.brand?.name ?? "—",
-          categoryName: l.product.category?.name ?? "—",
+          ...(() => {
+            const effId = effProduct(l.productId);
+            const meta = effId !== l.productId ? survivorMeta.get(effId) : undefined;
+            return {
+              productId: effId,
+              productName: meta?.name ?? l.product.name,
+              brandName: meta?.brandName ?? (l.product.brand?.name ?? "—"),
+              categoryName: meta?.categoryName ?? (l.product.category?.name ?? "—"),
+            };
+          })(),
           planQty,
           planAmount,
           planNbv,

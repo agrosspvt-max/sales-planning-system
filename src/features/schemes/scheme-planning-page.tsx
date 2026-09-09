@@ -698,6 +698,9 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
     return m;
   });
   const [remarks, setRemarks] = useState("");
+  // Pre-placement (Phase 11): Admin confirmed days, seeded from the current confirmed/requested value.
+  const prePlacementMax = plan.prePlacementMaxDays ?? 0;
+  const [adminPre, setAdminPre] = useState(() => { const v = plan.adminPrePlacementDays ?? plan.prePlacementDays; return v != null && v > 0 ? String(v) : ""; });
   const [error, setError] = useState<string | null>(null);
 
   // Billing is allowed once booking is Paid AND a document status is chosen — including the special
@@ -732,6 +735,8 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
       adminBillingSameForAll: !perInstance,
       adminBillingDate: billingEnabled && !perInstance ? (billDate || null) : null,
       adminBillingDates: billingEnabled && perInstance ? instNums.map((n) => ({ instanceNumber: n, date: instDates[n] || null })) : undefined,
+      // Pre-placement: only send when the scheme allows it; blank ⇒ null (dealer's requested days apply).
+      ...(prePlacementMax > 0 ? { adminPrePlacementDays: adminPre === "" ? null : Number(adminPre) } : {}),
       remarks: remarks.trim() || undefined,
     }),
     onSuccess: onSaved,
@@ -816,6 +821,18 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                     })
                   )}
                 </>
+              )}
+              {prePlacementMax > 0 && (
+                <tr>
+                  <Cell><span className="font-medium">Pre-placement (days)</span></Cell>
+                  <Cell>{plan.prePlacementDays != null ? `${plan.prePlacementDays} requested` : "—"}</Cell>
+                  <Cell>
+                    <div className="flex items-center gap-2">
+                      <Input type="number" min="0" max={prePlacementMax} className="w-24" placeholder={`0–${prePlacementMax}`} value={adminPre} onChange={(e) => setAdminPre(e.target.value)} />
+                      <span className="text-xs text-muted-foreground">Installments start from Billing Date + confirmed days</span>
+                    </div>
+                  </Cell>
+                </tr>
               )}
             </tbody>
           </table>

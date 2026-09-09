@@ -6,6 +6,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { ensureInstances } from "./scheme-planning.server";
+import { effectiveValueWithGST, effectiveValueWithoutGST } from "@/lib/scheme-options";
 
 /**
  * Enrolled Scheme — the operational layer AFTER a dealer is enrolled (Admin document verification).
@@ -65,6 +66,31 @@ export function resolveInstanceBillingDate(
 }
 
 /**
+ * Pre-placement (Phase 11). Confirmed days for a plan: Admin override wins, else the SO/dealer request,
+ * else 0. The dealer selects within the scheme's ceiling; Admin can confirm/override during verification.
+ */
+export function confirmedPrePlacementDays(plan: { adminPrePlacementDays: number | null; prePlacementDays: number | null }): number {
+  const v = plan.adminPrePlacementDays ?? plan.prePlacementDays ?? 0;
+  return v > 0 ? v : 0;
+}
+
+/**
+ * The date an instance's installment schedule STARTS from = its billing date + confirmed pre-placement days.
+ * The stored billing date is unchanged; only the installment offsets (daysAfterBillingDate) are measured from
+ * this shifted base. With 0 confirmed days this is exactly the billing date, so Fixed schemes and any plan
+ * without pre-placement behave exactly as before.
+ */
+export function installmentBaseDate(
+  plan: { adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; prePlacementDays: number | null; adminPrePlacementDays: number | null },
+  instance: { adminBillingDate: Date | null },
+): Date | null {
+  const billing = resolveInstanceBillingDate(plan, instance);
+  if (!billing) return null;
+  const pre = confirmedPrePlacementDays(plan);
+  return pre > 0 ? addDays(billing, pre) : billing;
+}
+
+/**
  * Ensure ONE instance has its installment rows. Lazy: inserts only when the instance has none yet (so
  * manual edits are never overwritten). Dates come from the instance's OWN billing date:
  *  - New Admin flow (plan.adminVerifiedAt set) → ONLY instance.adminBillingDate; never SO/plan fallbacks.
@@ -77,18 +103,20 @@ async function ensureInstanceInstallments(instanceId: string): Promise<void> {
     where: { id: instanceId },
     select: {
       adminBillingDate: true, soBillingDate: true,
-      dealerSchemePlan: { select: { adminVerifiedAt: true, adminBillingDate: true, billingDate: true, expectedBillingDate: true, scheme: { select: { schemeValueWithGST: true, installmentRules: true } } } },
+      dealerSchemePlan: { select: { adminVerifiedAt: true, adminBillingDate: true, billingDate: true, expectedBillingDate: true, prePlacementDays: true, adminPrePlacementDays: true, optionValueWithGST: true, scheme: { select: { schemeValueWithGST: true, structure: true, installmentRules: true } } } },
     },
   })) as {
     adminBillingDate: Date | null; soBillingDate: Date | null;
-    dealerSchemePlan: { adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; scheme: { schemeValueWithGST: unknown; installmentRules: RuleRow[] } };
+    dealerSchemePlan: { adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; prePlacementDays: number | null; adminPrePlacementDays: number | null; optionValueWithGST: unknown; scheme: { schemeValueWithGST: unknown; structure: string; installmentRules: RuleRow[] } };
   } | null;
   if (!inst) return;
   const plan = inst.dealerSchemePlan;
   const rules = plan.scheme.installmentRules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber);
   if (rules.length === 0) return;
-  const gst = money(plan.scheme.schemeValueWithGST);
-  const billing = resolveInstanceBillingDate(plan, inst);
+  // Effective value: MULTIPLE_OPTIONS uses the plan's frozen option snapshot; FIXED uses the scheme value.
+  const gst = effectiveValueWithGST({ structure: plan.scheme.structure, schemeValueWithGST: plan.scheme.schemeValueWithGST == null ? null : money(plan.scheme.schemeValueWithGST), optionValueWithGST: plan.optionValueWithGST == null ? null : money(plan.optionValueWithGST) });
+  // Pre-placement (Phase 11): schedule starts from billing + confirmed pre-placement days (0 ⇒ unchanged).
+  const billing = installmentBaseDate(plan, inst);
   await prisma.dealerSchemeInstallment.createMany({
     data: derivedInstallmentSchedule(rules, gst, billing).map((r) => ({
       instanceId,
@@ -205,7 +233,7 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string, o
     include: { states: { include: { group: { select: { name: true } } } }, installmentRules: true },
   })) as unknown as {
     id: string; schemeName: string; startDate: Date | null; endDate: Date | null; bookingLastDate: Date | null; isPerpetual: boolean;
-    bookingAmount: unknown; schemeValueWithoutGST: unknown; schemeValueWithGST: unknown; schemeBenefit: string; benefitDetails: string | null; otherBenefitDetails: string | null;
+    bookingAmount: unknown; schemeValueWithoutGST: unknown; schemeValueWithGST: unknown; schemeBenefit: string; benefitDetails: string | null; otherBenefitDetails: string | null; structure: string;
     documentUrl: string | null; states: { group: { name: string } }[]; installmentRules: RuleRow[];
   } | null;
   if (!scheme) throw new ApiError(404, "Scheme not found");
@@ -230,13 +258,15 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string, o
     orderBy: { createdAt: "asc" },
   })) as unknown as {
     id: string; dealerId: string; numberOfSchemes: number; salesOfficerId: string;
+    optionValueWithoutGST: unknown; optionValueWithGST: unknown; optionLabel: string | null;
     dealer: { name: string }; salesOfficer: { name: string; group: { name: string } | null };
     instances: { id: string; instanceNumber: number; adminBillingDate: Date | null; soBillingDate: Date | null; installments: RawInst[] }[];
   }[];
 
   const now = new Date();
-  const gstWithout = money(scheme.schemeValueWithoutGST);
-  const gstWith = money(scheme.schemeValueWithGST);
+  // Per-plan effective value: MULTIPLE_OPTIONS uses the plan's option snapshot; FIXED uses the scheme value.
+  const planGstWithout = (p: { optionValueWithoutGST: unknown }) => effectiveValueWithoutGST({ structure: scheme.structure, schemeValueWithoutGST: scheme.schemeValueWithoutGST == null ? null : money(scheme.schemeValueWithoutGST), optionValueWithoutGST: p.optionValueWithoutGST == null ? null : money(p.optionValueWithoutGST) });
+  const planGstWith = (p: { optionValueWithGST: unknown }) => effectiveValueWithGST({ structure: scheme.structure, schemeValueWithGST: scheme.schemeValueWithGST == null ? null : money(scheme.schemeValueWithGST), optionValueWithGST: p.optionValueWithGST == null ? null : money(p.optionValueWithGST) });
   const toRow = (i: RawInst): InstallmentRow => ({
     id: i.id,
     installmentNumber: i.installmentNumber,
@@ -268,8 +298,8 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string, o
       state: p.salesOfficer.group?.name ?? null,
       numberOfSchemes: p.numberOfSchemes || 1,
       billingDate: instances[0]?.billingDate ?? null, // compat: first instance
-      schemeValueWithoutGST: gstWithout,
-      schemeValueWithGST: gstWith,
+      schemeValueWithoutGST: planGstWithout(p),
+      schemeValueWithGST: planGstWith(p),
       status: dealerStatus(flat),
       instances,
       installments: instances[0]?.installments ?? [], // compat: single-scheme = the one schedule
@@ -285,8 +315,10 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string, o
       bookingLastDate: scheme.bookingLastDate?.toISOString() ?? null,
       isPerpetual: scheme.isPerpetual,
       bookingAmount: scheme.bookingAmount == null ? null : money(scheme.bookingAmount),
-      schemeValueWithoutGST: gstWithout,
-      schemeValueWithGST: gstWith,
+      // Scheme-level value is null for MULTIPLE_OPTIONS (values live per option); the per-dealer rows above
+      // carry the authoritative snapshot value. 0 here only for the scheme header of an option scheme.
+      schemeValueWithoutGST: scheme.schemeValueWithoutGST == null ? 0 : money(scheme.schemeValueWithoutGST),
+      schemeValueWithGST: scheme.schemeValueWithGST == null ? 0 : money(scheme.schemeValueWithGST),
       schemeBenefit: scheme.schemeBenefit,
       benefitDetails: scheme.benefitDetails,
       otherBenefitDetails: scheme.otherBenefitDetails,

@@ -28,6 +28,12 @@ export interface SchemePlan {
   adminConversionDate: string | null; adminBookingStatus: string | null; adminBookingAmount: number | null; adminDocumentStatus: string | null; adminBillingDate: string | null; adminVerifiedAt: string | null;
   soBillingSameForAll: boolean; adminBillingSameForAll: boolean;
   instances: { instanceNumber: number; soBillingDate: string | null; adminBillingDate: string | null }[];
+  // Multiple Options (Phase 10). selectedOptionId = the live/committed option; option* = frozen snapshot.
+  selectedOptionId?: string | null; optionLabel?: string | null; optionTargetQty?: number | null; optionTargetValue?: number | null;
+  optionValueWithoutGST?: number | null; optionValueWithGST?: number | null;
+  // Pre-placement (Phase 11). prePlacementDays = SO/dealer requested; adminPrePlacementDays = Admin confirmed;
+  // prePlacementMaxDays = scheme ceiling (0 ⇒ not available).
+  prePlacementDays?: number | null; adminPrePlacementDays?: number | null; prePlacementMaxDays?: number;
 }
 
 // Part E Plan Status labels/badges.

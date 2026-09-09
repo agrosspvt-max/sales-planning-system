@@ -7,8 +7,17 @@ import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { loadProductResolver } from "@/lib/product-resolver";
 import { writeAudit } from "@/lib/audit";
 import { parseSalesWorkbook } from "@/features/sales-upload/parser";
-import { loadSchemeRequirements, loadEnrolledDealerIds, computeSchemeUploadImpact } from "./scheme-achievement.server";
+import {
+  loadSchemeRequirements,
+  loadEnrolledDealerIds,
+  computeSchemeUploadImpact,
+  loadSchemeOptionConfig,
+  loadOptionSnapshotTargets,
+  computeSchemeOptionUploadImpact,
+  type SchemeOptionConfig,
+} from "./scheme-achievement.server";
 import { round2, round3, type UploadImpactRow } from "@/lib/scheme-achievement";
+import type { OptionUploadImpactRow, OptionAchievementType } from "@/lib/scheme-options";
 import { validateRange, schemeRangeInvalidReason, filterIncoming, type DateRange } from "@/lib/scheme-upload-logic";
 
 /**
@@ -53,6 +62,8 @@ export interface SchemeUploadOption {
   schemeName: string;
   requirementType: SchemeRequirementType;
   valueMode: "INDIVIDUAL" | "COMBINED" | null;
+  structure: "FIXED" | "MULTIPLE_OPTIONS";
+  optionAchievementType: OptionAchievementType | null;
   isPerpetual: boolean;
   startDate: string | null;
   endDate: string | null;
@@ -60,23 +71,25 @@ export interface SchemeUploadOption {
 }
 
 /**
- * Schemes selectable for Scheme Upload. NONE-requirement schemes are EXCLUDED, because Scheme Upload
- * exists solely to feed Product/Value achievement tracking — a NONE scheme has no requirement, so an
- * upload would create meaningless SchemeSale data (installment-only schemes are unaffected). Admin scope
- * (all schemes); the upload page is already SUPER_ADMIN gated.
+ * Schemes selectable for Scheme Upload. A FIXED scheme is excluded when its requirement is NONE (an upload
+ * would create meaningless SchemeSale data; installment-only schemes are unaffected). Every MULTIPLE_OPTIONS
+ * scheme IS selectable — its achievement is tracked over an eligible pool vs each dealer's snapshot target,
+ * so uploads are always meaningful. Admin scope (all schemes); the upload page is already SUPER_ADMIN gated.
  */
 export async function listSchemeUploadOptions(ctx: AuthContext): Promise<SchemeUploadOption[]> {
   assertAdmin(ctx);
   const rows = (await prisma.scheme.findMany({
-    where: { requirementType: { not: SchemeRequirementType.NONE } },
+    where: { OR: [{ requirementType: { not: SchemeRequirementType.NONE } }, { structure: "MULTIPLE_OPTIONS" }] },
     orderBy: [{ isPerpetual: "desc" }, { schemeName: "asc" }],
-    select: { id: true, schemeName: true, requirementType: true, valueMode: true, isPerpetual: true, startDate: true, endDate: true, status: true },
-  })) as {
+    select: { id: true, schemeName: true, requirementType: true, valueMode: true, structure: true, optionAchievementType: true, isPerpetual: true, startDate: true, endDate: true, status: true },
+  })) as unknown as {
     id: string; schemeName: string; requirementType: SchemeRequirementType; valueMode: "INDIVIDUAL" | "COMBINED" | null;
+    structure: string; optionAchievementType: string | null;
     isPerpetual: boolean; startDate: Date | null; endDate: Date | null; status: string;
   }[];
   return rows.map((s) => ({
     id: s.id, schemeName: s.schemeName, requirementType: s.requirementType, valueMode: s.valueMode,
+    structure: s.structure as SchemeUploadOption["structure"], optionAchievementType: (s.optionAchievementType ?? null) as OptionAchievementType | null,
     isPerpetual: s.isPerpetual, startDate: s.startDate?.toISOString() ?? null, endDate: s.endDate?.toISOString() ?? null, status: s.status,
   }));
 }
@@ -147,23 +160,31 @@ export interface CombinedDealerLine {
   requiredValue: number; previouslyAchievedValue: number; incomingValue: number; newTotalValue: number;
   remainingValue: number; completedBefore: boolean; completedAfter: boolean;
 }
+/** Per-dealer combined line for a MULTIPLE_OPTIONS scheme (single snapshot target across the eligible pool). */
+export interface OptionDealerLine {
+  dealerId: string; dealerName: string;
+  target: number; previouslyAchieved: number; incoming: number; newTotal: number; remaining: number;
+  completedBefore: boolean; completedAfter: boolean;
+}
 export interface SchemeUploadSchemeAnalysis {
   schemeId: string; schemeName: string;
   requirementType: SchemeRequirementType; valueMode: "INDIVIDUAL" | "COMBINED" | null;
+  structure: "FIXED" | "MULTIPLE_OPTIONS"; optionAchievementType: OptionAchievementType | null;
   valid: boolean; invalidReason: string | null;
   hasExistingScope: boolean; // exact-range ACTIVE scope exists → this upload would REPLACE it
   enrolledChecked: number;
   matchedDealers: number;      // enrolled dealers contributing ≥1 fact
-  notEnrolledDealers: number;  // matched dealers in the file, not enrolled, with facts on required products
-  requiredProducts: number;
+  notEnrolledDealers: number;  // matched dealers in the file, not enrolled, with facts on required/eligible products
+  requiredProducts: number;    // FIXED: required products; MULTIPLE_OPTIONS: eligible pool size
   matchedRequiredProducts: number;
-  notRequiredProducts: number; // matched products in the file that this scheme does not require
+  notRequiredProducts: number; // matched products in the file this scheme does not require / find eligible
   incomingQty: number; incomingValue: number;
   dealersAffected: number;
-  newlyCompleted: number;      // requirement items newly completed by this upload
+  newlyCompleted: number;      // requirement/target items newly completed by this upload
   contributions: number;       // SchemeSale facts that would be created
   lines: SchemeUploadImpactLine[];
-  combinedByDealer: CombinedDealerLine[]; // populated only for VALUE_BASED COMBINED
+  combinedByDealer: CombinedDealerLine[]; // populated only for Fixed VALUE_BASED COMBINED
+  optionByDealer: OptionDealerLine[];     // populated only for MULTIPLE_OPTIONS
 }
 export interface SchemeUploadAnalysis {
   fileName: string;
@@ -185,12 +206,15 @@ export async function analyzeSchemeUpload(ctx: AuthContext, buffer: Buffer, file
   const file = await resolveFile(buffer);
   const { productNameById } = await loadProductResolver();
 
-  const [requirements, enrolledMap, schemeRows] = await Promise.all([
+  const [requirements, enrolledMap, schemeRows, optionConfig] = await Promise.all([
     loadSchemeRequirements(schemeIds),
     loadEnrolledDealerIds(ctx, schemeIds),
     prisma.scheme.findMany({ where: { id: { in: schemeIds } }, select: { id: true, schemeName: true, requirementType: true, valueMode: true, isPerpetual: true, startDate: true, endDate: true } }),
+    loadSchemeOptionConfig(schemeIds),
   ]);
   const schemeById = new Map((schemeRows as { id: string; schemeName: string; requirementType: SchemeRequirementType; valueMode: "INDIVIDUAL" | "COMBINED" | null; isPerpetual: boolean; startDate: Date | null; endDate: Date | null }[]).map((s) => [s.id, s]));
+  // Per-dealer FROZEN snapshot targets for MULTIPLE_OPTIONS schemes (no-op for Fixed schemes).
+  const optionTargets = await loadOptionSnapshotTargets(ctx, optionConfig, schemeIds);
 
   // Names for every dealer that appears in any impact row (matched-in-file OR previously-achieved).
   const dealerNameById = new Map(file.dealerNameById);
@@ -199,17 +223,26 @@ export async function analyzeSchemeUpload(ctx: AuthContext, buffer: Buffer, file
   for (const schemeId of schemeIds) {
     const meta = schemeById.get(schemeId);
     const req = requirements.get(schemeId);
+    const cfg = optionConfig.get(schemeId);
     const invalidReason = schemeRangeInvalidReason(meta, range);
     const base: SchemeUploadSchemeAnalysis = {
       schemeId, schemeName: meta?.schemeName ?? schemeId,
       requirementType: meta?.requirementType ?? SchemeRequirementType.NONE, valueMode: meta?.valueMode ?? null,
+      structure: (cfg?.structure ?? "FIXED"), optionAchievementType: cfg?.optionAchievementType ?? null,
       valid: !invalidReason, invalidReason,
       hasExistingScope: false, enrolledChecked: 0, matchedDealers: 0, notEnrolledDealers: 0,
-      requiredProducts: req?.products.length ?? 0, matchedRequiredProducts: 0, notRequiredProducts: 0,
+      requiredProducts: cfg?.structure === "MULTIPLE_OPTIONS" ? (cfg.eligibleProductIds.length) : (req?.products.length ?? 0), matchedRequiredProducts: 0, notRequiredProducts: 0,
       incomingQty: 0, incomingValue: 0, dealersAffected: 0, newlyCompleted: 0, contributions: 0,
-      lines: [], combinedByDealer: [],
+      lines: [], combinedByDealer: [], optionByDealer: [],
     };
-    if (invalidReason || !req) { schemes.push(base); continue; }
+    if (invalidReason) { schemes.push(base); continue; }
+
+    // MULTIPLE_OPTIONS: eligible pool + per-dealer snapshot target (combined achievement), isolated path.
+    if (cfg && cfg.structure === "MULTIPLE_OPTIONS" && cfg.optionAchievementType) {
+      schemes.push(await analyzeOptionScheme(base, cfg, cfg.optionAchievementType, optionTargets.get(schemeId) ?? new Map(), file, dealerNameById, range));
+      continue;
+    }
+    if (!req) { schemes.push(base); continue; }
 
     const enrolled = new Set(enrolledMap.get(schemeId) ?? []);
     const required = new Set(req.products.map((p) => p.productId));
@@ -308,6 +341,67 @@ export async function analyzeSchemeUpload(ctx: AuthContext, buffer: Buffer, file
   };
 }
 
+/**
+ * Analyze one MULTIPLE_OPTIONS scheme: achievement is a single combined total over the ELIGIBLE pool vs each
+ * enrolled dealer's FROZEN snapshot target. Non-eligible products are ignored; dealers without a snapshot
+ * (not committed) never contribute. Mirrors the Fixed COMBINED shape but per-dealer, with an option target.
+ */
+async function analyzeOptionScheme(
+  base: SchemeUploadSchemeAnalysis,
+  cfg: SchemeOptionConfig,
+  achievementType: OptionAchievementType,
+  targetByDealer: Map<string, number>,
+  file: ResolvedFile,
+  dealerNameById: Map<string, string>,
+  range: DateRange,
+): Promise<SchemeUploadSchemeAnalysis> {
+  const eligible = new Set(cfg.eligibleProductIds);
+  const committed = new Set(targetByDealer.keys()); // enrolled dealers with a frozen snapshot target
+  const incoming = filterIncoming(file.matched, committed, eligible);
+
+  // Categorisation counts from the matched file facts.
+  const notCommitted = new Set<string>();
+  const notEligible = new Set<string>();
+  const matchedEligible = new Set<string>();
+  for (const f of file.matched.values()) {
+    if (eligible.has(f.productId)) {
+      if (committed.has(f.dealerId)) matchedEligible.add(f.productId);
+      else notCommitted.add(f.dealerId);
+    } else if (committed.has(f.dealerId)) {
+      notEligible.add(f.productId);
+    }
+  }
+
+  const impact = await computeSchemeOptionUploadImpact(base.schemeId, achievementType, cfg.eligibleProductIds, targetByDealer, { startDate: range.start, endDate: range.end }, incoming);
+  const optionByDealer: OptionDealerLine[] = impact.rows.map((r: OptionUploadImpactRow) => {
+    if (!dealerNameById.has(r.dealerId)) dealerNameById.set(r.dealerId, r.dealerId);
+    return {
+      dealerId: r.dealerId, dealerName: dealerNameById.get(r.dealerId) ?? r.dealerId,
+      target: r.target, previouslyAchieved: r.previouslyAchieved, incoming: r.incoming, newTotal: r.newTotal,
+      remaining: r.remaining, completedBefore: r.completedBefore, completedAfter: r.completedAfter,
+    };
+  });
+  const contributionEntries = [...incoming.values()];
+  const incomingQty = round3(contributionEntries.reduce((s, x) => s + x.qty, 0));
+  const incomingValue = round2(contributionEntries.reduce((s, x) => s + x.value, 0));
+  const dealersAffected = new Set([...incoming.keys()].map((k) => k.split("|")[0])).size;
+  const hasExistingScope = await hasExactActiveScope(base.schemeId, range);
+
+  return {
+    ...base,
+    hasExistingScope,
+    enrolledChecked: committed.size,
+    matchedDealers: dealersAffected,
+    notEnrolledDealers: notCommitted.size,
+    matchedRequiredProducts: matchedEligible.size,
+    notRequiredProducts: notEligible.size,
+    incomingQty, incomingValue, dealersAffected,
+    newlyCompleted: optionByDealer.filter((l) => l.completedAfter && !l.completedBefore).length,
+    contributions: incoming.size,
+    lines: [], combinedByDealer: [], optionByDealer,
+  };
+}
+
 /** True when an ACTIVE scope already exists for this scheme + EXACT date range (the replacement key). */
 async function hasExactActiveScope(schemeId: string, range: { start: Date; end: Date }): Promise<boolean> {
   const found = await prisma.schemeUploadBatchScheme.findFirst({
@@ -339,12 +433,15 @@ export async function commitSchemeUpload(ctx: AuthContext, buffer: Buffer, fileN
   const schemeIds = [...new Set(input.schemeIds)];
 
   const file = await resolveFile(buffer);
-  const [requirements, enrolledMap, schemeRows] = await Promise.all([
+  const [requirements, enrolledMap, schemeRows, optionConfig] = await Promise.all([
     loadSchemeRequirements(schemeIds),
     loadEnrolledDealerIds(ctx, schemeIds),
     prisma.scheme.findMany({ where: { id: { in: schemeIds } }, select: { id: true, schemeName: true, requirementType: true, valueMode: true, isPerpetual: true, startDate: true, endDate: true } }),
+    loadSchemeOptionConfig(schemeIds),
   ]);
   const schemeById = new Map((schemeRows as { id: string; schemeName: string; requirementType: SchemeRequirementType; valueMode: "INDIVIDUAL" | "COMBINED" | null; isPerpetual: boolean; startDate: Date | null; endDate: Date | null }[]).map((s) => [s.id, s]));
+  // Committed (snapshot) targets identify enrolled MULTIPLE_OPTIONS dealers; Fixed schemes ignore this.
+  const optionTargets = await loadOptionSnapshotTargets(ctx, optionConfig, schemeIds);
 
   // Validate every selected scheme up front — a single invalid selection fails the whole request (nothing
   // is written), so the admin never gets a silent partial import outside a scheme's period.
@@ -357,12 +454,16 @@ export async function commitSchemeUpload(ctx: AuthContext, buffer: Buffer, fileN
   interface Plan { schemeId: string; schemeName: string; facts: MatchedFact[]; existingScopeId: string | null }
   const plans: Plan[] = [];
   for (const schemeId of schemeIds) {
+    const cfg = optionConfig.get(schemeId);
+    const isOption = cfg?.structure === "MULTIPLE_OPTIONS";
+    // MULTIPLE_OPTIONS: contributing set = eligible pool + committed (snapshot) dealers.
+    // FIXED: required products + enrolled dealers (unchanged).
     const req = requirements.get(schemeId)!;
-    const enrolled = new Set(enrolledMap.get(schemeId) ?? []);
-    const required = new Set(req.products.map((p) => p.productId));
+    const dealerSet = isOption ? new Set((optionTargets.get(schemeId) ?? new Map()).keys()) : new Set(enrolledMap.get(schemeId) ?? []);
+    const productSet = isOption ? new Set(cfg!.eligibleProductIds) : new Set(req.products.map((p) => p.productId));
     const facts: MatchedFact[] = [];
     for (const f of file.matched.values()) {
-      if (!enrolled.has(f.dealerId) || !required.has(f.productId)) continue;
+      if (!dealerSet.has(f.dealerId) || !productSet.has(f.productId)) continue;
       if (f.qty === 0 && f.value === 0) continue;
       facts.push(f);
     }
@@ -402,7 +503,9 @@ export async function commitSchemeUpload(ctx: AuthContext, buffer: Buffer, fileN
       // 2. New ACTIVE scope.
       const matchedQty = round3(p.facts.reduce((s, f) => s + f.qty, 0));
       const matchedValue = round2(p.facts.reduce((s, f) => s + f.value, 0));
-      const enrolledChecked = (enrolledMap.get(p.schemeId) ?? []).length;
+      const enrolledChecked = optionConfig.get(p.schemeId)?.structure === "MULTIPLE_OPTIONS"
+        ? (optionTargets.get(p.schemeId)?.size ?? 0)
+        : (enrolledMap.get(p.schemeId) ?? []).length;
       const scope = (await tx.schemeUploadBatchScheme.create({
         data: {
           batchId: batch.id, schemeId: p.schemeId, startDate: range.start, endDate: range.end,

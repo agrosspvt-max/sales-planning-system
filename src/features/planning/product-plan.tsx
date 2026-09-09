@@ -48,11 +48,17 @@ export function ProductPlan() {
     const byProduct = new Map<string, ProductRow>();
     for (const d of detail.dealers) {
       for (const l of d.lines) {
-        let row = byProduct.get(l.productId);
+        // Product Merge (Phase 12): group by the EFFECTIVE (survivor) identity so a merged
+        // source product (e.g. TAANDAB) rolls up into its survivor (TANDAB) as ONE row with
+        // combined figures — no double counting, no duplicate row. Raw productId is still used
+        // for the live-edit cell lookup below.
+        const effId = l.effectiveProductId ?? l.productId;
+        const isSurvivorLine = effId === l.productId;
+        let row = byProduct.get(effId);
         if (!row) {
           row = {
-            productId: l.productId,
-            name: l.productName,
+            productId: effId,
+            name: l.effectiveProductName ?? l.productName,
             technicalName: l.technicalName,
             nbvPercent: l.nbvPercent,
             isClearance: l.isClearance ?? false,
@@ -65,7 +71,16 @@ export function ProductPlan() {
             actualAmount: 0,
             actualNbv: 0,
           };
-          byProduct.set(l.productId, row);
+          byProduct.set(effId, row);
+        }
+        // Survivor wins: the surviving product's own metadata (name/technical/NBV%/clearance)
+        // takes precedence over a merged source's, regardless of iteration order.
+        if (isSurvivorLine) {
+          row.name = l.effectiveProductName ?? l.productName;
+          row.technicalName = l.technicalName;
+          row.nbvPercent = l.nbvPercent;
+          row.isClearance = l.isClearance ?? false;
+          row.clearanceQty = l.clearanceQty ?? null;
         }
         // Live planned figures from the shared cells.
         const fig = lineFig(d.dealerId, l);

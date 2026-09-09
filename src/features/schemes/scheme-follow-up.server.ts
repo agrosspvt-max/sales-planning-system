@@ -4,10 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { BUSINESS_WEEK_COUNT, businessWeekDayRange } from "@/features/recovery/service.server";
-import { derivedInstallmentSchedule, resolveInstanceBillingDate, type InstallmentRuleRow } from "./scheme-enrolled.server";
+import { derivedInstallmentSchedule, installmentBaseDate, type InstallmentRuleRow } from "./scheme-enrolled.server";
 // Phase 6: Product/Value achievement follow-up REUSES the Phase 4 authoritative engine (pure calculations)
 // and its batched DB loaders (requirements + active-scope sales). No achievement maths is duplicated here.
-import { loadSchemeRequirements, loadActiveSchemeSales } from "./scheme-achievement.server";
+import { loadSchemeRequirements, loadActiveSchemeSales, loadSchemeOptionConfig } from "./scheme-achievement.server";
 import {
   installmentPaidTotal,
   schemeProductAchievement,
@@ -19,6 +19,12 @@ import {
   type SchemeProductAchievement,
   type SchemeValueAchievement,
 } from "@/lib/scheme-achievement";
+import {
+  effectiveValueWithGST,
+  effectiveOptionTarget,
+  dealerOptionAchievement,
+  type OptionAchievementType,
+} from "@/lib/scheme-options";
 
 /**
  * FOLLOW-UP PLANS — the recovery layer over enrolled schemes (Scheme Follow-up + Dealer Follow-up).
@@ -201,6 +207,13 @@ interface PlanModel {
   bookingAmount: number; // Admin-confirmed only
   rows: ScheduleRow[];
   derivedSchedule: boolean; // any instance shown from a derived (not persisted) schedule
+  // Phase 10 option snapshot (MULTIPLE_OPTIONS only; null for FIXED). Authoritative, frozen at submission.
+  structure: "FIXED" | "MULTIPLE_OPTIONS";
+  optionAchievementType: "QUANTITY_BASED" | "VALUE_BASED" | null;
+  selectedOptionId: string | null;
+  optionLabel: string | null;
+  optionTargetQty: number | null;
+  optionTargetValue: number | null;
 }
 
 /**
@@ -223,9 +236,11 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
     select: {
       id: true, dealerId: true, schemeId: true, numberOfSchemes: true,
       adminBookingAmount: true, adminVerifiedAt: true, adminBillingDate: true, billingDate: true, expectedBillingDate: true,
+      prePlacementDays: true, adminPrePlacementDays: true,
       dealer: { select: { name: true, town: true, village: true, tehsil: true, district: true, mobile: true } },
       salesOfficer: { select: { name: true, group: { select: { name: true } } } },
-      scheme: { select: { schemeName: true, schemeValueWithGST: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
+      selectedOptionId: true, optionLabel: true, optionTargetQty: true, optionTargetValue: true, optionValueWithGST: true,
+      scheme: { select: { schemeName: true, schemeValueWithGST: true, structure: true, optionAchievementType: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
       instances: {
         select: { id: true, instanceNumber: true, adminBillingDate: true, installments: { select: { installmentNumber: true, plannedAmount: true, plannedDate: true, receivedAmount: true, receivedDate: true } } },
         orderBy: { instanceNumber: "asc" },
@@ -235,14 +250,17 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
   })) as unknown as {
     id: string; dealerId: string; schemeId: string; numberOfSchemes: number;
     adminBookingAmount: unknown; adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null;
+    prePlacementDays: number | null; adminPrePlacementDays: number | null;
     dealer: { name: string; town: string | null; village: string | null; tehsil: string | null; district: string | null; mobile: string | null };
     salesOfficer: { name: string; group: { name: string } | null };
-    scheme: { schemeName: string; schemeValueWithGST: unknown; installmentRules: InstallmentRuleRow[] };
+    selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithGST: unknown;
+    scheme: { schemeName: string; schemeValueWithGST: unknown; structure: string; optionAchievementType: string | null; installmentRules: InstallmentRuleRow[] };
     instances: { id: string; instanceNumber: number; adminBillingDate: Date | null; installments: { installmentNumber: number; plannedAmount: unknown; plannedDate: Date | null; receivedAmount: unknown; receivedDate: Date | null }[] }[];
   }[];
 
   return plans.map((p) => {
-    const gst = money(p.scheme.schemeValueWithGST);
+    // Effective With-GST value: MULTIPLE_OPTIONS uses the plan's option snapshot; FIXED uses the scheme value.
+    const gst = effectiveValueWithGST({ structure: p.scheme.structure, schemeValueWithGST: p.scheme.schemeValueWithGST == null ? null : money(p.scheme.schemeValueWithGST), optionValueWithGST: p.optionValueWithGST == null ? null : money(p.optionValueWithGST) });
     const rows: ScheduleRow[] = [];
     let derivedSchedule = false;
     for (const inst of p.instances) {
@@ -258,7 +276,7 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
         continue;
       }
       // No rows persisted yet — DERIVE the schedule for display only (never written).
-      const billing = resolveInstanceBillingDate(p, inst);
+      const billing = installmentBaseDate(p, inst);
       const derived = derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing);
       if (derived.length > 0) derivedSchedule = true;
       for (const d of derived) {
@@ -277,6 +295,12 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
       instanceCount: p.instances.length, numberOfSchemes: p.numberOfSchemes || 1,
       bookingAmount: money(p.adminBookingAmount), // Admin-confirmed only; SO-entered amounts never count
       rows, derivedSchedule,
+      structure: p.scheme.structure as PlanModel["structure"],
+      optionAchievementType: (p.scheme.optionAchievementType ?? null) as PlanModel["optionAchievementType"],
+      selectedOptionId: p.selectedOptionId,
+      optionLabel: p.optionLabel,
+      optionTargetQty: p.optionTargetQty == null ? null : money(p.optionTargetQty),
+      optionTargetValue: p.optionTargetValue == null ? null : money(p.optionTargetValue),
     };
   });
 }
@@ -898,6 +922,176 @@ export async function dealerValueFollowUp(ctx: AuthContext, q: FollowUpQuery): P
       schemes,
     };
   }).sort((a, b) => remainingFirst(a.remainingValue, b.remainingValue, a.dealerName, b.dealerName));
+  return { rows };
+}
+
+/* --------------------------------- Multiple Options (Phase 10) --------------------------------- */
+
+/**
+ * OPTION achievement follow-up. A MULTIPLE_OPTIONS scheme tracks ONE combined total over its eligible product
+ * pool vs each dealer's FROZEN snapshot target (never the live master option). Scheme-wise groups dealers by
+ * their SELECTED option (never one blended target); dealer-wise lists a dealer's option schemes. Each row
+ * carries the selected option + a per-product contribution breakdown. Non-eligible products never contribute.
+ */
+export interface OptionContribLine { productId: string; productName: string; achievedQty: number; achievedValue: number }
+export interface OptionDealerBlock {
+  dealerId: string; dealerName: string; town: string | null; salesOfficerName: string;
+  optionId: string | null; optionLabel: string | null;
+  achievementType: OptionAchievementType; target: number; achieved: number; remaining: number; completed: boolean; progress: number | null;
+  contributions: OptionContribLine[];
+}
+export interface OptionGroupBlock {
+  optionId: string | null; optionLabel: string | null; target: number;
+  dealerCount: number; completedCount: number; dealers: OptionDealerBlock[];
+}
+export interface SchemeOptionRow {
+  schemeId: string; schemeName: string; achievementType: OptionAchievementType;
+  dealerCount: number; optionCount: number; completedCount: number;
+  groups: OptionGroupBlock[];
+}
+export interface DealerOptionSchemeBlock {
+  schemeId: string; schemeName: string; achievementType: OptionAchievementType;
+  optionId: string | null; optionLabel: string | null;
+  target: number; achieved: number; remaining: number; completed: boolean; progress: number | null;
+  contributions: OptionContribLine[];
+}
+export interface DealerOptionRow {
+  dealerId: string; dealerName: string; town: string | null; salesOfficerName: string; state: string | null;
+  schemeCount: number; completedCount: number; schemes: DealerOptionSchemeBlock[];
+}
+
+interface OptionAchvContext {
+  dealerMeta: Map<string, DealerMeta>;
+  schemeMeta: Map<string, { schemeName: string; achievementType: OptionAchievementType; eligible: Set<string> }>;
+  plans: PlanModel[]; // MULTIPLE_OPTIONS only
+  productName: Map<string, string>;
+  salesByScheme: Map<string, Map<string, Map<string, { qty: number; value: number }>>>; // schemeId → dealerId → productId → sums
+}
+
+/** Load the caller's ENROLLED option plans (scope + officer honoured) + eligible pools + ACTIVE sales. */
+async function loadOptionAchievementContext(ctx: AuthContext, q: FollowUpQuery): Promise<OptionAchvContext> {
+  const plans = (await loadPlans(ctx, { officerId: q.officerId })).filter((p) => p.structure === "MULTIPLE_OPTIONS" && p.optionAchievementType != null);
+  const dealerMeta = new Map<string, DealerMeta>();
+  const schemeIds = new Set<string>();
+  for (const p of plans) {
+    if (!dealerMeta.has(p.dealerId)) dealerMeta.set(p.dealerId, { dealerName: p.dealerName, town: p.town, salesOfficerName: p.salesOfficerName, state: p.state, mobile: p.mobile });
+    schemeIds.add(p.schemeId);
+  }
+  const ids = [...schemeIds];
+  const [config, sales] = await Promise.all([loadSchemeOptionConfig(ids), loadActiveSchemeSales(ids)]);
+  const productIds = new Set<string>();
+  for (const id of ids) for (const pid of config.get(id)?.eligibleProductIds ?? []) productIds.add(pid);
+  const productName = await loadProductNames([...productIds]);
+  const schemeMeta = new Map<string, { schemeName: string; achievementType: OptionAchievementType; eligible: Set<string> }>();
+  for (const id of ids) {
+    const cfg = config.get(id);
+    if (!cfg || !cfg.optionAchievementType) continue;
+    const name = plans.find((p) => p.schemeId === id)?.schemeName ?? id;
+    schemeMeta.set(id, { schemeName: name, achievementType: cfg.optionAchievementType, eligible: new Set(cfg.eligibleProductIds) });
+  }
+  const salesByScheme = new Map<string, Map<string, Map<string, { qty: number; value: number }>>>();
+  for (const id of ids) {
+    const perDealer = new Map<string, Map<string, { qty: number; value: number }>>();
+    for (const f of sales.get(id) ?? []) {
+      let m = perDealer.get(f.dealerId);
+      if (!m) { m = new Map(); perDealer.set(f.dealerId, m); }
+      const cur = m.get(f.productId) ?? { qty: 0, value: 0 };
+      cur.qty += f.qty; cur.value += f.value;
+      m.set(f.productId, cur);
+    }
+    salesByScheme.set(id, perDealer);
+  }
+  return { dealerMeta, schemeMeta, plans, productName, salesByScheme };
+}
+
+/**
+ * The eligible-product contribution list for one dealer — ALWAYS every eligible product in the pool (with a
+ * zero contribution when it has no sale), so the expanded detail lists what is being monitored even before any
+ * sales. These are contributions toward the option's single collective target, NOT per-product requirements.
+ */
+function optionContribLines(c: OptionAchvContext, eligible: Set<string>, dealerSums: Map<string, { qty: number; value: number }>): OptionContribLine[] {
+  return [...eligible]
+    .map((productId) => {
+      const s = dealerSums.get(productId) ?? { qty: 0, value: 0 };
+      return { productId, productName: c.productName.get(productId) ?? productId, achievedQty: s.qty, achievedValue: s.value };
+    })
+    .sort((a, b) => a.productName.localeCompare(b.productName));
+}
+
+/** Compute one dealer+scheme option achievement block from the context (shared by both views). */
+function optionDealerBlock(c: OptionAchvContext, p: PlanModel, meta: { achievementType: OptionAchievementType; eligible: Set<string> }): OptionDealerBlock {
+  const target = effectiveOptionTarget({ achievementType: meta.achievementType, optionTargetQty: p.optionTargetQty, optionTargetValue: p.optionTargetValue }) ?? 0;
+  const dealerSums = c.salesByScheme.get(p.schemeId)?.get(p.dealerId) ?? new Map<string, { qty: number; value: number }>();
+  const a = dealerOptionAchievement(meta.achievementType, target, meta.eligible, dealerSums);
+  const m = c.dealerMeta.get(p.dealerId);
+  return {
+    dealerId: p.dealerId, dealerName: m?.dealerName ?? p.dealerId, town: m?.town ?? null, salesOfficerName: m?.salesOfficerName ?? "",
+    optionId: p.selectedOptionId, optionLabel: p.optionLabel,
+    achievementType: meta.achievementType, target: a.target, achieved: a.achieved, remaining: a.remaining, completed: a.completed, progress: a.progress,
+    contributions: optionContribLines(c, meta.eligible, dealerSums),
+  };
+}
+
+/** SCHEME FOLLOW-UP → Options. One row per MULTIPLE_OPTIONS scheme, dealers GROUPED by their selected option. */
+export async function schemeOptionFollowUp(ctx: AuthContext, q: FollowUpQuery): Promise<{ rows: SchemeOptionRow[] }> {
+  const c = await loadOptionAchievementContext(ctx, q);
+  const bySchemeDealers = new Map<string, OptionDealerBlock[]>();
+  for (const p of c.plans) {
+    const meta = c.schemeMeta.get(p.schemeId);
+    if (!meta) continue;
+    const list = bySchemeDealers.get(p.schemeId) ?? [];
+    list.push(optionDealerBlock(c, p, meta));
+    bySchemeDealers.set(p.schemeId, list);
+  }
+  const rows: SchemeOptionRow[] = [];
+  for (const [schemeId, dealers] of bySchemeDealers) {
+    const meta = c.schemeMeta.get(schemeId)!;
+    const groups = new Map<string, OptionGroupBlock>();
+    for (const d of dealers) {
+      const key = d.optionId ?? `label:${d.optionLabel ?? ""}|${d.target}`;
+      let g = groups.get(key);
+      if (!g) { g = { optionId: d.optionId, optionLabel: d.optionLabel, target: d.target, dealerCount: 0, completedCount: 0, dealers: [] }; groups.set(key, g); }
+      g.dealers.push(d); g.dealerCount += 1; if (d.completed) g.completedCount += 1;
+    }
+    const groupList = [...groups.values()]
+      .map((g) => ({ ...g, dealers: g.dealers.sort((x, y) => remainingFirst(x.remaining, y.remaining, x.dealerName, y.dealerName)) }))
+      .sort((a, b) => a.target - b.target);
+    rows.push({
+      schemeId, schemeName: meta.schemeName, achievementType: meta.achievementType,
+      dealerCount: dealers.length, optionCount: groupList.length, completedCount: dealers.filter((d) => d.completed).length,
+      groups: groupList,
+    });
+  }
+  rows.sort((a, b) => a.schemeName.localeCompare(b.schemeName));
+  return { rows };
+}
+
+/** DEALER FOLLOW-UP → Options. One row per dealer, listing each of their MULTIPLE_OPTIONS schemes + option. */
+export async function dealerOptionFollowUp(ctx: AuthContext, q: FollowUpQuery): Promise<{ rows: DealerOptionRow[] }> {
+  const c = await loadOptionAchievementContext(ctx, q);
+  const byDealer = new Map<string, DealerOptionSchemeBlock[]>();
+  for (const p of c.plans) {
+    const meta = c.schemeMeta.get(p.schemeId);
+    if (!meta) continue;
+    const b = optionDealerBlock(c, p, meta);
+    const block: DealerOptionSchemeBlock = {
+      schemeId: p.schemeId, schemeName: meta.schemeName, achievementType: meta.achievementType,
+      optionId: b.optionId, optionLabel: b.optionLabel,
+      target: b.target, achieved: b.achieved, remaining: b.remaining, completed: b.completed, progress: b.progress,
+      contributions: b.contributions,
+    };
+    const list = byDealer.get(p.dealerId) ?? [];
+    list.push(block);
+    byDealer.set(p.dealerId, list);
+  }
+  const rows = [...byDealer.entries()].map(([dealerId, schemes]) => {
+    const m = c.dealerMeta.get(dealerId);
+    schemes.sort((x, y) => remainingFirst(x.remaining, y.remaining, x.schemeName, y.schemeName));
+    return {
+      dealerId, dealerName: m?.dealerName ?? dealerId, town: m?.town ?? null, salesOfficerName: m?.salesOfficerName ?? "", state: m?.state ?? null,
+      schemeCount: schemes.length, completedCount: schemes.filter((s) => s.completed).length, schemes,
+    };
+  }).sort((a, b) => a.dealerName.localeCompare(b.dealerName));
   return { rows };
 }
 

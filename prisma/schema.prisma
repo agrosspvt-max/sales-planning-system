@@ -80,8 +80,10 @@ model Scheme {
   startDate            DateTime?
   endDate              DateTime?
   bookingLastDate      DateTime?
-  schemeValueWithoutGST Decimal        @db.Decimal(14, 2)
-  schemeValueWithGST   Decimal         @db.Decimal(14, 2)
+  // FIXED schemes: required (app-validated). MULTIPLE_OPTIONS schemes: NULL — the real commercial values
+  // live on each SchemeOption (a Multiple-Options scheme has no single scheme-level value). Never 0.
+  schemeValueWithoutGST Decimal?       @db.Decimal(14, 2)
+  schemeValueWithGST   Decimal?        @db.Decimal(14, 2)
   bookingAmount        Decimal?        @db.Decimal(14, 2)
   schemeBenefit        SchemeBenefit
   benefitDetails       String?
@@ -90,12 +92,21 @@ model Scheme {
   // Conversion Date Extension config. 0/unset on either ⇒ extension not available for this scheme.
   maxExtensionDays     Int             @default(0) // total calendar days a dealer may push the ORIGINAL conversion date
   maxExtensionAttempts Int             @default(0) // how many separate extensions are allowed
+  // Pre-placement MASTER config (Phase 11). Max calendar days a dealer may be allowed to pre-place before the
+  // installment schedule starts. 0 ⇒ pre-placement not available for this scheme. The actual per-dealer value
+  // is chosen during planning (DealerSchemePlan.prePlacementDays) and confirmed by Admin; the installment
+  // schedule then starts from Billing Date + confirmed pre-placement days. This is a ceiling, never applied automatically.
+  prePlacementMaxDays  Int             @default(0)
   documentUrl          String?
   // --- Achievement Requirement (independent of installment tracking; NONE ⇒ installment-only scheme). ---
   // Existing schemes default to NONE and keep working exactly as before — requirements are never inferred.
   requirementType       SchemeRequirementType @default(NONE)
   valueMode             SchemeValueMode?      // only for requirementType = VALUE_BASED
   combinedRequiredValue Decimal?              @db.Decimal(14, 2) // only for VALUE_BASED + COMBINED (one target across products)
+  // --- Scheme Structure (Phase 10). FIXED keeps the requirement* fields above; MULTIPLE_OPTIONS uses
+  // optionAchievementType + eligibleProducts + options and leaves requirement* / scheme-level value NULL. ---
+  structure            SchemeStructure @default(FIXED)
+  optionAchievementType SchemeOptionAchievementType? // required for MULTIPLE_OPTIONS; null for FIXED
   status               SchemeStatus    @default(OPEN)
   createdById          String
   createdAt            DateTime        @default(now())
@@ -106,6 +117,8 @@ model Scheme {
   dealerPlans          DealerSchemePlan[]
   requirementProducts  SchemeRequirementProduct[]
   uploadScopes         SchemeUploadBatchScheme[]
+  options              SchemeOption[]
+  eligibleProducts     SchemeEligibleProduct[]
 
   @@index([status])
   @@index([isPerpetual, endDate])
@@ -153,8 +166,17 @@ model DealerSchemePlan {
   planStatus       SchemePlanState        @default(DRAFT) // Draft → Pending for RM → Pending Approval → Approved (+ Returned/Rejected)
   schemeStatus     SchemeConversionStatus @default(PENDING) // appears only after Approved; SO-controlled
   numberOfSchemes  Int                    @default(1) // dealer takes the same scheme N times (Allow Multi Schemes = Yes)
-  totalSchemeAmount Decimal?              @db.Decimal(14, 2) // schemeValueWithGST × numberOfSchemes
+  totalSchemeAmount Decimal?              @db.Decimal(14, 2) // effective value (With GST) × numberOfSchemes
   soNote           String?                // optional per-dealer note written by the Sales Officer in Create Plan
+  // --- Multiple Options (Phase 10). NULL for FIXED plans. While Draft/Returned, selectedOptionId points at
+  // the live SchemeOption. On SUBMIT the option config is FROZEN into the snapshot columns below and all
+  // downstream reads (installments, achievement target, follow-up) use the snapshot — never the live option.
+  selectedOptionId      String?
+  optionLabel           String?
+  optionTargetQty       Decimal?          @db.Decimal(14, 3) // QUANTITY_BASED snapshot target
+  optionTargetValue     Decimal?          @db.Decimal(14, 2) // VALUE_BASED snapshot target
+  optionValueWithoutGST Decimal?          @db.Decimal(14, 2) // snapshot commercial value
+  optionValueWithGST    Decimal?          @db.Decimal(14, 2) // snapshot commercial value (feeds installments)
   // SO conversion entry (after Approved)
   conversionDate   DateTime?
   soBookingStatus  SchemeBookingStatus?
@@ -167,6 +189,11 @@ model DealerSchemePlan {
   adminBookingAmount  Decimal?            @db.Decimal(14, 2)
   adminDocumentStatus SchemeAdminDocStatus?
   adminBillingDate    DateTime?
+  // Pre-placement (Phase 11). prePlacementDays = SO/dealer requested days (within Scheme.prePlacementMaxDays);
+  // adminPrePlacementDays = Admin confirmed/override. Confirmed = adminPrePlacementDays ?? prePlacementDays ?? 0.
+  // The installment schedule starts from (billing date + confirmed pre-placement days). NULL ⇒ 0 days.
+  prePlacementDays      Int?
+  adminPrePlacementDays Int?
   adminVerifiedById   String?
   adminVerifiedAt     DateTime?
   // Multi-scheme billing mode: whether ONE billing date applies to all instances (SO / Admin sides).
@@ -177,6 +204,7 @@ model DealerSchemePlan {
   scheme           Scheme                 @relation(fields: [schemeId], references: [id], onDelete: Cascade)
   dealer           Dealer                 @relation(fields: [dealerId], references: [id])
   salesOfficer     User                   @relation("OfficerSchemePlans", fields: [salesOfficerId], references: [id])
+  selectedOption   SchemeOption?          @relation(fields: [selectedOptionId], references: [id], onDelete: Restrict)
   rmActedBy        User?                  @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
   enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
   instances        DealerSchemeInstance[]
@@ -191,6 +219,7 @@ model DealerSchemePlan {
   @@index([enrollmentStatus])
   @@index([planStatus])
   @@index([schemeStatus])
+  @@index([selectedOptionId])
 }
 
 /// One Conversion Date Extension event for a dealer plan. Immutable history — the source of truth for how
@@ -320,6 +349,45 @@ model SchemeRequirementProduct {
   updatedAt     DateTime @updatedAt
   scheme        Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
   product       Product  @relation(fields: [productId], references: [id])
+
+  @@unique([schemeId, productId])
+  @@index([schemeId])
+  @@index([productId])
+}
+
+/// One predefined option of a MULTIPLE_OPTIONS scheme. A dealer commits to exactly one. The target is a
+/// single combined total across the scheme's eligible product pool (qty OR value by the scheme's
+/// optionAchievementType). Each option carries its OWN commercial value pair. Options are never hard-deleted
+/// once selected by a dealer — they are discontinued (isActive=false) to preserve historical integrity.
+model SchemeOption {
+  id              String   @id @default(cuid())
+  schemeId        String
+  label           String?  // optional usability name ("Basic"/"Standard"/"Premium"); NOT the identity
+  targetQty       Decimal? @db.Decimal(14, 3) // set when scheme.optionAchievementType = QUANTITY_BASED
+  targetValue     Decimal? @db.Decimal(14, 2) // set when scheme.optionAchievementType = VALUE_BASED
+  valueWithoutGST Decimal  @db.Decimal(14, 2)
+  valueWithGST    Decimal  @db.Decimal(14, 2)
+  sortOrder       Int      @default(0)
+  isActive        Boolean  @default(true) // false = discontinued: hidden from new selections, kept for history
+  discontinuedAt  DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  scheme          Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  dealerPlans     DealerSchemePlan[]
+
+  @@index([schemeId])
+}
+
+/// The eligible product pool of a MULTIPLE_OPTIONS scheme. These products collectively contribute toward the
+/// selected option's single total target — they carry NO per-product requirement (contrast
+/// SchemeRequirementProduct, used only by FIXED schemes). Kept in a separate table for clear semantics.
+model SchemeEligibleProduct {
+  id        String   @id @default(cuid())
+  schemeId  String
+  productId String
+  createdAt DateTime @default(now())
+  scheme    Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id])
 
   @@unique([schemeId, productId])
   @@index([schemeId])
@@ -457,6 +525,12 @@ model Product {
   categoryId    String?
   brandId       String?
   isActive      Boolean    @default(true)
+  // Product Merge / Consolidation (Phase 12). When set, this product has been consolidated INTO mergedInto:
+  // it is deactivated + hidden from operational selectors, but the row is retained so history/audit survive
+  // and name/id resolution can map this (source) product to the surviving product. NULL = normal product.
+  mergedIntoId  String?
+  mergedAt      DateTime?
+  mergedById    String?
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   planLines     PlanLine[]
@@ -465,10 +539,32 @@ model Product {
   groupCatalogues GroupProductCatalogue[]
   schemeRequirements SchemeRequirementProduct[]
   schemeSales        SchemeSale[]
+  schemeEligibleProducts SchemeEligibleProduct[]
+  mergedInto    Product?   @relation("ProductMerge", fields: [mergedIntoId], references: [id])
+  mergedFrom    Product[]  @relation("ProductMerge")
 
   @@index([categoryId])
   @@index([brandId])
   @@index([isActive])
+  @@index([mergedIntoId])
+}
+
+/// Auditable, reversible record of a Product Merge / Consolidation (one row per merge). Additive only — it
+/// never affects planning/catalogue data directly; it records the operation and enables safe reversal.
+model ProductMerge {
+  id                 String    @id @default(cuid())
+  sourceProductId    String    // the non-surviving product (e.g. ADAM PLUS)
+  survivingProductId String    // the surviving product (e.g. ADAM)
+  performedById      String
+  catalogueImpact    String?   // JSON summary of per-group action taken (for audit + safe reversal)
+  note               String?
+  reversedAt         DateTime?
+  reversedById       String?
+  createdAt          DateTime  @default(now())
+
+  @@index([sourceProductId])
+  @@index([survivingProductId])
+  @@index([createdAt])
 }
 
 /// Dealer master. Ownership over time is expressed via DealerAssignment.
@@ -1278,6 +1374,20 @@ enum SchemeValueMode {
 enum SchemeUploadStatus {
   ACTIVE
   SUPERSEDED
+}
+
+/// Scheme structure (Phase 10). FIXED = the original single-configuration scheme (unchanged behaviour).
+/// MULTIPLE_OPTIONS = one scheme offering several predefined options; a dealer commits to exactly one.
+enum SchemeStructure {
+  FIXED
+  MULTIPLE_OPTIONS
+}
+
+/// Achievement type for MULTIPLE_OPTIONS schemes. The option target is a single combined total across the
+/// eligible product pool — quantity (sum of eligible-product qty) or value (sum of eligible-product sales).
+enum SchemeOptionAchievementType {
+  QUANTITY_BASED
+  VALUE_BASED
 }
 
 enum PlanStatus {

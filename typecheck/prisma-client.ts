@@ -96,6 +96,12 @@ export type SchemeValueMode = (typeof SchemeValueMode)[keyof typeof SchemeValueM
 export const SchemeUploadStatus = { ACTIVE: "ACTIVE", SUPERSEDED: "SUPERSEDED" } as const;
 export type SchemeUploadStatus = (typeof SchemeUploadStatus)[keyof typeof SchemeUploadStatus];
 
+export const SchemeStructure = { FIXED: "FIXED", MULTIPLE_OPTIONS: "MULTIPLE_OPTIONS" } as const;
+export type SchemeStructure = (typeof SchemeStructure)[keyof typeof SchemeStructure];
+
+export const SchemeOptionAchievementType = { QUANTITY_BASED: "QUANTITY_BASED", VALUE_BASED: "VALUE_BASED" } as const;
+export type SchemeOptionAchievementType = (typeof SchemeOptionAchievementType)[keyof typeof SchemeOptionAchievementType];
+
 export const SchemeDocType = { SOFT_COPY: "SOFT_COPY", HARD_COPY: "HARD_COPY" } as const;
 export type SchemeDocType = (typeof SchemeDocType)[keyof typeof SchemeDocType];
 

@@ -130,6 +130,7 @@ export const DEFAULT_LABELS = {
   "scheme_planning.view.installments": "Installments",
   "scheme_planning.view.product_based": "Product Based",
   "scheme_planning.view.value_based": "Value Based",
+  "scheme_planning.view.options": "Options", // Phase 10: Multiple Options achievement follow-up
 
   // Review / summary table column headers
   "scheme_planning.col.scheme": "Scheme",
@@ -264,6 +265,29 @@ export const DEFAULT_LABELS = {
   "scheme_master.form.booking_amount": "Booking Amount",
   "scheme_master.form.value_without_gst": "Scheme Value (Without GST)",
   "scheme_master.form.value_with_gst": "Scheme Value (With GST)",
+  // Phase 10 — Fixed vs Multiple Options structure
+  // Phase 11 — Create/Edit Scheme section headers + pre-placement
+  "scheme_master.form.section.basic": "Basic Scheme Information",
+  "scheme_master.form.section.details": "Scheme Details",
+  "scheme_master.form.section.payment": "Scheme Payment",
+  "scheme_master.form.section.timeline": "Timeline",
+  "scheme_master.form.section.benefit": "Scheme Benefit / Other Details",
+  "scheme_master.form.section.document": "Scheme Document",
+  "scheme_master.form.pre_placement_max_days": "Pre-placement (Max Days)",
+  "scheme_master.form.structure": "Scheme Structure",
+  "scheme_master.form.structure.fixed": "Fixed",
+  "scheme_master.form.structure.options": "Multiple Options",
+  "scheme_master.form.achievement_type": "Achievement Type",
+  "scheme_master.form.achievement_type.quantity": "Quantity Based",
+  "scheme_master.form.achievement_type.value": "Value Based",
+  "scheme_master.form.eligible_products": "Eligible Products",
+  "scheme_master.form.options_builder": "Options",
+  "scheme_master.form.option_col.label": "Label",
+  "scheme_master.form.option_col.target": "Target",
+  "scheme_master.form.option_col.value_without_gst": "Value (Without GST)",
+  "scheme_master.form.option_col.value_with_gst": "Value (With GST)",
+  "scheme_master.form.option_col.active": "Active",
+  "scheme_master.form.add_option": "Add Option",
   "scheme_master.form.scheme_benefit": "Scheme Benefit",
   "scheme_master.form.allow_multiple": "Allow Multiple Schemes",
   "scheme_master.form.max_extension_days": "Maximum Extension Days",

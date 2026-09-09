@@ -14,6 +14,7 @@ import { planningProductsForOfficer, catalogueEntryForOfficerProduct, clearanceM
 import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { buildMonthlyDealers } from "./monthly.server";
+import { loadEffectiveProduct } from "@/features/products/merge.server";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "./lifecycle.server";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -292,6 +293,8 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   // Clearance flags (group-specific, by the plan officer's group + productId) — display-only.
   const clearanceOfficer = (await prisma.user.findUnique({ where: { id: mp.officerId }, select: { groupId: true, name: true } })) as { groupId: string | null; name: string | null } | null;
   const clearance = await clearanceMapForGroup(clearanceOfficer?.groupId ?? null);
+  // Product Merge (Phase 12): operational identity per line so merged sources fold into the survivor.
+  const effMp = await loadEffectiveProduct();
   // Season Sales = TOTAL actual sales for the WHOLE season per plan line (every month), from the same
   // authoritative MonthlyEntry.saleQty/saleValue used everywhere. Independent of the selected month.
   // findMany + in-app aggregation (groupBy's relational-where typing is unreliable on Prisma 6.3.1).
@@ -309,7 +312,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
 
   // Attach per-dealer completion (≥1 monthly plan value entered — the SAME "has a value" concept
   // Seasonal Planning uses) and the stored monthly No Plan state.
-  const dealers = buildMonthlyDealers(planDealers, months, monthlyMode, clearance).map((d) => ({
+  const dealers = buildMonthlyDealers(planDealers, months, monthlyMode, effMp, clearance).map((d) => ({
     ...d,
     noPlan: noPlanByDealer.has(d.dealerId),
     noPlanReason: noPlanByDealer.get(d.dealerId) ?? null,
@@ -407,7 +410,9 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
 
   const clOfficer = (await prisma.user.findUnique({ where: { id: seasonPlan.officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
   const clearance = await clearanceMapForGroup(clOfficer?.groupId ?? null);
-  return { monthlyMode, months, dealers: buildMonthlyDealers(planDealers, months, monthlyMode, clearance) };
+  // Product Merge (Phase 12): operational identity per line so merged sources fold into the survivor.
+  const eff = await loadEffectiveProduct();
+  return { monthlyMode, months, dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance) };
 }
 
 /* -------------------------------- Saving ---------------------------------- */
@@ -849,7 +854,9 @@ export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
     prisma.season.findUnique({ where: { id: mp.seasonPlan.seasonId }, select: { monthlyMode: true } }),
   ]);
   const gateNoPlanSet = new Set((gateNoPlan as { dealerId: string }[]).map((r) => r.dealerId));
-  const gateBuilt = buildMonthlyDealers(gatePlanDealers, [{ id: mp.seasonMonthId }], (gateSeason?.monthlyMode ?? "PACK_SIZE") as PlanningMode);
+  // This gate only checks per-dealer "has a planned value" membership — product identity is irrelevant,
+  // so an identity (no-op) effective resolver avoids an unnecessary merge-map query.
+  const gateBuilt = buildMonthlyDealers(gatePlanDealers, [{ id: mp.seasonMonthId }], (gateSeason?.monthlyMode ?? "PACK_SIZE") as PlanningMode, { effId: (id) => id, meta: () => null, hasMerges: false });
   const remaining = gateBuilt.filter(
     (d) => !gateNoPlanSet.has(d.dealerId) && !d.products.some((p) => (p.monthly[mp.seasonMonthId]?.plan ?? 0) > 0),
   );

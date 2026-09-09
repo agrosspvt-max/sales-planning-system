@@ -39,16 +39,18 @@ export interface PlanningProduct {
 export async function planningProductsForOfficer(officerId: string, db: PrismaLike = prisma): Promise<PlanningProduct[]> {
   const officer = (await db.user.findUnique({ where: { id: officerId }, select: { groupId: true } })) as { groupId: string | null } | null;
   const groupId = officer?.groupId ?? null;
+  // Product Merge (Phase 12): never seed a merged SOURCE product into new plan lines — only the survivor
+  // (or unmerged products) are plannable. Existing historical lines are untouched; this guards creation.
   if (groupId) {
     const entries = (await db.groupProductCatalogue.findMany({
-      where: { groupId, isActive: true, product: { isActive: true } },
+      where: { groupId, isActive: true, product: { isActive: true, mergedIntoId: null } },
       select: { productId: true, price: true, isClearance: true, clearanceQty: true, product: { select: { nbvPercent: true } } },
     })) as { productId: string; price: unknown; isClearance: boolean; clearanceQty: number | null; product: { nbvPercent: unknown } }[];
     if (entries.length > 0) {
       return entries.map((e) => ({ productId: e.productId, rate: num(e.price), nbvPercent: num(e.product.nbvPercent), isClearance: e.isClearance, clearanceQty: e.clearanceQty }));
     }
   }
-  const master = (await db.product.findMany({ where: { isActive: true }, select: { id: true, rate: true, nbvPercent: true } })) as { id: string; rate: unknown; nbvPercent: unknown }[];
+  const master = (await db.product.findMany({ where: { isActive: true, mergedIntoId: null }, select: { id: true, rate: true, nbvPercent: true } })) as { id: string; rate: unknown; nbvPercent: unknown }[];
   return master.map((p) => ({ productId: p.id, rate: num(p.rate), nbvPercent: num(p.nbvPercent) }));
 }
 
@@ -135,8 +137,12 @@ export interface CatalogueRow {
 export async function listGroupCatalogue(ctx: AuthContext, groupId: string) {
   assertAdmin(ctx);
   const group = await loadGroupOr404(groupId);
+  // Product Merge (Phase 12): the operational State Catalogue must NOT show a merged SOURCE product as an
+  // independent row (survivor wins). We exclude any catalogue entry whose product has been merged into
+  // another (mergedIntoId != null) — the source stays in the DB and in Product Master (for audit/un-merge),
+  // but never appears as a separate operational catalogue row. No duplicate survivor row is created.
   const entries = (await prisma.groupProductCatalogue.findMany({
-    where: { groupId },
+    where: { groupId, product: { mergedIntoId: null } },
     include: { product: { select: { name: true, technicalName: true, rate: true, nbvPercent: true, isActive: true } } },
     orderBy: { product: { name: "asc" } },
   })) as {
@@ -187,7 +193,8 @@ export async function listGroupCatalogue(ctx: AuthContext, groupId: string) {
   // Active Master products NOT yet in this group's catalogue — the "Add Product" candidates.
   const inCatalogue = new Set(rows.map((r) => r.productId));
   const master = (await prisma.product.findMany({
-    where: { isActive: true },
+    // Merged SOURCE products are excluded from the "Add Product" candidates — only the survivor is addable.
+    where: { isActive: true, mergedIntoId: null },
     select: { id: true, name: true, rate: true },
     orderBy: { name: "asc" },
   })) as { id: string; name: string; rate: unknown }[];

@@ -36,6 +36,10 @@ export interface PlanLineDetail {
   planLineId: string;
   productId: string;
   productName: string;
+  // Product Merge (Phase 12): operational identity for read/aggregation grouping. Equals productId/productName
+  // for normal products; equals the SURVIVOR for a merged source. Raw productId is kept for editing/cell keys.
+  effectiveProductId?: string;
+  effectiveProductName?: string;
   technicalName: string | null;
   productActive: boolean;
   isAutoAdded?: boolean;
@@ -147,6 +151,9 @@ export interface MonthlyProductRow {
   planLineId: string;
   productId: string;
   productName: string;
+  // Product Merge (Phase 12): operational identity for read/aggregation grouping (survivor after a merge).
+  effectiveProductId?: string;
+  effectiveProductName?: string;
   /** True for an Additional Product (planned monthly, not in the approved Seasonal Plan). */
   isAdditional?: boolean;
   /** True for an Auto-Added / Unplanned product created by Sales Upload. */

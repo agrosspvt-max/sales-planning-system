@@ -335,7 +335,9 @@ function EligibleProductPicker({ products, selectedIds, onToggle }: { products: 
  *  all sections (border, radius, padding, header typography). No fixed heights — grows with its content. */
 function FormSection({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="space-y-3 rounded-md border p-3">
+    // Elevated navy surface (bg-card, ~13% L) sitting on the darker modal (bg-background, ~10% L), with the
+    // theme's subtle blue-gray border — the reference's layered section-card look, all from existing tokens.
+    <section className="space-y-3 rounded-md border bg-card p-3">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       {children}
     </section>
@@ -345,7 +347,9 @@ function FormSection({ title, children }: { title: string; children: ReactNode }
 function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; states: State[]; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(scheme?.schemeName ?? "");
   const [stateIds, setStateIds] = useState<string[]>(scheme?.states.map((s) => s.id) ?? []);
-  const [isPerpetual, setIsPerpetual] = useState(scheme?.isPerpetual ?? false);
+  // Perpetual is no longer editable in the UI (control removed); the value is preserved from the loaded
+  // scheme purely so save payload + backend behaviour for any existing perpetual scheme stay unchanged.
+  const [isPerpetual] = useState(scheme?.isPerpetual ?? false);
   const [startDate, setStartDate] = useState(scheme ? toDateInput(scheme.startDate) : "");
   const [endDate, setEndDate] = useState(scheme ? toDateInput(scheme.endDate) : "");
   const [bookingLastDate, setBookingLastDate] = useState(scheme ? toDateInput(scheme.bookingLastDate) : "");
@@ -411,6 +415,13 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const addOptRow = () => setOptRows((r) => [...r, { label: "", target: "", valueWithoutGST: "", valueWithGST: "", isActive: true }]);
   const updateOptRow = (i: number, patch: Partial<OptRow>) => setOptRows((r) => r.map((x, idx) => (idx === i ? { ...x, ...patch } : x)));
   const removeOptRow = (i: number) => setOptRows((r) => r.filter((_, idx) => idx !== i));
+  // "No. of Options" is DERIVED from the existing options array (no new DB field/state): raising it appends
+  // blank option rows, lowering it trims from the end. Same reuse pattern as the installment count control.
+  const setOptCount = (n: number) => setOptRows((rows) => {
+    const count = Math.max(0, Math.min(20, Math.floor(n)));
+    if (count <= rows.length) return rows.slice(0, count);
+    return [...rows, ...Array.from({ length: count - rows.length }, () => ({ label: "", target: "", valueWithoutGST: "", valueWithGST: "", isActive: true } as OptRow))];
+  });
   const toggleEligible = (id: string) => setEligibleIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   const multipleOptionsInput = () => ({
     achievementType: optAchType,
@@ -464,6 +475,9 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     achQuantity: useLabel("scheme_master.form.achievement_type.quantity"),
     achValue: useLabel("scheme_master.form.achievement_type.value"),
     eligibleProducts: useLabel("scheme_master.form.eligible_products"),
+    noOfOptions: useLabel("scheme_master.form.no_of_options"),
+    onlyMultiple: useLabel("scheme_master.form.only_multiple"),
+    onlyFixed: useLabel("scheme_master.form.only_fixed"),
     optionsBuilder: useLabel("scheme_master.form.options_builder"),
     optColLabel: useLabel("scheme_master.form.option_col.label"),
     optColTarget: useLabel("scheme_master.form.option_col.target"),
@@ -565,12 +579,41 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
               </div>
               <div className="space-y-1.5"><Label>{FL.allowMultiple}</Label><NativeSelect value={multiple ? "yes" : "no"} onChange={(e) => setMultiple(e.target.value === "yes")} options={[{ value: "no", label: "No" }, { value: "yes", label: "Yes" }]} /></div>
             </div>
+
+            {/* Multiple Options only: the option COUNT + NAMES live here (Basic). These edit the SAME existing
+                options array used for targets/values in Scheme Details — no duplicate option state is created. */}
+            {isOptions && (
+              <div className="space-y-3 rounded-md border border-primary/20 bg-primary/5 p-3">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-primary">{FL.onlyMultiple}</h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5"><Label>{FL.noOfOptions}</Label><Input type="number" min="0" value={String(optRows.length)} onChange={(e) => setOptCount(Number(e.target.value) || 0)} /></div>
+                </div>
+                {optRows.length > 0 && (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {optRows.map((o, i) => (
+                      <div key={i} className="space-y-1.5">
+                        <Label>{`Option ${i + 1} Name`}</Label>
+                        <Input value={o.label} onChange={(e) => updateOptRow(i, { label: e.target.value })} placeholder={`e.g. ${(i + 1) * 100}L`} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </FormSection>
 
           {/* 2. SCHEME DETAILS — Fixed: scheme values + requirement; Multiple Options: achievement type, eligible pool, options. */}
           <FormSection title={FL.sectionDetails}>
+            {/* Scheme Benefit + Other Benefit Details lead this section (moved from the old Benefit section),
+                placed before the Scheme Value fields. Same fields, options, labels and behaviour as before. */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5"><Label>{FL.schemeBenefit} *</Label><NativeSelect value={benefit} onChange={(e) => setBenefit(e.target.value as Benefit)} options={Object.entries(benefits).map(([value, label]) => ({ value, label }))} /></div>
+              {benefit === "OTHER" && <div className="space-y-1.5"><Label>{FL.benefitDetails} *</Label><Input value={benefitDetails} onChange={(e) => setBenefitDetails(e.target.value)} placeholder="e.g. Special Product Gift" /></div>}
+            </div>
+            <div className="space-y-1.5"><Label>{FL.otherBenefitDetails}</Label><Input value={otherBenefitDetails} onChange={(e) => setOtherBenefitDetails(e.target.value)} placeholder="Optional additional notes" /></div>
             {isOptions ? (
-              <>
+              <div className="space-y-3 rounded-md border border-primary/20 bg-primary/5 p-3">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-primary">{FL.onlyMultiple}</h4>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5">
                     <Label>{FL.achievementType} *</Label>
@@ -604,7 +647,8 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                         <TableBody>
                           {optRows.map((o, i) => (
                             <TableRow key={i}>
-                              <TableCell className="min-w-[200px]"><Input value={o.label} onChange={(e) => updateOptRow(i, { label: e.target.value })} placeholder="e.g. Basic / Standard" /></TableCell>
+                              {/* Option name is edited in Basic Scheme Information; shown here read-only (falls back to positional "Option N"). */}
+                              <TableCell className="min-w-[200px] font-medium">{o.label.trim() || `Option ${i + 1}`}</TableCell>
                               <TableCell><Input type="number" min="0" step="any" value={o.target} onChange={(e) => updateOptRow(i, { target: e.target.value })} placeholder={optAchType === "QUANTITY_BASED" ? "Qty" : "Value"} /></TableCell>
                               <TableCell><Input type="number" min="0" step="any" value={o.valueWithoutGST} onChange={(e) => updateOptRow(i, { valueWithoutGST: e.target.value })} /></TableCell>
                               <TableCell><Input type="number" min="0" step="any" value={o.valueWithGST} onChange={(e) => updateOptRow(i, { valueWithGST: e.target.value })} /></TableCell>
@@ -618,9 +662,10 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                   )}
                   {!optionsValid && <p className="text-xs text-destructive">{optionErrors[0]}</p>}
                 </div>
-              </>
+              </div>
             ) : (
-              <>
+              <div className="space-y-3 rounded-md border border-success/20 bg-success/5 p-3">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-success">{FL.onlyFixed}</h4>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5"><Label>{FL.valueWithoutGst} *</Label><Input type="number" min="0" value={valueWithoutGST} onChange={(e) => setValueWithoutGST(e.target.value)} /></div>
                   <div className="space-y-1.5"><Label>{FL.valueWithGst} *</Label><Input type="number" min="0" value={valueWithGST} onChange={(e) => setValueWithGST(e.target.value)} /></div>
@@ -685,7 +730,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                     </div>
                   )}
                 </div>
-              </>
+              </div>
             )}
           </FormSection>
 
@@ -741,11 +786,12 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
 
           {/* 4. TIMELINE — dates, pre-placement ceiling, and conversion-date extension config. */}
           <FormSection title={FL.sectionTimeline}>
-            <label className="flex items-center gap-2 rounded-md border p-3 text-sm font-medium"><input type="checkbox" checked={isPerpetual} onChange={(e) => setIsPerpetual(e.target.checked)} />{FL.perpetual}</label>
+            {/* "Perpetual Scheme" is intentionally HIDDEN from the UI (its DB field + isPerpetual state are
+                retained for existing data/backend behaviour; there is simply no toggle in Create/Edit). */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5"><Label>{FL.schemeStart} {!isPerpetual && "*"}</Label><Input disabled={isPerpetual} type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></div>
-              <div className="space-y-1.5"><Label>{FL.schemeEnd} {!isPerpetual && "*"}</Label><Input disabled={isPerpetual} type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></div>
-              <div className="space-y-1.5"><Label>{FL.lastBookingDate} {!isPerpetual && "*"}</Label><Input disabled={isPerpetual} type="date" value={bookingLastDate} onChange={(e) => setBookingLastDate(e.target.value)} /></div>
+              <div className="space-y-1.5"><Label>{FL.schemeStart} *</Label><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></div>
+              <div className="space-y-1.5"><Label>{FL.schemeEnd} *</Label><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></div>
+              <div className="space-y-1.5"><Label>{FL.lastBookingDate} *</Label><Input type="date" value={bookingLastDate} onChange={(e) => setBookingLastDate(e.target.value)} /></div>
               {/* Pre-placement MASTER ceiling — the max days a dealer may be allowed; actual value chosen in planning. */}
               <div className="space-y-1.5"><Label>{FL.prePlacement}</Label><Input type="number" min="0" value={prePlacementMaxDays} onChange={(e) => setPrePlacementMaxDays(e.target.value)} placeholder="0 = not allowed" /></div>
               <div className="space-y-1.5"><Label>{FL.maxExtDays}</Label><Input type="number" min="0" value={maxExtDays} onChange={(e) => setMaxExtDays(e.target.value)} placeholder="0 = no extension" /></div>
@@ -753,16 +799,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
             </div>
           </FormSection>
 
-          {/* 5. SCHEME BENEFIT / OTHER DETAILS */}
-          <FormSection title={FL.sectionBenefit}>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5"><Label>{FL.schemeBenefit} *</Label><NativeSelect value={benefit} onChange={(e) => setBenefit(e.target.value as Benefit)} options={Object.entries(benefits).map(([value, label]) => ({ value, label }))} /></div>
-              {benefit === "OTHER" && <div className="space-y-1.5"><Label>{FL.benefitDetails} *</Label><Input value={benefitDetails} onChange={(e) => setBenefitDetails(e.target.value)} placeholder="e.g. Special Product Gift" /></div>}
-            </div>
-            <div className="space-y-1.5"><Label>{FL.otherBenefitDetails}</Label><Input value={otherBenefitDetails} onChange={(e) => setOtherBenefitDetails(e.target.value)} placeholder="Optional additional notes" /></div>
-          </FormSection>
-
-          {/* 6. SCHEME DOCUMENT */}
+          {/* SCHEME DOCUMENT */}
           <FormSection title={FL.sectionDocument}>
             <div className="space-y-1.5"><Label>{FL.schemeDocument}</Label><Input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" onChange={(e) => upload(e.target.files?.[0])} />{documentUrl && <div className="flex items-center gap-2 text-xs text-muted-foreground"><FileText className="h-4 w-4" />Document attached <Button variant="ghost" size="sm" onClick={() => setDocumentUrl("")}><X className="h-3 w-3" /></Button></div>}</div>
           </FormSection>

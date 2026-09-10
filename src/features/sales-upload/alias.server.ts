@@ -77,16 +77,28 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
   }
 
   // Active Seasonal Plan membership — detected ONLY via the PlanDealer relation (never inferred from the
-  // dealer assignment or aliases). Batched: each owner's active approved seasonal plan + its PlanDealers.
+  // dealer assignment or aliases). The plan considered per officer MUST match the auto-add target used by
+  // the Edit-Dealer checkbox: the APPROVED active plan, or — as a fallback — an open-season in-progress
+  // (e.g. DRAFT) plan. Both are computed here so a dealer added to either shows as a member on reopen.
   const ownerOfficerIds = [...new Set([...officerByDealer.values()].map((o) => o.officerId))];
   const inActivePlan = new Set<string>();
   if (ownerOfficerIds.length > 0) {
-    const activePlans = (await prisma.seasonPlan.findMany({
+    const approvedPlans = (await prisma.seasonPlan.findMany({
       where: { officerId: { in: ownerOfficerIds }, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
       select: { id: true, officerId: true },
     })) as { id: string; officerId: string }[];
-    const planByOfficer = new Map(activePlans.map((p) => [p.officerId, p.id] as const));
-    const planIds = activePlans.map((p) => p.id);
+    const planByOfficer = new Map(approvedPlans.map((p) => [p.officerId, p.id] as const));
+    // Fallback for officers with no approved active plan: their latest open-season, ACTIVE-lifecycle plan.
+    const missingOfficerIds = ownerOfficerIds.filter((id) => !planByOfficer.has(id));
+    if (missingOfficerIds.length > 0) {
+      const openPlans = (await prisma.seasonPlan.findMany({
+        where: { officerId: { in: missingOfficerIds }, planningType: "SEASONAL", lifecycleState: "ACTIVE", season: { status: "OPEN" } },
+        orderBy: [{ isActiveVersion: "desc" }, { version: "desc" }],
+        select: { id: true, officerId: true },
+      })) as { id: string; officerId: string }[];
+      for (const p of openPlans) if (!planByOfficer.has(p.officerId)) planByOfficer.set(p.officerId, p.id); // newest per officer wins
+    }
+    const planIds = [...planByOfficer.values()];
     if (planIds.length > 0) {
       const pds = (await prisma.planDealer.findMany({ where: { seasonPlanId: { in: planIds } }, select: { seasonPlanId: true, dealerId: true } })) as { seasonPlanId: string; dealerId: string }[];
       const dealersByPlan = new Map<string, Set<string>>();

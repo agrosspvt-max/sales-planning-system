@@ -591,20 +591,41 @@ function dealerData(d: DealerFields) {
 }
 
 /**
- * Add an EXISTING dealer to the officer's ACTIVE APPROVED seasonal plan as a real seasonal dealer:
- * one PlanDealer + one zero-quantity PlanLine per active product (no PlanLinePack rows = 0). Idempotent
- * (skips if the PlanDealer already exists). If the officer has no active approved seasonal plan, it does
- * nothing and returns a warning (the caller still creates the dealer). Reused by the create form + Excel.
+ * The ONE definition of the officer's "current seasonal plan" a dealer can be auto-added to, shared by
+ * the add service below AND the Dealer-Alias membership indicator so both always agree:
+ *   1. Preferred — the APPROVED, active-version, ACTIVE-lifecycle seasonal plan (the finalised plan).
+ *   2. Fallback  — if none is approved yet, the officer's latest ACTIVE-lifecycle seasonal plan whose
+ *      SEASON is still OPEN (e.g. a DRAFT/RETURNED plan being worked on). Newest version preferred.
+ * Returns the target plan id, or null when the officer has neither. Read-only (no writes).
  */
-export async function addDealerToActiveSeasonalPlan(tx: Tx, officerId: string, dealerId: string): Promise<{ added: boolean; warning?: string }> {
-  const plan = await tx.seasonPlan.findFirst({
+export async function resolveAddableSeasonalPlanId(tx: Tx, officerId: string): Promise<string | null> {
+  const approved = await tx.seasonPlan.findFirst({
     where: { officerId, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
     select: { id: true },
   });
-  if (!plan) return { added: false, warning: "No active approved seasonal plan for this officer — the dealer was created but not added to a plan." };
-  const existing = await tx.planDealer.findUnique({ where: { seasonPlanId_dealerId: { seasonPlanId: plan.id, dealerId } }, select: { id: true } });
+  if (approved) return approved.id;
+  // Fallback: an in-progress (not-yet-approved) plan for a season that is still OPEN.
+  const open = await tx.seasonPlan.findFirst({
+    where: { officerId, planningType: "SEASONAL", lifecycleState: "ACTIVE", season: { status: "OPEN" } },
+    orderBy: [{ isActiveVersion: "desc" }, { version: "desc" }],
+    select: { id: true },
+  });
+  return open?.id ?? null;
+}
+
+/**
+ * Add an EXISTING dealer to the officer's current seasonal plan as a real seasonal dealer: one PlanDealer
+ * + one zero-quantity PlanLine per active product (no PlanLinePack rows = 0). The target plan is resolved
+ * by `resolveAddableSeasonalPlanId` — the APPROVED active plan, or (fallback) an open-season in-progress
+ * plan. Idempotent (skips if the PlanDealer already exists). If the officer has NO approved AND no
+ * open-season plan, it does nothing and returns a warning. Reused by the create form + Excel + Edit Dealer.
+ */
+export async function addDealerToActiveSeasonalPlan(tx: Tx, officerId: string, dealerId: string): Promise<{ added: boolean; warning?: string }> {
+  const planId = await resolveAddableSeasonalPlanId(tx, officerId);
+  if (!planId) return { added: false, warning: "This Sales Officer has no approved active plan and no open-season plan — the dealer was not added to any plan." };
+  const existing = await tx.planDealer.findUnique({ where: { seasonPlanId_dealerId: { seasonPlanId: planId, dealerId } }, select: { id: true } });
   if (existing) return { added: true }; // no duplicate PlanDealer
-  const pd = await tx.planDealer.create({ data: { seasonPlanId: plan.id, dealerId, fromMonthlyPlan: false }, select: { id: true } });
+  const pd = await tx.planDealer.create({ data: { seasonPlanId: planId, dealerId, fromMonthlyPlan: false }, select: { id: true } });
   await seedSeasonalPlanLines(tx, pd.id, officerId);
   return { added: true };
 }

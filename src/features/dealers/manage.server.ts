@@ -104,12 +104,20 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
         if (!existing) await tx.dealerAlias.create({ data: { systemDealerId: dealerId, tallyName: aliasName, tallyKey: key } });
       }
     }
-    // Optionally ADD to the selected officer's active seasonal plan — idempotent (never creates a
-    // duplicate PlanDealer, never removes). Only adds when an active plan exists and the dealer stays active.
-    // Only ACTIVE dealers are plan-eligible — never add a Pending/Inactive/Defaulter dealer to a plan.
+    // Optionally ADD to the SELECTED officer's active seasonal plan — reuses the ONE existing seasonal
+    // membership service (addDealerToActiveSeasonalPlan): idempotent (never a duplicate PlanDealer, never
+    // removes), targets the officer being SUBMITTED (data.officerId — the new owner on a reassignment),
+    // and only for an ACTIVE dealer. The service returns { added } — we must NOT ignore it: when the
+    // officer has no APPROVED, active-version seasonal plan it returns added:false, and swallowing that
+    // was the bug (the edit "saved" but no PlanDealer was created, so the checkbox reset on reopen). We
+    // now surface it; throwing inside the transaction rolls back the whole edit so nothing is partially
+    // saved when the requested auto-add cannot complete.
     const targetOfficerId = data.officerId ?? currentOwner?.officerId;
     if (data.addToSeasonalPlan && effectiveStatus === "ACTIVE" && targetOfficerId) {
-      await addDealerToActiveSeasonalPlan(tx, targetOfficerId, dealerId);
+      const planResult = await addDealerToActiveSeasonalPlan(tx, targetOfficerId, dealerId);
+      if (!planResult.added) {
+        throw new ApiError(409, planResult.warning ?? "The selected Sales Officer has no approved active plan and no open-season plan to add this dealer to.");
+      }
     }
   });
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Edited dealer ${data.name}` });

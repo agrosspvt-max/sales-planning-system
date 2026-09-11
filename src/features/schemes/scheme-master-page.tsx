@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { FileText, Lock, Unlock, Plus, X, MoreVertical, Info, Share2, Pencil, Trash2, AlertTriangle, ChevronDown, ChevronUp, Search } from "lucide-react";
+import { FileText, Lock, Unlock, Plus, X, MoreVertical, Info, Share2, Pencil, Trash2, AlertTriangle } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { formatDate, formatCurrency, cn } from "@/lib/utils";
@@ -280,54 +280,29 @@ export function SchemeMasterPage({ canManage = true, crumbs, nav, hideViewToggle
 }
 
 /**
- * Compact searchable multi-select for the Multiple Options eligible-product pool (Phase 10). Selected
- * products show as removable chips; the full catalogue lives in a collapsed, scrollable, searchable panel
- * so it never dominates the modal. Selection semantics are unchanged — it just toggles ids in the pool.
+ * Shared product-row selector — the SAME "Select Product" dropdown + "+ Add Product" pattern the Fixed
+ * requirement products use, so Fixed and Multiple Options pick products identically. Rows may hold an empty
+ * pending selection ("Select Product"); the component publishes the unique, non-empty ids to the parent, so
+ * no product is auto-selected, duplicates are prevented, and saved products load unchanged in edit mode.
+ * Used for the Multiple Options eligible-product pool — selection semantics (a set of ids) are unchanged.
  */
-function EligibleProductPicker({ products, selectedIds, onToggle }: { products: ProductOption[]; selectedIds: string[]; onToggle: (id: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const byId = new Map(products.map((p) => [p.productId, p] as const));
-  const selected = selectedIds.map((id) => byId.get(id)).filter((p): p is ProductOption => !!p);
-  const query = q.trim().toLowerCase();
-  const filtered = query ? products.filter((p) => p.name.toLowerCase().includes(query)) : products;
+function EligibleProductRows({ products, value, onChange, addLabel, productName }: { products: ProductOption[]; value: string[]; onChange: (ids: string[]) => void; addLabel: string; productName: (id: string) => string }) {
+  const [rows, setRows] = useState<string[]>(value.length ? value : [""]);
+  const publish = (next: string[]) => { setRows(next); onChange([...new Set(next.filter((x) => x !== ""))]); };
+  const used = new Set(rows.filter((x) => x !== ""));
+  const optionsFor = (cur: string) => products.filter((p) => p.productId === cur || !used.has(p.productId));
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap gap-1.5">
-        {selected.length === 0 ? (
-          <span className="text-xs text-muted-foreground">No products selected yet.</span>
-        ) : (
-          selected.map((p) => (
-            <span key={p.productId} className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs">
-              {p.name}
-              <button type="button" className="text-muted-foreground hover:text-destructive" onClick={() => onToggle(p.productId)} title="Remove"><X className="h-3 w-3" /></button>
-            </span>
-          ))
-        )}
-      </div>
-      <Button type="button" variant="outline" size="sm" onClick={() => setOpen((o) => !o)}>
-        <Search className="h-3 w-3" /> {open ? "Close product list" : "Search / add products"} {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-      </Button>
-      {open && (
-        <div className="rounded-md border">
-          <div className="border-b p-2"><Input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search products…" /></div>
-          <div className="max-h-56 space-y-0.5 overflow-auto p-2">
-            {products.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No products available.</p>
-            ) : filtered.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No products match “{q}”.</p>
-            ) : (
-              filtered.map((p) => (
-                <label key={p.productId} className="flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/50">
-                  <input type="checkbox" checked={selectedIds.includes(p.productId)} onChange={() => onToggle(p.productId)} />
-                  <span>{p.isActive ? p.name : `${p.name} (inactive)`}</span>
-                </label>
-              ))
-            )}
+      {rows.map((id, i) => (
+        <div key={i} className="flex items-start gap-2">
+          <div className="flex-1">
+            <NativeSelect value={id} onChange={(e) => publish(rows.map((r, idx) => (idx === i ? e.target.value : r)))} options={[{ value: "", label: "Select Product" }, ...optionsFor(id).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
+            {id !== "" && !products.some((p) => p.productId === id) && <p className="mt-1 text-xs text-muted-foreground">{productName(id)}</p>}
           </div>
-          <div className="border-t px-2 py-1.5 text-right text-xs text-muted-foreground">{selectedIds.length} selected</div>
+          <Button type="button" variant="ghost" size="sm" onClick={() => publish(rows.length > 1 ? rows.filter((_, idx) => idx !== i) : [""])} title="Remove"><X className="h-3 w-3" /></Button>
         </div>
-      )}
+      ))}
+      <Button type="button" variant="outline" size="sm" onClick={() => publish([...rows, ""])}><Plus className="h-3 w-3" /> {addLabel}</Button>
     </div>
   );
 }
@@ -357,13 +332,15 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const [valueWithoutGST, setValueWithoutGST] = useState(scheme ? String(scheme.schemeValueWithoutGST) : "");
   const [valueWithGST, setValueWithGST] = useState(scheme ? String(scheme.schemeValueWithGST) : "");
   const [bookingAmount, setBookingAmount] = useState(scheme?.bookingAmount != null ? String(scheme.bookingAmount) : "");
-  const [benefit, setBenefit] = useState<Benefit>(scheme?.schemeBenefit ?? "DOMESTIC_TOUR");
+  // Create starts UNSELECTED ("Select Scheme Benefit"); Edit loads the saved benefit.
+  const [benefit, setBenefit] = useState<Benefit | "">(scheme?.schemeBenefit ?? "");
   const [benefitDetails, setBenefitDetails] = useState(scheme?.benefitDetails ?? "");
   const [otherBenefitDetails, setOtherBenefitDetails] = useState(scheme?.otherBenefitDetails ?? "");
   const [multiple, setMultiple] = useState(scheme?.allowMultipleSchemes ?? false);
-  const [maxExtDays, setMaxExtDays] = useState(scheme?.maxExtensionDays != null ? String(scheme.maxExtensionDays) : "0");
-  const [maxExtAttempts, setMaxExtAttempts] = useState(scheme?.maxExtensionAttempts != null ? String(scheme.maxExtensionAttempts) : "0");
-  const [prePlacementMaxDays, setPrePlacementMaxDays] = useState(scheme?.prePlacementMaxDays != null ? String(scheme.prePlacementMaxDays) : "0");
+  // Create starts EMPTY (not "0"); Edit loads the saved value. Blank saves as 0 via `Number(x) || 0` (unchanged).
+  const [maxExtDays, setMaxExtDays] = useState(scheme?.maxExtensionDays != null ? String(scheme.maxExtensionDays) : "");
+  const [maxExtAttempts, setMaxExtAttempts] = useState(scheme?.maxExtensionAttempts != null ? String(scheme.maxExtensionAttempts) : "");
+  const [prePlacementMaxDays, setPrePlacementMaxDays] = useState(scheme?.prePlacementMaxDays != null ? String(scheme.prePlacementMaxDays) : "");
   const [documentUrl, setDocumentUrl] = useState(scheme?.documentUrl ?? "");
   const [installments, setInstallments] = useState<Installment[]>(scheme?.installments ?? []);
   const [error, setError] = useState<string | null>(null);
@@ -372,7 +349,6 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   // schemes stay installment-only. qty/value are kept as strings while editing (empty = not entered). ----
   type ReqRow = { productId: string; requiredQty: string; requiredValue: string };
   const [reqType, setReqType] = useState<ReqType>(scheme?.requirementType ?? "NONE");
-  const [valueMode, setValueMode] = useState<ValueMode>(scheme?.valueMode ?? "INDIVIDUAL");
   const [combinedValue, setCombinedValue] = useState(scheme?.combinedRequiredValue != null ? String(scheme.combinedRequiredValue) : "");
   const [reqRows, setReqRows] = useState<ReqRow[]>(
     scheme?.requirementProducts?.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty != null ? String(p.requiredQty) : "", requiredValue: p.requiredValue != null ? String(p.requiredValue) : "" })) ?? [],
@@ -383,21 +359,27 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const usedProductIds = new Set(reqRows.map((r) => r.productId));
   const availableProducts = productOptions.filter((p) => !usedProductIds.has(p.productId));
 
-  const addReqRow = () => { const first = availableProducts[0]; if (!first) return; setReqRows((rows) => [...rows, { productId: first.productId, requiredQty: "", requiredValue: "" }]); };
+  // A new product row starts EMPTY — no product is auto-selected; the user must pick one ("Select Product").
+  const emptyReqRow = (): ReqRow => ({ productId: "", requiredQty: "", requiredValue: "" });
+  const addReqRow = () => setReqRows((rows) => [...rows, emptyReqRow()]);
   const updateReqRow = (idx: number, patch: Partial<ReqRow>) => setReqRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   const removeReqRow = (idx: number) => setReqRows((rows) => rows.filter((_, i) => i !== idx));
+  // Choosing a basis (Product/Value Based) shows ONE empty product row to start; existing rows are kept.
+  const changeReqType = (t: ReqType) => { setReqType(t); if (t !== "NONE") setReqRows((rows) => (rows.length === 0 ? [emptyReqRow()] : rows)); };
   // Products still selectable for a given row = the ones not used elsewhere, plus the row's own current pick.
   const optionsForRow = (currentId: string) => productOptions.filter((p) => p.productId === currentId || !usedProductIds.has(p.productId));
 
   // Build the shared requirement shape (validation + persistence use the SAME normalizer contract).
+  // Fixed + Value Based ALWAYS uses COMBINED (the Value Mode selector was removed): one combined required
+  // value across the applicable products, and no per-product required value. Product Based is unchanged.
   const requirementInput = () => ({
     requirementType: reqType,
-    valueMode: reqType === "VALUE_BASED" ? valueMode : null,
-    combinedRequiredValue: reqType === "VALUE_BASED" && valueMode === "COMBINED" ? (combinedValue === "" ? null : Number(combinedValue)) : null,
+    valueMode: reqType === "VALUE_BASED" ? ("COMBINED" as ValueMode) : null,
+    combinedRequiredValue: reqType === "VALUE_BASED" ? (combinedValue === "" ? null : Number(combinedValue)) : null,
     products: reqType === "NONE" ? [] : reqRows.map((r) => ({
       productId: r.productId,
       requiredQty: reqType === "PRODUCT_BASED" ? (r.requiredQty === "" ? null : Number(r.requiredQty)) : null,
-      requiredValue: reqType === "VALUE_BASED" && valueMode === "INDIVIDUAL" ? (r.requiredValue === "" ? null : Number(r.requiredValue)) : null,
+      requiredValue: null, // Value Based is Combined → per-product values are never used
     })),
   });
   const requirementErrors = validateSchemeRequirement(requirementInput());
@@ -408,7 +390,8 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   // value fields are unused for options (sent null); installment rules must be percentage-only. ----
   type OptRow = { id?: string; label: string; target: string; valueWithoutGST: string; valueWithGST: string; isActive: boolean };
   const [structure, setStructure] = useState<Structure>(scheme?.structure ?? "FIXED");
-  const [optAchType, setOptAchType] = useState<OptionAchievementType>(scheme?.optionAchievementType ?? "QUANTITY_BASED");
+  // Create starts UNSELECTED ("Select Achievement Type"); Edit loads the saved type.
+  const [optAchType, setOptAchType] = useState<OptionAchievementType | "">(scheme?.optionAchievementType ?? "");
   const [eligibleIds, setEligibleIds] = useState<string[]>(scheme?.eligibleProductIds ?? []);
   const [optRows, setOptRows] = useState<OptRow[]>(
     scheme?.options?.map((o) => ({ id: o.id, label: o.label ?? "", target: o.target != null ? String(o.target) : "", valueWithoutGST: String(o.valueWithoutGST), valueWithGST: String(o.valueWithGST), isActive: o.isActive })) ?? [],
@@ -416,16 +399,8 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const addOptRow = () => setOptRows((r) => [...r, { label: "", target: "", valueWithoutGST: "", valueWithGST: "", isActive: true }]);
   const updateOptRow = (i: number, patch: Partial<OptRow>) => setOptRows((r) => r.map((x, idx) => (idx === i ? { ...x, ...patch } : x)));
   const removeOptRow = (i: number) => setOptRows((r) => r.filter((_, idx) => idx !== i));
-  // "No. of Options" is DERIVED from the existing options array (no new DB field/state): raising it appends
-  // blank option rows, lowering it trims from the end. Same reuse pattern as the installment count control.
-  const setOptCount = (n: number) => setOptRows((rows) => {
-    const count = Math.max(0, Math.min(20, Math.floor(n)));
-    if (count <= rows.length) return rows.slice(0, count);
-    return [...rows, ...Array.from({ length: count - rows.length }, () => ({ label: "", target: "", valueWithoutGST: "", valueWithGST: "", isActive: true } as OptRow))];
-  });
-  const toggleEligible = (id: string) => setEligibleIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   const multipleOptionsInput = () => ({
-    achievementType: optAchType,
+    achievementType: optAchType as OptionAchievementType, // "" is caught by validateMultipleOptions (gates Save)
     eligibleProductIds: eligibleIds,
     options: optRows.map((o) => ({ label: o.label.trim() || null, target: o.target === "" ? null : Number(o.target), valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST) })),
     installmentCalcTypes: installments.map((r) => r.calculationType),
@@ -566,7 +541,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
       return {
         ...common,
         schemeValueWithoutGST: null, schemeValueWithGST: null,
-        optionAchievementType: optAchType, eligibleProductIds: eligibleIds,
+        optionAchievementType: optAchType || null, eligibleProductIds: eligibleIds,
         options: optRows.map((o) => ({ id: o.id, label: o.label.trim() || null, target: o.target === "" ? null : Number(o.target), valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST), isActive: o.isActive })),
         requirementType: "NONE", valueMode: null, combinedRequiredValue: null, requirementProducts: [],
       };
@@ -608,58 +583,40 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
               <div className="space-y-1.5"><Label>{FL.allowMultiple}</Label><NativeSelect value={multiple ? "yes" : "no"} onChange={(e) => setMultiple(e.target.value === "yes")} options={[{ value: "no", label: "No" }, { value: "yes", label: "Yes" }]} /></div>
             </div>
 
-            {/* Multiple Options only: the option COUNT + NAMES live here (Basic). These edit the SAME existing
-                options array used for targets/values in Scheme Details — no duplicate option state is created. */}
-            {isOptions && (
-              <div className="space-y-3 rounded-md border border-primary/20 bg-primary/5 p-3">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-primary">{FL.onlyMultiple}</h4>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="space-y-1.5"><Label>{FL.noOfOptions}</Label><Input type="number" min="0" value={String(optRows.length)} onChange={(e) => setOptCount(Number(e.target.value) || 0)} /></div>
-                </div>
-                {optRows.length > 0 && (
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    {optRows.map((o, i) => (
-                      <div key={i} className="space-y-1.5">
-                        <Label>{`Option ${i + 1} Name`}</Label>
-                        <Input value={o.label} onChange={(e) => updateOptRow(i, { label: e.target.value })} placeholder={`e.g. ${(i + 1) * 100}L`} />
-                      </div>
-                    ))}
+            {/* Multiple Options only: option NAMES live here (Basic). Options themselves are added via the
+                "+ Add Option" control in Scheme Details — there is no separate "No. of Options" field. */}
+            {isOptions && optRows.length > 0 && (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {optRows.map((o, i) => (
+                  <div key={i} className="space-y-1.5">
+                    <Label>{`Option ${i + 1} Name`}</Label>
+                    <Input value={o.label} onChange={(e) => updateOptRow(i, { label: e.target.value })} placeholder={`e.g. ${(i + 1) * 100}L`} />
                   </div>
-                )}
+                ))}
               </div>
             )}
           </FormSection>
 
           {/* 2. SCHEME DETAILS — Fixed: scheme values + requirement; Multiple Options: achievement type, eligible pool, options. */}
           <FormSection title={FL.sectionDetails}>
-            {/* Scheme Benefit + Other Benefit Details lead this section (moved from the old Benefit section),
-                placed before the Scheme Value fields. Same fields, options, labels and behaviour as before. */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5"><Label>{FL.schemeBenefit} *</Label><NativeSelect value={benefit} onChange={(e) => setBenefit(e.target.value as Benefit)} options={Object.entries(benefits).map(([value, label]) => ({ value, label }))} /></div>
-              {benefit === "OTHER" && <div className="space-y-1.5"><Label>{FL.benefitDetails} *</Label><Input value={benefitDetails} onChange={(e) => setBenefitDetails(e.target.value)} placeholder="e.g. Special Product Gift" /></div>}
-            </div>
-            <div className="space-y-1.5"><Label>{FL.otherBenefitDetails}</Label><Input value={otherBenefitDetails} onChange={(e) => setOtherBenefitDetails(e.target.value)} placeholder="Optional additional notes" /></div>
             {isOptions ? (
-              <div className="space-y-3 rounded-md border border-primary/20 bg-primary/5 p-3">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-primary">{FL.onlyMultiple}</h4>
+              <div className="space-y-3">
+                {/* Scheme Basis — SAME label as Fixed (L.type). Default "None" (L.typeNone). For Multiple Options
+                    the basis IS the achievement type (Quantity/Value Based) — value and validation unchanged. */}
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label>{FL.achievementType} *</Label>
-                    <NativeSelect value={optAchType} onChange={(e) => setOptAchType(e.target.value as OptionAchievementType)} options={[{ value: "QUANTITY_BASED", label: FL.achQuantity }, { value: "VALUE_BASED", label: FL.achValue }]} />
+                    <Label>{L.type}</Label>
+                    <NativeSelect value={optAchType} onChange={(e) => setOptAchType(e.target.value as OptionAchievementType | "")} options={[{ value: "", label: L.typeNone }, { value: "QUANTITY_BASED", label: FL.achQuantity }, { value: "VALUE_BASED", label: FL.achValue }]} />
                   </div>
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs font-medium text-muted-foreground">{FL.eligibleProducts} *</Label>
-                  <EligibleProductPicker products={productOptions} selectedIds={eligibleIds} onToggle={toggleEligible} />
+                  {/* SAME product-selection pattern as Fixed: "Select Product" dropdown rows + "+ Add Product". */}
+                  <EligibleProductRows products={productOptions} value={eligibleIds} onChange={setEligibleIds} addLabel={L.addProduct} productName={productName} />
                 </div>
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <Label className="text-sm font-semibold">{FL.optionsBuilder}</Label>
-                    <Button type="button" size="sm" onClick={addOptRow}><Plus className="h-4 w-4" /> {FL.addOption}</Button>
-                  </div>
-                  {optRows.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No options added yet. Click “{FL.addOption}” to define the first option.</p>
-                  ) : (
+                  <Label className="text-sm font-semibold">{FL.optionsBuilder}</Label>
+                  {optRows.length > 0 && (
                     <div className="overflow-x-auto">
                       <Table className="min-w-[720px]">
                         <TableHeader>
@@ -688,32 +645,25 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                       </Table>
                     </div>
                   )}
-                  {!optionsValid && <p className="text-xs text-destructive">{optionErrors[0]}</p>}
+                  {/* Add Option — wrapped in a block so it always sits on its OWN line below the "Options" label
+                      (the label is inline), left aligned, whether or not any options have been added. */}
+                  <div><Button type="button" variant="outline" size="sm" onClick={addOptRow}><Plus className="h-3 w-3" /> {FL.addOption}</Button></div>
+                  {!optionsValid && optRows.length > 0 && <p className="text-xs text-destructive">{optionErrors[0]}</p>}
                 </div>
               </div>
             ) : (
-              <div className="space-y-3 rounded-md border border-success/20 bg-success/5 p-3">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-success">{FL.onlyFixed}</h4>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="space-y-1.5"><Label>{FL.valueWithoutGst} *</Label><Input type="number" min="0" value={valueWithoutGST} onChange={(e) => setValueWithoutGST(e.target.value)} /></div>
-                  <div className="space-y-1.5"><Label>{FL.valueWithGst} *</Label><Input type="number" min="0" value={valueWithGST} onChange={(e) => setValueWithGST(e.target.value)} /></div>
-                </div>
-                {/* Scheme Requirement (Phase 5) — belongs to the scheme; achievement engine consumes it. */}
-                <div className="space-y-3 border-t pt-3">
-                  <Label className="text-sm font-semibold">{L.section}</Label>
+              <div className="space-y-3">
+                {/* Scheme Basis + product requirement come FIRST in the required sequence (before the values).
+                    No redundant inner section heading — the "SCHEME DETAILS" FormSection title already covers it. */}
+                <div className="space-y-3">
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="space-y-1.5">
                       <Label>{L.type}</Label>
-                      <NativeSelect value={reqType} onChange={(e) => setReqType(e.target.value as ReqType)} options={[{ value: "NONE", label: L.typeNone }, { value: "PRODUCT_BASED", label: L.typeProduct }, { value: "VALUE_BASED", label: L.typeValue }]} />
+                      <NativeSelect value={reqType} onChange={(e) => changeReqType(e.target.value as ReqType)} options={[{ value: "NONE", label: L.typeNone }, { value: "PRODUCT_BASED", label: L.typeProduct }, { value: "VALUE_BASED", label: L.typeValue }]} />
                     </div>
-                    {reqType === "VALUE_BASED" && (
-                      <div className="space-y-1.5">
-                        <Label>{L.valueMode}</Label>
-                        <NativeSelect value={valueMode} onChange={(e) => setValueMode(e.target.value as ValueMode)} options={[{ value: "INDIVIDUAL", label: L.modeIndividual }, { value: "COMBINED", label: L.modeCombined }]} />
-                      </div>
-                    )}
                   </div>
-                  {reqType === "VALUE_BASED" && valueMode === "COMBINED" && (
+                  {/* Value Based always uses COMBINED behaviour — one combined value across the products below; no Value Mode selector. */}
+                  {reqType === "VALUE_BASED" && (
                     <div className="space-y-1.5">
                       <Label>{L.combinedValue} *</Label>
                       <Input type="number" min="0" value={combinedValue} onChange={(e) => setCombinedValue(e.target.value)} placeholder="Total value across the products below" />
@@ -721,20 +671,14 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                   )}
                   {reqType !== "NONE" && (
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <Label className="text-xs font-medium text-muted-foreground">{reqType === "VALUE_BASED" && valueMode === "COMBINED" ? L.applicableProducts : L.colProduct}</Label>
-                        <Button type="button" variant="outline" size="sm" disabled={availableProducts.length === 0} onClick={addReqRow}><Plus className="h-3 w-3" /> {L.addProduct}</Button>
-                      </div>
-                      {reqRows.length === 0 ? (
-                        <p className="text-xs text-muted-foreground">No products added yet.</p>
-                      ) : (
+                      <Label className="text-xs font-medium text-muted-foreground">{reqType === "VALUE_BASED" ? L.applicableProducts : L.colProduct}</Label>
+                      {reqRows.length > 0 && (
                         <div className="overflow-auto">
                           <Table>
                             <TableHeader>
                               <TableRow>
                                 <TableHead>{L.colProduct}</TableHead>
                                 {reqType === "PRODUCT_BASED" && <TableHead className="w-40">{L.colQty}</TableHead>}
-                                {reqType === "VALUE_BASED" && valueMode === "INDIVIDUAL" && <TableHead className="w-40">{L.colValue}</TableHead>}
                                 <TableHead className="w-12" />
                               </TableRow>
                             </TableHeader>
@@ -742,11 +686,11 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                               {reqRows.map((r, i) => (
                                 <TableRow key={i}>
                                   <TableCell>
-                                    <NativeSelect value={r.productId} onChange={(e) => updateReqRow(i, { productId: e.target.value })} options={optionsForRow(r.productId).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))} />
-                                    {!productOptions.some((p) => p.productId === r.productId) && <p className="mt-1 text-xs text-muted-foreground">{productName(r.productId)}</p>}
+                                    {/* No product is pre-selected — a new row starts on the "Select Product" placeholder. */}
+                                    <NativeSelect value={r.productId} onChange={(e) => updateReqRow(i, { productId: e.target.value })} options={[{ value: "", label: "Select Product" }, ...optionsForRow(r.productId).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
+                                    {r.productId !== "" && !productOptions.some((p) => p.productId === r.productId) && <p className="mt-1 text-xs text-muted-foreground">{productName(r.productId)}</p>}
                                   </TableCell>
                                   {reqType === "PRODUCT_BASED" && <TableCell><Input type="number" min="0" step="any" value={r.requiredQty} onChange={(e) => updateReqRow(i, { requiredQty: e.target.value })} placeholder="Qty" /></TableCell>}
-                                  {reqType === "VALUE_BASED" && valueMode === "INDIVIDUAL" && <TableCell><Input type="number" min="0" step="any" value={r.requiredValue} onChange={(e) => updateReqRow(i, { requiredValue: e.target.value })} placeholder="Value" /></TableCell>}
                                   <TableCell><Button type="button" variant="ghost" size="sm" onClick={() => removeReqRow(i)} title="Remove"><X className="h-3 w-3" /></Button></TableCell>
                                 </TableRow>
                               ))}
@@ -754,12 +698,26 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                           </Table>
                         </div>
                       )}
+                      {/* Add Product — left aligned, always BELOW the product rows (same interaction pattern as Multiple Options). */}
+                      <Button type="button" variant="outline" size="sm" disabled={availableProducts.length === 0} onClick={addReqRow}><Plus className="h-3 w-3" /> {L.addProduct}</Button>
                       {!requirementValid && reqRows.length > 0 && <p className="text-xs text-destructive">{requirementErrors[0]}</p>}
                     </div>
                   )}
                 </div>
+                {/* Scheme Value pair — AFTER the Scheme Basis / product rows, per the required sequence. */}
+                <div className="grid grid-cols-1 gap-3 border-t pt-3 sm:grid-cols-2">
+                  <div className="space-y-1.5"><Label>{FL.valueWithoutGst} *</Label><Input type="number" min="0" value={valueWithoutGST} onChange={(e) => setValueWithoutGST(e.target.value)} /></div>
+                  <div className="space-y-1.5"><Label>{FL.valueWithGst} *</Label><Input type="number" min="0" value={valueWithGST} onChange={(e) => setValueWithGST(e.target.value)} /></div>
+                </div>
               </div>
             )}
+            {/* Scheme Benefit + Other Benefit Details come LAST in Scheme Details (positions 5–6). Shared by
+                both Fixed and Multiple Options; same fields, labels and behaviour — only the position changed. */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5"><Label>{FL.schemeBenefit} *</Label><NativeSelect value={benefit} onChange={(e) => setBenefit(e.target.value as Benefit | "")} options={[{ value: "", label: "Select Scheme Benefit" }, ...Object.entries(benefits).map(([value, label]) => ({ value, label }))]} /></div>
+              {benefit === "OTHER" && <div className="space-y-1.5"><Label>{FL.benefitDetails} *</Label><Input value={benefitDetails} onChange={(e) => setBenefitDetails(e.target.value)} placeholder="e.g. Special Product Gift" /></div>}
+            </div>
+            <div className="space-y-1.5"><Label>{FL.otherBenefitDetails}</Label><Input value={otherBenefitDetails} onChange={(e) => setOtherBenefitDetails(e.target.value)} placeholder="Optional additional notes" /></div>
           </FormSection>
 
           {/* 3. SCHEME PAYMENT — the Installment Rule Builder now OWNS the Booking Amount (single field). */}
@@ -767,12 +725,13 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
             <div className="space-y-3 rounded-md border p-3">
               <Label className="text-sm font-semibold">{FL.installmentBuilder}</Label>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {/* Booking Amount on the LEFT, No. of Installments on the RIGHT (position only; behaviour unchanged). */}
+                <div className="space-y-1.5"><Label>{FL.bookingAmount}</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} placeholder="Optional" /></div>
                 <div className="space-y-1.5">
                   <Label>{FL.noOfInstallments}</Label>
-                  <NativeSelect value={String(installments.length)} onChange={(e) => setCount(Number(e.target.value))} options={Array.from({ length: 11 }, (_, i) => ({ value: String(i), label: String(i) }))} />
+                  {/* Create starts on the "Select…" placeholder (not 0); Edit shows the saved count. */}
+                  <NativeSelect value={!scheme && installments.length === 0 ? "" : String(installments.length)} onChange={(e) => setCount(Number(e.target.value) || 0)} options={[{ value: "", label: "Select…" }, ...Array.from({ length: 11 }, (_, i) => ({ value: String(i), label: String(i) }))]} />
                 </div>
-                {/* Booking Amount lives HERE now (moved from its own field above the builder). One field only. */}
-                <div className="space-y-1.5"><Label>{FL.bookingAmount}</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} placeholder="Optional" /></div>
               </div>
               {installments.length > 0 && (
                 <>
@@ -867,7 +826,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
         </div>
         <DialogFooter className="shrink-0 border-t pt-4">
           <Button variant="outline" onClick={onClose}>{FL.cancel}</Button>
-          <Button disabled={!name.trim() || !stateIds.length || (!isPerpetual && (!startDate || !endDate || !bookingLastDate)) || (!isOptions && (valueWithoutGST === "" || valueWithGST === "")) || (benefit === "OTHER" && !benefitDetails.trim()) || !installValid || (isOptions ? !optionsValid : !requirementValid) || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{scheme ? FL.saveChanges : FL.saveScheme}</Button>
+          <Button disabled={!name.trim() || !stateIds.length || !benefit || (!isPerpetual && (!startDate || !endDate || !bookingLastDate)) || (!isOptions && (valueWithoutGST === "" || valueWithGST === "")) || (benefit === "OTHER" && !benefitDetails.trim()) || !installValid || (isOptions ? !optionsValid : !requirementValid) || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{scheme ? FL.saveChanges : FL.saveScheme}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

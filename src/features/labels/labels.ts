@@ -298,6 +298,8 @@ export const DEFAULT_LABELS = {
   "scheme_master.form.benefit_details": "Enter Benefit Details",
   "scheme_master.form.other_benefit_details": "Other Benefit Details",
   "scheme_master.form.installment_builder": "Installment Rule Builder",
+  "scheme_master.form.col_amount_derived": "Amount",
+  "scheme_master.form.booking_note": "Booking Amount is included in the total Scheme Value and is deducted from the final installment. This adjusted final installment amount is used throughout the system.",
   "scheme_master.form.no_of_installments": "No. of Installments",
   "scheme_master.form.calculation_type": "Calculation Type",
   "scheme_master.form.col_percentage": "Percentage (%)",

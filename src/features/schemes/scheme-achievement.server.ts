@@ -283,7 +283,7 @@ export async function computeInstallmentProgress(
       id: true, schemeId: true, dealerId: true, adminVerifiedAt: true, billingDate: true, expectedBillingDate: true, adminBillingDate: true,
       prePlacementDays: true, adminPrePlacementDays: true,
       optionValueWithGST: true,
-      scheme: { select: { schemeValueWithGST: true, structure: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
+      scheme: { select: { schemeValueWithGST: true, structure: true, bookingAmount: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
       instances: {
         select: { id: true, instanceNumber: true, adminBillingDate: true, installments: { select: { installmentNumber: true, plannedAmount: true, receivedAmount: true } } },
         orderBy: { instanceNumber: "asc" },
@@ -293,7 +293,7 @@ export async function computeInstallmentProgress(
     id: string; schemeId: string; dealerId: string; adminVerifiedAt: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; adminBillingDate: Date | null;
     prePlacementDays: number | null; adminPrePlacementDays: number | null;
     optionValueWithGST: unknown;
-    scheme: { schemeValueWithGST: unknown; structure: string; installmentRules: InstallmentRuleRow[] };
+    scheme: { schemeValueWithGST: unknown; structure: string; bookingAmount: unknown; installmentRules: InstallmentRuleRow[] };
     instances: { id: string; instanceNumber: number; adminBillingDate: Date | null; installments: { installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown }[] }[];
   }[];
 
@@ -308,7 +308,7 @@ export async function computeInstallmentProgress(
       }
       // No persisted rows yet — derive the schedule (read-only, same helper the views use). Unpaid by nature.
       const billing = installmentBaseDate(p, inst);
-      for (const d of derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing)) items.push({ plannedAmount: d.plannedAmount, receivedAmount: null });
+      for (const d of derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing, num(p.scheme.bookingAmount))) items.push({ plannedAmount: d.plannedAmount, receivedAmount: null });
     }
     const { paid, total } = installmentPaidTotal(items);
     return { planId: p.id, schemeId: p.schemeId, dealerId: p.dealerId, paid, total };

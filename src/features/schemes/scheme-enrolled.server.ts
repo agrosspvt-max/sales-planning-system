@@ -7,6 +7,7 @@ import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { ensureInstances } from "./scheme-planning.server";
 import { effectiveValueWithGST, effectiveValueWithoutGST } from "@/lib/scheme-options";
+import { computeInstallmentAmounts } from "@/lib/scheme-installments";
 
 /**
  * Enrolled Scheme — the operational layer AFTER a dealer is enrolled (Admin document verification).
@@ -17,7 +18,6 @@ import { effectiveValueWithGST, effectiveValueWithoutGST } from "@/lib/scheme-op
 
 const money = (n: unknown): number => (n == null ? 0 : Number(n.toString()));
 const day = 24 * 60 * 60 * 1000;
-const round2 = (n: number) => Math.round(n * 100) / 100;
 function addDays(base: Date, days: number): Date {
   return new Date(base.getTime() + days * day);
 }
@@ -27,28 +27,33 @@ function addDays(base: Date, days: number): Date {
 export interface InstallmentRuleRow { installmentNumber: number; calculationType: string; value: unknown; daysAfterBillingDate: number }
 type RuleRow = InstallmentRuleRow;
 
-/** Planned amount for a rule row against the scheme's With-GST value. */
-function plannedAmountFor(rule: RuleRow, schemeValueWithGST: number): number {
-  return rule.calculationType === "PERCENTAGE" ? round2((schemeValueWithGST * Number(rule.value)) / 100) : round2(Number(rule.value));
-}
-
 export interface DerivedInstallment { installmentNumber: number; plannedAmount: number; plannedDate: Date | null }
 
 /**
  * PURE — the schedule a set of installment rules produces for one billing date. No DB access, no writes.
- * `ensureInstanceInstallments` PERSISTS exactly this, and read-only consumers (Scheme/Dealer Follow-up)
- * use it to DISPLAY the schedule of an instance whose rows have not been generated yet — so the two paths
- * can never disagree about amounts or dates, and merely viewing a report never creates rows.
+ * AMOUNTS come from the ONE canonical calculator (`computeInstallmentAmounts`), which deducts the scheme's
+ * Booking Amount from the FINAL installment; dates are the billing date + each rule's daysAfterBillingDate.
+ * `ensureInstanceInstallments` PERSISTS exactly this, and read-only consumers (Scheme/Dealer Follow-up,
+ * Achievement) DISPLAY it for instances whose rows have not been generated yet — so UI, persisted schedule
+ * and reports can never disagree about amounts (Booking deduction included), and viewing never creates rows.
  */
-export function derivedInstallmentSchedule(rules: InstallmentRuleRow[], schemeValueWithGST: number, billingDate: Date | null): DerivedInstallment[] {
-  return rules
-    .slice()
-    .sort((a, b) => a.installmentNumber - b.installmentNumber)
-    .map((r) => ({
-      installmentNumber: r.installmentNumber,
-      plannedAmount: plannedAmountFor(r, schemeValueWithGST),
-      plannedDate: billingDate ? addDays(billingDate, r.daysAfterBillingDate) : null,
-    }));
+export function derivedInstallmentSchedule(
+  rules: InstallmentRuleRow[],
+  schemeValueWithGST: number,
+  billingDate: Date | null,
+  bookingAmount = 0,
+): DerivedInstallment[] {
+  const dayByNum = new Map(rules.map((r) => [r.installmentNumber, r.daysAfterBillingDate] as const));
+  const amounts = computeInstallmentAmounts(
+    rules.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) })),
+    schemeValueWithGST,
+    bookingAmount,
+  );
+  return amounts.map((a) => ({
+    installmentNumber: a.installmentNumber,
+    plannedAmount: a.plannedAmount,
+    plannedDate: billingDate ? addDays(billingDate, dayByNum.get(a.installmentNumber) ?? 0) : null,
+  }));
 }
 
 /**
@@ -103,11 +108,11 @@ async function ensureInstanceInstallments(instanceId: string): Promise<void> {
     where: { id: instanceId },
     select: {
       adminBillingDate: true, soBillingDate: true,
-      dealerSchemePlan: { select: { adminVerifiedAt: true, adminBillingDate: true, billingDate: true, expectedBillingDate: true, prePlacementDays: true, adminPrePlacementDays: true, optionValueWithGST: true, scheme: { select: { schemeValueWithGST: true, structure: true, installmentRules: true } } } },
+      dealerSchemePlan: { select: { adminVerifiedAt: true, adminBillingDate: true, billingDate: true, expectedBillingDate: true, prePlacementDays: true, adminPrePlacementDays: true, optionValueWithGST: true, scheme: { select: { schemeValueWithGST: true, structure: true, bookingAmount: true, installmentRules: true } } } },
     },
   })) as {
     adminBillingDate: Date | null; soBillingDate: Date | null;
-    dealerSchemePlan: { adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; prePlacementDays: number | null; adminPrePlacementDays: number | null; optionValueWithGST: unknown; scheme: { schemeValueWithGST: unknown; structure: string; installmentRules: RuleRow[] } };
+    dealerSchemePlan: { adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; prePlacementDays: number | null; adminPrePlacementDays: number | null; optionValueWithGST: unknown; scheme: { schemeValueWithGST: unknown; structure: string; bookingAmount: unknown; installmentRules: RuleRow[] } };
   } | null;
   if (!inst) return;
   const plan = inst.dealerSchemePlan;
@@ -115,10 +120,12 @@ async function ensureInstanceInstallments(instanceId: string): Promise<void> {
   if (rules.length === 0) return;
   // Effective value: MULTIPLE_OPTIONS uses the plan's frozen option snapshot; FIXED uses the scheme value.
   const gst = effectiveValueWithGST({ structure: plan.scheme.structure, schemeValueWithGST: plan.scheme.schemeValueWithGST == null ? null : money(plan.scheme.schemeValueWithGST), optionValueWithGST: plan.optionValueWithGST == null ? null : money(plan.optionValueWithGST) });
+  // Booking Amount (scheme-level) is deducted from the FINAL installment by the canonical calculator.
+  const booking = money(plan.scheme.bookingAmount);
   // Pre-placement (Phase 11): schedule starts from billing + confirmed pre-placement days (0 ⇒ unchanged).
   const billing = installmentBaseDate(plan, inst);
   await prisma.dealerSchemeInstallment.createMany({
-    data: derivedInstallmentSchedule(rules, gst, billing).map((r) => ({
+    data: derivedInstallmentSchedule(rules, gst, billing, booking).map((r) => ({
       instanceId,
       installmentNumber: r.installmentNumber,
       plannedAmount: r.plannedAmount,

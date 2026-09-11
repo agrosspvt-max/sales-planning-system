@@ -21,6 +21,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useLabel } from "@/features/labels/label-ui";
 import { validateSchemeRequirement } from "@/lib/scheme-requirement";
 import { validateMultipleOptions } from "@/lib/scheme-options";
+import { computeInstallmentAmounts, bookingExceedsFinalInstallment } from "@/lib/scheme-installments";
 import { SchemeDetailDialog } from "./scheme-detail-dialog";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 // Reuse the EXACT Info / View Document / Share dialogs + helpers from the Planned Scheme (Create Plan) menu,
@@ -499,6 +500,8 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     benefitDetails: useLabel("scheme_master.form.benefit_details"),
     otherBenefitDetails: useLabel("scheme_master.form.other_benefit_details"),
     installmentBuilder: useLabel("scheme_master.form.installment_builder"),
+    colAmountDerived: useLabel("scheme_master.form.col_amount_derived"),
+    bookingNote: useLabel("scheme_master.form.booking_note"),
     noOfInstallments: useLabel("scheme_master.form.no_of_installments"),
     calcType: useLabel("scheme_master.form.calculation_type"),
     colPercentage: useLabel("scheme_master.form.col_percentage"),
@@ -509,9 +512,34 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
 
   const gstValue = Number(valueWithGST) || 0;
   const calcType: CalcType = installments[0]?.calculationType ?? "PERCENTAGE";
-  const installTotal = installments.reduce((sum, r) => sum + (Number(r.value) || 0), 0);
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  // Booking Amount (scheme-level) is deducted from the FINAL installment by the shared calculator.
+  const booking = Number(bookingAmount) || 0;
+  // The FINAL installment auto-balances: its % (or amount) is the remainder after the earlier rows, so the
+  // percentages always total 100% (or the amounts total the scheme value). Only the earlier rows are edited.
   const installTarget = calcType === "PERCENTAGE" ? 100 : gstValue;
-  const installValid = installments.length === 0 || Math.round(installTotal * 100) === Math.round(installTarget * 100);
+  const nonFinalSum = installments.length > 0 ? installments.slice(0, -1).reduce((sum, r) => sum + (Number(r.value) || 0), 0) : 0;
+  const finalValue = installments.length > 0 ? round2(installTarget - nonFinalSum) : 0; // final % or amount (pre-booking "normal")
+  // Effective rules = state with the final row overridden to the auto-balanced value. Persisted + shown.
+  const effInstallments = installments.map((r, i) => (i === installments.length - 1 ? { ...r, value: finalValue } : r));
+  // Booking-adjusted per-row amounts (needs a concrete value): FIXED uses the scheme value; MULTIPLE_OPTIONS
+  // has per-option values so the master builder shows "—" (real amounts are computed per selected option).
+  const hasValue = gstValue > 0;
+  const rowAmounts = hasValue
+    ? computeInstallmentAmounts(effInstallments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0 })), gstValue, booking)
+    : [];
+  // Validation: the final installment must never be negative — earlier rows can't exceed 100%/scheme value,
+  // and the Booking Amount can't exceed the final installment's normal amount (per active option for MO).
+  const finalNegative = installments.length > 0 && finalValue < -1e-9;
+  let bookingTooBig = false;
+  if (installments.length > 0 && booking > 0 && !finalNegative) {
+    if (isOptions) {
+      bookingTooBig = optRows.some((o) => o.isActive && o.valueWithGST !== "" && booking > round2(((Number(o.valueWithGST) || 0) * finalValue) / 100));
+    } else if (hasValue) {
+      bookingTooBig = bookingExceedsFinalInstallment(effInstallments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0 })), gstValue, booking);
+    }
+  }
+  const installValid = installments.length === 0 || (!finalNegative && !bookingTooBig);
 
   const setCount = (n: number) => {
     setInstallments((prev) => {
@@ -530,7 +558,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
       bookingAmount: bookingAmount === "" ? null : bookingAmount, schemeBenefit: benefit, benefitDetails: benefit === "OTHER" ? benefitDetails : null,
       otherBenefitDetails: otherBenefitDetails.trim() || null, allowMultipleSchemes: multiple,
       maxExtensionDays: Number(maxExtDays) || 0, maxExtensionAttempts: Number(maxExtAttempts) || 0, prePlacementMaxDays: Number(prePlacementMaxDays) || 0, documentUrl: documentUrl || null,
-      installments: installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0, daysAfterBillingDate: Number(r.daysAfterBillingDate) || 0 })),
+      installments: effInstallments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0, daysAfterBillingDate: Number(r.daysAfterBillingDate) || 0 })),
       structure,
     };
     if (isOptions) {
@@ -734,16 +762,17 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
             )}
           </FormSection>
 
-          {/* 3. SCHEME PAYMENT — booking amount + installment rule builder. */}
+          {/* 3. SCHEME PAYMENT — the Installment Rule Builder now OWNS the Booking Amount (single field). */}
           <FormSection title={FL.sectionPayment}>
-            <div className="space-y-1.5"><Label>{FL.bookingAmount}</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} placeholder="Optional" /></div>
-            <div className="space-y-2 rounded-md border p-3">
-              <div className="flex items-center justify-between gap-3">
-                <Label className="text-sm font-semibold">{FL.installmentBuilder}</Label>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">{FL.noOfInstallments}</span>
-                  <NativeSelect className="w-20" value={String(installments.length)} onChange={(e) => setCount(Number(e.target.value))} options={Array.from({ length: 11 }, (_, i) => ({ value: String(i), label: String(i) }))} />
+            <div className="space-y-3 rounded-md border p-3">
+              <Label className="text-sm font-semibold">{FL.installmentBuilder}</Label>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>{FL.noOfInstallments}</Label>
+                  <NativeSelect value={String(installments.length)} onChange={(e) => setCount(Number(e.target.value))} options={Array.from({ length: 11 }, (_, i) => ({ value: String(i), label: String(i) }))} />
                 </div>
+                {/* Booking Amount lives HERE now (moved from its own field above the builder). One field only. */}
+                <div className="space-y-1.5"><Label>{FL.bookingAmount}</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} placeholder="Optional" /></div>
               </div>
               {installments.length > 0 && (
                 <>
@@ -764,21 +793,51 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                   )}
                   <div className="overflow-auto">
                     <Table>
-                      <TableHeader><TableRow><TableHead className="w-12">#</TableHead><TableHead>{calcType === "PERCENTAGE" ? FL.colPercentage : FL.colAmount}</TableHead><TableHead>{FL.daysAfterBilling}</TableHead></TableRow></TableHeader>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-12">#</TableHead>
+                          {calcType === "PERCENTAGE" && <TableHead>{FL.colPercentage}</TableHead>}
+                          <TableHead className="text-right">{FL.colAmountDerived}</TableHead>
+                          <TableHead>{FL.daysAfterBilling}</TableHead>
+                        </TableRow>
+                      </TableHeader>
                       <TableBody>
-                        {installments.map((r, i) => (
-                          <TableRow key={i}>
-                            <TableCell className="font-medium">{i + 1}</TableCell>
-                            <TableCell><Input type="number" min="0" value={r.value === 0 ? "" : String(r.value)} onChange={(e) => updateRow(i, { value: Number(e.target.value) || 0 })} /></TableCell>
-                            <TableCell><Input type="number" min="0" value={r.daysAfterBillingDate === 0 ? "" : String(r.daysAfterBillingDate)} onChange={(e) => updateRow(i, { daysAfterBillingDate: Number(e.target.value) || 0 })} /></TableCell>
-                          </TableRow>
-                        ))}
+                        {installments.map((r, i) => {
+                          const isFinal = i === installments.length - 1;
+                          const amt = rowAmounts[i]?.plannedAmount; // booking already deducted from the final row
+                          return (
+                            <TableRow key={i}>
+                              <TableCell className="font-medium">{i + 1}</TableCell>
+                              {calcType === "PERCENTAGE" && (
+                                <TableCell>
+                                  {isFinal
+                                    ? <Input type="number" value={finalValue} readOnly disabled title="Auto-balanced final installment" />
+                                    : <Input type="number" min="0" value={r.value === 0 ? "" : String(r.value)} onChange={(e) => updateRow(i, { value: Number(e.target.value) || 0 })} />}
+                                </TableCell>
+                              )}
+                              <TableCell className="text-right tabular-nums">
+                                {calcType === "FIXED_AMOUNT"
+                                  ? (isFinal
+                                      ? <Input type="number" className="text-right" value={hasValue ? finalValue - booking : finalValue} readOnly disabled title="Auto-balanced final installment (Booking Amount deducted)" />
+                                      : <Input type="number" min="0" value={r.value === 0 ? "" : String(r.value)} onChange={(e) => updateRow(i, { value: Number(e.target.value) || 0 })} />)
+                                  : (hasValue ? formatCurrency(amt ?? 0) : "—")}
+                              </TableCell>
+                              <TableCell><Input type="number" min="0" value={r.daysAfterBillingDate === 0 ? "" : String(r.daysAfterBillingDate)} onChange={(e) => updateRow(i, { daysAfterBillingDate: Number(e.target.value) || 0 })} /></TableCell>
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
                   </div>
-                  <p className={cn("text-xs", installValid ? "text-muted-foreground" : "text-destructive")}>
-                    Total: {calcType === "PERCENTAGE" ? `${installTotal}%` : formatCurrency(installTotal)} {installValid ? "✓" : `— must equal ${calcType === "PERCENTAGE" ? "100%" : formatCurrency(installTarget)}`}
-                  </p>
+                  {calcType === "PERCENTAGE" && (
+                    <p className={cn("text-xs", installValid ? "text-muted-foreground" : "text-destructive")}>
+                      Total: {round2(nonFinalSum + finalValue)}% {installValid ? "✓" : ""}
+                    </p>
+                  )}
+                  {finalNegative && <p className="text-xs text-destructive">The earlier installments exceed the {calcType === "PERCENTAGE" ? "100% total" : "scheme value"} — the final installment would be negative.</p>}
+                  {bookingTooBig && <p className="text-xs text-destructive">Booking Amount is larger than the final installment. Reduce the Booking Amount or the earlier installments.</p>}
+                  {/* Section 9 — subtle explanatory note (centralized label). */}
+                  <p className="text-xs text-muted-foreground">{FL.bookingNote}</p>
                 </>
               )}
             </div>

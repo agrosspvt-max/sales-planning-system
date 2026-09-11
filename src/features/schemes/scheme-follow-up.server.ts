@@ -240,7 +240,7 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
       dealer: { select: { name: true, town: true, village: true, tehsil: true, district: true, mobile: true } },
       salesOfficer: { select: { name: true, group: { select: { name: true } } } },
       selectedOptionId: true, optionLabel: true, optionTargetQty: true, optionTargetValue: true, optionValueWithGST: true,
-      scheme: { select: { schemeName: true, schemeValueWithGST: true, structure: true, optionAchievementType: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
+      scheme: { select: { schemeName: true, schemeValueWithGST: true, structure: true, bookingAmount: true, optionAchievementType: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
       instances: {
         select: { id: true, instanceNumber: true, adminBillingDate: true, installments: { select: { installmentNumber: true, plannedAmount: true, plannedDate: true, receivedAmount: true, receivedDate: true } } },
         orderBy: { instanceNumber: "asc" },
@@ -254,7 +254,7 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
     dealer: { name: string; town: string | null; village: string | null; tehsil: string | null; district: string | null; mobile: string | null };
     salesOfficer: { name: string; group: { name: string } | null };
     selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithGST: unknown;
-    scheme: { schemeName: string; schemeValueWithGST: unknown; structure: string; optionAchievementType: string | null; installmentRules: InstallmentRuleRow[] };
+    scheme: { schemeName: string; schemeValueWithGST: unknown; structure: string; bookingAmount: unknown; optionAchievementType: string | null; installmentRules: InstallmentRuleRow[] };
     instances: { id: string; instanceNumber: number; adminBillingDate: Date | null; installments: { installmentNumber: number; plannedAmount: unknown; plannedDate: Date | null; receivedAmount: unknown; receivedDate: Date | null }[] }[];
   }[];
 
@@ -277,7 +277,7 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
       }
       // No rows persisted yet — DERIVE the schedule for display only (never written).
       const billing = installmentBaseDate(p, inst);
-      const derived = derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing);
+      const derived = derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing, money(p.scheme.bookingAmount));
       if (derived.length > 0) derivedSchedule = true;
       for (const d of derived) {
         rows.push({

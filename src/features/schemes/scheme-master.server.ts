@@ -6,6 +6,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { validateSchemeRequirement, normalizeSchemeRequirement } from "@/lib/scheme-requirement";
 import { validateMultipleOptions, normalizeOption, type OptionAchievementType } from "@/lib/scheme-options";
+import { bookingExceedsFinalInstallment } from "@/lib/scheme-installments";
 
 // One installment of the payout schedule for Scheme Value (With GST).
 const installmentInput = z.object({
@@ -106,11 +107,31 @@ const schemeInput = z.object({
     if (value.optionAchievementType == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["optionAchievementType"], message: "Select an achievement type" });
     // Percentage total must still be 100% (installments are percentage-only for options, checked above).
     validateInstallments(value.installments ?? [], 0, ctx);
+    // Booking Amount is deducted from the final installment (canonical calc): it must not exceed the final
+    // installment's normal amount for ANY active option (else that option's final installment goes negative).
+    const moRules = (value.installments ?? []).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value }));
+    for (const o of value.options ?? []) {
+      if (o.isActive === false) continue;
+      const optVal = o.valueWithGST ?? 0;
+      if (optVal > 0 && bookingExceedsFinalInstallment(moRules, optVal, value.bookingAmount ?? 0)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bookingAmount"], message: "Booking Amount is larger than an option's final installment. Reduce the Booking Amount or the earlier installments." });
+        break;
+      }
+    }
   } else {
     // FIXED: scheme-level values required (unchanged behaviour), plus installment + requirement validation.
     if (value.schemeValueWithoutGST == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithoutGST"], message: "Scheme Value (Without GST) is required" });
     if (value.schemeValueWithGST == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithGST"], message: "Scheme Value (With GST) is required" });
     validateInstallments(value.installments ?? [], value.schemeValueWithGST ?? 0, ctx);
+    // Booking Amount is deducted from the final installment (canonical calc): it must not exceed the final
+    // installment's normal amount, otherwise the final installment would be negative.
+    if (bookingExceedsFinalInstallment(
+      (value.installments ?? []).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value })),
+      value.schemeValueWithGST ?? 0,
+      value.bookingAmount ?? 0,
+    )) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bookingAmount"], message: "Booking Amount is larger than the final installment. Reduce the Booking Amount or the earlier installments." });
+    }
     // Server-side requirement validation — rejects every ambiguous/invalid combination even if the client
     // allowed it. Single source of truth shared with the client (src/lib/scheme-requirement.ts).
     for (const message of validateSchemeRequirement({

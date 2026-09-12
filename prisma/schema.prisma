@@ -85,13 +85,15 @@ model Scheme {
   schemeValueWithoutGST Decimal?       @db.Decimal(14, 2)
   schemeValueWithGST   Decimal?        @db.Decimal(14, 2)
   bookingAmount        Decimal?        @db.Decimal(14, 2)
+  installmentBalance   Boolean         @default(false) // final rule balances per value; enables Options Amount without changing legacy masters
   schemeBenefit        SchemeBenefit
   benefitDetails       String?
   otherBenefitDetails  String?
   allowMultipleSchemes Boolean         @default(false)
-  // Conversion Date Extension config. 0/unset on either ⇒ extension not available for this scheme.
+  // Conversion Date Extension config. Days 0 disables extensions. Attempts: 0 = disabled,
+  // -1 = unlimited attempts, positive value = maximum attempts.
   maxExtensionDays     Int             @default(0) // total calendar days a dealer may push the ORIGINAL conversion date
-  maxExtensionAttempts Int             @default(0) // how many separate extensions are allowed
+  maxExtensionAttempts Int             @default(0)
   // Pre-placement MASTER config (Phase 11). Max calendar days a dealer may be allowed to pre-place before the
   // installment schedule starts. 0 ⇒ pre-placement not available for this scheme. The actual per-dealer value
   // is chosen during planning (DealerSchemePlan.prePlacementDays) and confirmed by Admin; the installment
@@ -172,6 +174,8 @@ model DealerSchemePlan {
   // the live SchemeOption. On SUBMIT the option config is FROZEN into the snapshot columns below and all
   // downstream reads (installments, achievement target, follow-up) use the snapshot — never the live option.
   selectedOptionId      String?
+  optionBookingAmount   Decimal?          @db.Decimal(14, 2) // frozen on submission; null uses legacy Scheme.bookingAmount
+  installmentBalance    Boolean           @default(false) // frozen final-balance behavior, including Options Amount; never upgrades on master edit
   optionLabel           String?
   optionTargetQty       Decimal?          @db.Decimal(14, 3) // QUANTITY_BASED snapshot target
   optionTargetValue     Decimal?          @db.Decimal(14, 2) // VALUE_BASED snapshot target
@@ -207,6 +211,18 @@ model DealerSchemePlan {
   selectedOption   SchemeOption?          @relation(fields: [selectedOptionId], references: [id], onDelete: Restrict)
   rmActedBy        User?                  @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
   enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
+  // Combined-plan billing. Instance billing columns remain for historical records only.
+  billMode Boolean @default(false)
+  soBillCount Int?
+  adminBillCount Int?
+  soAmountWithoutGST Decimal? @db.Decimal(14, 2)
+  soAmountWithGST Decimal? @db.Decimal(14, 2)
+  adminAmountWithoutGST Decimal? @db.Decimal(14, 2)
+  adminAmountWithGST Decimal? @db.Decimal(14, 2)
+  bookingAmount Decimal? @db.Decimal(14, 2)
+  bookingBillNumber Int?
+  billsLockedAt DateTime?
+  bills DealerSchemeBill[]
   instances        DealerSchemeInstance[]
   payments         SchemePayment[]
   conversionExtensions SchemeConversionExtension[]
@@ -250,6 +266,15 @@ model DealerSchemeInstance {
   instanceNumber     Int
   soBillingDate      DateTime?
   adminBillingDate   DateTime? // authoritative billing date for this instance's installment schedule
+  billMode           Boolean @default(false)
+  soBillCount        Int?
+  adminBillCount     Int?
+  adminAmountWithoutGST Decimal? @db.Decimal(14, 2)
+  adminAmountWithGST  Decimal? @db.Decimal(14, 2)
+  bookingAmount      Decimal? @db.Decimal(14, 2) // frozen instance booking reservation
+  bookingBillNumber  Int?
+  billsLockedAt      DateTime?
+  bills              DealerSchemeBill[]
   createdAt          DateTime                  @default(now())
   updatedAt          DateTime                  @updatedAt
   dealerSchemePlan   DealerSchemePlan          @relation(fields: [dealerSchemePlanId], references: [id], onDelete: Cascade)
@@ -259,12 +284,37 @@ model DealerSchemeInstance {
   @@index([dealerSchemePlanId])
 }
 
-/// Per-INSTANCE installment schedule for an ENROLLED scheme plan (the operational "Enrolled Scheme" layer).
-/// Seeded from the scheme's SchemeInstallmentRule + the instance's admin billing date (dealer/instance
-/// specific). Planned amount/date editable by SO/RM/Admin; received amount/date are Admin-only.
+/// One declared bill of a scheme instance. SO dates are references; Admin data drives its locked schedule.
+model DealerSchemeBill {
+  id String @id @default(cuid())
+  instanceId String? // historical instance-owned bills; never reparented
+  planId String? // new combined-plan bills
+  plan DealerSchemePlan? @relation(fields: [planId], references: [id], onDelete: Cascade)
+  partNumber Int
+  soBillDate DateTime?
+  soAmountWithoutGST Decimal? @db.Decimal(14, 2)
+  soAmountWithGST Decimal? @db.Decimal(14, 2)
+  adminBillDate DateTime?
+  amountWithoutGST Decimal? @db.Decimal(14, 2)
+  amountWithGST Decimal? @db.Decimal(14, 2)
+  verifiedAt DateTime?
+  verifiedById String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  instance DealerSchemeInstance? @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  installments DealerSchemeInstallment[]
+  @@unique([planId, partNumber])
+  @@unique([instanceId, partNumber])
+  @@unique([id, instanceId])
+}
+
+/// Bill-linked schedules are immutable after creation. A null billId preserves legacy instance schedules.
+/// Received amounts remain rollups of SchemePaymentAllocation records.
 model DealerSchemeInstallment {
   id                 String               @id @default(cuid())
-  instanceId         String
+  billId             String?
+  bill               DealerSchemeBill? @relation(fields: [billId], references: [id], onDelete: Restrict)
+  instanceId         String? // NULL for new plan-owned bill schedules
   installmentNumber  Int
   plannedAmount      Decimal              @db.Decimal(14, 2)
   plannedDate        DateTime?
@@ -275,10 +325,11 @@ model DealerSchemeInstallment {
   updatedById        String?
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
-  instance           DealerSchemeInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  instance           DealerSchemeInstance? @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   paymentAllocations SchemePaymentAllocation[]
 
-  @@unique([instanceId, installmentNumber])
+  // Legacy (billId IS NULL) uniqueness remains a partial index in SQL.
+  @@unique([billId, installmentNumber])
   @@index([instanceId])
 }
 
@@ -367,6 +418,7 @@ model SchemeOption {
   targetValue     Decimal? @db.Decimal(14, 2) // set when scheme.optionAchievementType = VALUE_BASED
   valueWithoutGST Decimal  @db.Decimal(14, 2)
   valueWithGST    Decimal  @db.Decimal(14, 2)
+  bookingAmount   Decimal? @db.Decimal(14, 2) // null: legacy global Scheme.bookingAmount
   sortOrder       Int      @default(0)
   isActive        Boolean  @default(true) // false = discontinued: hidden from new selections, kept for history
   discontinuedAt  DateTime?

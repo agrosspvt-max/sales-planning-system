@@ -51,3 +51,28 @@ export function formatDateShort(value: Date | string | null | undefined): string
     year: "2-digit",
   });
 }
+
+export function formatSchemeDate(value: Date | string | null | undefined) {
+  if (!value) return "—";
+  const text = value instanceof Date ? value.toISOString().slice(0, 10) : value.slice(0, 10);
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : text;
+}
+
+export function parseSchemeDate(value: string) {
+  const match = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return null;
+  const [, dayText, monthText, yearText] = match;
+  const day = Number(dayText);
+  const month = Number(monthText);
+  const year = Number(yearText);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return `${yearText}-${monthText}-${dayText}`;
+}
+
+
+/** Scheme bill/payment amounts retain paise in display; storage/calculations are untouched. */
+export function formatSchemeCurrency(value: number | string): string {
+  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(Number(value));
+}

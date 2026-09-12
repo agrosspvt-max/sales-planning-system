@@ -4,7 +4,7 @@ import { useState, type ReactNode } from "react";
 import { FileText, Lock, Unlock, Plus, X, MoreVertical, Info, Share2, Pencil, Trash2, AlertTriangle } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import { formatDate, formatCurrency, cn } from "@/lib/utils";
+import { formatSchemeDate as formatDate, formatCurrency, cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -21,7 +21,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useLabel } from "@/features/labels/label-ui";
 import { validateSchemeRequirement } from "@/lib/scheme-requirement";
 import { validateMultipleOptions } from "@/lib/scheme-options";
-import { computeInstallmentAmounts, bookingExceedsFinalInstallment } from "@/lib/scheme-installments";
+import { computeInstallmentAmounts, bookingExceedsFinalInstallment, installmentValueColumns } from "@/lib/scheme-installments";
+import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import { SchemeDetailDialog } from "./scheme-detail-dialog";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
 // Reuse the EXACT Info / View Document / Share dialogs + helpers from the Planned Scheme (Create Plan) menu,
@@ -32,6 +33,7 @@ import { SchemeInfoDialog, SchemeDocumentDialog, SchemeShareDialog, schemeShareT
 const isExpired = (s: Scheme) => !s.isPerpetual && !!s.endDate && new Date(s.endDate) < new Date();
 
 type Benefit = "DOMESTIC_TOUR" | "DOMESTIC_COUPLE_TOUR" | "FOREIGN_TOUR" | "CREDIT_NOTE" | "OTHER";
+type BenefitChoice = Benefit | "SPECIAL_GIFT" | "GOLD_SILVER";
 type CalcType = "PERCENTAGE" | "FIXED_AMOUNT";
 type Installment = { installmentNumber: number; calculationType: CalcType; value: number; daysAfterBillingDate: number };
 type State = { id: string; name: string };
@@ -40,10 +42,11 @@ type ValueMode = "INDIVIDUAL" | "COMBINED";
 type RequirementProduct = { productId: string; requiredQty: number | null; requiredValue: number | null };
 type Structure = "FIXED" | "MULTIPLE_OPTIONS";
 type OptionAchievementType = "QUANTITY_BASED" | "VALUE_BASED";
-type SchemeOption = { id?: string; label: string | null; target: number | null; valueWithoutGST: number; valueWithGST: number; isActive: boolean };
-type Scheme = { id: string; schemeName: string; isPerpetual: boolean; startDate: string | null; endDate: string | null; bookingLastDate: string | null; schemeValueWithoutGST: number | null; schemeValueWithGST: number | null; bookingAmount: number | null; schemeBenefit: Benefit; benefitDetails: string | null; otherBenefitDetails: string | null; allowMultipleSchemes: boolean; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays?: number; documentUrl: string | null; status: "OPEN" | "CLOSED"; states: State[]; installments: Installment[]; requirementType?: ReqType; valueMode?: ValueMode | null; combinedRequiredValue?: number | null; requirementProducts?: RequirementProduct[]; structure?: Structure; optionAchievementType?: OptionAchievementType | null; options?: SchemeOption[]; eligibleProductIds?: string[] };
+type SchemeOption = { bookingAmount?: number | null; id?: string; label: string | null; target: number | null; valueWithoutGST: number; valueWithGST: number; isActive: boolean };
+type Scheme = { installmentBalance?: boolean; id: string; schemeName: string; isPerpetual: boolean; startDate: string | null; endDate: string | null; bookingLastDate: string | null; schemeValueWithoutGST: number | null; schemeValueWithGST: number | null; bookingAmount: number | null; schemeBenefit: Benefit; benefitDetails: string | null; otherBenefitDetails: string | null; allowMultipleSchemes: boolean; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays?: number; documentUrl: string | null; status: "OPEN" | "CLOSED"; states: State[]; installments: Installment[]; requirementType?: ReqType; valueMode?: ValueMode | null; combinedRequiredValue?: number | null; requirementProducts?: RequirementProduct[]; structure?: Structure; optionAchievementType?: OptionAchievementType | null; options?: SchemeOption[]; eligibleProductIds?: string[] };
 type ProductOption = { productId: string; name: string; isActive: boolean };
-const benefits: Record<Benefit, string> = { DOMESTIC_TOUR: "Domestic Tour", DOMESTIC_COUPLE_TOUR: "Domestic Couple Tour", FOREIGN_TOUR: "Foreign Tour", CREDIT_NOTE: "Credit Note", OTHER: "Other" };
+const benefits: Record<Exclude<Benefit, "DOMESTIC_COUPLE_TOUR">, string> = { DOMESTIC_TOUR: "Domestic Tour", FOREIGN_TOUR: "Foreign Tour", CREDIT_NOTE: "Credit Note", OTHER: "Other" };
+const specialBenefitDetails: Record<Extract<BenefitChoice, "SPECIAL_GIFT" | "GOLD_SILVER">, string> = { SPECIAL_GIFT: "Special Gift", GOLD_SILVER: "Gold / Silver" };
 const toDateInput = (v: string | null) => v ? new Date(v).toISOString().slice(0, 10) : "";
 const MIN_DELETE_REASON = 10;
 
@@ -251,7 +254,7 @@ export function SchemeMasterPage({ canManage = true, crumbs, nav, hideViewToggle
       <button type="button" onClick={() => setView("enrolled")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "enrolled" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>{ML.enrolledScheme}</button>
     </div>
     )}
-    {hideList ? null : !hideViewToggle && view === "enrolled" ? <EnrolledSchemesView /> : <div className="overflow-auto rounded-lg border bg-background"><Table stickyFirstColumn><TableHeader><TableRow><TableHead>{ML.colName}</TableHead><TableHead>{ML.colStates}</TableHead><TableHead>{ML.colPeriod}</TableHead><TableHead>{ML.colLastBooking}</TableHead><TableHead className="text-right">{ML.colWithoutGst}</TableHead><TableHead className="text-right">{ML.colWithGst}</TableHead><TableHead>{ML.colBenefit}</TableHead><TableHead>{ML.colStatus}</TableHead>{canManage && <TableHead className="text-right">{ML.colActions}</TableHead>}</TableRow></TableHeader><TableBody>{isLoading ? <TableRow><TableCell colSpan={canManage ? 9 : 8}><Skeleton className="h-7 w-full" /></TableCell></TableRow> : !data?.length ? <TableRow><TableCell colSpan={canManage ? 9 : 8} className="py-10 text-center text-muted-foreground">No schemes found.</TableCell></TableRow> : data.map((s) => <TableRow key={s.id}><TableCell className="font-medium"><button type="button" className="text-left text-primary hover:underline" onClick={() => setDetail(s)} title="View dealer plans">{s.schemeName}</button>{s.documentUrl && <a href={s.documentUrl} target="_blank" rel="noreferrer" className="ml-2 inline-block text-primary" title="Open scheme document"><FileText className="h-4 w-4" /></a>}</TableCell><TableCell>{s.states.map((x) => x.name).join(", ")}</TableCell><TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate!)} – ${formatDate(s.endDate!)}`}</TableCell><TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate!)}</TableCell><TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithoutGST)}</TableCell><TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithGST)}</TableCell><TableCell>{benefits[s.schemeBenefit]}{s.benefitDetails ? ` · ${s.benefitDetails}` : ""}</TableCell><TableCell><Badge variant={s.status === "OPEN" ? "success" : "muted"}>{s.status}</Badge></TableCell>{canManage && <TableCell className="text-right"><div className="flex items-center justify-end gap-1"><SchemeRowMenu hasDocument={!!s.documentUrl} onInfo={() => setInfoFor(s)} onDoc={() => setDocFor(s)} onShare={() => void shareScheme(s)} onEdit={() => setEditing(s)} onDelete={() => setDeleting(s)} />{s.status === "OPEN" && <Button variant="ghost" size="sm" onClick={() => setClosing(s)} title="Close scheme" disabled={close.isPending}><Unlock className="h-4 w-4" /></Button>}{s.status === "CLOSED" && <Button variant="ghost" size="sm" onClick={() => setReopening(s)} title={isExpired(s) ? "Closed (period expired) — reopening requires extending the end date" : "Closed — click to reopen"} disabled={reopen.isPending}><Lock className="h-4 w-4" /></Button>}</div></TableCell>}</TableRow>)}</TableBody></Table></div>}
+    {hideList ? null : !hideViewToggle && view === "enrolled" ? <EnrolledSchemesView /> : <div className="overflow-auto rounded-lg border bg-background"><Table stickyFirstColumn><TableHeader><TableRow><TableHead>{ML.colName}</TableHead><TableHead>{ML.colStates}</TableHead><TableHead>{ML.colPeriod}</TableHead><TableHead>{ML.colLastBooking}</TableHead><TableHead className="text-right">{ML.colWithoutGst}</TableHead><TableHead className="text-right">{ML.colWithGst}</TableHead><TableHead>{ML.colBenefit}</TableHead><TableHead>{ML.colStatus}</TableHead>{canManage && <TableHead className="text-right">{ML.colActions}</TableHead>}</TableRow></TableHeader><TableBody>{isLoading ? <TableRow><TableCell colSpan={canManage ? 9 : 8}><Skeleton className="h-7 w-full" /></TableCell></TableRow> : !data?.length ? <TableRow><TableCell colSpan={canManage ? 9 : 8} className="py-10 text-center text-muted-foreground">No schemes found.</TableCell></TableRow> : data.map((s) => <TableRow key={s.id}><TableCell className="font-medium"><button type="button" className="text-left text-primary hover:underline" onClick={() => setDetail(s)} title="View dealer plans">{s.schemeName}</button>{s.documentUrl && <a href={s.documentUrl} target="_blank" rel="noreferrer" className="ml-2 inline-block text-primary" title="Open scheme document"><FileText className="h-4 w-4" /></a>}</TableCell><TableCell>{s.states.map((x) => x.name).join(", ")}</TableCell><TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate!)} – ${formatDate(s.endDate!)}`}</TableCell><TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate!)}</TableCell><TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithoutGST)}</TableCell><TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithGST)}</TableCell><TableCell>{benefits[s.schemeBenefit as Exclude<Benefit, "DOMESTIC_COUPLE_TOUR">] ?? "Domestic Couple Tour"}{s.benefitDetails ? ` · ${s.benefitDetails}` : ""}</TableCell><TableCell><Badge variant={s.status === "OPEN" ? "success" : "muted"}>{s.status}</Badge></TableCell>{canManage && <TableCell className="text-right"><div className="flex items-center justify-end gap-1"><SchemeRowMenu hasDocument={!!s.documentUrl} onInfo={() => setInfoFor(s)} onDoc={() => setDocFor(s)} onShare={() => void shareScheme(s)} onEdit={() => setEditing(s)} onDelete={() => setDeleting(s)} />{s.status === "OPEN" && <Button variant="ghost" size="sm" onClick={() => setClosing(s)} title="Close scheme" disabled={close.isPending}><Unlock className="h-4 w-4" /></Button>}{s.status === "CLOSED" && <Button variant="ghost" size="sm" onClick={() => setReopening(s)} title={isExpired(s) ? "Closed (period expired) — reopening requires extending the end date" : "Closed — click to reopen"} disabled={reopen.isPending}><Lock className="h-4 w-4" /></Button>}</div></TableCell>}</TableRow>)}</TableBody></Table></div>}
     {create && <SchemeDialog states={states} onClose={() => setCreate(false)} onSaved={() => { setCreate(false); invalidate(); }} />}{editing && <SchemeDialog scheme={editing} states={states} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); invalidate(); }} />}
     {detail && <SchemeDetailDialog schemeId={detail.id} schemeName={detail.schemeName} canVerify={canManage} onClose={() => setDetail(null)} />}
     <ConfirmDialog
@@ -286,7 +289,7 @@ export function SchemeMasterPage({ canManage = true, crumbs, nav, hideViewToggle
  * no product is auto-selected, duplicates are prevented, and saved products load unchanged in edit mode.
  * Used for the Multiple Options eligible-product pool — selection semantics (a set of ids) are unchanged.
  */
-function EligibleProductRows({ products, value, onChange, addLabel, productName }: { products: ProductOption[]; value: string[]; onChange: (ids: string[]) => void; addLabel: string; productName: (id: string) => string }) {
+function EligibleProductRows({ products, value, onChange, addLabel, productName, maxProducts }: { products: ProductOption[]; value: string[]; onChange: (ids: string[]) => void; addLabel: string; productName: (id: string) => string; maxProducts?: number }) {
   const [rows, setRows] = useState<string[]>(value.length ? value : [""]);
   const publish = (next: string[]) => { setRows(next); onChange([...new Set(next.filter((x) => x !== ""))]); };
   const used = new Set(rows.filter((x) => x !== ""));
@@ -302,7 +305,7 @@ function EligibleProductRows({ products, value, onChange, addLabel, productName 
           <Button type="button" variant="ghost" size="sm" onClick={() => publish(rows.length > 1 ? rows.filter((_, idx) => idx !== i) : [""])} title="Remove"><X className="h-3 w-3" /></Button>
         </div>
       ))}
-      <Button type="button" variant="outline" size="sm" onClick={() => publish([...rows, ""])}><Plus className="h-3 w-3" /> {addLabel}</Button>
+      {(maxProducts == null || rows.length < maxProducts) && <Button type="button" variant="outline" size="sm" onClick={() => publish([...rows, ""])}><Plus className="h-3 w-3" /> {addLabel}</Button>}
     </div>
   );
 }
@@ -336,20 +339,25 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const [benefit, setBenefit] = useState<Benefit | "">(scheme?.schemeBenefit ?? "");
   const [benefitDetails, setBenefitDetails] = useState(scheme?.benefitDetails ?? "");
   const [otherBenefitDetails, setOtherBenefitDetails] = useState(scheme?.otherBenefitDetails ?? "");
-  const [multiple, setMultiple] = useState(scheme?.allowMultipleSchemes ?? false);
+  const [multiple, setMultiple] = useState<"" | "yes" | "no">(scheme ? (scheme.allowMultipleSchemes ? "yes" : "no") : "");
   // Create starts EMPTY (not "0"); Edit loads the saved value. Blank saves as 0 via `Number(x) || 0` (unchanged).
   const [maxExtDays, setMaxExtDays] = useState(scheme?.maxExtensionDays != null ? String(scheme.maxExtensionDays) : "");
   const [maxExtAttempts, setMaxExtAttempts] = useState(scheme?.maxExtensionAttempts != null ? String(scheme.maxExtensionAttempts) : "");
   const [prePlacementMaxDays, setPrePlacementMaxDays] = useState(scheme?.prePlacementMaxDays != null ? String(scheme.prePlacementMaxDays) : "");
   const [documentUrl, setDocumentUrl] = useState(scheme?.documentUrl ?? "");
+  const [installmentBalance, setInstallmentBalance] = useState(scheme?.installmentBalance ?? !scheme);
   const [installments, setInstallments] = useState<Installment[]>(scheme?.installments ?? []);
+  const [installmentMode, setInstallmentMode] = useState<CalcType | "">(scheme?.installments[0]?.calculationType ?? "");
   const [error, setError] = useState<string | null>(null);
+  const standardExtensionAttempts = new Set(["-1", "1", "2", "3", "4", "5"]);
+  const preservedExtensionAttemptOption = scheme && maxExtAttempts !== "" && !standardExtensionAttempts.has(maxExtAttempts)
+    ? [{ value: maxExtAttempts, label: maxExtAttempts === "0" ? "Disabled" : maxExtAttempts }]
+    : [];
 
-  // ---- Scheme Requirement (Phase 5). Belongs to the SCHEME, not to dealers. Defaults to None so existing
-  // schemes stay installment-only. qty/value are kept as strings while editing (empty = not entered). ----
+  // ---- Scheme Requirement (Phase 5). Belongs to the SCHEME, not to dealers. A real basis must be chosen;
+  // qty/value are kept as strings while editing (empty = not entered). ----
   type ReqRow = { productId: string; requiredQty: string; requiredValue: string };
-  const [reqType, setReqType] = useState<ReqType>(scheme?.requirementType ?? "NONE");
-  const [combinedValue, setCombinedValue] = useState(scheme?.combinedRequiredValue != null ? String(scheme.combinedRequiredValue) : "");
+  const [reqType, setReqType] = useState<ReqType | "">(scheme?.requirementType === "NONE" ? "" : (scheme?.requirementType ?? ""));
   const [reqRows, setReqRows] = useState<ReqRow[]>(
     scheme?.requirementProducts?.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty != null ? String(p.requiredQty) : "", requiredValue: p.requiredValue != null ? String(p.requiredValue) : "" })) ?? [],
   );
@@ -365,17 +373,23 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const updateReqRow = (idx: number, patch: Partial<ReqRow>) => setReqRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   const removeReqRow = (idx: number) => setReqRows((rows) => rows.filter((_, i) => i !== idx));
   // Choosing a basis (Product/Value Based) shows ONE empty product row to start; existing rows are kept.
-  const changeReqType = (t: ReqType) => { setReqType(t); if (t !== "NONE") setReqRows((rows) => (rows.length === 0 ? [emptyReqRow()] : rows)); };
+  const changeReqType = (t: ReqType | "") => { setReqType(t); if (t && t !== "NONE") setReqRows((rows) => (rows.length === 0 ? [emptyReqRow()] : rows)); };
   // Products still selectable for a given row = the ones not used elsewhere, plus the row's own current pick.
   const optionsForRow = (currentId: string) => productOptions.filter((p) => p.productId === currentId || !usedProductIds.has(p.productId));
 
   // Build the shared requirement shape (validation + persistence use the SAME normalizer contract).
-  // Fixed + Value Based ALWAYS uses COMBINED (the Value Mode selector was removed): one combined required
-  // value across the applicable products, and no per-product required value. Product Based is unchanged.
+  // Fixed + Value Based ALWAYS uses COMBINED (the Value Mode selector was removed): Scheme Value
+  // (With GST) is also the combined required value, so the user enters the total only once. Preserve a
+  // legacy stored target on an unchanged edit; changing the visible GST value makes it authoritative.
+  const combinedRequiredValue = reqType !== "VALUE_BASED" || valueWithGST === ""
+    ? null
+    : scheme?.requirementType === "VALUE_BASED" && scheme.combinedRequiredValue != null && valueWithGST === String(scheme.schemeValueWithGST)
+      ? scheme.combinedRequiredValue
+      : Number(valueWithGST);
   const requirementInput = () => ({
-    requirementType: reqType,
+    requirementType: (reqType || "NONE") as ReqType,
     valueMode: reqType === "VALUE_BASED" ? ("COMBINED" as ValueMode) : null,
-    combinedRequiredValue: reqType === "VALUE_BASED" ? (combinedValue === "" ? null : Number(combinedValue)) : null,
+    combinedRequiredValue,
     products: reqType === "NONE" ? [] : reqRows.map((r) => ({
       productId: r.productId,
       requiredQty: reqType === "PRODUCT_BASED" ? (r.requiredQty === "" ? null : Number(r.requiredQty)) : null,
@@ -383,33 +397,36 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     })),
   });
   const requirementErrors = validateSchemeRequirement(requirementInput());
-  const requirementValid = requirementErrors.length === 0;
+  const requirementValid = reqType !== "" && reqType !== "NONE" && requirementErrors.length === 0;
 
   // ---- Multiple Options (Phase 10). A scheme is FIXED (existing behaviour) or MULTIPLE_OPTIONS: an
   // achievement type + an eligible product pool + ≥1 option (label? + target + value pair). Scheme-level
-  // value fields are unused for options (sent null); installment rules must be percentage-only. ----
-  type OptRow = { id?: string; label: string; target: string; valueWithoutGST: string; valueWithGST: string; isActive: boolean };
-  const [structure, setStructure] = useState<Structure>(scheme?.structure ?? "FIXED");
+  // value fields are unused for options (sent null); installment rules are shared across options. ----
+  // Labels are retained for historical round-tripping, but are no longer editable.
+  type OptRow = { bookingAmount: string; id?: string; label: string; target: string; valueWithoutGST: string; valueWithGST: string; isActive: boolean };
+  const [structure, setStructure] = useState<Structure | "">(scheme?.structure ?? "");
   // Create starts UNSELECTED ("Select Achievement Type"); Edit loads the saved type.
   const [optAchType, setOptAchType] = useState<OptionAchievementType | "">(scheme?.optionAchievementType ?? "");
   const [eligibleIds, setEligibleIds] = useState<string[]>(scheme?.eligibleProductIds ?? []);
   const [optRows, setOptRows] = useState<OptRow[]>(
-    scheme?.options?.map((o) => ({ id: o.id, label: o.label ?? "", target: o.target != null ? String(o.target) : "", valueWithoutGST: String(o.valueWithoutGST), valueWithGST: String(o.valueWithGST), isActive: o.isActive })) ?? [],
+    scheme?.options?.map((o) => ({ bookingAmount: String(o.bookingAmount ?? scheme.bookingAmount ?? 0), id: o.id, label: o.label ?? "", target: o.target != null ? String(o.target) : "", valueWithoutGST: String(o.valueWithoutGST), valueWithGST: String(o.valueWithGST), isActive: o.isActive })) ?? [],
   );
-  const addOptRow = () => setOptRows((r) => [...r, { label: "", target: "", valueWithoutGST: "", valueWithGST: "", isActive: true }]);
+  const addOptRow = () => setOptRows((r) => [...r, { bookingAmount: "", label: "", target: "", valueWithoutGST: "", valueWithGST: "", isActive: true }]);
   const updateOptRow = (i: number, patch: Partial<OptRow>) => setOptRows((r) => r.map((x, idx) => (idx === i ? { ...x, ...patch } : x)));
   const removeOptRow = (i: number) => setOptRows((r) => r.filter((_, idx) => idx !== i));
   const multipleOptionsInput = () => ({
     achievementType: optAchType as OptionAchievementType, // "" is caught by validateMultipleOptions (gates Save)
     eligibleProductIds: eligibleIds,
-    options: optRows.map((o) => ({ label: o.label.trim() || null, target: o.target === "" ? null : Number(o.target), valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST) })),
-    installmentCalcTypes: installments.map((r) => r.calculationType),
+    options: optRows.map((o) => ({ label: o.label.trim() || null, target: optAchType === "QUANTITY_BASED" && o.target !== "" ? Number(o.target) : null, valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST) })),
   });
   const optionErrors = structure === "MULTIPLE_OPTIONS" ? validateMultipleOptions(multipleOptionsInput()) : [];
-  const optionsValid = optionErrors.length === 0;
+  const optionBookingsValid = optRows.length > 0 && optRows.every((option) => option.bookingAmount !== "" && Number(option.bookingAmount) >= 0);
+  const optionsValid = optionErrors.length === 0 && optionBookingsValid;
   const isOptions = structure === "MULTIPLE_OPTIONS";
-  // Structure change also resets installments to percentage (options can't use FIXED_AMOUNT).
-  const changeStructure = (s: Structure) => { setStructure(s); if (s === "MULTIPLE_OPTIONS") setAllCalc("PERCENTAGE"); };
+  const changeStructure = (s: Structure | "") => {
+    setStructure(s);
+    if (installmentMode === "FIXED_AMOUNT") setInstallmentBalance(s === "MULTIPLE_OPTIONS");
+  };
 
   // Requirement section labels (admin-customizable via the Labels page).
   const L = {
@@ -421,7 +438,6 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     valueMode: useLabel("scheme_master.requirement.value_mode"),
     modeIndividual: useLabel("scheme_master.requirement.value_mode.individual"),
     modeCombined: useLabel("scheme_master.requirement.value_mode.combined"),
-    combinedValue: useLabel("scheme_master.requirement.combined_value"),
     applicableProducts: useLabel("scheme_master.requirement.applicable_products"),
     addProduct: useLabel("scheme_master.requirement.add_product"),
     colProduct: useLabel("scheme_master.requirement.col.product"),
@@ -486,7 +502,8 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   };
 
   const gstValue = Number(valueWithGST) || 0;
-  const calcType: CalcType = installments[0]?.calculationType ?? "PERCENTAGE";
+  const fixedGstValid = valueWithoutGST === "" || valueWithGST === "" || Math.round(Number(valueWithGST) * 100) >= Math.round(Number(valueWithoutGST) * 100);
+  const calcType: CalcType = installmentMode || installments[0]?.calculationType || "PERCENTAGE";
   const round2 = (n: number) => Math.round(n * 100) / 100;
   // Booking Amount (scheme-level) is deducted from the FINAL installment by the shared calculator.
   const booking = Number(bookingAmount) || 0;
@@ -494,47 +511,46 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   // percentages always total 100% (or the amounts total the scheme value). Only the earlier rows are edited.
   const installTarget = calcType === "PERCENTAGE" ? 100 : gstValue;
   const nonFinalSum = installments.length > 0 ? installments.slice(0, -1).reduce((sum, r) => sum + (Number(r.value) || 0), 0) : 0;
-  const finalValue = installments.length > 0 ? round2(installTarget - nonFinalSum) : 0; // final % or amount (pre-booking "normal")
+  const finalValue = installments.length > 0
+    ? isOptions && calcType === "FIXED_AMOUNT" ? 0 : round2(installTarget - nonFinalSum)
+    : 0; // Options Amount stores a zero-valued Balance rule; each option derives its own final amount.
   // Effective rules = state with the final row overridden to the auto-balanced value. Persisted + shown.
   const effInstallments = installments.map((r, i) => (i === installments.length - 1 ? { ...r, value: finalValue } : r));
-  // Booking-adjusted per-row amounts (needs a concrete value): FIXED uses the scheme value; MULTIPLE_OPTIONS
-  // has per-option values so the master builder shows "—" (real amounts are computed per selected option).
-  const hasValue = gstValue > 0;
-  const rowAmounts = hasValue
-    ? computeInstallmentAmounts(effInstallments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0 })), gstValue, booking)
-    : [];
-  // Validation: the final installment must never be negative — earlier rows can't exceed 100%/scheme value,
-  // and the Booking Amount can't exceed the final installment's normal amount (per active option for MO).
+  const paymentColumns = installmentValueColumns({
+    structure: (structure || "FIXED") as Structure, achievementType: optAchType, valueWithGST: gstValue, bookingAmount: booking,
+    options: optRows.map(o => ({ target: o.target === "" ? null : Number(o.target), valueWithGST: Number(o.valueWithGST) || 0, bookingAmount: Number(o.bookingAmount) || 0 })),
+  });
+  const columnAmounts = paymentColumns.map(c => computeInstallmentAmounts(effInstallments, c.valueWithGST, c.bookingAmount, installmentBalance));
   const finalNegative = installments.length > 0 && finalValue < -1e-9;
-  let bookingTooBig = false;
-  if (installments.length > 0 && booking > 0 && !finalNegative) {
-    if (isOptions) {
-      bookingTooBig = optRows.some((o) => o.isActive && o.valueWithGST !== "" && booking > round2(((Number(o.valueWithGST) || 0) * finalValue) / 100));
-    } else if (hasValue) {
-      bookingTooBig = bookingExceedsFinalInstallment(effInstallments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0 })), gstValue, booking);
-    }
-  }
+  const bookingTooBig = paymentColumns.some((c, i) => (!isOptions || optRows[i].isActive) &&
+    bookingExceedsFinalInstallment(effInstallments, c.valueWithGST, c.bookingAmount, installmentBalance));
   const installValid = installments.length === 0 || (!finalNegative && !bookingTooBig);
 
   const setCount = (n: number) => {
+    if (n > 0 && scheme?.installments.length === 0 && installmentMode !== "FIXED_AMOUNT") setInstallmentBalance(true);
     setInstallments((prev) => {
-      const type = prev[0]?.calculationType ?? "PERCENTAGE";
+      const type = installmentMode || prev[0]?.calculationType || "PERCENTAGE";
       return Array.from({ length: n }, (_, i) => prev[i] ?? { installmentNumber: i + 1, calculationType: type, value: 0, daysAfterBillingDate: 0 })
         .map((r, i) => ({ ...r, installmentNumber: i + 1 }));
     });
   };
   const updateRow = (idx: number, patch: Partial<Installment>) => setInstallments((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
-  const setAllCalc = (t: CalcType) => setInstallments((prev) => prev.map((r) => ({ ...r, calculationType: t })));
+  const setAllCalc = (t: CalcType | "") => {
+    setInstallmentMode(t);
+    if (!t) return;
+    if (t === "FIXED_AMOUNT") setInstallmentBalance(isOptions);
+    setInstallments((prev) => prev.map((r) => ({ ...r, calculationType: t })));
+  };
 
   const payload = () => {
     const common = {
-      schemeName: name, stateIds, isPerpetual,
+      schemeName: name, stateIds, isPerpetual, installmentBalance,
       startDate: isPerpetual ? null : startDate, endDate: isPerpetual ? null : endDate, bookingLastDate: isPerpetual ? null : bookingLastDate,
       bookingAmount: bookingAmount === "" ? null : bookingAmount, schemeBenefit: benefit, benefitDetails: benefit === "OTHER" ? benefitDetails : null,
-      otherBenefitDetails: otherBenefitDetails.trim() || null, allowMultipleSchemes: multiple,
+      otherBenefitDetails: otherBenefitDetails.trim(), allowMultipleSchemes: multiple === "yes",
       maxExtensionDays: Number(maxExtDays) || 0, maxExtensionAttempts: Number(maxExtAttempts) || 0, prePlacementMaxDays: Number(prePlacementMaxDays) || 0, documentUrl: documentUrl || null,
       installments: effInstallments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0, daysAfterBillingDate: Number(r.daysAfterBillingDate) || 0 })),
-      structure,
+      structure: structure as Structure,
     };
     if (isOptions) {
       // MULTIPLE_OPTIONS: no scheme-level value (null → "Per option"); requirement is replaced by the option pool.
@@ -542,7 +558,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
         ...common,
         schemeValueWithoutGST: null, schemeValueWithGST: null,
         optionAchievementType: optAchType || null, eligibleProductIds: eligibleIds,
-        options: optRows.map((o) => ({ id: o.id, label: o.label.trim() || null, target: o.target === "" ? null : Number(o.target), valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST), isActive: o.isActive })),
+        options: optRows.map((o) => ({ bookingAmount: o.bookingAmount === "" ? null : Number(o.bookingAmount), id: o.id, label: o.label.trim() || null, target: optAchType === "QUANTITY_BASED" && o.target !== "" ? Number(o.target) : null, valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST), isActive: o.isActive })),
         requirementType: "NONE", valueMode: null, combinedRequiredValue: null, requirementProducts: [],
       };
     }
@@ -572,73 +588,57 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
         <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
           {/* 1. BASIC SCHEME INFORMATION */}
           <FormSection title={FL.sectionBasic}>
-            <div className="space-y-1.5"><Label>{FL.schemeName} *</Label><Input value={name} onChange={(e) => setName(e.target.value)} /></div>
+            <div className="space-y-1.5"><Label>{FL.schemeName} *</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Enter scheme name" /></div>
             <div className="space-y-1.5"><Label>{FL.applicableStates} *</Label><div className="grid grid-cols-2 gap-2 rounded-md border p-3">{states.map((s) => <label key={s.id} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={stateIds.includes(s.id)} onChange={() => setStateIds((ids) => ids.includes(s.id) ? ids.filter((id) => id !== s.id) : [...ids, s.id])} />{s.name}</label>)}</div></div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {/* Phase 10: Fixed (one scheme value) vs Multiple Options (a pool + several option targets). */}
               <div className="space-y-1.5">
-                <Label>{FL.structure}</Label>
-                <NativeSelect value={structure} onChange={(e) => changeStructure(e.target.value as Structure)} options={[{ value: "FIXED", label: FL.structureFixed }, { value: "MULTIPLE_OPTIONS", label: FL.structureOptions }]} />
+                <Label>{FL.structure} *</Label>
+                <NativeSelect value={structure} onChange={(e) => changeStructure(e.target.value as Structure | "")} options={[{ value: "", label: "Select..." }, { value: "FIXED", label: FL.structureFixed }, { value: "MULTIPLE_OPTIONS", label: FL.structureOptions }]} />
               </div>
-              <div className="space-y-1.5"><Label>{FL.allowMultiple}</Label><NativeSelect value={multiple ? "yes" : "no"} onChange={(e) => setMultiple(e.target.value === "yes")} options={[{ value: "no", label: "No" }, { value: "yes", label: "Yes" }]} /></div>
+              <div className="space-y-1.5"><Label>{FL.allowMultiple} *</Label><NativeSelect value={multiple} onChange={(e) => setMultiple(e.target.value as "" | "yes" | "no")} options={[{ value: "", label: "Select..." }, { value: "no", label: "No" }, { value: "yes", label: "Yes" }]} /></div>
             </div>
 
-            {/* Multiple Options only: option NAMES live here (Basic). Options themselves are added via the
-                "+ Add Option" control in Scheme Details — there is no separate "No. of Options" field. */}
-            {isOptions && optRows.length > 0 && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {optRows.map((o, i) => (
-                  <div key={i} className="space-y-1.5">
-                    <Label>{`Option ${i + 1} Name`}</Label>
-                    <Input value={o.label} onChange={(e) => updateOptRow(i, { label: e.target.value })} placeholder={`e.g. ${(i + 1) * 100}L`} />
-                  </div>
-                ))}
-              </div>
-            )}
           </FormSection>
 
           {/* 2. SCHEME DETAILS — Fixed: scheme values + requirement; Multiple Options: achievement type, eligible pool, options. */}
           <FormSection title={FL.sectionDetails}>
             {isOptions ? (
               <div className="space-y-3">
-                {/* Scheme Basis — SAME label as Fixed (L.type). Default "None" (L.typeNone). For Multiple Options
-                    the basis IS the achievement type (Quantity/Value Based) — value and validation unchanged. */}
+                {/* For Multiple Options, Scheme Basis is the achievement type (Quantity/Value Based). */}
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label>{L.type}</Label>
-                    <NativeSelect value={optAchType} onChange={(e) => setOptAchType(e.target.value as OptionAchievementType | "")} options={[{ value: "", label: L.typeNone }, { value: "QUANTITY_BASED", label: FL.achQuantity }, { value: "VALUE_BASED", label: FL.achValue }]} />
+                    <Label>{L.type} *</Label>
+                    <NativeSelect value={optAchType} onChange={(e) => setOptAchType(e.target.value as OptionAchievementType | "")} options={[{ value: "", label: "Select..." }, { value: "QUANTITY_BASED", label: FL.achQuantity }, { value: "VALUE_BASED", label: FL.achValue }]} />
                   </div>
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs font-medium text-muted-foreground">{FL.eligibleProducts} *</Label>
                   {/* SAME product-selection pattern as Fixed: "Select Product" dropdown rows + "+ Add Product". */}
-                  <EligibleProductRows products={productOptions} value={eligibleIds} onChange={setEligibleIds} addLabel={L.addProduct} productName={productName} />
+                  <EligibleProductRows products={productOptions} value={eligibleIds} onChange={setEligibleIds} addLabel={L.addProduct} productName={productName} maxProducts={optAchType === "QUANTITY_BASED" ? 1 : undefined} />
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-sm font-semibold">{FL.optionsBuilder}</Label>
+                  <Label className="text-sm font-semibold">{FL.optionsBuilder} *</Label>
                   {optRows.length > 0 && (
                     <div className="overflow-x-auto">
-                      <Table className="min-w-[720px]">
+                      <Table className={optAchType === "QUANTITY_BASED" ? "min-w-[640px]" : "min-w-[520px]"}>
                         <TableHeader>
                           <TableRow>
-                            <TableHead className="min-w-[200px]">{FL.optColLabel}</TableHead>
-                            <TableHead className="w-32">{FL.optColTarget} ({optAchType === "QUANTITY_BASED" ? "Qty" : "Value"})</TableHead>
-                            <TableHead className="w-36">{FL.optColValueWithout}</TableHead>
-                            <TableHead className="w-36">{FL.optColValueWith}</TableHead>
-                            <TableHead className="w-16 text-center">{FL.optColActive}</TableHead>
-                            <TableHead className="w-12" />
+                            <TableHead className="w-24">Option</TableHead>
+                            {optAchType === "QUANTITY_BASED" && <TableHead className="w-32">{FL.optColTarget} (Qty) *</TableHead>}
+                            <TableHead className="w-36">{FL.optColValueWithout} *</TableHead>
+                            <TableHead className="w-36">{FL.optColValueWith} *</TableHead>
+                            <TableHead className="w-16 text-center">{FL.optColActive} *</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           {optRows.map((o, i) => (
                             <TableRow key={i}>
-                              {/* Option name is edited in Basic Scheme Information; shown here read-only (falls back to positional "Option N"). */}
-                              <TableCell className="min-w-[200px] font-medium">{o.label.trim() || `Option ${i + 1}`}</TableCell>
-                              <TableCell><Input type="number" min="0" step="any" value={o.target} onChange={(e) => updateOptRow(i, { target: e.target.value })} placeholder={optAchType === "QUANTITY_BASED" ? "Qty" : "Value"} /></TableCell>
-                              <TableCell><Input type="number" min="0" step="any" value={o.valueWithoutGST} onChange={(e) => updateOptRow(i, { valueWithoutGST: e.target.value })} /></TableCell>
-                              <TableCell><Input type="number" min="0" step="any" value={o.valueWithGST} onChange={(e) => updateOptRow(i, { valueWithGST: e.target.value })} /></TableCell>
-                              <TableCell className="text-center"><input type="checkbox" checked={o.isActive} onChange={(e) => updateOptRow(i, { isActive: e.target.checked })} /></TableCell>
-                              <TableCell><Button type="button" variant="ghost" size="sm" onClick={() => removeOptRow(i)} title="Remove"><X className="h-3 w-3" /></Button></TableCell>
+                              <TableCell className="font-medium">Option {i + 1}</TableCell>
+                              {optAchType === "QUANTITY_BASED" && <TableCell><FormattedNumberInput value={o.target} onValueChange={(target) => updateOptRow(i, { target })} placeholder="Enter quantity" /></TableCell>}
+                              <TableCell><FormattedNumberInput value={o.valueWithoutGST} onValueChange={(valueWithoutGST) => updateOptRow(i, { valueWithoutGST })} placeholder="Enter amount" /></TableCell>
+                              <TableCell><FormattedNumberInput value={o.valueWithGST} onValueChange={(valueWithGST) => updateOptRow(i, { valueWithGST })} placeholder="Enter amount" /></TableCell>
+                              <TableCell><div className="flex items-center justify-center gap-1"><input type="checkbox" aria-label={`Option ${i + 1} active`} checked={o.isActive} onChange={(e) => updateOptRow(i, { isActive: e.target.checked })} /><Button type="button" variant="ghost" size="sm" onClick={() => removeOptRow(i)} title="Remove" aria-label={`Remove option ${i + 1}`}><X className="h-3 w-3" /></Button></div></TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
@@ -648,7 +648,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                   {/* Add Option — wrapped in a block so it always sits on its OWN line below the "Options" label
                       (the label is inline), left aligned, whether or not any options have been added. */}
                   <div><Button type="button" variant="outline" size="sm" onClick={addOptRow}><Plus className="h-3 w-3" /> {FL.addOption}</Button></div>
-                  {!optionsValid && optRows.length > 0 && <p className="text-xs text-destructive">{optionErrors[0]}</p>}
+                  {!optionsValid && optRows.length > 0 && <p className="text-xs text-destructive">{optionErrors[0] ?? "Booking Amount is required for every option."}</p>}
                 </div>
               </div>
             ) : (
@@ -658,27 +658,20 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                 <div className="space-y-3">
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="space-y-1.5">
-                      <Label>{L.type}</Label>
-                      <NativeSelect value={reqType} onChange={(e) => changeReqType(e.target.value as ReqType)} options={[{ value: "NONE", label: L.typeNone }, { value: "PRODUCT_BASED", label: L.typeProduct }, { value: "VALUE_BASED", label: L.typeValue }]} />
+                      <Label>{L.type} *</Label>
+                      <NativeSelect value={reqType} onChange={(e) => changeReqType(e.target.value as ReqType | "")} options={[{ value: "", label: "Select..." }, { value: "PRODUCT_BASED", label: L.typeProduct }, { value: "VALUE_BASED", label: L.typeValue }]} />
                     </div>
                   </div>
-                  {/* Value Based always uses COMBINED behaviour — one combined value across the products below; no Value Mode selector. */}
-                  {reqType === "VALUE_BASED" && (
-                    <div className="space-y-1.5">
-                      <Label>{L.combinedValue} *</Label>
-                      <Input type="number" min="0" value={combinedValue} onChange={(e) => setCombinedValue(e.target.value)} placeholder="Total value across the products below" />
-                    </div>
-                  )}
-                  {reqType !== "NONE" && (
+                  {reqType !== "" && reqType !== "NONE" && (
                     <div className="space-y-2">
-                      <Label className="text-xs font-medium text-muted-foreground">{reqType === "VALUE_BASED" ? L.applicableProducts : L.colProduct}</Label>
+                      <Label className="text-xs font-medium text-muted-foreground">{reqType === "VALUE_BASED" ? L.applicableProducts : L.colProduct} *</Label>
                       {reqRows.length > 0 && (
                         <div className="overflow-auto">
                           <Table>
                             <TableHeader>
                               <TableRow>
-                                <TableHead>{L.colProduct}</TableHead>
-                                {reqType === "PRODUCT_BASED" && <TableHead className="w-40">{L.colQty}</TableHead>}
+                                <TableHead>{L.colProduct} *</TableHead>
+                                {reqType === "PRODUCT_BASED" && <TableHead className="w-40">{L.colQty} *</TableHead>}
                                 <TableHead className="w-12" />
                               </TableRow>
                             </TableHeader>
@@ -690,7 +683,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                                     <NativeSelect value={r.productId} onChange={(e) => updateReqRow(i, { productId: e.target.value })} options={[{ value: "", label: "Select Product" }, ...optionsForRow(r.productId).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
                                     {r.productId !== "" && !productOptions.some((p) => p.productId === r.productId) && <p className="mt-1 text-xs text-muted-foreground">{productName(r.productId)}</p>}
                                   </TableCell>
-                                  {reqType === "PRODUCT_BASED" && <TableCell><Input type="number" min="0" step="any" value={r.requiredQty} onChange={(e) => updateReqRow(i, { requiredQty: e.target.value })} placeholder="Qty" /></TableCell>}
+                                  {reqType === "PRODUCT_BASED" && <TableCell><FormattedNumberInput value={r.requiredQty} onValueChange={(requiredQty) => updateReqRow(i, { requiredQty })} placeholder="Enter quantity" /></TableCell>}
                                   <TableCell><Button type="button" variant="ghost" size="sm" onClick={() => removeReqRow(i)} title="Remove"><X className="h-3 w-3" /></Button></TableCell>
                                 </TableRow>
                               ))}
@@ -706,99 +699,77 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                 </div>
                 {/* Scheme Value pair — AFTER the Scheme Basis / product rows, per the required sequence. */}
                 <div className="grid grid-cols-1 gap-3 border-t pt-3 sm:grid-cols-2">
-                  <div className="space-y-1.5"><Label>{FL.valueWithoutGst} *</Label><Input type="number" min="0" value={valueWithoutGST} onChange={(e) => setValueWithoutGST(e.target.value)} /></div>
-                  <div className="space-y-1.5"><Label>{FL.valueWithGst} *</Label><Input type="number" min="0" value={valueWithGST} onChange={(e) => setValueWithGST(e.target.value)} /></div>
+                  <div className="space-y-1.5"><Label>{FL.valueWithoutGst} *</Label><FormattedNumberInput value={valueWithoutGST} onValueChange={setValueWithoutGST} placeholder="Enter amount" /></div>
+                  <div className="space-y-1.5"><Label>{FL.valueWithGst} *</Label><FormattedNumberInput value={valueWithGST} onValueChange={setValueWithGST} placeholder="Enter amount" />{!fixedGstValid && <p className="text-xs text-destructive">Scheme Value (With GST) must be greater than or equal to Scheme Value (Without GST).</p>}</div>
                 </div>
               </div>
             )}
             {/* Scheme Benefit + Other Benefit Details come LAST in Scheme Details (positions 5–6). Shared by
                 both Fixed and Multiple Options; same fields, labels and behaviour — only the position changed. */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5"><Label>{FL.schemeBenefit} *</Label><NativeSelect value={benefit} onChange={(e) => setBenefit(e.target.value as Benefit | "")} options={[{ value: "", label: "Select Scheme Benefit" }, ...Object.entries(benefits).map(([value, label]) => ({ value, label }))]} /></div>
-              {benefit === "OTHER" && <div className="space-y-1.5"><Label>{FL.benefitDetails} *</Label><Input value={benefitDetails} onChange={(e) => setBenefitDetails(e.target.value)} placeholder="e.g. Special Product Gift" /></div>}
+            <div className="space-y-3">
+              <div className="space-y-1.5"><Label>{FL.schemeBenefit} *</Label><NativeSelect value={benefit === "OTHER" && benefitDetails === specialBenefitDetails.SPECIAL_GIFT ? "SPECIAL_GIFT" : benefit === "OTHER" && benefitDetails === specialBenefitDetails.GOLD_SILVER ? "GOLD_SILVER" : benefit} onChange={(e) => { const selected = e.target.value as BenefitChoice | ""; if (selected === "SPECIAL_GIFT" || selected === "GOLD_SILVER") { setBenefit("OTHER"); setBenefitDetails(specialBenefitDetails[selected]); } else { setBenefit(selected as Benefit | ""); setBenefitDetails(""); } }} options={[{ value: "", label: "Select..." }, ...Object.entries(benefits).filter(([value]) => value !== "OTHER").map(([value, label]) => ({ value, label })), { value: "SPECIAL_GIFT", label: specialBenefitDetails.SPECIAL_GIFT }, { value: "GOLD_SILVER", label: specialBenefitDetails.GOLD_SILVER }, { value: "OTHER", label: benefits.OTHER }]} /></div>
+              {benefit === "OTHER" && benefitDetails !== specialBenefitDetails.SPECIAL_GIFT && benefitDetails !== specialBenefitDetails.GOLD_SILVER && <div className="space-y-1.5"><Label>{FL.benefitDetails} *</Label><Input value={benefitDetails} onChange={(e) => setBenefitDetails(e.target.value)} placeholder="e.g. Special Product Gift" /></div>}
             </div>
-            <div className="space-y-1.5"><Label>{FL.otherBenefitDetails}</Label><Input value={otherBenefitDetails} onChange={(e) => setOtherBenefitDetails(e.target.value)} placeholder="Optional additional notes" /></div>
+            <div className="space-y-1.5"><Label>{FL.otherBenefitDetails} *</Label><Input value={otherBenefitDetails} onChange={(e) => setOtherBenefitDetails(e.target.value)} placeholder="Enter additional benefit details" /></div>
           </FormSection>
 
-          {/* 3. SCHEME PAYMENT — the Installment Rule Builder now OWNS the Booking Amount (single field). */}
+          {/* Booking is separate from the actual installment rules and has no billing-day offset. */}
           <FormSection title={FL.sectionPayment}>
             <div className="space-y-3 rounded-md border p-3">
               <Label className="text-sm font-semibold">{FL.installmentBuilder}</Label>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {/* Booking Amount on the LEFT, No. of Installments on the RIGHT (position only; behaviour unchanged). */}
-                <div className="space-y-1.5"><Label>{FL.bookingAmount}</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} placeholder="Optional" /></div>
+              <div className="grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>{FL.noOfInstallments}</Label>
-                  {/* Create starts on the "Select…" placeholder (not 0); Edit shows the saved count. */}
-                  <NativeSelect value={!scheme && installments.length === 0 ? "" : String(installments.length)} onChange={(e) => setCount(Number(e.target.value) || 0)} options={[{ value: "", label: "Select…" }, ...Array.from({ length: 11 }, (_, i) => ({ value: String(i), label: String(i) }))]} />
+                  <Label>{FL.noOfInstallments} *</Label>
+                  <NativeSelect value={installments.length === 0 ? "" : String(installments.length)} onChange={(e) => setCount(Number(e.target.value) || 0)} options={[{ value: "", label: "Select…" }, ...Array.from({ length: 10 }, (_, i) => ({ value: String(i + 1), label: `Booking Amount + ${i + 1}` }))]} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Installment Mode *</Label>
+                  <NativeSelect value={installmentMode} onChange={(e) => setAllCalc(e.target.value as CalcType | "")} options={[{ value: "", label: "Select..." }, { value: "PERCENTAGE", label: "Percentage" }, { value: "FIXED_AMOUNT", label: "Amount" }]} />
                 </div>
               </div>
-              {installments.length > 0 && (
-                <>
-                  {/* Multiple Options installments are percentage-only; Fixed keeps the editable selector. */}
-                  {isOptions ? (
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-muted-foreground">{FL.calcType}</span>
-                        <span className="inline-flex h-9 items-center rounded-md border bg-muted/40 px-3 text-sm font-medium">Percentage</span>
-                      </div>
-                      <p className="text-xs text-muted-foreground">Multiple Options schemes use percentage-based installments only (must total 100%).</p>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground">{FL.calcType}</span>
-                      <NativeSelect className="w-40" value={calcType} onChange={(e) => setAllCalc(e.target.value as CalcType)} options={[{ value: "PERCENTAGE", label: "Percentage" }, { value: "FIXED_AMOUNT", label: "Fixed Amount" }]} />
-                    </div>
-                  )}
-                  <div className="overflow-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-12">#</TableHead>
-                          {calcType === "PERCENTAGE" && <TableHead>{FL.colPercentage}</TableHead>}
-                          <TableHead className="text-right">{FL.colAmountDerived}</TableHead>
-                          <TableHead>{FL.daysAfterBilling}</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {installments.map((r, i) => {
-                          const isFinal = i === installments.length - 1;
-                          const amt = rowAmounts[i]?.plannedAmount; // booking already deducted from the final row
-                          return (
-                            <TableRow key={i}>
-                              <TableCell className="font-medium">{i + 1}</TableCell>
-                              {calcType === "PERCENTAGE" && (
-                                <TableCell>
-                                  {isFinal
-                                    ? <Input type="number" value={finalValue} readOnly disabled title="Auto-balanced final installment" />
-                                    : <Input type="number" min="0" value={r.value === 0 ? "" : String(r.value)} onChange={(e) => updateRow(i, { value: Number(e.target.value) || 0 })} />}
-                                </TableCell>
-                              )}
-                              <TableCell className="text-right tabular-nums">
-                                {calcType === "FIXED_AMOUNT"
-                                  ? (isFinal
-                                      ? <Input type="number" className="text-right" value={hasValue ? finalValue - booking : finalValue} readOnly disabled title="Auto-balanced final installment (Booking Amount deducted)" />
-                                      : <Input type="number" min="0" value={r.value === 0 ? "" : String(r.value)} onChange={(e) => updateRow(i, { value: Number(e.target.value) || 0 })} />)
-                                  : (hasValue ? formatCurrency(amt ?? 0) : "—")}
-                              </TableCell>
-                              <TableCell><Input type="number" min="0" value={r.daysAfterBillingDate === 0 ? "" : String(r.daysAfterBillingDate)} onChange={(e) => updateRow(i, { daysAfterBillingDate: Number(e.target.value) || 0 })} /></TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                  </div>
-                  {calcType === "PERCENTAGE" && (
-                    <p className={cn("text-xs", installValid ? "text-muted-foreground" : "text-destructive")}>
-                      Total: {round2(nonFinalSum + finalValue)}% {installValid ? "✓" : ""}
-                    </p>
-                  )}
-                  {finalNegative && <p className="text-xs text-destructive">The earlier installments exceed the {calcType === "PERCENTAGE" ? "100% total" : "scheme value"} — the final installment would be negative.</p>}
-                  {bookingTooBig && <p className="text-xs text-destructive">Booking Amount is larger than the final installment. Reduce the Booking Amount or the earlier installments.</p>}
-                  {/* Section 9 — subtle explanatory note (centralized label). */}
-                  <p className="text-xs text-muted-foreground">{FL.bookingNote}</p>
-                </>
-              )}
+              <Table className={cn(
+                "border border-border/80 [&_td]:border-b [&_td]:border-r [&_td]:border-border/70 [&_th]:border-b [&_th]:border-r [&_th]:border-border/70 [&_td:last-child]:border-r-0 [&_th:last-child]:border-r-0 [&_tbody_tr:last-child_td]:border-b-0",
+                isOptions ? "min-w-max" : "min-w-[640px]",
+              )}>
+                  <TableHeader><TableRow>
+                    <TableHead className="min-w-44">Scheme Payment</TableHead>
+                    {calcType === "PERCENTAGE" && <TableHead className="min-w-40">Payment Details</TableHead>}
+                    {paymentColumns.map((c, i) => <TableHead key={i} className="min-w-40 text-right">{c.header}</TableHead>)}
+                    <TableHead className="min-w-44">{FL.daysAfterBilling} *</TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    <TableRow>
+                      <TableCell className="font-medium">Booking Amount *</TableCell>
+                      {calcType === "PERCENTAGE" && <TableCell className="text-muted-foreground">As per scheme</TableCell>}
+                      {paymentColumns.map((c, i) => <TableCell key={i}><FormattedNumberInput integerOnly={isOptions} aria-label={`Booking Amount — ${c.header}`} className="text-right" value={isOptions ? optRows[i].bookingAmount : bookingAmount} onValueChange={value => isOptions ? updateOptRow(i, { bookingAmount: value }) : setBookingAmount(value)} placeholder="Enter amount" /></TableCell>)}
+                      <TableCell>—</TableCell>
+                    </TableRow>
+                    {installments.map((r, i) => {
+                      const isFinal = i === installments.length - 1;
+                      return <TableRow key={i}>
+                        <TableCell>
+                          <span className="font-medium">Installment {i + 1}{isFinal && calcType === "FIXED_AMOUNT" ? " — Balance" : ""}</span>
+                        </TableCell>
+                        {calcType === "PERCENTAGE" && <TableCell>{isFinal ? <span className="font-medium text-muted-foreground">Balance</span> : <div className="flex items-center gap-1"><FormattedNumberInput aria-label={`Installment ${i + 1} percentage`} className="w-24" value={r.value === 0 ? "" : String(r.value)} onValueChange={value => updateRow(i, { value: Number(value) || 0 })} placeholder="Enter %" /><span>%</span></div>}</TableCell>}
+                        {paymentColumns.map((c, col) => <TableCell key={col} className="text-right tabular-nums">
+                          {!isFinal && calcType === "FIXED_AMOUNT"
+                            ? <FormattedNumberInput aria-label={`Installment ${i + 1} amount`} className="text-right" value={r.value === 0 ? "" : String(r.value)} onValueChange={value => updateRow(i, { value: Number(value) || 0 })} placeholder="Enter amount" />
+                            : formatCurrency(columnAmounts[col][i].plannedAmount)}
+                        </TableCell>)}
+                        <TableCell><FormattedNumberInput aria-label={`Installment ${i + 1} days after billing`} value={r.daysAfterBillingDate === 0 ? "" : String(r.daysAfterBillingDate)} onValueChange={value => updateRow(i, { daysAfterBillingDate: Number(value) || 0 })} placeholder="Enter days" /></TableCell>
+                      </TableRow>;
+                    })}
+                    <TableRow className="bg-muted/30 font-semibold hover:bg-muted/30">
+                      <TableCell>Total</TableCell>
+                      {calcType === "PERCENTAGE" && <TableCell>100%</TableCell>}
+                      {paymentColumns.map((column, index) => <TableCell key={index} className="text-right tabular-nums">{formatCurrency(column.valueWithGST)}</TableCell>)}
+                      <TableCell>—</TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              {finalNegative && <p className="text-xs text-destructive">The earlier installments exceed the {calcType === "PERCENTAGE" ? "100% total" : "scheme value"} — the final installment would be negative.</p>}
+              {bookingTooBig && <p className="text-xs text-destructive">Booking Amount and earlier installments exceed the scheme value. Reduce the booking or earlier installments.</p>}
+              <p className="text-xs text-muted-foreground">{FL.bookingNote}</p>
             </div>
           </FormSection>
 
@@ -807,13 +778,13 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
             {/* "Perpetual Scheme" is intentionally HIDDEN from the UI (its DB field + isPerpetual state are
                 retained for existing data/backend behaviour; there is simply no toggle in Create/Edit). */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5"><Label>{FL.schemeStart} *</Label><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></div>
-              <div className="space-y-1.5"><Label>{FL.schemeEnd} *</Label><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></div>
-              <div className="space-y-1.5"><Label>{FL.lastBookingDate} *</Label><Input type="date" value={bookingLastDate} onChange={(e) => setBookingLastDate(e.target.value)} /></div>
+              <div className="space-y-1.5"><Label>{FL.schemeStart} *</Label><SchemeDateInput value={startDate} onValueChange={setStartDate} /></div>
+              <div className="space-y-1.5"><Label>{FL.schemeEnd} *</Label><SchemeDateInput value={endDate} onValueChange={setEndDate} /></div>
+              <div className="space-y-1.5"><Label>{FL.lastBookingDate} *</Label><SchemeDateInput value={bookingLastDate} onValueChange={setBookingLastDate} /></div>
               {/* Pre-placement MASTER ceiling — the max days a dealer may be allowed; actual value chosen in planning. */}
-              <div className="space-y-1.5"><Label>{FL.prePlacement}</Label><Input type="number" min="0" value={prePlacementMaxDays} onChange={(e) => setPrePlacementMaxDays(e.target.value)} placeholder="0 = not allowed" /></div>
-              <div className="space-y-1.5"><Label>{FL.maxExtDays}</Label><Input type="number" min="0" value={maxExtDays} onChange={(e) => setMaxExtDays(e.target.value)} placeholder="0 = no extension" /></div>
-              <div className="space-y-1.5"><Label>{FL.maxExtAttempts}</Label><Input type="number" min="0" value={maxExtAttempts} onChange={(e) => setMaxExtAttempts(e.target.value)} placeholder="0 = no extension" /></div>
+              <div className="space-y-1.5"><Label>{FL.prePlacement} *</Label><NativeSelect value={prePlacementMaxDays} onChange={(e) => setPrePlacementMaxDays(e.target.value)} options={[{ value: "", label: "Select..." }, ...[0, 15, 30, 45].map((value) => ({ value: String(value), label: String(value) }))]} /></div>
+              <div className="space-y-1.5"><Label>{FL.maxExtDays} *</Label><NativeSelect value={maxExtDays} onChange={(e) => setMaxExtDays(e.target.value)} options={[{ value: "", label: "Select..." }, ...[5, 10, 15, 20, 25, 30].map((value) => ({ value: String(value), label: String(value) }))]} /></div>
+              <div className="space-y-1.5"><Label>{FL.maxExtAttempts} *</Label><NativeSelect value={maxExtAttempts} onChange={(e) => setMaxExtAttempts(e.target.value)} options={[{ value: "", label: "Select..." }, { value: "-1", label: "No Limit" }, ...[1, 2, 3, 4, 5].map((value) => ({ value: String(value), label: String(value) })), ...preservedExtensionAttemptOption]} /></div>
             </div>
           </FormSection>
 
@@ -826,7 +797,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
         </div>
         <DialogFooter className="shrink-0 border-t pt-4">
           <Button variant="outline" onClick={onClose}>{FL.cancel}</Button>
-          <Button disabled={!name.trim() || !stateIds.length || !benefit || (!isPerpetual && (!startDate || !endDate || !bookingLastDate)) || (!isOptions && (valueWithoutGST === "" || valueWithGST === "")) || (benefit === "OTHER" && !benefitDetails.trim()) || !installValid || (isOptions ? !optionsValid : !requirementValid) || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{scheme ? FL.saveChanges : FL.saveScheme}</Button>
+          <Button disabled={!name.trim() || !stateIds.length || !structure || !multiple || !benefit || !otherBenefitDetails.trim() || !prePlacementMaxDays || !maxExtDays || maxExtAttempts === "" || (!isPerpetual && (!startDate || !endDate || !bookingLastDate)) || installments.length === 0 || !installmentMode || (!isOptions && (bookingAmount === "" || valueWithoutGST === "" || valueWithGST === "" || !fixedGstValid)) || (benefit === "OTHER" && !benefitDetails.trim()) || !installValid || (isOptions ? !optionsValid : !requirementValid) || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{scheme ? FL.saveChanges : FL.saveScheme}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

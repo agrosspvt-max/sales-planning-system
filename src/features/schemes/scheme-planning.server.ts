@@ -1,4 +1,7 @@
 import "server-only";
+import { saveBillConversion, verifyBills, rejectLegacyBillWrite } from "./scheme-bills.server";
+import { billDate } from "@/lib/scheme-bills";
+import type { BillInstanceInfo, PlanBillInfo } from "@/lib/scheme-bills";
 import { Role, SchemeStatus, SchemePlanStatus, SchemeEnrollmentStatus, SchemePlanState, SchemeConversionStatus, SchemeBookingStatus, SchemeSoDocStatus, SchemeAdminDocStatus } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
@@ -6,6 +9,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { refreshSchemeStatuses } from "./scheme-master.server";
+import { extensionAttemptsEnabled, hasExtensionAttemptsRemaining, isConversionExtensionStatusEligible, isWithinConversionExtensionDayLimit } from "@/lib/scheme-conversion-extension";
 
 /**
  * Scheme Planning (Phase 1): a Sales Officer plans their assigned dealers into an OPEN scheme applicable
@@ -94,6 +98,10 @@ export interface SchemePlanRow {
   // Multi-scheme billing (per-instance) — lets the SO/Admin dialogs restore their same/different choice + dates.
   soBillingSameForAll: boolean;
   adminBillingSameForAll: boolean;
+  billing: PlanBillInfo;
+  billInstances: BillInstanceInfo[];
+  defaultAmountWithoutGST: number;
+  defaultAmountWithGST: number;
   instances: { instanceNumber: number; soBillingDate: string | null; adminBillingDate: string | null }[];
   // Multiple Options (Phase 10). structure carried from the scheme; selectedOptionId + snapshot from the plan.
   structure: string;
@@ -109,8 +117,14 @@ export interface SchemePlanRow {
   prePlacementMaxDays: number; // scheme ceiling, carried for the UI
 }
 
-type RawInstance = { instanceNumber: number; soBillingDate: Date | null; adminBillingDate: Date | null };
+type RawInstance = { id: string; billMode: boolean; soBillCount: number | null; adminBillCount: number | null; adminAmountWithoutGST: unknown; adminAmountWithGST: unknown; bookingAmount: unknown; billsLockedAt: Date | null;
+  installments: { billId: string | null }[];
+  bills: { id: string; partNumber: number; soBillDate: Date | null; adminBillDate: Date | null; amountWithoutGST: unknown; amountWithGST: unknown; verifiedAt: Date | null }[];
+  instanceNumber: number; soBillingDate: Date | null; adminBillingDate: Date | null };
 type RawPlan = {
+  billMode: boolean; soBillCount: number | null; adminBillCount: number | null; soAmountWithoutGST: unknown; soAmountWithGST: unknown;
+  adminAmountWithoutGST: unknown; adminAmountWithGST: unknown; bookingAmount: unknown; bookingBillNumber: number | null; billsLockedAt: Date | null;
+  bills: (RawInstance["bills"][number] & { soAmountWithoutGST: unknown; soAmountWithGST: unknown })[];
   id: string; schemeId: string; dealerId: string; salesOfficerId: string; planningStatus: string; enrollmentStatus: string;
   expectedBillingDate: Date | null; submittedAt: Date | null; rmActedAt: Date | null; rmRemarks: string | null; documentCompleted: boolean; documentType: string | null;
   verificationRemarks: string | null; enrolledAt: Date | null; createdAt: Date;
@@ -122,26 +136,30 @@ type RawPlan = {
   soBillingSameForAll: boolean; adminBillingSameForAll: boolean; instances: RawInstance[];
   selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithoutGST: unknown; optionValueWithGST: unknown;
   prePlacementDays: number | null; adminPrePlacementDays: number | null;
-  scheme: { schemeName: string; schemeValueWithGST: unknown; structure: string; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays: number };
+  scheme: { schemeName: string; schemeValueWithoutGST: unknown; schemeValueWithGST: unknown; structure: string; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays: number };
   dealer: { name: string };
   salesOfficer: { name: string; territory: string | null; group: { name: string } | null };
   rmActedBy: { name: string } | null;
   enrolledBy: { name: string } | null;
 };
 const PLAN_INCLUDE = {
-  scheme: { select: { schemeName: true, schemeValueWithGST: true, structure: true, maxExtensionDays: true, maxExtensionAttempts: true, prePlacementMaxDays: true } },
+  bills: { orderBy: { partNumber: "asc" } },
+  scheme: { select: { schemeName: true, schemeValueWithoutGST: true, schemeValueWithGST: true, structure: true, maxExtensionDays: true, maxExtensionAttempts: true, prePlacementMaxDays: true } },
   dealer: { select: { name: true } },
   salesOfficer: { select: { name: true, territory: true, group: { select: { name: true } } } },
   rmActedBy: { select: { name: true } },
   enrolledBy: { select: { name: true } },
-  instances: { select: { instanceNumber: true, soBillingDate: true, adminBillingDate: true }, orderBy: { instanceNumber: "asc" } },
+  instances: { include: { bills: { orderBy: { partNumber: "asc" } }, installments: { select: { billId: true } } }, orderBy: { instanceNumber: "asc" } },
   conversionExtensions: { select: { extensionNumber: true, previousConversionDate: true, newConversionDate: true, daysAdded: true, createdAt: true, extendedBy: { select: { name: true } } }, orderBy: { extensionNumber: "asc" } },
 } as const;
 
 const asNum = (v: unknown): number => (v == null ? 0 : Number(v.toString()));
 
 function toPlanRow(r: RawPlan): SchemePlanRow {
-  const total = r.totalSchemeAmount != null ? asNum(r.totalSchemeAmount) : asNum(r.scheme.schemeValueWithGST) * (r.numberOfSchemes || 1);
+  const plannedTotal = r.totalSchemeAmount != null ? asNum(r.totalSchemeAmount) : asNum(r.scheme.schemeValueWithGST) * (r.numberOfSchemes || 1);
+  const total = r.billMode && r.adminAmountWithGST != null ? asNum(r.adminAmountWithGST) : r.instances.some(i => i.billMode && i.adminAmountWithGST != null)
+    ? r.instances.reduce((sum, i) => sum + asNum(i.adminAmountWithGST ?? (r.scheme.structure === "MULTIPLE_OPTIONS" ? r.optionValueWithGST : r.scheme.schemeValueWithGST)), 0)
+    : plannedTotal;
   return {
     id: r.id,
     schemeId: r.schemeId,
@@ -196,6 +214,25 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
     adminVerifiedAt: r.adminVerifiedAt?.toISOString() ?? null,
     soBillingSameForAll: r.soBillingSameForAll,
     adminBillingSameForAll: r.adminBillingSameForAll,
+    defaultAmountWithoutGST: asNum(r.scheme.structure === "MULTIPLE_OPTIONS" ? r.optionValueWithoutGST : r.scheme.schemeValueWithoutGST),
+    defaultAmountWithGST: asNum(r.scheme.structure === "MULTIPLE_OPTIONS" ? r.optionValueWithGST : r.scheme.schemeValueWithGST),
+    billing: {
+      billMode: r.billMode, locked: !!r.billsLockedAt,
+      legacySchedules: r.instances.some(i => i.installments.length > 0) || (!r.billMode && !r.instances.some(i => i.billMode) && (!!r.adminVerifiedAt || r.enrollmentStatus === "ENROLLED")),
+      soBillCount: r.soBillCount, adminBillCount: r.adminBillCount,
+      soAmountWithoutGST: r.soAmountWithoutGST == null ? null : String(r.soAmountWithoutGST), soAmountWithGST: r.soAmountWithGST == null ? null : String(r.soAmountWithGST),
+      amountWithoutGST: r.adminAmountWithoutGST == null ? null : String(r.adminAmountWithoutGST), amountWithGST: r.adminAmountWithGST == null ? null : String(r.adminAmountWithGST),
+      defaultAmountWithoutGST: String(asNum(r.scheme.structure === "MULTIPLE_OPTIONS" ? r.optionValueWithoutGST : r.scheme.schemeValueWithoutGST) * (r.numberOfSchemes || 1)),
+      defaultAmountWithGST: String(plannedTotal), bookingAmount: r.bookingAmount == null ? null : String(r.bookingAmount), bookingBillNumber: r.bookingBillNumber,
+      bills: (r.bills ?? []).map(b => ({ partNumber: b.partNumber, soBillDate: b.soBillDate?.toISOString() ?? null, adminBillDate: b.adminBillDate?.toISOString() ?? null,
+        soAmountWithoutGST: b.soAmountWithoutGST == null ? null : String(b.soAmountWithoutGST), soAmountWithGST: b.soAmountWithGST == null ? null : String(b.soAmountWithGST),
+        amountWithoutGST: b.amountWithoutGST == null ? null : String(b.amountWithoutGST), amountWithGST: b.amountWithGST == null ? null : String(b.amountWithGST), verified: !!b.verifiedAt })),
+    },
+    billInstances: (r.instances ?? []).map(i => ({ instanceNumber: i.instanceNumber, billMode: i.billMode, soBillCount: i.soBillCount, adminBillCount: i.adminBillCount,
+      amountWithoutGST: i.adminAmountWithoutGST == null ? null : asNum(i.adminAmountWithoutGST), amountWithGST: i.adminAmountWithGST == null ? null : asNum(i.adminAmountWithGST),
+      locked: !!i.billsLockedAt, legacySchedule: i.installments.some(x => !x.billId),
+      bills: i.bills.map(b => ({ partNumber: b.partNumber, soBillDate: b.soBillDate?.toISOString() ?? null, adminBillDate: b.adminBillDate?.toISOString() ?? null,
+        amountWithoutGST: b.amountWithoutGST == null ? null : asNum(b.amountWithoutGST), amountWithGST: b.amountWithGST == null ? null : asNum(b.amountWithGST), verified: !!b.verifiedAt })) })),
     instances: (r.instances ?? []).map((i) => ({ instanceNumber: i.instanceNumber, soBillingDate: i.soBillingDate?.toISOString() ?? null, adminBillingDate: i.adminBillingDate?.toISOString() ?? null })),
     structure: r.scheme.structure,
     selectedOptionId: r.selectedOptionId ?? null,
@@ -318,6 +355,7 @@ export interface SchemeSummaryFilters {
 }
 
 type SummaryRaw = {
+  billMode: boolean; adminAmountWithGST: unknown; soBillCount: number | null; adminBillCount: number | null; bills: { partNumber: number; soBillDate: Date | null; verifiedAt: Date | null }[];
   schemeId: string;
   salesOfficerId: string;
   numberOfSchemes: number;
@@ -330,7 +368,7 @@ type SummaryRaw = {
   totalSchemeAmount: unknown;
   scheme: { schemeName: string; schemeValueWithGST: unknown };
   salesOfficer: { name: string; group: { name: string } | null };
-  instances: { soBillingDate: Date | null; adminBillingDate: Date | null }[];
+  instances: { billMode: boolean; adminAmountWithGST: unknown; soBillCount: number | null; adminBillCount: number | null; bills: { partNumber: number; soBillDate: Date | null; verifiedAt: Date | null }[]; soBillingDate: Date | null; adminBillingDate: Date | null }[];
 };
 
 /**
@@ -376,10 +414,11 @@ export async function schemeWiseSummary(
       adminDocumentStatus: true,
       billingDate: true,
       adminBillingDate: true,
+      billMode: true, adminAmountWithGST: true, soBillCount: true, adminBillCount: true, bills: { select: { partNumber: true, soBillDate: true, verifiedAt: true } },
       totalSchemeAmount: true,
       scheme: { select: { schemeName: true, schemeValueWithGST: true } },
       salesOfficer: { select: { name: true, group: { select: { name: true } } } },
-      instances: { select: { soBillingDate: true, adminBillingDate: true } },
+      instances: { select: { billMode: true, adminAmountWithGST: true, soBillCount: true, adminBillCount: true, bills: { select: { partNumber: true, soBillDate: true, verifiedAt: true } }, soBillingDate: true, adminBillingDate: true } },
     },
   })) as unknown as SummaryRaw[];
 
@@ -451,14 +490,16 @@ export async function schemeWiseSummary(
       if (qualifies) {
         row.adminConvertedUnits += units;
         // Total Amount counts only qualifying (✅ or ❓) records — never crossed/failed ones.
-        row.totalAmount += r.totalSchemeAmount != null ? asNum(r.totalSchemeAmount) : asNum(r.scheme.schemeValueWithGST) * units;
+        row.totalAmount += r.billMode ? asNum(r.adminAmountWithGST) : r.instances.some(i => i.billMode && i.adminAmountWithGST != null)
+          ? r.instances.reduce((sum, i) => sum + asNum(i.adminAmountWithGST), 0)
+          : r.totalSchemeAmount != null ? asNum(r.totalSchemeAmount) : asNum(r.scheme.schemeValueWithGST) * units;
       }
     }
 
     // Billing (per dealer record): SO filled = plan or any instance SO date; Admin filled = plan or any
     // instance Admin date. Admin-filled is only counted when SO is also filled (numerator ⊂ denominator).
-    const soFilled = r.billingDate != null || r.instances.some((i) => i.soBillingDate != null);
-    const adminFilled = r.adminBillingDate != null || r.instances.some((i) => i.adminBillingDate != null);
+    const soFilled = r.billMode ? r.bills.some(b => b.partNumber <= (r.soBillCount ?? 0) && b.soBillDate) : r.billingDate != null || r.instances.some((i) => i.billMode ? i.bills.some(b => b.partNumber <= (i.soBillCount ?? 0) && b.soBillDate) : i.soBillingDate != null);
+    const adminFilled = r.billMode ? r.bills.some(b => b.partNumber <= (r.adminBillCount ?? 0) && b.verifiedAt) : r.adminBillingDate != null || r.instances.some((i) => i.billMode ? i.bills.some(b => b.partNumber <= (i.adminBillCount ?? 0) && b.verifiedAt) : i.adminBillingDate != null);
     if (soFilled) {
       row.soBillingFilled += 1;
       if (adminFilled) row.adminBillingFilled += 1;
@@ -690,8 +731,15 @@ export function enrollmentEligible(p: { adminConversionDate: Date | string | nul
  */
 export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): Promise<{ enrolled: boolean; eligible: boolean }> {
   if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can verify a scheme plan");
+  if (raw && typeof raw === "object" && "billing" in raw) billDate.parse((raw as { adminConversionDate?: unknown }).adminConversionDate);
+  if (raw && typeof raw === "object" && "billInstances" in raw) throw new ApiError(409, "Instance-owned bill input is no longer supported; reload and use combined plan billing");
   const data = verifySchema.parse(raw);
-  const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id }, select: { planStatus: true } })) as { planStatus: string } | null;
+  if (data.adminBookingStatus === "PARTIAL" && !(data.adminBookingAmount && data.adminBookingAmount > 0)) throw new ApiError(422, "Enter the partial booking amount");
+  if (raw && typeof raw === "object" && "billing" in raw) return verifyBills(ctx, id, data, raw.billing);
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "id" FROM "DealerSchemePlan" WHERE "id" = ${id} FOR UPDATE`;
+  await rejectLegacyBillWrite(id, tx);
+  const plan = (await tx.dealerSchemePlan.findUnique({ where: { id }, select: { planStatus: true } })) as { planStatus: string } | null;
   if (!plan) throw new ApiError(404, "Scheme plan not found");
   if (plan.planStatus !== SchemePlanState.APPROVED) throw new ApiError(409, "Only an approved plan can be verified");
 
@@ -719,12 +767,12 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
 
   // Persist per-instance admin billing dates.
   for (const inst of instances) {
-    await prisma.dealerSchemeInstance.update({ where: { id: inst.id }, data: { adminBillingDate: dateFor(inst.instanceNumber) } });
+    await tx.dealerSchemeInstance.update({ where: { id: inst.id }, data: { adminBillingDate: dateFor(inst.instanceNumber) } });
   }
   const everyInstanceBilled = instances.length > 0 && instances.every((inst) => dateFor(inst.instanceNumber) != null);
   const eligible = enrollmentEligible(data) && everyInstanceBilled;
 
-  await prisma.dealerSchemePlan.update({
+  await tx.dealerSchemePlan.update({
     where: { id },
     data: {
       adminConversionDate: data.adminConversionDate,
@@ -745,8 +793,9 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
         : {}),
     },
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: eligible ? "Dealer enrolled after verification" : "Scheme verification saved" });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: eligible ? "Dealer enrolled after verification" : "Scheme verification saved" }, tx);
   return { enrolled: eligible, eligible };
+  });
 }
 
 /* --------------------------------- Running Schemes (Sales Officer) --------------------------------- */
@@ -943,8 +992,8 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
   const targetOfficerId = await resolveTargetOfficer(ctx, data.officerId);
   const isRm = ctx.role === Role.REGIONAL_MANAGER;
 
-  const scheme = (await prisma.scheme.findUnique({ where: { id: data.schemeId }, select: { status: true, isPerpetual: true, startDate: true, endDate: true, allowMultipleSchemes: true, schemeValueWithGST: true, structure: true, prePlacementMaxDays: true, states: { select: { groupId: true } }, options: { select: { id: true, label: true, targetQty: true, targetValue: true, valueWithoutGST: true, valueWithGST: true, isActive: true } } } })) as
-    { status: string; isPerpetual: boolean; startDate: Date | null; endDate: Date | null; allowMultipleSchemes: boolean; schemeValueWithGST: unknown; structure: string; prePlacementMaxDays: number; states: { groupId: string }[]; options: { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; isActive: boolean }[] } | null;
+  const scheme = (await prisma.scheme.findUnique({ where: { id: data.schemeId }, select: { status: true, isPerpetual: true, startDate: true, endDate: true, allowMultipleSchemes: true, schemeValueWithGST: true, bookingAmount: true, installmentBalance: true, structure: true, prePlacementMaxDays: true, states: { select: { groupId: true } }, options: { select: { id: true, label: true, targetQty: true, targetValue: true, valueWithoutGST: true, valueWithGST: true, bookingAmount: true, isActive: true } } } })) as
+    { status: string; isPerpetual: boolean; startDate: Date | null; endDate: Date | null; allowMultipleSchemes: boolean; schemeValueWithGST: unknown; bookingAmount: unknown; installmentBalance: boolean; structure: string; prePlacementMaxDays: number; states: { groupId: string }[]; options: { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; bookingAmount: unknown; isActive: boolean }[] } | null;
   if (!scheme) throw new ApiError(404, "Scheme not found");
   if (scheme.status !== SchemeStatus.OPEN) throw new ApiError(422, "This scheme is closed");
   if (ctx.groupId && !scheme.states.some((s) => s.groupId === ctx.groupId)) throw new ApiError(422, "This scheme is not applicable to your State");
@@ -1020,7 +1069,7 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
       ? {
           selectedOptionId: d.optionId ?? null,
           ...(forward && opt
-            ? { optionLabel: opt.label, optionTargetQty: num(opt.targetQty), optionTargetValue: num(opt.targetValue), optionValueWithoutGST: num(opt.valueWithoutGST), optionValueWithGST: num(opt.valueWithGST) }
+            ? { optionLabel: opt.label, optionTargetQty: num(opt.targetQty), optionTargetValue: num(opt.targetValue), optionValueWithoutGST: num(opt.valueWithoutGST), optionValueWithGST: num(opt.valueWithGST), optionBookingAmount: num(opt.bookingAmount) ?? num(scheme.bookingAmount) ?? 0 }
             : {}),
         }
       : {};
@@ -1034,7 +1083,7 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
       : { prePlacementDays: scheme.prePlacementMaxDays > 0 && (d.prePlacementDays ?? 0) > 0 ? Math.min(d.prePlacementDays as number, scheme.prePlacementMaxDays) : null };
     const legacyNext = legacyNextFor(forward);
     const planNext = planNextFor(forward);
-    const submitStamp = submitStampFor(forward);
+    const submitStamp = { ...submitStampFor(forward), ...(forward ? { installmentBalance: scheme.installmentBalance } : {}) };
     const cur = byDealer.get(d.dealerId);
     if (!cur) {
       // While the plan is editable, the original (extension baseline) tracks the planned conversion date.
@@ -1092,7 +1141,14 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
   if (!scope.all && !scope.ids.includes(plan.salesOfficerId)) throw new ApiError(403, "You cannot manage this scheme plan");
   if (plan.planStatus !== SchemePlanState.APPROVED) throw new ApiError(409, "Scheme Status can only be set after the plan is Approved");
 
+  if (raw && typeof raw === "object" && "billing" in raw && "conversionDate" in raw && raw.conversionDate != null) billDate.parse(raw.conversionDate);
+  if (raw && typeof raw === "object" && "billInstances" in raw) throw new ApiError(409, "Instance-owned bill input is no longer supported; reload and use combined plan billing");
   const data = conversionSchema.parse(raw);
+  if (data.schemeStatus === "CONVERTED" && data.soBookingStatus === "PARTIAL" && !(data.soBookingAmount && data.soBookingAmount > 0)) throw new ApiError(422, "Enter the partial booking amount");
+  if (raw && typeof raw === "object" && "billing" in raw) return saveBillConversion(ctx, planId, data, raw.billing);
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "id" FROM "DealerSchemePlan" WHERE "id" = ${planId} FOR UPDATE`;
+  await rejectLegacyBillWrite(planId, tx);
   const converting = data.schemeStatus === SchemeConversionStatus.CONVERTED;
   if (converting && data.soBookingStatus === SchemeBookingStatus.PARTIAL && (data.soBookingAmount == null || data.soBookingAmount <= 0)) {
     throw new ApiError(422, "Enter the partial booking amount");
@@ -1108,10 +1164,10 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
     return sameForAll ? (data.billingDate ?? null) : (byNum.get(instanceNumber) ?? null);
   };
   for (const inst of instances) {
-    await prisma.dealerSchemeInstance.update({ where: { id: inst.id }, data: { soBillingDate: soDateFor(inst.instanceNumber) } });
+    await tx.dealerSchemeInstance.update({ where: { id: inst.id }, data: { soBillingDate: soDateFor(inst.instanceNumber) } });
   }
 
-  await prisma.dealerSchemePlan.update({
+  await tx.dealerSchemePlan.update({
     where: { id: planId },
     data: {
       schemeStatus: data.schemeStatus,
@@ -1124,8 +1180,9 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
       billingDate: converting && sameForAll ? (data.billingDate ?? null) : null,
     },
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Scheme status set to ${data.schemeStatus}` });
+  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Scheme status set to ${data.schemeStatus}` }, tx);
   return { ok: true };
+  });
 }
 
 /* --------------------------------- Conversion Date Extension --------------------------------- */
@@ -1140,7 +1197,7 @@ const extendSchema = z.object({ newConversionDate: z.coerce.date() });
  * Extend a dealer plan's planned Conversion Date. The ORIGINAL date is the permanent baseline: every
  * extension is measured against it, so the allowance never resets. Enforced server-side:
  *   - role SO/RM within scope (Admin cannot extend — view only); owner's plan
- *   - scheme has extension configured (maxDays > 0 AND maxAttempts > 0)
+ *   - scheme has extension configured (maxDays > 0; maxAttempts is -1 unlimited or a positive limit)
  *   - plan status still allows conversion-date changes (submitted, not converted, not Admin-verified)
  *   - attempts remaining, cumulative days ≤ maxDays, new date ≤ original + maxDays, new date after current
  * The write (history row + plan update + count increment) runs in one transaction; the unique
@@ -1167,11 +1224,10 @@ export async function extendConversionDate(ctx: AuthContext, planId: string, raw
 
   const maxDays = plan.scheme.maxExtensionDays ?? 0;
   const maxAttempts = plan.scheme.maxExtensionAttempts ?? 0;
-  if (maxDays <= 0 || maxAttempts <= 0) throw new ApiError(422, "Conversion Date extension is not enabled for this scheme");
+  if (maxDays <= 0 || !extensionAttemptsEnabled(maxAttempts)) throw new ApiError(422, "Conversion Date extension is not enabled for this scheme");
 
   // Only extendable while the plan is live and the conversion has not been recorded/verified yet.
-  const statusOk = (plan.planStatus === SchemePlanState.PENDING_RM || plan.planStatus === SchemePlanState.PENDING_APPROVAL || plan.planStatus === SchemePlanState.APPROVED)
-    && plan.schemeStatus !== SchemeConversionStatus.CONVERTED && plan.adminVerifiedAt == null;
+  const statusOk = isConversionExtensionStatusEligible(plan.planStatus, plan.schemeStatus, plan.adminVerifiedAt != null);
   if (!statusOk) throw new ApiError(409, "The conversion date can no longer be extended for this plan");
 
   const current = plan.expectedBillingDate;
@@ -1179,14 +1235,14 @@ export async function extendConversionDate(ctx: AuthContext, planId: string, raw
   const original = plan.originalConversionDate ?? current; // legacy plans: capture baseline now
 
   const attemptsUsed = plan.conversionExtensionCount ?? 0;
-  if (attemptsUsed >= maxAttempts) throw new ApiError(422, "No extension attempts remaining");
+  if (!hasExtensionAttemptsRemaining(attemptsUsed, maxAttempts)) throw new ApiError(422, "No extension attempts remaining");
 
   const daysUsed = dayDiff(original, current); // ≥ 0
   const ceiling = new Date(Date.UTC(original.getUTCFullYear(), original.getUTCMonth(), original.getUTCDate()) + maxDays * 86_400_000);
   const daysAdded = dayDiff(current, newConversionDate);
   if (daysAdded < 1) throw new ApiError(422, "The new date must be after the current conversion date");
   if (dayDiff(newConversionDate, ceiling) < 0) throw new ApiError(422, "The new date exceeds the maximum allowed extension");
-  if (daysUsed + daysAdded > maxDays) throw new ApiError(422, `Only ${maxDays - daysUsed} extension day(s) remaining`);
+  if (!isWithinConversionExtensionDayLimit(maxDays, daysUsed, daysAdded)) throw new ApiError(422, `Only ${maxDays - daysUsed} extension day(s) remaining`);
 
   const extensionNumber = attemptsUsed + 1;
   await prisma.$transaction([

@@ -1,19 +1,23 @@
 "use client";
+import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatDateShort } from "@/lib/utils";
+import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDateShort } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { UNLIMITED_EXTENSION_ATTEMPTS, extensionAttemptsEnabled, hasExtensionAttemptsRemaining, isConversionExtensionStatusEligible } from "@/lib/scheme-conversion-extension";
 
 export interface SchemePlan {
+  billing?: import("@/lib/scheme-bills").PlanBillInfo;
+  billInstances?: import("@/lib/scheme-bills").BillInstanceInfo[];
+  defaultAmountWithoutGST?: number; defaultAmountWithGST?: number;
   id: string; schemeId: string; schemeName: string; dealerId: string; dealerName: string;
   salesOfficerId: string; salesOfficerName: string; state: string | null; territory: string | null;
   planningStatus: string; enrollmentStatus: string; expectedBillingDate: string | null; submittedAt: string | null;
@@ -170,6 +174,25 @@ export function conversionDateCell(p: SchemePlan): MarkedText {
  * record (never collapsed to one dealer). Display-only: reads existing fields, changes no data.
  */
 export function billingSide(p: SchemePlan, side: "so" | "admin"): { filled: number; total: number; dates: string[]; display: string } {
+  if (p.billing?.billMode) {
+    const billing = p.billing;
+    const total = (side === "so" ? billing.soBillCount : billing.adminBillCount ?? billing.soBillCount) ?? 0;
+    const dates = billing.bills.filter(b => b.partNumber <= total).map(b => side === "so" ? b.soBillDate : b.verified ? b.adminBillDate : null).filter((d): d is string => !!d);
+    return { total, dates, filled: dates.length, display: `${dates.length}/${total} bills` };
+  }
+  if (p.billInstances?.some(i => i.billMode)) {
+    let total = 0;
+    const dates: string[] = [];
+    for (const i of p.billInstances) {
+      const count = (side === "so" ? i.soBillCount : i.adminBillCount ?? i.soBillCount) ?? 0;
+      total += count;
+      for (const b of i.bills.filter(b => b.partNumber <= count)) {
+        const d = side === "so" ? b.soBillDate : b.verified ? b.adminBillDate : null;
+        if (d) dates.push(d);
+      }
+    }
+    return { total, dates, filled: dates.length, display: total === 1 && dates.length === 1 ? formatDateShort(dates[0]) : `${dates.length}/${total} bills` };
+  }
   const total = p.numberOfSchemes || 1;
   const instDates = p.instances
     .map((i) => (side === "so" ? i.soBillingDate : i.adminBillingDate))
@@ -304,7 +327,12 @@ function PlanDrawer({ plan, onBack, canExtend = false, onExtended }: { plan: Sch
             <Row label="Booking (Admin)" value={plan.adminBookingStatus ? `${SO_BOOKING_LABEL[plan.adminBookingStatus] ?? plan.adminBookingStatus}${plan.adminBookingAmount != null ? ` · ${money(plan.adminBookingAmount)}` : ""}` : "—"} />
             <Row label="Document (SO)" value={plan.soDocumentStatus ? SO_DOC_LABEL[plan.soDocumentStatus] ?? plan.soDocumentStatus : "—"} />
             <Row label="Document (Admin)" value={plan.adminDocumentStatus ? ADMIN_DOC_LABEL[plan.adminDocumentStatus] ?? plan.adminDocumentStatus : "—"} />
-            <Row label="Billing Date" value={formatDateShort(plan.adminBillingDate ?? plan.billingDate)} />
+            <Row label="Billing Date" value={<BillingDateValue plan={plan} />} />
+            {!plan.billing?.billMode && plan.billInstances?.filter(i => i.billMode).map(i => <div key={i.instanceNumber} className="space-y-1 border-b py-2 text-sm">
+              <p className="font-medium">Scheme instance {i.instanceNumber} · {i.adminBillCount ?? i.soBillCount} bills</p>
+              {i.bills.filter(b => b.partNumber <= Math.max(i.soBillCount ?? 0, i.adminBillCount ?? 0)).map(b => <p key={b.partNumber}>Part Bill {b.partNumber}: SO {formatDateShort(b.soBillDate)} · Admin {b.verified ? "✓ " : ""}{formatDateShort(b.adminBillDate)} · Without GST {b.amountWithoutGST == null ? "—" : formatCurrency(b.amountWithoutGST)} · With GST {b.amountWithGST == null ? "—" : formatCurrency(b.amountWithGST)}</p>)}
+            </div>)}
+            {plan.billing?.billMode && <div className="space-y-1 border-b py-2 text-sm"><p className="font-medium">Combined plan bills</p>{plan.billing.bills.filter(b => b.partNumber <= Math.max(plan.billing?.soBillCount ?? 0, plan.billing?.adminBillCount ?? 0)).map(b => <p key={b.partNumber}>Part Bill {b.partNumber}: SO {formatDateShort(b.soBillDate)} · Admin {b.verified ? "✓ " : ""}{formatDateShort(b.adminBillDate)} · Without GST {b.amountWithoutGST == null ? "—" : formatCurrency(b.amountWithoutGST)} · With GST {b.amountWithGST == null ? "—" : formatCurrency(b.amountWithGST)}</p>)}</div>}
             <Row label="Verified At" value={formatDateShort(plan.adminVerifiedAt)} />
             <Row label="Enrolled" value={plan.enrollmentStatus === "ENROLLED" ? `Yes · ${formatDateShort(plan.enrolledAt)}` : "No"} />
           </section>
@@ -336,7 +364,8 @@ function ConversionExtensionSection({ plan, canExtend, onExtended }: { plan: Sch
   const maxDays = plan.maxExtensionDays ?? 0;
   const maxAttempts = plan.maxExtensionAttempts ?? 0;
   const extensions = plan.conversionExtensions ?? [];
-  const configured = maxDays > 0 && maxAttempts > 0;
+  const unlimitedAttempts = maxAttempts === UNLIMITED_EXTENSION_ATTEMPTS;
+  const configured = maxDays > 0 && extensionAttemptsEnabled(maxAttempts);
   const [newDate, setNewDate] = useState("");
   const [error, setError] = useState<string | null>(null);
   const ext = useMutation({
@@ -349,9 +378,9 @@ function ConversionExtensionSection({ plan, canExtend, onExtended }: { plan: Sch
   const daysUsed = dayNum(current) - dayNum(original);
   const remaining = Math.max(0, maxDays - daysUsed);
   const attemptsUsed = plan.conversionExtensionCount ?? extensions.length;
-  const attemptsRemaining = Math.max(0, maxAttempts - attemptsUsed);
-  const eligibleStatus = plan.schemeStatus !== "CONVERTED" && plan.adminVerifiedAt == null && ["PENDING_RM", "PENDING_APPROVAL", "APPROVED"].includes(plan.planStatus);
-  const canPick = canExtend && configured && attemptsRemaining > 0 && remaining > 0 && eligibleStatus;
+  const attemptsRemaining = unlimitedAttempts ? null : Math.max(0, maxAttempts - attemptsUsed);
+  const eligibleStatus = isConversionExtensionStatusEligible(plan.planStatus, plan.schemeStatus, plan.adminVerifiedAt != null);
+  const canPick = canExtend && configured && hasExtensionAttemptsRemaining(attemptsUsed, maxAttempts) && remaining > 0 && eligibleStatus;
   const maxDate = addDaysInput(original, maxDays);
   const minDate = addDaysInput(current, 1);
 
@@ -362,7 +391,7 @@ function ConversionExtensionSection({ plan, canExtend, onExtended }: { plan: Sch
       <Row label="Current Conversion Date" value={formatDateShort(current)} />
       {configured && (
         <>
-          <Row label="Extensions Used" value={`${attemptsUsed} / ${maxAttempts}`} />
+          <Row label="Extensions Used" value={`${attemptsUsed} / ${unlimitedAttempts ? "No Limit" : maxAttempts}`} />
           <Row label="Extension Days Used" value={`${daysUsed} / ${maxDays}`} />
           <Row label="Remaining Days" value={remaining} />
         </>
@@ -383,10 +412,10 @@ function ConversionExtensionSection({ plan, canExtend, onExtended }: { plan: Sch
         <div className="mt-2 space-y-1.5">
           <Label>Extend Conversion Date</Label>
           <div className="flex items-center gap-2">
-            <Input type="date" className="w-44" value={newDate} min={minDate} max={maxDate} onChange={(e) => setNewDate(e.target.value)} />
+            <SchemeDateInput className="w-44" value={newDate} min={minDate} max={maxDate} onValueChange={(v) => setNewDate(v)} />
             <Button size="sm" disabled={!newDate || ext.isPending} onClick={() => { setError(null); ext.mutate(); }}>{ext.isPending ? "Saving…" : "Extend"}</Button>
           </div>
-          <p className="text-xs text-muted-foreground">Latest allowed date: {formatDateShort(maxDate)} · {remaining} day(s) and {attemptsRemaining} attempt(s) remaining.</p>
+          <p className="text-xs text-muted-foreground">Latest allowed date: {formatDateShort(maxDate)} · {remaining} day(s) and {unlimitedAttempts ? "no attempt limit" : `${attemptsRemaining} attempt(s) remaining`}.</p>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
       )}

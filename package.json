@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/lib/scheme-achievement.test.ts && tsx src/lib/scheme-requirement.test.ts && tsx src/lib/scheme-follow-up.test.ts && tsx src/lib/scheme-upload.test.ts && tsx src/lib/scheme-options.test.ts && tsx src/lib/product-merge.test.ts && tsx src/features/planning/merge-aggregation.test.ts && tsx src/lib/recovery-population.test.ts && tsx src/lib/scheme-installments.test.ts && tsx src/lib/scheme-isolation.test.ts",
+    "test": "tsx src/lib/scheme-achievement.test.ts && tsx src/lib/scheme-requirement.test.ts && tsx src/lib/scheme-follow-up.test.ts && tsx src/lib/scheme-upload.test.ts && tsx src/lib/scheme-options.test.ts && tsx src/lib/product-merge.test.ts && tsx src/features/planning/merge-aggregation.test.ts && tsx src/lib/recovery-population.test.ts && tsx src/lib/scheme-installments.test.ts && tsx src/lib/scheme-conversion-extension.test.ts && tsx src/lib/scheme-isolation.test.ts && tsx src/features/schemes/scheme-installment-flow.test.ts && tsx src/features/schemes/scheme-bills.test.ts",
     "test:db": "tsx scripts/scheme-upload-integration.ts",
     "format": "prettier --write .",
     "prisma:generate": "prisma generate",

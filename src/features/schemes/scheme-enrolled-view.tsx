@@ -1,10 +1,12 @@
 "use client";
 
+import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
+import type { EnrolledInstanceRow, EnrolledBillRow } from "./scheme-enrolled.server";
 import { Fragment, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronRight, ChevronDown, Eye, FileText, IndianRupee } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,16 +33,16 @@ function InstallmentStatusBadge({ i }: { i: Installment }) {
   return <StatusBadge s={i.status} />;
 }
 
-interface Installment { id: string; installmentNumber: number; plannedAmount: number; plannedDate: string | null; receivedAmount: number | null; receivedDate: string | null; status: string }
-interface InstanceRow { instanceId: string; instanceNumber: number; billingDate: string | null; status: string; installments: Installment[] }
-interface DealerRow { planId: string; dealerId: string; dealerName: string; salesOfficerName: string; state: string | null; numberOfSchemes: number; billingDate: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number; status: string; instances: InstanceRow[]; installments: Installment[] }
+interface Installment { billPartNumber?: number | null; id: string; installmentNumber: number; plannedAmount: number; plannedDate: string | null; receivedAmount: number | null; receivedDate: string | null; status: string }
+type InstanceRow = EnrolledInstanceRow;
+interface DealerRow { billMode: boolean; bills: EnrolledBillRow[]; planId: string; dealerId: string; dealerName: string; salesOfficerName: string; state: string | null; numberOfSchemes: number; billingDate: string | null; schemeValueWithoutGST: number; schemeValueWithGST: number; status: string; instances: InstanceRow[]; installments: Installment[] }
 interface SchemeInfo {
   id: string; schemeName: string; startDate: string | null; endDate: string | null; bookingLastDate: string | null; isPerpetual: boolean;
   bookingAmount: number | null; schemeValueWithoutGST: number; schemeValueWithGST: number; schemeBenefit: string; benefitDetails: string | null; otherBenefitDetails: string | null;
   states: string[]; documentUrl: string | null; installments: { installmentNumber: number; calculationType: string; value: number; daysAfterBillingDate: number }[];
 }
 interface Detail { scheme: SchemeInfo; dealers: DealerRow[]; canEditPlanned: boolean; canEditReceived: boolean }
-interface ListRow { id: string; schemeName: string; enrolledDealers: number; startDate: string | null; endDate: string | null; isPerpetual: boolean; status: string }
+interface ListRow { id: string; schemeName: string; enrolledDealers: number; partialDealers: number; startDate: string | null; endDate: string | null; isPerpetual: boolean; status: string }
 
 /** Enrolled Scheme — role-aware operational view. List of enrolled schemes → per-scheme installment tracker.
  *  Optional `officerId` scopes an RM to one team Sales Officer (server-validated); omitted = full scope. */
@@ -73,7 +75,7 @@ function EnrolledSchemeList({ onOpen, officerId }: { onOpen: (s: { id: string; n
             data!.map((s) => (
               <TableRow key={s.id}>
                 <TableCell className="font-medium"><button type="button" className="text-left text-primary hover:underline" onClick={() => onOpen({ id: s.id, name: s.schemeName })}>{s.schemeName}</button></TableCell>
-                <TableCell>{s.enrolledDealers} Dealer{s.enrolledDealers === 1 ? "" : "s"}</TableCell>
+                <TableCell>{s.enrolledDealers} enrolled{s.partialDealers > 0 && <span className="ml-2 text-muted-foreground">{s.partialDealers} partially verified</span>}</TableCell>
                 <TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate)} – ${formatDate(s.endDate)}`}</TableCell>
                 <TableCell><Badge variant={s.status === "Running" ? "success" : "muted"}>{s.status}</Badge></TableCell>
                 <TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => onOpen({ id: s.id, name: s.schemeName })}><Eye className="h-4 w-4" /> Open</Button></TableCell>
@@ -151,15 +153,15 @@ function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: strin
                         <TableCell className="cursor-pointer" onClick={() => toggle(d.planId)}>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
                         <TableCell className="font-medium">{d.dealerName}{d.numberOfSchemes > 1 && <span className="ml-2 text-xs text-muted-foreground">{d.numberOfSchemes} schemes</span>}</TableCell>
                         <TableCell>
-                          {d.numberOfSchemes > 1 ? (
+                          {(d.billMode || d.instances.some(i => i.billMode)) ? <span className="text-muted-foreground">Per bill</span> : d.numberOfSchemes > 1 ? (
                             <span className="text-muted-foreground">Per scheme</span>
                           ) : data.canEditPlanned && d.instances[0] ? (
-                            <Input key={`bill-${d.instances[0].instanceId}-${resetKey}`} type="date" className="w-40" defaultValue={toDateInput(d.instances[0].billingDate)} onBlur={(e) => { const v = e.target.value; const inst = d.instances[0]; if (v && inst && v !== toDateInput(inst.billingDate)) setBillingConfirm({ instanceId: inst.instanceId, date: v }); }} />
+                            <SchemeDateInput key={`bill-${d.instances[0].instanceId}-${resetKey}`} className="w-40" value={toDateInput(d.instances[0].billingDate)} onValueChange={(v) => { const inst = d.instances[0]; if (v && inst && v !== toDateInput(inst.billingDate)) setBillingConfirm({ instanceId: inst.instanceId, date: v }); }} />
                           ) : (d.billingDate ? formatDate(d.billingDate) : "—")}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">{formatCurrency(d.schemeValueWithoutGST)}</TableCell>
                         <TableCell className="text-right tabular-nums">{formatCurrency(d.schemeValueWithGST)}</TableCell>
-                        <TableCell><button type="button" className="inline-flex items-center gap-1 text-primary hover:underline" onClick={() => toggle(d.planId)}>{open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}{d.instances.reduce((a, x) => a + x.installments.length, 0)}</button></TableCell>
+                        <TableCell><button type="button" className="inline-flex items-center gap-1 text-primary hover:underline" onClick={() => toggle(d.planId)}>{open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}{d.billMode ? d.bills.reduce((a,b) => a + b.installments.length, 0) : d.instances.reduce((a, x) => a + x.installments.length, 0)}</button></TableCell>
                         <TableCell><StatusBadge s={d.status} /></TableCell>
                         {data.canEditReceived && (
                           <TableCell className="text-right">
@@ -171,7 +173,7 @@ function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: strin
                         <TableRow>
                           <TableCell colSpan={data.canEditReceived ? 8 : 7} className={schemeTable.nestedCell}>
                            <div className={schemeTable.nestedInset}>
-                            {d.numberOfSchemes <= 1 ? (
+                            {d.billMode ? <div className="space-y-3">{d.bills.map(b => <section key={b.id} className="space-y-2 rounded-md border bg-background p-3"><p className="font-medium">Part Bill {b.partNumber} · {b.verified ? `✓ ${formatDate(b.date)}` : "Pending verification"}</p><p className="text-sm text-muted-foreground">SO: {formatDate(b.soDate)} · Without GST {formatCurrency(b.amountWithoutGST ?? 0)} · With GST {formatCurrency(b.amountWithGST ?? 0)}</p><InstallmentTable installments={b.installments} canEditPlanned={false} onPatch={() => {}} /></section>)}</div> : d.numberOfSchemes <= 1 && !d.instances.some(i => i.billMode) ? (
                               <div className={schemeTable.nestedShell}>
                                 <InstallmentTable installments={d.instances[0]?.installments ?? []} canEditPlanned={data.canEditPlanned} onPatch={(id, body) => patchInst.mutate({ id, body })} />
                               </div>
@@ -182,12 +184,16 @@ function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: strin
                                     <div className="flex flex-wrap items-center justify-between gap-2 border-b p-2">
                                       <div className="flex items-center gap-2 text-sm font-medium">Scheme {inst.instanceNumber} <StatusBadge s={inst.status} /></div>
                                       <div className="flex items-center gap-2 text-sm">
-                                        <span className="text-muted-foreground">Billing Date</span>
-                                        {data.canEditPlanned ? (
-                                          <Input key={`bill-${inst.instanceId}-${resetKey}`} type="date" className="w-40" defaultValue={toDateInput(inst.billingDate)} onBlur={(e) => { const v = e.target.value; if (v && v !== toDateInput(inst.billingDate)) setBillingConfirm({ instanceId: inst.instanceId, date: v }); }} />
+                                        <span className="text-muted-foreground">{inst.billMode ? "Billing per part" : "Billing Date"}</span>
+                                        {data.canEditPlanned && !inst.billMode ? (
+                                          <SchemeDateInput key={`bill-${inst.instanceId}-${resetKey}`} className="w-40" value={toDateInput(inst.billingDate)} onValueChange={(v) => { if (v && v !== toDateInput(inst.billingDate)) setBillingConfirm({ instanceId: inst.instanceId, date: v }); }} />
                                         ) : <span>{inst.billingDate ? formatDate(inst.billingDate) : "—"}</span>}
                                       </div>
                                     </div>
+                                    {inst.billMode && <div className="space-y-1 border-b p-2 text-sm">
+                                      <p>Admin total: {formatCurrency(inst.amountWithoutGST ?? 0)} Without GST · {formatCurrency(inst.amountWithGST ?? 0)} With GST</p>
+                                      {inst.bills?.map(b => <p key={b.partNumber}>Part Bill {b.partNumber} · {b.verified ? `✓ ${formatDate(b.date)}` : "Pending verification"} · {formatCurrency(b.amountWithoutGST ?? 0)} / {formatCurrency(b.amountWithGST ?? 0)}</p>)}
+                                    </div>}
                                     <div className="p-2">
                                       <InstallmentTable installments={inst.installments} canEditPlanned={data.canEditPlanned} onPatch={(id, body) => patchInst.mutate({ id, body })} />
                                     </div>
@@ -248,19 +254,19 @@ function InstallmentTable({ installments, canEditPlanned, onPatch }: { installme
         </TableHeader>
         <TableBody>
           {installments.length === 0 ? (
-            <TableRow><TableCell colSpan={6} className="py-4 text-center text-muted-foreground">No installment rules on this scheme.</TableCell></TableRow>
+            <TableRow><TableCell colSpan={6} className="py-4 text-center text-muted-foreground">No active installment schedule.</TableCell></TableRow>
           ) : (
             installments.map((i) => (
               <TableRow key={i.id}>
-                <TableCell className="font-medium">{ordinal(i.installmentNumber)} Installment</TableCell>
+                <TableCell className="font-medium">{i.billPartNumber && <>Part Bill {i.billPartNumber} · </>}{ordinal(i.installmentNumber)} Installment</TableCell>
                 <TableCell className="text-right">
-                  {canEditPlanned ? (
+                  {canEditPlanned && !i.billPartNumber ? (
                     <Input type="number" min="0" className="w-28 text-right" defaultValue={String(i.plannedAmount)} onBlur={(e) => { const v = Number(e.target.value); if (v !== i.plannedAmount) onPatch(i.id, { plannedAmount: v }); }} />
                   ) : formatCurrency(i.plannedAmount)}
                 </TableCell>
                 <TableCell>
-                  {canEditPlanned ? (
-                    <Input type="date" className="w-40" defaultValue={toDateInput(i.plannedDate)} onBlur={(e) => { const v = e.target.value; if (v !== toDateInput(i.plannedDate)) onPatch(i.id, { plannedDate: v || null }); }} />
+                  {canEditPlanned && !i.billPartNumber ? (
+                    <SchemeDateInput className="w-40" value={toDateInput(i.plannedDate)} onValueChange={(v) => { if (v !== toDateInput(i.plannedDate)) onPatch(i.id, { plannedDate: v || null }); }} />
                   ) : (i.plannedDate ? formatDate(i.plannedDate) : "—")}
                 </TableCell>
                 {/* Received amount / date are READ-ONLY — they are the rollup of recorded payments (Add Payment). */}
@@ -331,14 +337,13 @@ function ordinal(n: number): string {
 /* --------------------------- Add Payment (per dealer, Super Admin) --------------------------- */
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
-interface PreviewLine { instanceNumber: number; installmentNumber: number; allocated: number; plannedAmount: number; newReceived: number; settled: boolean }
+interface PreviewLine { billPartNumber?: number | null; instanceNumber: number; installmentNumber: number; allocated: number; plannedAmount: number; newReceived: number; settled: boolean }
 
 /** Client-side allocation preview — mirrors the server's `allocatePayment` so the modal shows exactly where
  *  the money will go before confirming. The server re-computes and remains authoritative. */
 function previewAllocation(dealer: DealerRow, amount: number): { lines: PreviewLine[]; leftover: number; totalOutstanding: number } {
-  const items = dealer.instances
-    .flatMap((inst) => inst.installments.map((i) => ({ ...i, instanceNumber: inst.instanceNumber })))
-    .sort((a, b) => a.instanceNumber - b.instanceNumber || a.installmentNumber - b.installmentNumber);
+  const items = (dealer.billMode ? dealer.bills.flatMap(b => b.installments.map(i => ({ ...i, instanceNumber: 0 }))) : dealer.instances.flatMap((inst) => inst.installments.map((i) => ({ ...i, instanceNumber: inst.instanceNumber }))))
+    .sort((a, b) => a.instanceNumber - b.instanceNumber || (a.billPartNumber ?? 0) - (b.billPartNumber ?? 0) || a.installmentNumber - b.installmentNumber);
   const totalOutstanding = round2(items.reduce((s, i) => s + Math.max(0, round2(i.plannedAmount - (i.receivedAmount ?? 0))), 0));
   let left = round2(amount);
   const lines: PreviewLine[] = [];
@@ -348,7 +353,7 @@ function previewAllocation(dealer: DealerRow, amount: number): { lines: PreviewL
     if (rem <= 0.005) continue;
     const allocated = round2(Math.min(left, rem));
     const newReceived = round2((i.receivedAmount ?? 0) + allocated);
-    lines.push({ instanceNumber: i.instanceNumber, installmentNumber: i.installmentNumber, allocated, plannedAmount: i.plannedAmount, newReceived, settled: newReceived + 0.005 >= i.plannedAmount });
+    lines.push({ billPartNumber: i.billPartNumber, instanceNumber: i.instanceNumber, installmentNumber: i.installmentNumber, allocated, plannedAmount: i.plannedAmount, newReceived, settled: newReceived + 0.005 >= i.plannedAmount });
     left = round2(left - allocated);
   }
   return { lines, leftover: round2(left), totalOutstanding };
@@ -377,8 +382,8 @@ function AddPaymentDialog({ dealer, schemeName, onClose, onSaved }: { dealer: De
         <div className="space-y-3">
           <div className="text-sm text-muted-foreground">Dealer: <span className="font-medium text-foreground">{dealer.dealerName}</span> · Scheme: <span className="font-medium text-foreground">{schemeName}</span></div>
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5"><Label>Payment Amount *</Label><Input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" autoFocus /></div>
-            <div className="space-y-1.5"><Label>Payment Received Date *</Label><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+            <div className="space-y-1.5"><Label>Payment Amount *</Label><FormattedNumberInput value={amount} onValueChange={setAmount} placeholder="0" autoFocus /></div>
+            <div className="space-y-1.5"><Label>Payment Received Date *</Label><SchemeDateInput value={date} onValueChange={setDate} /></div>
           </div>
           {preview && (
             <div className="space-y-1.5">
@@ -392,7 +397,7 @@ function AddPaymentDialog({ dealer, schemeName, onClose, onSaved }: { dealer: De
                     ) : (
                       preview.lines.map((l, idx) => (
                         <TableRow key={idx}>
-                          <TableCell>{multi ? `S${l.instanceNumber} · ` : ""}{ordinal(l.installmentNumber)} Installment</TableCell>
+                          <TableCell>{multi && l.instanceNumber > 0 ? `S${l.instanceNumber} · ` : ""}{l.billPartNumber && <>Part Bill {l.billPartNumber} · </>}{ordinal(l.installmentNumber)} Installment</TableCell>
                           <TableCell className="text-right tabular-nums">{formatCurrency(l.allocated)}</TableCell>
                           <TableCell>{l.settled ? <Badge variant="success">Settled</Badge> : <Badge variant="default">Partial · {((l.newReceived / l.plannedAmount) * 100).toFixed(2)}%</Badge>}</TableCell>
                         </TableRow>

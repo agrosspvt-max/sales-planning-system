@@ -1,11 +1,13 @@
 "use client";
 
+import { SchemeBillFields, initialBillEditor, billEditorPayload } from "./scheme-bill-fields";
+import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { CornerUpLeft, Send, Eye, Info, ShieldCheck, ChevronRight, ChevronLeft, ChevronDown } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatDateShort, formatCurrency } from "@/lib/utils";
+import { cn, formatSchemeDate as formatDateShort, formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -682,6 +684,8 @@ function AdminMark({ mark }: { mark: "" | "✓" | "!" | "✕" }) {
  * booking + document are both Received. Previously-saved Admin values re-populate on reopen.
  */
 function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClose: () => void; onSaved: () => void }) {
+  const partBills = plan.billing?.billMode ?? false;
+  const [billRows, setBillRows] = useState(() => initialBillEditor(plan, true));
   const count = plan.numberOfSchemes || 1;
   const multi = count > 1;
   const instNums = Array.from({ length: count }, (_, i) => i + 1);
@@ -710,7 +714,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
   const partialNeedsAmount = booking === "PARTIAL" && !(Number(bookingAmount) > 0);
   const coreComplete = !!convDate && !!booking && !!doc && !partialNeedsAmount;
   const perInstance = multi && !sameForAll;
-  const billingComplete = billingEnabled && (perInstance ? instNums.every((n) => !!instDates[n]) : !!billDate);
+  const billingComplete = billingEnabled && (partBills ? billRows.bills.every(b => !!b.adminBillDate) : perInstance ? instNums.every((n) => !!instDates[n]) : !!billDate);
   // Enrollment still requires the document to be Received (soft/hard); the question-mark case (Paid + Not
   // Received) can record a billing date but never enrolls — mirrors the server's `enrollmentEligible`.
   const docReceived = doc === "RECEIVED_SOFT" || doc === "RECEIVED_HARD";
@@ -722,13 +726,14 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
   const convMark: "" | "✓" = convDate ? "✓" : "";
 
   // When booking/document stop qualifying, clear the (now-disabled) billing dates.
-  const clearBilling = () => { setBillDate(""); setInstDates({}); };
+  const clearBilling = () => { setBillDate(""); setInstDates({}); if (partBills) setBillRows(row => ({ ...row, bills: row.bills.map(b => ({ ...b, adminBillDate: plan.billing?.bills.find(x => x.partNumber === b.partNumber)?.verified ? b.adminBillDate : "" })) })); };
   const onBooking = (v: string) => { setBooking(v); if (!canBill(v, doc)) clearBilling(); };
   const onDoc = (v: string) => { setDoc(v); if (!canBill(booking, v)) clearBilling(); };
 
   const mut = useMutation({
     mutationFn: () => api.post(`/api/scheme-plans/${plan.id}/verify`, {
       adminConversionDate: convDate,
+      ...(partBills ? { billing: billEditorPayload(billRows, true) } : {}),
       adminBookingStatus: booking,
       adminBookingAmount: booking === "NOT_RECEIVED" ? null : (bookingAmount ? Number(bookingAmount) : null),
       adminDocumentStatus: doc,
@@ -748,7 +753,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader><DialogTitle>Verify — {plan.schemeName} · {plan.dealerName}</DialogTitle></DialogHeader>
         <div className="overflow-auto">
           <table className="w-full text-sm">
@@ -761,7 +766,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
               <tr>
                 <Cell><span className="font-medium">Conversion Date *</span></Cell>
                 <Cell>{plan.conversionDate ? formatDateShort(plan.conversionDate) : "—"}</Cell>
-                <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={convDate} onChange={(e) => setConvDate(e.target.value)} /><AdminMark mark={convMark} /></div></Cell>
+                <Cell><div className="flex items-center gap-2"><SchemeDateInput className="w-40" value={convDate} onValueChange={setConvDate} /><AdminMark mark={convMark} /></div></Cell>
               </tr>
               <tr>
                 <Cell><span className="font-medium">Booking Amount *</span></Cell>
@@ -769,7 +774,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                 <Cell>
                   <div className="flex items-center gap-2">
                     <NativeSelect className="w-40" value={booking} onChange={(e) => onBooking(e.target.value)} options={[{ value: "", label: "Choose Booking Status" }, { value: "RECEIVED", label: "Paid" }, { value: "PARTIAL", label: "Partially paid" }, { value: "NOT_RECEIVED", label: "Not paid" }]} />
-                    {booking && booking !== "NOT_RECEIVED" && <Input type="number" min="0" className="w-28" placeholder="Amount" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} />}
+                    {booking && booking !== "NOT_RECEIVED" && <FormattedNumberInput disabled={partBills && plan.billing?.locked} className="w-28" placeholder="Amount" value={bookingAmount} onValueChange={setBookingAmount} />}
                     <AdminMark mark={bookingMark} />
                   </div>
                 </Cell>
@@ -784,11 +789,11 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                   </div>
                 </Cell>
               </tr>
-              {!multi ? (
+              {partBills ? null : !multi ? (
                 <tr>
                   <Cell><span className="font-medium">Billing Date</span></Cell>
                   <Cell>{plan.billingDate ? formatDateShort(plan.billingDate) : "—"}</Cell>
-                  <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={billDate} disabled={!billingEnabled} onChange={(e) => setBillDate(e.target.value)} /><AdminMark mark={billDate ? "✓" : ""} /></div></Cell>
+                  <Cell><div className="flex items-center gap-2"><SchemeDateInput className="w-40" value={billDate} disabled={!billingEnabled} onValueChange={(v) => setBillDate(v)} /><AdminMark mark={billDate ? "✓" : ""} /></div></Cell>
                 </tr>
               ) : (
                 <>
@@ -806,7 +811,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                     <tr>
                       <Cell><span className="pl-3 text-muted-foreground">All schemes</span></Cell>
                       <Cell>—</Cell>
-                      <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={billDate} disabled={!billingEnabled} onChange={(e) => setBillDate(e.target.value)} /><AdminMark mark={billDate ? "✓" : ""} /></div></Cell>
+                      <Cell><div className="flex items-center gap-2"><SchemeDateInput className="w-40" value={billDate} disabled={!billingEnabled} onValueChange={(v) => setBillDate(v)} /><AdminMark mark={billDate ? "✓" : ""} /></div></Cell>
                     </tr>
                   ) : (
                     instNums.map((n) => {
@@ -815,7 +820,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                         <tr key={n}>
                           <Cell><span className="pl-3 text-muted-foreground">Scheme {n}</span></Cell>
                           <Cell>{so ? formatDateShort(so) : "—"}</Cell>
-                          <Cell><div className="flex items-center gap-2"><Input type="date" className="w-40" value={instDates[n] ?? ""} disabled={!billingEnabled} onChange={(e) => setInstDates((p) => ({ ...p, [n]: e.target.value }))} /><AdminMark mark={instDates[n] ? "✓" : ""} /></div></Cell>
+                          <Cell><div className="flex items-center gap-2"><SchemeDateInput className="w-40" value={instDates[n] ?? ""} disabled={!billingEnabled} onValueChange={(v) => setInstDates((p) => ({ ...p, [n]: v }))} /><AdminMark mark={instDates[n] ? "✓" : ""} /></div></Cell>
                         </tr>
                       );
                     })
@@ -828,7 +833,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                   <Cell>{plan.prePlacementDays != null ? `${plan.prePlacementDays} requested` : "—"}</Cell>
                   <Cell>
                     <div className="flex items-center gap-2">
-                      <Input type="number" min="0" max={prePlacementMax} className="w-24" placeholder={`0–${prePlacementMax}`} value={adminPre} onChange={(e) => setAdminPre(e.target.value)} />
+                      <Input disabled={partBills && plan.billing?.locked} type="number" min="0" max={prePlacementMax} className="w-24" placeholder={`0–${prePlacementMax}`} value={adminPre} onChange={(e) => setAdminPre(e.target.value)} />
                       <span className="text-xs text-muted-foreground">Installments start from Billing Date + confirmed days</span>
                     </div>
                   </Cell>
@@ -837,6 +842,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
             </tbody>
           </table>
         </div>
+        {partBills && <SchemeBillFields plan={plan} rows={billRows} onChange={setBillRows} admin disabled={!billingEnabled} />}
         <div className="space-y-1.5">
           <Label>Remarks</Label>
           <Textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} rows={2} placeholder="Optional" />
@@ -845,6 +851,8 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
         <p className="text-xs text-muted-foreground">
           {!coreComplete
             ? "Select Conversion Date, Booking Amount and Document to update the verification."
+            : partBills
+              ? "Dated bills create locked schedules. Undated bills remain pending; full enrollment still requires all prerequisites."
             : eligible
               ? "All conditions are met — Update will enroll the dealer."
               : billingEnabled

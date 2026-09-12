@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { ChevronDown, ChevronRight, Copy, Download, MessageCircle } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -83,11 +83,11 @@ interface SchemeDealerFigures extends Figures { planId: string; dealerId: string
 interface SchemeRow extends Figures { schemeId: string; schemeName: string; dealerCount: number; instanceCount: number; dealers: SchemeDealerFigures[] }
 interface SchemeList { period: Period; months: MonthOption[]; rows: SchemeRow[]; totals: Figures }
 interface InstallmentRow {
-  key: string; instanceNumber: number; installmentNumber: number; plannedAmount: number; plannedDate: string | null;
+  key: string; billPartNumber?: number | null; instanceNumber: number | null; installmentNumber: number; plannedAmount: number; plannedDate: string | null;
   receivedAmount: number | null; receivedDate: string | null; status: string; daysLate: number | null; derived: boolean;
 }
 interface PaymentRow {
-  key: string; schemeName: string; instanceNumber: number | null; kind: "BOOKING" | "INSTALLMENT"; installmentNumber: number | null;
+  key: string; schemeName: string; billPartNumber?: number | null; instanceNumber: number | null; kind: "BOOKING" | "INSTALLMENT"; installmentNumber: number | null;
   amount: number; paymentDate: string | null; dueDate: string | null; status: string; daysLate: number | null;
 }
 interface DealerDetail {
@@ -1403,8 +1403,8 @@ function DealerDetailDialog({ dealerId, month, week, onClose, onShare }: {
                       ) : (
                         s.installments.map((i) => (
                           <TableRow key={i.key}>
-                            <TableCell>Scheme {i.instanceNumber}</TableCell>
-                            <TableCell className="font-medium">{ordinal(i.installmentNumber)} Installment</TableCell>
+                            <TableCell>{i.instanceNumber == null ? "Combined plan" : `Scheme ${i.instanceNumber}`}</TableCell>
+                            <TableCell className="font-medium">{i.billPartNumber && <>Part Bill {i.billPartNumber} · </>}{ordinal(i.installmentNumber)} Installment</TableCell>
                             <TableCell className="text-right tabular-nums">{formatCurrency(i.plannedAmount)}</TableCell>
                             <TableCell>{i.plannedDate ? formatDate(i.plannedDate) : "—"}</TableCell>
                             <TableCell className="text-right tabular-nums">{i.receivedAmount == null ? "—" : formatCurrency(i.receivedAmount)}</TableCell>
@@ -1442,7 +1442,7 @@ function DealerDetailDialog({ dealerId, month, week, onClose, onShare }: {
                         <TableRow key={p.key}>
                           <TableCell>{p.paymentDate ? formatDate(p.paymentDate) : "—"}</TableCell>
                           <TableCell>{p.schemeName}</TableCell>
-                          <TableCell>{p.kind === "BOOKING" ? "Booking" : `Scheme ${p.instanceNumber} · ${ordinal(p.installmentNumber ?? 0)} Installment`}</TableCell>
+                          <TableCell>{p.kind === "BOOKING" ? "Booking" : `${p.instanceNumber == null ? "" : `Scheme ${p.instanceNumber} · `}${p.billPartNumber ? `Part Bill ${p.billPartNumber} · ` : ""}${ordinal(p.installmentNumber ?? 0)} Installment`}</TableCell>
                           <TableCell className="text-right tabular-nums">{formatCurrency(p.amount)}</TableCell>
                           <TableCell>{p.dueDate ? formatDate(p.dueDate) : "—"}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">{p.status}</TableCell>

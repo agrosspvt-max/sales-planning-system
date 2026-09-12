@@ -18,7 +18,7 @@ export type OptionAchievementType = "QUANTITY_BASED" | "VALUE_BASED";
 
 export interface OptionInput {
   label?: string | null;
-  target?: number | null; // qty (QUANTITY_BASED) or value (VALUE_BASED)
+  target?: number | null; // Quantity input only; Value Based master writes derive the target from valueWithGST.
   valueWithoutGST?: number | null;
   valueWithGST?: number | null;
 }
@@ -26,8 +26,6 @@ export interface MultipleOptionsInput {
   achievementType: OptionAchievementType;
   eligibleProductIds: string[];
   options: OptionInput[];
-  // Installment calculation types present on the scheme (to enforce percentage-only for options).
-  installmentCalcTypes?: string[];
 }
 
 const num = (v: unknown): number | null => {
@@ -53,27 +51,27 @@ export function validateMultipleOptions(input: MultipleOptionsInput): string[] {
   if (options.length === 0) errors.push("Add at least one option.");
   const targetKeys = new Set<string>();
   for (const o of options) {
-    const target = num(o.target);
+    const isValue = input.achievementType === "VALUE_BASED";
+    const target = isValue ? num(o.valueWithGST) : num(o.target);
     const vWithout = num(o.valueWithoutGST);
     const vWith = num(o.valueWithGST);
-    if (target == null || target <= 0) errors.push("Every option needs a target greater than zero.");
+    if (!isValue && (target == null || target <= 0)) errors.push("Every option needs a target greater than zero.");
     if (vWithout == null || vWithout <= 0) errors.push("Every option needs a Value (Without GST) greater than zero.");
     if (vWith == null || vWith <= 0) errors.push("Every option needs a Value (With GST) greater than zero.");
+    if (vWithout != null && vWith != null && round2(vWith) < round2(vWithout)) {
+      errors.push("Every option's Value (With GST) must be greater than or equal to its Value (Without GST).");
+    }
     // Options must be distinguishable by target (avoids ambiguous duplicate commitments).
     if (target != null) {
-      const key = String(Math.round(target * 1000));
+      const key = String(Math.round(target * (isValue ? 100 : 1000)));
       if (targetKeys.has(key)) errors.push("Two options have the same target — options must be distinguishable.");
       targetKeys.add(key);
     }
   }
-  // Installment rules for Multiple Options are percentage-only (FIXED_AMOUNT can't map to per-option values).
-  if ((input.installmentCalcTypes ?? []).some((t) => t !== "PERCENTAGE")) {
-    errors.push("Multiple Options installment rules must be percentage-based (fixed amounts are not allowed).");
-  }
   return errors;
 }
 
-/** Normalize one option row to its canonical stored shape for the scheme's achievement type. */
+/** Normalize master CREATE/UPDATE only. Stored historical targets and dealer snapshots are read unchanged. */
 export function normalizeOption(o: OptionInput, achievementType: OptionAchievementType): {
   label: string | null; targetQty: number | null; targetValue: number | null; valueWithoutGST: number; valueWithGST: number;
 } {
@@ -81,7 +79,7 @@ export function normalizeOption(o: OptionInput, achievementType: OptionAchieveme
   return {
     label: o.label?.trim() ? o.label.trim() : null,
     targetQty: achievementType === "QUANTITY_BASED" ? round3(target) : null,
-    targetValue: achievementType === "VALUE_BASED" ? round2(target) : null,
+    targetValue: achievementType === "VALUE_BASED" ? round2(num(o.valueWithGST) ?? 0) : null,
     valueWithoutGST: round2(num(o.valueWithoutGST) ?? 0),
     valueWithGST: round2(num(o.valueWithGST) ?? 0),
   };

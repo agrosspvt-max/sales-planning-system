@@ -1,12 +1,14 @@
 "use client";
 
+import { SchemeBillFields, initialBillEditor, billEditorPayload } from "./scheme-bill-fields";
+import { combinedPresetValueErrors } from "@/lib/scheme-bills";
+import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Clock, Info, Pencil } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDateShort } from "@/lib/utils";
+import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDateShort } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
@@ -311,6 +313,8 @@ export function SchemeWiseCollapsibleView({ officerId, groupByOfficer = false, o
 
 /** SO conversion entry: set Scheme Status and (when Converted) record conversion details + billing date(s). */
 function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: { plan: SchemePlan; onClose: () => void; onSaved: () => void; salesOfficerView?: boolean }) {
+  const partBills = !!plan.billing && !plan.billing.legacySchedules;
+  const [billRows, setBillRows] = useState(() => initialBillEditor(plan, false));
   const count = plan.numberOfSchemes || 1;
   const multi = count > 1;
   // Initialize strictly from persisted values; unsaved dropdowns stay empty ("") so they show a
@@ -332,8 +336,9 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
 
   const perInstance = multi && !sameForAll;
   const instNums = Array.from({ length: count }, (_, i) => i + 1);
-  const billingComplete = !converting || (perInstance ? instNums.every((n) => !!instDates[n]) : !!billingDate);
+  const billingComplete = !converting || (partBills ? billRows.bills.every(b => !!b.soBillDate) : (perInstance ? instNums.every((n) => !!instDates[n]) : !!billingDate));
   const partialInvalid = converting && booking === "PARTIAL" && !bookingAmount;
+  const combinedValueMinimumValid = !partBills || !plan.billing || combinedPresetValueErrors(billRows, { amountWithoutGST: plan.billing.defaultAmountWithoutGST, amountWithGST: plan.billing.defaultAmountWithGST }).length === 0;
 
   // Booking Amount options. Sales Officers may only choose Paid / Partially paid — "Not paid" is hidden.
   // Exception: if a saved record is already Not paid, keep that option so opening the modal shows the real
@@ -348,6 +353,7 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
   const save = useMutation({
     mutationFn: () => api.patch(`/api/scheme-plans/${plan.id}/conversion`, {
       schemeStatus,
+      ...(partBills && converting ? { billing: billEditorPayload(billRows, false) } : {}),
       conversionDate: converting ? (conversionDate || null) : null,
       soBookingStatus: converting && booking ? booking : null,
       soBookingAmount: converting && booking === "PARTIAL" ? Number(bookingAmount) : (converting && booking && bookingAmount ? Number(bookingAmount) : null),
@@ -362,7 +368,7 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader><DialogTitle>{plan.schemeName} — {plan.dealerName}{multi ? ` · ${count} Schemes` : ""}</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
@@ -371,13 +377,14 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
           </div>
           {converting && (
             <>
-              <div className="space-y-1.5"><Label>Conversion Date</Label><Input type="date" value={conversionDate} onChange={(e) => setConversionDate(e.target.value)} /></div>
+              <div className="space-y-1.5"><Label>Conversion Date</Label><SchemeDateInput value={conversionDate} onValueChange={setConversionDate} /></div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5"><Label>Booking Amount</Label><NativeSelect value={booking} onChange={(e) => setBooking(e.target.value)} options={bookingOptions} /></div>
-                {booking === "PARTIAL" && <div className="space-y-1.5"><Label>Partial Amount *</Label><Input type="number" min="0" value={bookingAmount} onChange={(e) => setBookingAmount(e.target.value)} /></div>}
+                {booking === "PARTIAL" && <div className="space-y-1.5"><Label>Partial Amount *</Label><FormattedNumberInput value={bookingAmount} onValueChange={setBookingAmount} /></div>}
               </div>
               <div className="space-y-1.5"><Label>Document Status</Label><NativeSelect value={doc} onChange={(e) => setDoc(e.target.value)} options={[{ value: "", label: "Choose document status" }, { value: "SIGNED_BUT_NOT_SENT", label: "Signed but not sent" }, { value: "SIGNED_AND_SENT", label: "Soft copy sent" }, { value: "HARD_COPY_SENT", label: "Hard copy sent" }, { value: "DOC_RECEIVED", label: "HO received hard copy" }]} /></div>
 
+              {partBills ? <SchemeBillFields plan={plan} rows={billRows} onChange={setBillRows} admin={false} /> : <>
               {multi && (
                 <div className="space-y-1.5">
                   <Label>Is Billing Date same for all schemes?</Label>
@@ -391,14 +398,15 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
                     {instNums.map((n) => (
                       <div key={n} className="flex items-center gap-2">
                         <span className="w-20 text-sm text-muted-foreground">Scheme {n}</span>
-                        <Input type="date" value={instDates[n] ?? ""} onChange={(e) => setInstDates((p) => ({ ...p, [n]: e.target.value }))} />
+                        <SchemeDateInput value={instDates[n] ?? ""} onValueChange={(v) => setInstDates((p) => ({ ...p, [n]: v }))} />
                       </div>
                     ))}
                   </div>
                 </div>
               ) : (
-                <div className="space-y-1.5"><Label>Billing Date{multi ? " (all schemes)" : ""}</Label><Input type="date" value={billingDate} onChange={(e) => setBillingDate(e.target.value)} /></div>
+                <div className="space-y-1.5"><Label>Billing Date{multi ? " (all schemes)" : ""}</Label><SchemeDateInput value={billingDate} onValueChange={(v) => setBillingDate(v)} /></div>
               )}
+              </>}
             </>
           )}
           {error && <p className="text-sm text-destructive">{error}</p>}
@@ -406,7 +414,7 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={save.isPending || !schemeStatus || partialInvalid || !billingComplete} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</Button>
+          <Button disabled={save.isPending || !schemeStatus || partialInvalid || !billingComplete || !combinedValueMinimumValid} onClick={() => { setError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

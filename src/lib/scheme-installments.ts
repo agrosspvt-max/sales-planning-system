@@ -6,8 +6,10 @@
  * Business rule — Booking Amount is part of the total scheme value, so it is DEDUCTED FROM THE FINAL
  * installment (the highest installmentNumber). The per-rule "normal" amount is unchanged:
  *   - PERCENTAGE → applicable value (With GST) × percentage / 100
- *   - FIXED_AMOUNT → the entered amount
- * Only the final installment's payable is reduced by the Booking Amount. Therefore, for valid rules:
+ *   - FIXED_AMOUNT → the entered amount for each non-final row
+ * With balance enabled, the final row is derived from the applicable total after the earlier rows. This lets
+ * Multiple Options share fixed non-final amounts while calculating a different final balance for each option.
+ * Booking is then deducted from that final installment. Therefore, for valid rules:
  *
  *   Booking Amount + Σ plannedAmount === applicable total scheme value (With GST)
  *
@@ -48,14 +50,19 @@ export function computeInstallmentAmounts(
   rules: InstallmentRuleInput[],
   valueWithGST: number,
   bookingAmount = 0,
+  balance = false,
 ): ComputedInstallment[] {
   const sorted = rules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber);
   const lastIdx = sorted.length - 1;
   const booking = bookingAmount > 0 ? bookingAmount : 0;
+  let previous = 0;
   return sorted.map((r, i) => {
     const normalAmount = normalInstallmentAmount(r, valueWithGST);
     const isFinal = i === lastIdx;
-    const plannedAmount = isFinal ? Math.max(0, round2(normalAmount - booking)) : normalAmount;
+    const plannedAmount = isFinal
+      ? Math.max(0, round2((balance ? round2(valueWithGST) - previous : normalAmount) - booking))
+      : normalAmount;
+    previous = round2(previous + plannedAmount);
     return { installmentNumber: r.installmentNumber, normalAmount, plannedAmount, isFinal };
   });
 }
@@ -65,9 +72,29 @@ export function computeInstallmentAmounts(
  * amount) — an invalid configuration callers should reject. `valueWithGST` must be the applicable total.
  * Returns false when there are no rules or the booking is 0 (nothing to validate).
  */
-export function bookingExceedsFinalInstallment(rules: InstallmentRuleInput[], valueWithGST: number, bookingAmount: number): boolean {
-  if (!(bookingAmount > 0) || rules.length === 0) return false;
+export function bookingExceedsFinalInstallment(rules: InstallmentRuleInput[], valueWithGST: number, bookingAmount: number, balance = false): boolean {
+  if (rules.length === 0 || (!balance && !(bookingAmount > 0))) return false;
   const sorted = rules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber);
-  const finalNormal = normalInstallmentAmount(sorted[sorted.length - 1], valueWithGST);
+  const finalNormal = balance
+    ? round2(valueWithGST) - sorted.slice(0, -1).reduce((sum, r) => round2(sum + normalInstallmentAmount(r, valueWithGST)), 0)
+    : normalInstallmentAmount(sorted[sorted.length - 1], valueWithGST);
   return round2(bookingAmount) > round2(finalNormal);
+}
+
+/** Resolve the committed booking, never the current master option. Zero is an explicit snapshot. */
+export function effectiveBookingAmount(structure: string, schemeBooking: number, optionBooking: number | null | undefined): number {
+  return structure === "MULTIPLE_OPTIONS" ? (optionBooking ?? schemeBooking) : schemeBooking;
+}
+
+/** Builder columns share the same With-GST calculator as persisted schedules. */
+export function installmentValueColumns(input: {
+  structure: string; achievementType: string; valueWithGST: number; bookingAmount: number;
+  options: { target: number | null; valueWithGST: number; bookingAmount: number | null }[];
+}): { header: string; valueWithGST: number; bookingAmount: number }[] {
+  if (input.structure !== "MULTIPLE_OPTIONS") return [{ header: "Amount", valueWithGST: input.valueWithGST, bookingAmount: input.bookingAmount }];
+  return input.options.map((o, index) => ({
+    header: `Option ${index + 1}`,
+    valueWithGST: o.valueWithGST,
+    bookingAmount: o.bookingAmount ?? input.bookingAmount,
+  }));
 }

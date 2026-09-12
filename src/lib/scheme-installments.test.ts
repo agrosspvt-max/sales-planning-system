@@ -7,7 +7,7 @@
  * Booking is deducted from the FINAL installment only; the final is never negative.
  */
 import assert from "node:assert/strict";
-import { normalInstallmentAmount, computeInstallmentAmounts, bookingExceedsFinalInstallment } from "./scheme-installments";
+import { normalInstallmentAmount, computeInstallmentAmounts, bookingExceedsFinalInstallment, effectiveBookingAmount, installmentValueColumns } from "./scheme-installments";
 
 let passed = 0;
 function test(name: string, fn: () => void) { fn(); passed += 1; console.log(`  ok  ${name}`); }
@@ -128,6 +128,69 @@ test("13. Booking + all installments === applicable total (percentage & amount, 
 test("14. normalInstallmentAmount: percentage vs fixed", () => {
   approx(normalInstallmentAmount(pct(1, 40), 100000), 40000);
   approx(normalInstallmentAmount(amt(1, 12345), 100000), 12345);
+});
+
+test("15. Balance calculates every option independently using one row percentage", () => {
+  const columns = installmentValueColumns({ structure: "MULTIPLE_OPTIONS", achievementType: "QUANTITY_BASED", valueWithGST: 999, bookingAmount: 999,
+    options: [{ target: 100, valueWithGST: 100000, bookingAmount: 25000 }, { target: 200, valueWithGST: 200000, bookingAmount: 35000 }, { target: 300, valueWithGST: 300000, bookingAmount: 50000 }] });
+  assert.deepEqual(columns.map(c => c.header), ["Option 1", "Option 2", "Option 3"]);
+  const rules = [pct(1, 30), pct(2, 70)];
+  assert.deepEqual(columns.map(c => planned(computeInstallmentAmounts(rules, c.valueWithGST, c.bookingAmount, true))), [[30000, 45000], [60000, 105000], [90000, 160000]]);
+});
+
+test("15b. Options Amount shares non-final amounts and balances each option independently", () => {
+  const columns = installmentValueColumns({ structure: "MULTIPLE_OPTIONS", achievementType: "VALUE_BASED", valueWithGST: 0, bookingAmount: 0,
+    options: [{ target: null, valueWithGST: 100000, bookingAmount: 10000 }, { target: null, valueWithGST: 200000, bookingAmount: 20000 }] });
+  const rules = [amt(1, 30000), amt(2, 0)];
+  assert.deepEqual(columns.map(c => planned(computeInstallmentAmounts(rules, c.valueWithGST, c.bookingAmount, true))), [[30000, 60000], [30000, 150000]]);
+  for (const [index, column] of columns.entries()) {
+    approx(column.bookingAmount + sum(planned(computeInstallmentAmounts(rules, column.valueWithGST, column.bookingAmount, true))), column.valueWithGST, `option ${index + 1}`);
+  }
+});
+
+test("16. Fixed creates exactly one With-GST value column regardless of basis", () => {
+  for (const achievementType of ["PRODUCT_BASED", "VALUE_BASED", "NONE"]) {
+    const cols = installmentValueColumns({ structure: "FIXED", achievementType, valueWithGST: 100000, bookingAmount: 25000, options: [] });
+    assert.deepEqual(cols, [{ header: "Amount", valueWithGST: 100000, bookingAmount: 25000 }]);
+  }
+});
+
+test("17. Value options use each With-GST value, never global or historical target", () => {
+  const cols = installmentValueColumns({ structure: "MULTIPLE_OPTIONS", achievementType: "VALUE_BASED", valueWithGST: 999999, bookingAmount: 0,
+    options: [{ target: 50000, valueWithGST: 23600, bookingAmount: 3600 }] });
+  assert.equal(cols[0].header, "Option 1");
+  assert.deepEqual(planned(computeInstallmentAmounts([pct(1, 100)], cols[0].valueWithGST, cols[0].bookingAmount, true)), [20000]);
+});
+
+test("18. Balance reconciles paise while default calculation preserves legacy rounding", () => {
+  const rules = [pct(1, 50), pct(2, 50)];
+  assert.deepEqual(planned(computeInstallmentAmounts(rules, 0.03, 0)), [0.02, 0.02]);
+  assert.deepEqual(planned(computeInstallmentAmounts(rules, 0.03, 0, true)), [0.02, 0.01]);
+  assert.equal(bookingExceedsFinalInstallment(rules, 0.03, 0.02, true), true);
+  assert.equal(bookingExceedsFinalInstallment(rules, 0.03, 0.02), false);
+});
+
+test("19. Balance validation detects rounded over-allocation even without booking", () => {
+  assert.equal(bookingExceedsFinalInstallment([pct(1, 50), pct(2, 50), pct(3, 0)], 0.01, 0, true), true);
+  assert.equal(bookingExceedsFinalInstallment([pct(1, 80), pct(2, 20)], 100, 25, true), true);
+});
+
+test("20. Snapshot booking wins including zero; legacy null falls back to global", () => {
+  assert.equal(effectiveBookingAmount("MULTIPLE_OPTIONS", 100, 0), 0);
+  assert.equal(effectiveBookingAmount("MULTIPLE_OPTIONS", 100, 25), 25);
+  assert.equal(effectiveBookingAmount("MULTIPLE_OPTIONS", 100, null), 100);
+  assert.equal(effectiveBookingAmount("FIXED", 100, 25), 100);
+});
+
+test("21. Valid Balance schedules reconcile exactly at monetary precision", () => {
+  for (const value of [0.03, 100.01, 23600.99, 300000]) {
+    const rules = [pct(1, 30), pct(2, 20), pct(3, 50)];
+    const booking = Math.round(value * 0.1 * 100) / 100;
+    if (bookingExceedsFinalInstallment(rules, value, booking, true)) continue;
+    const rows = computeInstallmentAmounts(rules, value, booking, true);
+    assert.equal(Math.round((booking + sum(planned(rows))) * 100), Math.round(value * 100));
+    assert.ok(rows.every(r => r.plannedAmount >= 0));
+  }
 });
 
 console.log(`\n${passed} passed`);

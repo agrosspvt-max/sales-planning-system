@@ -1,4 +1,6 @@
 import "server-only";
+import { billFinancialScope } from "./scheme-bills.server";
+import { effectiveBookingAmount } from "@/lib/scheme-installments";
 import { SchemeEnrollmentStatus, SchemeUploadStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { AuthContext } from "@/lib/http";
@@ -274,42 +276,46 @@ export async function computeInstallmentProgress(
       : { salesOfficerId: { in: scope.ids } };
   const plans = (await prisma.dealerSchemePlan.findMany({
     where: {
-      enrollmentStatus: SchemeEnrollmentStatus.ENROLLED,
+      ...billFinancialScope,
       ...(opts.schemeId ? { schemeId: opts.schemeId } : {}),
       ...(opts.dealerId ? { dealerId: opts.dealerId } : {}),
       ...officerFilter,
     },
     select: {
-      id: true, schemeId: true, dealerId: true, adminVerifiedAt: true, billingDate: true, expectedBillingDate: true, adminBillingDate: true,
+      id: true, schemeId: true, dealerId: true, billMode: true, adminVerifiedAt: true, billingDate: true, expectedBillingDate: true, adminBillingDate: true,
       prePlacementDays: true, adminPrePlacementDays: true,
-      optionValueWithGST: true,
+      optionValueWithGST: true, optionBookingAmount: true, installmentBalance: true,
       scheme: { select: { schemeValueWithGST: true, structure: true, bookingAmount: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
+      bills: { select: { installments: { select: { plannedAmount: true, receivedAmount: true } } } },
       instances: {
-        select: { id: true, instanceNumber: true, adminBillingDate: true, installments: { select: { installmentNumber: true, plannedAmount: true, receivedAmount: true } } },
+        select: { id: true, billMode: true, instanceNumber: true, adminBillingDate: true, installments: { select: { installmentNumber: true, plannedAmount: true, receivedAmount: true } } },
         orderBy: { instanceNumber: "asc" },
       },
     },
   })) as unknown as {
+    billMode: boolean; bills: { installments: { plannedAmount: unknown; receivedAmount: unknown }[] }[];
     id: string; schemeId: string; dealerId: string; adminVerifiedAt: Date | null; billingDate: Date | null; expectedBillingDate: Date | null; adminBillingDate: Date | null;
     prePlacementDays: number | null; adminPrePlacementDays: number | null;
-    optionValueWithGST: unknown;
+    optionValueWithGST: unknown; optionBookingAmount: unknown; installmentBalance: boolean;
     scheme: { schemeValueWithGST: unknown; structure: string; bookingAmount: unknown; installmentRules: InstallmentRuleRow[] };
-    instances: { id: string; instanceNumber: number; adminBillingDate: Date | null; installments: { installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown }[] }[];
+    instances: { billMode: boolean; id: string; instanceNumber: number; adminBillingDate: Date | null; installments: { installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown }[] }[];
   }[];
 
   return plans.map((p) => {
     // Effective With-GST base for derived schedules: option snapshot for MULTIPLE_OPTIONS, scheme value for FIXED.
     const gst = effectiveValueWithGST({ structure: p.scheme.structure, schemeValueWithGST: p.scheme.schemeValueWithGST == null ? null : num(p.scheme.schemeValueWithGST), optionValueWithGST: p.optionValueWithGST == null ? null : num(p.optionValueWithGST) });
     const items: { plannedAmount: number; receivedAmount: number | null }[] = [];
-    for (const inst of p.instances) {
+    for (const inst of p.billMode ? [] : p.instances) {
       if (inst.installments.length > 0) {
         for (const i of inst.installments) items.push({ plannedAmount: num(i.plannedAmount), receivedAmount: i.receivedAmount == null ? null : num(i.receivedAmount) });
         continue;
       }
+      if (inst.billMode) continue;
       // No persisted rows yet — derive the schedule (read-only, same helper the views use). Unpaid by nature.
       const billing = installmentBaseDate(p, inst);
-      for (const d of derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing, num(p.scheme.bookingAmount))) items.push({ plannedAmount: d.plannedAmount, receivedAmount: null });
+      for (const d of derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing, effectiveBookingAmount(p.scheme.structure, num(p.scheme.bookingAmount), p.optionBookingAmount == null ? null : num(p.optionBookingAmount)), p.installmentBalance)) items.push({ plannedAmount: d.plannedAmount, receivedAmount: null });
     }
+    for (const bill of p.bills ?? []) for (const i of bill.installments) items.push({ plannedAmount: num(i.plannedAmount), receivedAmount: i.receivedAmount == null ? null : num(i.receivedAmount) });
     const { paid, total } = installmentPaidTotal(items);
     return { planId: p.id, schemeId: p.schemeId, dealerId: p.dealerId, paid, total };
   });

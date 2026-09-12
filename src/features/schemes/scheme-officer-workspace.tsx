@@ -1,14 +1,14 @@
 "use client";
+import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, FileText, Eye, Save, Send } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -307,7 +307,7 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
                           <TableRow key={d.id}>
                             <TableCell className="font-medium">{d.name}</TableCell>
                             <TableCell>
-                              <Input type="date" className="w-44" min={minDate} max={maxDate} disabled={locked} value={dates[d.id] ?? ""} onChange={(e) => setDates((prev) => ({ ...prev, [d.id]: e.target.value }))} />
+                              <SchemeDateInput className="w-44" min={minDate} max={maxDate} disabled={locked} value={dates[d.id] ?? ""} onValueChange={(v) => setDates((prev) => ({ ...prev, [d.id]: v }))} />
                             </TableCell>
                             {allowMulti && (
                               <>

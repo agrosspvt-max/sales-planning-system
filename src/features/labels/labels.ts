@@ -208,7 +208,7 @@ export const DEFAULT_LABELS = {
   "scheme_master.requirement.section": "Scheme Requirement",
   "scheme_master.requirement.type": "Requirement Type",
   "scheme_master.requirement.type.none": "None",
-  "scheme_master.requirement.type.product": "Product Based",
+  "scheme_master.requirement.type.product": "Product Quantity Based",
   "scheme_master.requirement.type.value": "Value Based",
   "scheme_master.requirement.value_mode": "Value Mode",
   "scheme_master.requirement.value_mode.individual": "Individual",
@@ -262,7 +262,7 @@ export const DEFAULT_LABELS = {
   "scheme_master.form.scheme_start": "Scheme Start",
   "scheme_master.form.scheme_end": "Scheme End",
   "scheme_master.form.last_booking_date": "Last Booking Date",
-  "scheme_master.form.booking_amount": "Booking Amount",
+  "scheme_master.form.booking_amount": "Credit Note Amt.",
   "scheme_master.form.value_without_gst": "Scheme Value (Without GST)",
   "scheme_master.form.value_with_gst": "Scheme Value (With GST)",
   // Phase 10 — Fixed vs Multiple Options structure
@@ -275,10 +275,10 @@ export const DEFAULT_LABELS = {
   "scheme_master.form.section.document": "Scheme Document",
   "scheme_master.form.pre_placement_max_days": "Pre-placement (Max Days)",
   "scheme_master.form.structure": "Scheme Structure",
-  "scheme_master.form.structure.fixed": "Fixed",
-  "scheme_master.form.structure.options": "Multiple Options",
+  "scheme_master.form.structure.fixed": "Fixed Scheme",
+  "scheme_master.form.structure.options": "Options Scheme",
   "scheme_master.form.achievement_type": "Achievement Type",
-  "scheme_master.form.achievement_type.quantity": "Quantity Based",
+  "scheme_master.form.achievement_type.quantity": "Product Quantity Based",
   "scheme_master.form.achievement_type.value": "Value Based",
   "scheme_master.form.eligible_products": "Eligible Products",
   "scheme_master.form.no_of_options": "No. of Options",
@@ -311,6 +311,9 @@ export const DEFAULT_LABELS = {
    * SCHEME UPLOAD (Phase 7) — the dedicated date-range achievement upload tab. Structural
    * labels only (tab, step headings, field labels). Never data. Never renames DB enums.
    * ===================================================================================== */
+  "scheme_bills.count": "Number of Bills",
+  "scheme_bills.so_date": "SO Date",
+  "scheme_bills.admin_date": "Admin Date",
   "scheme_upload.tab": "Scheme Upload",
   "scheme_upload.title": "Scheme Upload",
   "scheme_upload.select_schemes": "Select Schemes",

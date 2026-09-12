@@ -16,9 +16,9 @@ const installmentInput = z.object({
   daysAfterBillingDate: z.coerce.number().int().min(0, "Days after billing cannot be negative"),
 });
 
-/** Percentage installments must sum to 100%; fixed-amount installments must sum to Scheme Value (With GST). */
+/** Percentage installments total 100%. Fixed rules total the value unless their final rule is a per-option balance. */
 const CENTS = (n: number) => Math.round(n * 100);
-function validateInstallments(rules: z.infer<typeof installmentInput>[], schemeValueWithGST: number, ctx: z.RefinementCtx) {
+function validateInstallments(rules: z.infer<typeof installmentInput>[], schemeValueWithGST: number, ctx: z.RefinementCtx, balanceFixedAmounts = false) {
   if (rules.length === 0) return; // installments are optional
   const types = new Set(rules.map((r) => r.calculationType));
   if (types.size > 1) {
@@ -28,7 +28,7 @@ function validateInstallments(rules: z.infer<typeof installmentInput>[], schemeV
   const total = rules.reduce((sum, r) => sum + r.value, 0);
   if (rules[0].calculationType === SchemeCalcType.PERCENTAGE) {
     if (CENTS(total) !== CENTS(100)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["installments"], message: `Percentages must total 100% (currently ${total}%)` });
-  } else {
+  } else if (!balanceFixedAmounts) {
     if (CENTS(total) !== CENTS(schemeValueWithGST)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["installments"], message: `Fixed amounts must total the Scheme Value (With GST) ₹${schemeValueWithGST}` });
   }
 }
@@ -48,7 +48,8 @@ const schemeOptionInput = z.object({
   target: z.coerce.number().nullable().optional(),
   valueWithoutGST: z.coerce.number().nullable().optional(),
   valueWithGST: z.coerce.number().nullable().optional(),
-  isActive: z.boolean().optional().default(true),
+  bookingAmount: z.coerce.number().min(0).nullable().optional(),
+  isActive: z.boolean(),
 });
 
 const schemeInput = z.object({
@@ -64,23 +65,24 @@ const schemeInput = z.object({
   bookingAmount: z.coerce.number().min(0, "Booking Amount cannot be negative").nullable().optional(),
   schemeBenefit: z.nativeEnum(SchemeBenefit),
   benefitDetails: z.string().trim().max(500).nullable().optional(),
-  otherBenefitDetails: z.string().trim().max(500).nullable().optional(),
+  otherBenefitDetails: z.string().trim().min(1, "Other Benefit Details are required").max(500),
   allowMultipleSchemes: z.boolean(),
-  maxExtensionDays: z.coerce.number().int().min(0).max(365).optional().default(0),
-  maxExtensionAttempts: z.coerce.number().int().min(0).max(20).optional().default(0),
+  maxExtensionDays: z.coerce.number().int().min(1, "Select SO Conversion Extension").max(365),
+  maxExtensionAttempts: z.coerce.number().int().min(-1).max(20),
   // Pre-placement MASTER ceiling (Phase 11). 0 ⇒ not available. Actual per-dealer days are chosen in planning.
-  prePlacementMaxDays: z.coerce.number().int().min(0).max(365).optional().default(0),
+  prePlacementMaxDays: z.coerce.number().int().min(0, "Select Allowed Pre-placement Days").max(365),
   documentUrl: z.string().max(5_000_000).nullable().optional(),
-  installments: z.array(installmentInput).max(10).optional().default([]),
-  // Scheme Requirement (Phase 5). Belongs to the Scheme, not to individual dealers. Defaults to NONE so
-  // existing/historical schemes stay installment-only unless an admin explicitly configures a requirement.
-  requirementType: z.nativeEnum(SchemeRequirementType).optional().default(SchemeRequirementType.NONE),
+  installmentBalance: z.boolean().optional(),
+  installments: z.array(installmentInput).min(1, "Select at least one installment").max(10),
+  // Scheme Requirement (Phase 5). Belongs to the Scheme, not to individual dealers. Fixed schemes must
+  // explicitly choose a real basis; Multiple Options uses NONE internally because its basis is separate.
+  requirementType: z.nativeEnum(SchemeRequirementType),
   valueMode: z.nativeEnum(SchemeValueMode).nullable().optional(),
   combinedRequiredValue: z.coerce.number().nullable().optional(),
   requirementProducts: z.array(requirementProductInput).max(200).optional().default([]),
-  // Scheme Structure (Phase 10). FIXED (default) keeps the requirement* fields above; MULTIPLE_OPTIONS uses
+  // Scheme Structure (Phase 10). FIXED keeps the requirement* fields above; MULTIPLE_OPTIONS uses
   // optionAchievementType + eligibleProductIds + options.
-  structure: z.nativeEnum(SchemeStructure).optional().default(SchemeStructure.FIXED),
+  structure: z.nativeEnum(SchemeStructure),
   optionAchievementType: z.nativeEnum(SchemeOptionAchievementType).nullable().optional(),
   eligibleProductIds: z.array(z.string().min(1)).max(500).optional().default([]),
   options: z.array(schemeOptionInput).max(50).optional().default([]),
@@ -91,6 +93,9 @@ const schemeInput = z.object({
   if (!value.isPerpetual && value.startDate && value.endDate && value.endDate < value.startDate) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endDate"], message: "End Date must be on or after Start Date" });
   if (value.schemeBenefit === SchemeBenefit.OTHER && !value.benefitDetails) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["benefitDetails"], message: "Benefit Details are required when Benefit is Other" });
 
+  if (value.structure !== SchemeStructure.MULTIPLE_OPTIONS && value.installmentBalance && value.installments.some(r => r.calculationType !== SchemeCalcType.PERCENTAGE)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["installments"], message: "Balance schedules use percentage rules" });
+  }
   if (value.structure === SchemeStructure.MULTIPLE_OPTIONS) {
     // MULTIPLE_OPTIONS: scheme-level values must be null (they live on each option); no Fixed requirement.
     if (value.schemeValueWithGST != null || value.schemeValueWithoutGST != null) {
@@ -100,28 +105,48 @@ const schemeInput = z.object({
       achievementType: (value.optionAchievementType ?? "QUANTITY_BASED") as OptionAchievementType,
       eligibleProductIds: value.eligibleProductIds ?? [],
       options: value.options ?? [],
-      installmentCalcTypes: (value.installments ?? []).map((i) => i.calculationType),
     })) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["options"], message });
     }
     if (value.optionAchievementType == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["optionAchievementType"], message: "Select an achievement type" });
-    // Percentage total must still be 100% (installments are percentage-only for options, checked above).
-    validateInstallments(value.installments ?? [], 0, ctx);
+    for (let index = 0; index < value.options.length; index++) {
+      if (value.options[index].bookingAmount == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["options", index, "bookingAmount"], message: "Booking Amount is required for every option" });
+    }
+    const optionAmountMode = value.installments[0]?.calculationType === SchemeCalcType.FIXED_AMOUNT;
+    if (optionAmountMode && !value.installmentBalance) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["installmentBalance"], message: "Options Amount mode requires the final installment to be Balance" });
+    }
+    if (optionAmountMode) {
+      const finalRule = value.installments.slice().sort((a, b) => a.installmentNumber - b.installmentNumber).at(-1);
+      if (finalRule && CENTS(finalRule.value) !== 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["installments"], message: "The final installment in Options Amount mode must be Balance" });
+      }
+    }
+    // Amount rows are shared across options. Their final rule is a persisted balance marker, so each option's
+    // GST-inclusive value is validated independently below rather than against a nonexistent scheme-level total.
+    validateInstallments(value.installments ?? [], 0, ctx, optionAmountMode && (value.installmentBalance ?? false));
     // Booking Amount is deducted from the final installment (canonical calc): it must not exceed the final
     // installment's normal amount for ANY active option (else that option's final installment goes negative).
     const moRules = (value.installments ?? []).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value }));
     for (const o of value.options ?? []) {
       if (o.isActive === false) continue;
       const optVal = o.valueWithGST ?? 0;
-      if (optVal > 0 && bookingExceedsFinalInstallment(moRules, optVal, value.bookingAmount ?? 0)) {
+      if (optVal > 0 && bookingExceedsFinalInstallment(moRules, optVal, o.bookingAmount ?? value.bookingAmount ?? 0, value.installmentBalance ?? false)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bookingAmount"], message: "Booking Amount is larger than an option's final installment. Reduce the Booking Amount or the earlier installments." });
         break;
       }
     }
   } else {
     // FIXED: scheme-level values required (unchanged behaviour), plus installment + requirement validation.
+    if (value.bookingAmount == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bookingAmount"], message: "Booking Amount is required" });
     if (value.schemeValueWithoutGST == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithoutGST"], message: "Scheme Value (Without GST) is required" });
     if (value.schemeValueWithGST == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithGST"], message: "Scheme Value (With GST) is required" });
+    if (value.schemeValueWithoutGST != null && value.schemeValueWithGST != null && CENTS(value.schemeValueWithGST) < CENTS(value.schemeValueWithoutGST)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schemeValueWithGST"], message: "Scheme Value (With GST) must be greater than or equal to Scheme Value (Without GST)" });
+    }
+    if (value.requirementType === SchemeRequirementType.NONE) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requirementType"], message: "Select a Scheme Basis" });
+    }
     validateInstallments(value.installments ?? [], value.schemeValueWithGST ?? 0, ctx);
     // Booking Amount is deducted from the final installment (canonical calc): it must not exceed the final
     // installment's normal amount, otherwise the final installment would be negative.
@@ -129,6 +154,7 @@ const schemeInput = z.object({
       (value.installments ?? []).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value })),
       value.schemeValueWithGST ?? 0,
       value.bookingAmount ?? 0,
+      value.installmentBalance ?? false,
     )) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bookingAmount"], message: "Booking Amount is larger than the final installment. Reduce the Booking Amount or the earlier installments." });
     }
@@ -164,10 +190,10 @@ type RequirementProductRow = { productId: string; requiredQty: unknown; required
 const mapRequirementProducts = (rows: RequirementProductRow[]) => rows.map((r) => ({ productId: r.productId, requiredQty: r.requiredQty == null ? null : Number(r.requiredQty), requiredValue: r.requiredValue == null ? null : Number(r.requiredValue) }));
 
 const numOrNull = (v: unknown): number | null => (v == null ? null : Number(v.toString()));
-type OptionRow = { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; sortOrder: number; isActive: boolean };
+type OptionRow = { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; bookingAmount: unknown; sortOrder: number; isActive: boolean };
 const mapOptions = (rows: OptionRow[]) => rows.slice().sort((a, b) => a.sortOrder - b.sortOrder).map((o) => ({
   id: o.id, label: o.label, target: numOrNull(o.targetQty) ?? numOrNull(o.targetValue), targetQty: numOrNull(o.targetQty), targetValue: numOrNull(o.targetValue),
-  valueWithoutGST: Number(o.valueWithoutGST), valueWithGST: Number(o.valueWithGST), sortOrder: o.sortOrder, isActive: o.isActive,
+  valueWithoutGST: Number(o.valueWithoutGST), valueWithGST: Number(o.valueWithGST), bookingAmount: numOrNull(o.bookingAmount), sortOrder: o.sortOrder, isActive: o.isActive,
 }));
 const OPTION_INCLUDE = { options: { orderBy: { sortOrder: "asc" } as const }, eligibleProducts: { select: { productId: true } } };
 
@@ -228,7 +254,7 @@ function schemeScalarData(data: SchemeData) {
 const optionCreateRows = (options: SchemeData["options"], achievementType: OptionAchievementType) =>
   (options ?? []).map((o, i) => {
     const nrm = normalizeOption(o, achievementType);
-    return { label: nrm.label, targetQty: nrm.targetQty, targetValue: nrm.targetValue, valueWithoutGST: nrm.valueWithoutGST, valueWithGST: nrm.valueWithGST, sortOrder: i, isActive: o.isActive ?? true };
+    return { label: nrm.label, targetQty: nrm.targetQty, targetValue: nrm.targetValue, valueWithoutGST: nrm.valueWithoutGST, valueWithGST: nrm.valueWithGST, bookingAmount: o.bookingAmount, sortOrder: i, isActive: o.isActive ?? true };
   });
 
 export async function createScheme(ctx: AuthContext, raw: unknown) {
@@ -292,7 +318,7 @@ export async function updateScheme(ctx: AuthContext, id: string, raw: unknown) {
     for (let i = 0; i < incoming.length; i++) {
       const o = incoming[i];
       const nrm = normalizeOption(o, achievementType);
-      const row = { label: nrm.label, targetQty: nrm.targetQty, targetValue: nrm.targetValue, valueWithoutGST: nrm.valueWithoutGST, valueWithGST: nrm.valueWithGST, sortOrder: i, isActive: o.isActive ?? true };
+      const row = { label: nrm.label, targetQty: nrm.targetQty, targetValue: nrm.targetValue, valueWithoutGST: nrm.valueWithoutGST, valueWithGST: nrm.valueWithGST, bookingAmount: o.bookingAmount, sortOrder: i, isActive: o.isActive ?? true };
       if (o.id) await tx.schemeOption.update({ where: { id: o.id }, data: row });
       else await tx.schemeOption.create({ data: { ...row, schemeId: id } });
     }
@@ -334,7 +360,7 @@ export async function getSchemeDeletionImpact(ctx: AuthContext, id: string) {
   ]);
   const [instances, installments] = await Promise.all([
     prisma.dealerSchemeInstance.count({ where: { dealerSchemePlan: { schemeId: id } } }),
-    prisma.dealerSchemeInstallment.count({ where: { instance: { dealerSchemePlan: { schemeId: id } } } }),
+    prisma.dealerSchemeInstallment.count({ where: { OR: [{ instance: { dealerSchemePlan: { schemeId: id } } }, { bill: { plan: { schemeId: id } } }] } }),
   ]);
   return { schemeId: scheme.id, schemeName: scheme.schemeName, dealerPlans, instances, installments, installmentRules, states };
 }
@@ -370,14 +396,14 @@ export async function deleteScheme(ctx: AuthContext, id: string, rawReason: unkn
       tx.schemeInstallmentRule.count({ where: { schemeId: id } }),
       tx.schemeState.count({ where: { schemeId: id } }),
       tx.dealerSchemeInstance.count({ where: { dealerSchemePlan: { schemeId: id } } }),
-      tx.dealerSchemeInstallment.count({ where: { instance: { dealerSchemePlan: { schemeId: id } } } }),
+      tx.dealerSchemeInstallment.count({ where: { OR: [{ instance: { dealerSchemePlan: { schemeId: id } } }, { bill: { plan: { schemeId: id } } }] } }),
     ]);
 
     // Explicit bottom-up deletion (leaf → root). Each layer is scoped to THIS scheme only.
     // Payment transactions + allocations first (they reference installments and the plan).
     await tx.schemePaymentAllocation.deleteMany({ where: { payment: { plan: { schemeId: id } } } });
     await tx.schemePayment.deleteMany({ where: { plan: { schemeId: id } } });
-    await tx.dealerSchemeInstallment.deleteMany({ where: { instance: { dealerSchemePlan: { schemeId: id } } } });
+    await tx.dealerSchemeInstallment.deleteMany({ where: { OR: [{ instance: { dealerSchemePlan: { schemeId: id } } }, { bill: { plan: { schemeId: id } } }] } });
     await tx.dealerSchemeInstance.deleteMany({ where: { dealerSchemePlan: { schemeId: id } } });
     await tx.dealerSchemePlan.deleteMany({ where: { schemeId: id } });
     await tx.schemeInstallmentRule.deleteMany({ where: { schemeId: id } });

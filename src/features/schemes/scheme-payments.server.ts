@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
+import { billFinancialScope, planInstallmentWhere } from "./scheme-bills.server";
 import { ensureAllInstallments } from "./scheme-enrolled.server";
 
 /**
@@ -26,9 +27,9 @@ const EPS = 0.005;
 
 /* --------------------------- Pure allocation (shared by preview + persist) --------------------------- */
 
-export interface AllocInstallment { id: string; instanceNumber: number; installmentNumber: number; plannedAmount: number; receivedAmount: number }
+export interface AllocInstallment { id: string; instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; plannedAmount: number; receivedAmount: number }
 export interface AllocLine {
-  installmentId: string; instanceNumber: number; installmentNumber: number;
+  installmentId: string; instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number;
   plannedAmount: number; priorReceived: number; allocated: number; newReceived: number; settled: boolean;
 }
 export interface AllocResult { lines: AllocLine[]; leftover: number; totalOutstanding: number }
@@ -38,7 +39,7 @@ export interface AllocResult { lines: AllocLine[]; leftover: number; totalOutsta
  * outstanding balance. No DB access; the persist path and the modal preview both use it so they agree.
  */
 export function allocatePayment(installments: AllocInstallment[], amount: number): AllocResult {
-  const ordered = installments.slice().sort((a, b) => a.instanceNumber - b.instanceNumber || a.installmentNumber - b.installmentNumber);
+  const ordered = installments.slice().sort((a, b) => (a.instanceNumber ?? 0) - (b.instanceNumber ?? 0) || (a.billPartNumber ?? 0) - (b.billPartNumber ?? 0) || a.installmentNumber - b.installmentNumber);
   const totalOutstanding = round2(ordered.reduce((s, i) => s + Math.max(0, round2(i.plannedAmount - i.receivedAmount)), 0));
   let left = round2(amount);
   const lines: AllocLine[] = [];
@@ -49,7 +50,7 @@ export function allocatePayment(installments: AllocInstallment[], amount: number
     const allocated = round2(Math.min(left, remaining));
     const newReceived = round2(i.receivedAmount + allocated);
     lines.push({
-      installmentId: i.id, instanceNumber: i.instanceNumber, installmentNumber: i.installmentNumber,
+      installmentId: i.id, instanceNumber: i.instanceNumber, billPartNumber: i.billPartNumber, installmentNumber: i.installmentNumber,
       plannedAmount: i.plannedAmount, priorReceived: i.receivedAmount, allocated, newReceived, settled: newReceived + EPS >= i.plannedAmount,
     });
     left = round2(left - allocated);
@@ -84,12 +85,13 @@ export async function addSchemePayment(ctx: AuthContext, planId: string, raw: un
     { id: string; salesOfficerId: string; enrollmentStatus: string } | null;
   if (!plan) throw new ApiError(404, "Enrolled dealer plan not found");
   await assertPlanInScope(ctx, plan.salesOfficerId);
-  if (plan.enrollmentStatus !== SchemeEnrollmentStatus.ENROLLED) throw new ApiError(409, "Only enrolled dealers can receive payments");
+  if (plan.enrollmentStatus !== SchemeEnrollmentStatus.ENROLLED && !(await prisma.dealerSchemeBill.count({ where: { OR: [{ planId }, { instance: { dealerSchemePlanId: planId } }], verifiedAt: { not: null }, installments: { some: {} } } }))) throw new ApiError(409, "Payments require enrollment or a verified bill with an active installment schedule");
 
   // Make sure concrete installment rows exist before we allocate (idempotent; runs outside the tx).
   await ensureAllInstallments(planId);
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "DealerSchemePlan" WHERE "id" = ${planId} FOR UPDATE`;
     // Double-submit guard: an identical payment recorded in the last 15s is treated as a duplicate.
     const recent = (await tx.schemePayment.findFirst({
       where: { planId, amount, receivedDate, createdById: ctx.userId, recordedAt: { gte: new Date(Date.now() - 15_000) } },
@@ -98,13 +100,13 @@ export async function addSchemePayment(ctx: AuthContext, planId: string, raw: un
     if (recent) throw new ApiError(409, "This payment was just recorded — refresh to see it.");
 
     const rows = (await tx.dealerSchemeInstallment.findMany({
-      where: { instance: { dealerSchemePlanId: planId } },
-      select: { id: true, installmentNumber: true, plannedAmount: true, receivedAmount: true, instance: { select: { instanceNumber: true } } },
-    })) as { id: string; installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown; instance: { instanceNumber: number } }[];
+      where: planInstallmentWhere(planId),
+      select: { id: true, bill: { select: { partNumber: true } }, installmentNumber: true, plannedAmount: true, receivedAmount: true, instance: { select: { instanceNumber: true } } },
+    })) as { id: string; bill: { partNumber: number } | null; installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown; instance: { instanceNumber: number } | null }[];
     if (rows.length === 0) throw new ApiError(409, "This dealer has no installment schedule to allocate against");
 
     const installments: AllocInstallment[] = rows.map((r) => ({
-      id: r.id, instanceNumber: r.instance.instanceNumber, installmentNumber: r.installmentNumber,
+      id: r.id, billPartNumber: r.bill?.partNumber ?? null, instanceNumber: r.instance?.instanceNumber ?? null, installmentNumber: r.installmentNumber,
       plannedAmount: money(r.plannedAmount), receivedAmount: money(r.receivedAmount),
     }));
 
@@ -182,7 +184,7 @@ export async function paymentDealers(ctx: AuthContext, f: PaymentFilters): Promi
 
   const plans = (await prisma.dealerSchemePlan.findMany({
     where: {
-      enrollmentStatus: SchemeEnrollmentStatus.ENROLLED,
+      ...billFinancialScope,
       ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }),
       ...(f.officerId ? { salesOfficerId: f.officerId } : {}),
       ...(f.state ? { salesOfficer: { group: { name: f.state } } } : {}),
@@ -230,8 +232,8 @@ export async function paymentDealers(ctx: AuthContext, f: PaymentFilters): Promi
   return { rows, filters: { states: [...statesSet].sort(), officers } };
 }
 
-export interface TimelineInstallment { installmentId: string; instanceNumber: number; installmentNumber: number; plannedAmount: number; receivedAmount: number; status: string; receivedPct: number }
-export interface TimelineAllocation { instanceNumber: number; installmentNumber: number; allocated: number; cumulative: number; plannedAmount: number; resultingStatus: string; receivedPct: number }
+export interface TimelineInstallment { installmentId: string; instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; plannedAmount: number; receivedAmount: number; status: string; receivedPct: number }
+export interface TimelineAllocation { instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; allocated: number; cumulative: number; plannedAmount: number; resultingStatus: string; receivedPct: number }
 export interface TimelinePayment { id: string; amount: number; receivedDate: string; recordedAt: string; createdByName: string | null; note: string | null; allocations: TimelineAllocation[] }
 export interface DealerPaymentTimeline {
   plan: { planId: string; dealerId: string; dealerName: string; schemeId: string; schemeName: string; salesOfficerName: string; state: string | null };
@@ -256,28 +258,35 @@ export async function dealerPaymentTimeline(ctx: AuthContext, planId: string, f:
     select: {
       id: true, dealerId: true, schemeId: true, salesOfficerId: true,
       dealer: { select: { name: true } }, scheme: { select: { schemeName: true } }, salesOfficer: { select: { name: true, group: { select: { name: true } } } },
-      instances: { select: { instanceNumber: true, installments: { select: { id: true, installmentNumber: true, plannedAmount: true, receivedAmount: true } } } },
+      bills: { select: { partNumber: true, installments: { select: { id: true, installmentNumber: true, plannedAmount: true, receivedAmount: true } } } },
+      instances: { select: { instanceNumber: true, installments: { select: { id: true, bill: { select: { partNumber: true } }, installmentNumber: true, plannedAmount: true, receivedAmount: true } } } },
     },
   })) as unknown as {
     id: string; dealerId: string; schemeId: string; salesOfficerId: string;
     dealer: { name: string }; scheme: { schemeName: string }; salesOfficer: { name: string; group: { name: string } | null };
-    instances: { instanceNumber: number; installments: { id: string; installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown }[] }[];
+    bills: { partNumber: number; installments: { id: string; installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown }[] }[];
+    instances: { instanceNumber: number | null; installments: { id: string; bill: { partNumber: number } | null; installmentNumber: number; plannedAmount: unknown; receivedAmount: unknown }[] }[];
   } | null;
   if (!plan) throw new ApiError(404, "Dealer plan not found");
   if (!scope.all && !scope.ids.includes(plan.salesOfficerId)) throw new ApiError(403, "You cannot view this dealer's payments");
 
   // Flat installment index (by id) with its ordering key, for allocation lookups.
-  const instById = new Map<string, { instanceNumber: number; installmentNumber: number; plannedAmount: number }>();
+  const instById = new Map<string, { instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; plannedAmount: number }>();
   const installments: TimelineInstallment[] = [];
   for (const inst of plan.instances) {
     for (const i of inst.installments.slice().sort((a, b) => a.installmentNumber - b.installmentNumber)) {
       const planned = money(i.plannedAmount);
       const received = money(i.receivedAmount);
-      instById.set(i.id, { instanceNumber: inst.instanceNumber, installmentNumber: i.installmentNumber, plannedAmount: planned });
-      installments.push({ installmentId: i.id, instanceNumber: inst.instanceNumber, installmentNumber: i.installmentNumber, plannedAmount: planned, receivedAmount: received, status: statusOf(received, planned), receivedPct: pct(received, planned) });
+      instById.set(i.id, { billPartNumber: i.bill?.partNumber ?? null, instanceNumber: inst.instanceNumber, installmentNumber: i.installmentNumber, plannedAmount: planned });
+      installments.push({ installmentId: i.id, billPartNumber: i.bill?.partNumber ?? null, instanceNumber: inst.instanceNumber, installmentNumber: i.installmentNumber, plannedAmount: planned, receivedAmount: received, status: statusOf(received, planned), receivedPct: pct(received, planned) });
     }
   }
-  installments.sort((a, b) => a.instanceNumber - b.instanceNumber || a.installmentNumber - b.installmentNumber);
+  for (const bill of plan.bills ?? []) for (const i of bill.installments) {
+    const planned = money(i.plannedAmount), received = money(i.receivedAmount);
+    instById.set(i.id, { instanceNumber: null, billPartNumber: bill.partNumber, installmentNumber: i.installmentNumber, plannedAmount: planned });
+    installments.push({ installmentId: i.id, instanceNumber: null, billPartNumber: bill.partNumber, installmentNumber: i.installmentNumber, plannedAmount: planned, receivedAmount: received, status: statusOf(received, planned), receivedPct: pct(received, planned) });
+  }
+  installments.sort((a, b) => (a.instanceNumber ?? 0) - (b.instanceNumber ?? 0) || (a.billPartNumber ?? 0) - (b.billPartNumber ?? 0) || a.installmentNumber - b.installmentNumber);
 
   // ALL payments in recorded order → reconstruct cumulative; then apply the display filters.
   const allPayments = (await prisma.schemePayment.findMany({
@@ -298,10 +307,10 @@ export async function dealerPaymentTimeline(ctx: AuthContext, planId: string, f:
       const cumulative = round2((cumulativeByInst.get(a.installmentId) ?? 0) + money(a.amount));
       cumulativeByInst.set(a.installmentId, cumulative);
       return {
-        instanceNumber: meta?.instanceNumber ?? 0, installmentNumber: meta?.installmentNumber ?? 0,
+        billPartNumber: meta?.billPartNumber ?? null, instanceNumber: meta?.instanceNumber ?? null, installmentNumber: meta?.installmentNumber ?? 0,
         allocated: money(a.amount), cumulative, plannedAmount: planned, resultingStatus: statusOf(cumulative, planned), receivedPct: pct(cumulative, planned),
       };
-    }).sort((x, y) => x.instanceNumber - y.instanceNumber || x.installmentNumber - y.installmentNumber);
+    }).sort((x, y) => (x.instanceNumber ?? 0) - (y.instanceNumber ?? 0) || (x.billPartNumber ?? 0) - (y.billPartNumber ?? 0) || x.installmentNumber - y.installmentNumber);
     built.push({
       id: pay.id, amount: money(pay.amount), receivedDate: pay.receivedDate.toISOString(), recordedAt: pay.recordedAt.toISOString(),
       createdByName: pay.createdBy?.name ?? null, note: pay.note, allocations, _received: pay.receivedDate, _recorded: pay.recordedAt,

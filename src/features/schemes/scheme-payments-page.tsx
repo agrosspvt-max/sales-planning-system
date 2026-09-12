@@ -1,13 +1,13 @@
 "use client";
+import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { IndianRupee } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
@@ -20,8 +20,8 @@ interface DealerRow {
   paymentCount: number; totalPaid: number; lastReceivedDate: string | null; lastRecordedAt: string | null;
 }
 interface DealerList { rows: DealerRow[]; filters: { states: string[]; officers: { id: string; name: string }[] } }
-interface TInstallment { installmentId: string; instanceNumber: number; installmentNumber: number; plannedAmount: number; receivedAmount: number; status: string; receivedPct: number }
-interface TAllocation { instanceNumber: number; installmentNumber: number; allocated: number; cumulative: number; plannedAmount: number; resultingStatus: string; receivedPct: number }
+interface TInstallment { installmentId: string; instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; plannedAmount: number; receivedAmount: number; status: string; receivedPct: number }
+interface TAllocation { instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; allocated: number; cumulative: number; plannedAmount: number; resultingStatus: string; receivedPct: number }
 interface TPayment { id: string; amount: number; receivedDate: string; recordedAt: string; createdByName: string | null; note: string | null; allocations: TAllocation[] }
 interface Timeline {
   plan: { planId: string; dealerId: string; dealerName: string; schemeId: string; schemeName: string; salesOfficerName: string; state: string | null };
@@ -99,7 +99,7 @@ export function SchemePaymentsPage() {
       <PageHeader
         crumbs={[{ label: "Planning" }, { label: "Payments" }]}
         title="Payments"
-        subtitle="Record and review payments received on enrolled schemes. Payments are the source of truth for money received."
+        subtitle="Record and review payments received on enrolled schemes and verified part bills. Payments are the source of truth for money received."
       />
 
       {/* Filters */}
@@ -115,17 +115,17 @@ export function SchemePaymentsPage() {
         <div className="space-y-1.5">
           <Label>Payment Received Date</Label>
           <div className="flex items-center gap-2">
-            <Input type="date" value={receivedFrom} onChange={(e) => setReceivedFrom(e.target.value)} />
+            <SchemeDateInput value={receivedFrom} onValueChange={(v) => setReceivedFrom(v)} />
             <span className="text-xs text-muted-foreground">to</span>
-            <Input type="date" value={receivedTo} onChange={(e) => setReceivedTo(e.target.value)} />
+            <SchemeDateInput value={receivedTo} onValueChange={(v) => setReceivedTo(v)} />
           </div>
         </div>
         <div className="space-y-1.5 md:col-start-3">
           <Label>Payment Recorded Date</Label>
           <div className="flex items-center gap-2">
-            <Input type="date" value={recordedFrom} onChange={(e) => setRecordedFrom(e.target.value)} />
+            <SchemeDateInput value={recordedFrom} onValueChange={(v) => setRecordedFrom(v)} />
             <span className="text-xs text-muted-foreground">to</span>
-            <Input type="date" value={recordedTo} onChange={(e) => setRecordedTo(e.target.value)} />
+            <SchemeDateInput value={recordedTo} onValueChange={(v) => setRecordedTo(v)} />
           </div>
         </div>
       </div>
@@ -175,7 +175,7 @@ export function SchemePaymentsPage() {
 
 function DealerTimeline({ t }: { t: Timeline }) {
   const multi = new Set(t.installments.map((i) => i.instanceNumber)).size > 1;
-  const instLabel = (instanceNumber: number, installmentNumber: number) => `${multi ? `S${instanceNumber} · ` : ""}${ordinal(installmentNumber)} Installment`;
+  const instLabel = (instanceNumber: number | null, installmentNumber: number, billPartNumber?: number | null) => `${multi && instanceNumber != null && instanceNumber > 0 ? `S${instanceNumber} · ` : ""}${billPartNumber ? `Part Bill ${billPartNumber} · ` : ""}${ordinal(installmentNumber)} Installment`;
   return (
     <>
       <div className="rounded-lg border bg-background p-4">
@@ -194,7 +194,7 @@ function DealerTimeline({ t }: { t: Timeline }) {
         <div className="mt-3 flex flex-wrap gap-2">
           {t.installments.map((i) => (
             <div key={i.installmentId} className="rounded-md border px-2 py-1 text-xs">
-              <span className="font-medium">{instLabel(i.instanceNumber, i.installmentNumber)}</span>{" "}
+              <span className="font-medium">{instLabel(i.instanceNumber, i.installmentNumber, i.billPartNumber)}</span>{" "}
               <span className="text-muted-foreground">{formatCurrency(i.receivedAmount)} / {formatCurrency(i.plannedAmount)}</span>{" "}
               <AllocStatusBadge status={i.status} pct={i.receivedPct} />
             </div>
@@ -215,7 +215,7 @@ function DealerTimeline({ t }: { t: Timeline }) {
             <div className="mt-2 space-y-1">
               {p.allocations.map((a, i) => (
                 <div key={i} className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="min-w-[10rem]">{instLabel(a.instanceNumber, a.installmentNumber)}</span>
+                  <span className="min-w-[10rem]">{instLabel(a.instanceNumber, a.installmentNumber, a.billPartNumber)}</span>
                   <span className="tabular-nums">→ {formatCurrency(a.allocated)}</span>
                   <span className="text-xs text-muted-foreground">cumulative {formatCurrency(a.cumulative)} / {formatCurrency(a.plannedAmount)}</span>
                   <AllocStatusBadge status={a.resultingStatus} pct={a.receivedPct} />

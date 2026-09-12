@@ -1,10 +1,11 @@
 "use client";
+import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Copy, FileText, Info, MessageCircle, MoreVertical, Plus, Save, Send, Share2, StickyNote, X } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { cn, formatCurrency, formatDate, formatDateShort } from "@/lib/utils";
+import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDate, formatSchemeDate as formatDateShort } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -419,7 +420,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                           )}
                                           <TableCell>
                                             {r.editable ? (
-                                              <Input type="date" className="w-44" min={minDate} max={maxDate} value={r.date} onChange={(e) => setDate(s.id, r.dealerId, e.target.value)} />
+                                              <SchemeDateInput className="w-44" min={minDate} max={maxDate} value={r.date} onValueChange={(v) => setDate(s.id, r.dealerId, v)} />
                                             ) : r.date ? formatDateShort(r.date) : <span className="text-muted-foreground">—</span>}
                                           </TableCell>
                                           {(s.prePlacementMaxDays ?? 0) > 0 && (

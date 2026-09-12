@@ -1,4 +1,6 @@
 import "server-only";
+import { effectiveBookingAmount } from "@/lib/scheme-installments";
+import { billFinancialScope } from "./scheme-bills.server";
 import { SchemeEnrollmentStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -178,8 +180,10 @@ const inRange = (d: Date | null, r: Range | null): boolean => !!d && !!r && d.ge
 
 /** One installment, whether persisted or derived in memory for display. */
 interface ScheduleRow {
-  instanceId: string;
-  instanceNumber: number;
+  instanceId: string | null;
+  billId?: string;
+  instanceNumber: number | null;
+  billPartNumber?: number | null;
   installmentNumber: number;
   plannedAmount: number;
   plannedDate: Date | null;
@@ -202,6 +206,8 @@ interface PlanModel {
   schemeId: string;
   schemeName: string;
   schemeValueWithGST: number;
+  confirmedSchemeAmount: number;
+  verificationPending: boolean;
   instanceCount: number;
   numberOfSchemes: number;
   bookingAmount: number; // Admin-confirmed only
@@ -220,7 +226,7 @@ interface PlanModel {
  * Load every ENROLLED plan in the caller's scope with its dealer, scheme rules and instance schedules.
  * ONE query per relation level (Prisma nested include) — never a query per dealer/plan/instance.
  */
-async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?: string; officerId?: string } = {}): Promise<PlanModel[]> {
+async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?: string; officerId?: string; financial?: boolean } = {}): Promise<PlanModel[]> {
   const scope = await getOfficerScope(ctx);
   // RM narrowing to a single Sales Officer: validate membership server-side, then filter to that officer.
   // This is stricter than (a subset of) the scope, so it never widens access.
@@ -228,34 +234,36 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
   const officerFilter = opts.officerId ? { salesOfficerId: opts.officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
   const plans = (await prisma.dealerSchemePlan.findMany({
     where: {
-      enrollmentStatus: SchemeEnrollmentStatus.ENROLLED,
+      ...(opts.financial === false ? { enrollmentStatus: SchemeEnrollmentStatus.ENROLLED } : billFinancialScope),
       ...(opts.dealerId ? { dealerId: opts.dealerId } : {}),
       ...(opts.schemeId ? { schemeId: opts.schemeId } : {}),
       ...officerFilter,
     },
     select: {
-      id: true, dealerId: true, schemeId: true, numberOfSchemes: true,
+      id: true, dealerId: true, schemeId: true, numberOfSchemes: true, enrollmentStatus: true, billMode: true, adminAmountWithGST: true,
       adminBookingAmount: true, adminVerifiedAt: true, adminBillingDate: true, billingDate: true, expectedBillingDate: true,
       prePlacementDays: true, adminPrePlacementDays: true,
       dealer: { select: { name: true, town: true, village: true, tehsil: true, district: true, mobile: true } },
       salesOfficer: { select: { name: true, group: { select: { name: true } } } },
-      selectedOptionId: true, optionLabel: true, optionTargetQty: true, optionTargetValue: true, optionValueWithGST: true,
+      selectedOptionId: true, optionLabel: true, optionTargetQty: true, optionTargetValue: true, optionValueWithGST: true, optionBookingAmount: true, installmentBalance: true,
       scheme: { select: { schemeName: true, schemeValueWithGST: true, structure: true, bookingAmount: true, optionAchievementType: true, installmentRules: { select: { installmentNumber: true, calculationType: true, value: true, daysAfterBillingDate: true } } } },
+      bills: { select: { id: true, partNumber: true, installments: { select: { installmentNumber: true, plannedAmount: true, plannedDate: true, receivedAmount: true, receivedDate: true } } } },
       instances: {
-        select: { id: true, instanceNumber: true, adminBillingDate: true, installments: { select: { installmentNumber: true, plannedAmount: true, plannedDate: true, receivedAmount: true, receivedDate: true } } },
+        select: { id: true, billMode: true, adminAmountWithGST: true, instanceNumber: true, adminBillingDate: true, installments: { select: { bill: { select: { partNumber: true } }, installmentNumber: true, plannedAmount: true, plannedDate: true, receivedAmount: true, receivedDate: true } } },
         orderBy: { instanceNumber: "asc" },
       },
     },
     orderBy: { createdAt: "asc" },
   })) as unknown as {
-    id: string; dealerId: string; schemeId: string; numberOfSchemes: number;
+    id: string; dealerId: string; schemeId: string; numberOfSchemes: number; enrollmentStatus: string; billMode: boolean; adminAmountWithGST: unknown;
+    bills: { id: string; partNumber: number; installments: { installmentNumber: number; plannedAmount: unknown; plannedDate: Date | null; receivedAmount: unknown; receivedDate: Date | null }[] }[];
     adminBookingAmount: unknown; adminVerifiedAt: Date | null; adminBillingDate: Date | null; billingDate: Date | null; expectedBillingDate: Date | null;
     prePlacementDays: number | null; adminPrePlacementDays: number | null;
     dealer: { name: string; town: string | null; village: string | null; tehsil: string | null; district: string | null; mobile: string | null };
     salesOfficer: { name: string; group: { name: string } | null };
-    selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithGST: unknown;
+    selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithGST: unknown; optionBookingAmount: unknown; installmentBalance: boolean;
     scheme: { schemeName: string; schemeValueWithGST: unknown; structure: string; bookingAmount: unknown; optionAchievementType: string | null; installmentRules: InstallmentRuleRow[] };
-    instances: { id: string; instanceNumber: number; adminBillingDate: Date | null; installments: { installmentNumber: number; plannedAmount: unknown; plannedDate: Date | null; receivedAmount: unknown; receivedDate: Date | null }[] }[];
+    instances: { id: string; billMode: boolean; adminAmountWithGST: unknown; instanceNumber: number; adminBillingDate: Date | null; installments: { bill: { partNumber: number } | null; installmentNumber: number; plannedAmount: unknown; plannedDate: Date | null; receivedAmount: unknown; receivedDate: Date | null }[] }[];
   }[];
 
   return plans.map((p) => {
@@ -263,11 +271,11 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
     const gst = effectiveValueWithGST({ structure: p.scheme.structure, schemeValueWithGST: p.scheme.schemeValueWithGST == null ? null : money(p.scheme.schemeValueWithGST), optionValueWithGST: p.optionValueWithGST == null ? null : money(p.optionValueWithGST) });
     const rows: ScheduleRow[] = [];
     let derivedSchedule = false;
-    for (const inst of p.instances) {
+    for (const inst of p.billMode ? [] : p.instances) {
       if (inst.installments.length > 0) {
         for (const i of inst.installments) {
           rows.push({
-            instanceId: inst.id, instanceNumber: inst.instanceNumber, installmentNumber: i.installmentNumber,
+            instanceId: inst.id, instanceNumber: inst.instanceNumber, billPartNumber: i.bill?.partNumber ?? null, installmentNumber: i.installmentNumber,
             plannedAmount: money(i.plannedAmount), plannedDate: i.plannedDate,
             receivedAmount: i.receivedAmount == null ? null : money(i.receivedAmount), receivedDate: i.receivedDate,
             derived: false,
@@ -275,9 +283,10 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
         }
         continue;
       }
+      if (inst.billMode) continue; // Pending bills have no schedule; never derive from an SO/legacy date.
       // No rows persisted yet — DERIVE the schedule for display only (never written).
       const billing = installmentBaseDate(p, inst);
-      const derived = derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing, money(p.scheme.bookingAmount));
+      const derived = derivedInstallmentSchedule(p.scheme.installmentRules, gst, billing, effectiveBookingAmount(p.scheme.structure, money(p.scheme.bookingAmount), p.optionBookingAmount == null ? null : money(p.optionBookingAmount)), p.installmentBalance);
       if (derived.length > 0) derivedSchedule = true;
       for (const d of derived) {
         rows.push({
@@ -286,15 +295,16 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
         });
       }
     }
-    rows.sort((a, b) => a.instanceNumber - b.instanceNumber || a.installmentNumber - b.installmentNumber);
+    for (const bill of p.bills ?? []) for (const i of bill.installments) rows.push({ instanceId: null, billId: bill.id, instanceNumber: null, billPartNumber: bill.partNumber, installmentNumber: i.installmentNumber, plannedAmount: money(i.plannedAmount), plannedDate: i.plannedDate, receivedAmount: i.receivedAmount == null ? null : money(i.receivedAmount), receivedDate: i.receivedDate, derived: false });
+    rows.sort((a, b) => (a.instanceNumber ?? 0) - (b.instanceNumber ?? 0) || (a.billPartNumber ?? 0) - (b.billPartNumber ?? 0) || a.installmentNumber - b.installmentNumber);
     return {
       planId: p.id, dealerId: p.dealerId,
       dealerName: p.dealer.name, town: p.dealer.town, village: p.dealer.village, tehsil: p.dealer.tehsil, district: p.dealer.district, mobile: p.dealer.mobile,
       salesOfficerName: p.salesOfficer.name, state: p.salesOfficer.group?.name ?? null,
-      schemeId: p.schemeId, schemeName: p.scheme.schemeName, schemeValueWithGST: gst,
+      schemeId: p.schemeId, schemeName: p.scheme.schemeName, schemeValueWithGST: gst, confirmedSchemeAmount: p.billMode ? money(p.adminAmountWithGST) : p.instances.reduce((sum, i) => sum + (i.billMode && i.adminAmountWithGST != null ? money(i.adminAmountWithGST) : gst), 0),
       instanceCount: p.instances.length, numberOfSchemes: p.numberOfSchemes || 1,
       bookingAmount: money(p.adminBookingAmount), // Admin-confirmed only; SO-entered amounts never count
-      rows, derivedSchedule,
+      rows, derivedSchedule, verificationPending: (p.billMode || p.instances.some(i => i.billMode)) && p.enrollmentStatus !== "ENROLLED",
       structure: p.scheme.structure as PlanModel["structure"],
       optionAchievementType: (p.scheme.optionAchievementType ?? null) as PlanModel["optionAchievementType"],
       selectedOptionId: p.selectedOptionId,
@@ -328,6 +338,7 @@ export interface FollowUpFigures {
   nextDueDate: string | null;
   lastPaymentDate: string | null;
   status: string;
+  verificationPending?: boolean;
 }
 
 /** Snapshot status, using the same vocabulary as the Enrolled Scheme view (evaluated at the cutoff). */
@@ -470,12 +481,18 @@ function sumFigures(parts: FollowUpFigures[], w: Windows): FollowUpFigures {
     overdueCount: overdue,
     nextDueDate: nextDue[0] ?? null,
     lastPaymentDate: lastPaid[lastPaid.length - 1] ?? null,
-    status: positionStatus(total, received, overdue),
+    verificationPending: parts.some(p => p.verificationPending),
+    status: parts.some(p => p.verificationPending) ? "Partial Verification" : positionStatus(total, received, overdue),
   };
 }
 
+function financialFigures(p: PlanModel, w: Windows): FollowUpFigures {
+  const figures = aggregate(p.rows, p.confirmedSchemeAmount, p.bookingAmount, w);
+  return { ...figures, verificationPending: p.verificationPending, ...(p.verificationPending ? { status: "Partial Verification" } : {}) };
+}
+
 const bySchemeFigures = (p: PlanModel, w: Windows): DealerSchemeFigures => ({
-  ...aggregate(p.rows, p.schemeValueWithGST * p.instanceCount, p.bookingAmount, w),
+  ...financialFigures(p, w),
   planId: p.planId, schemeId: p.schemeId, schemeName: p.schemeName,
   instanceCount: p.instanceCount, numberOfSchemes: p.numberOfSchemes, derivedSchedule: p.derivedSchedule,
 });
@@ -559,7 +576,7 @@ export async function schemeFollowUp(ctx: AuthContext, q: FollowUpQuery): Promis
   const rows: SchemeFollowUpRow[] = [...byScheme.values()].map((group) => {
     const head = group[0];
     const dealers: SchemeDealerFigures[] = group.map((p) => ({
-      ...aggregate(p.rows, p.schemeValueWithGST * p.instanceCount, p.bookingAmount, w),
+      ...financialFigures(p, w),
       planId: p.planId, dealerId: p.dealerId, dealerName: p.dealerName, town: p.town, mobile: p.mobile,
       salesOfficerName: p.salesOfficerName, instanceCount: p.instanceCount,
     }));
@@ -580,7 +597,8 @@ export async function schemeFollowUp(ctx: AuthContext, q: FollowUpQuery): Promis
 
 export interface FollowUpInstallmentRow {
   key: string;
-  instanceNumber: number;
+  instanceNumber: number | null;
+  billPartNumber?: number | null;
   installmentNumber: number;
   plannedAmount: number;
   plannedDate: string | null;
@@ -596,6 +614,7 @@ export interface FollowUpPaymentRow {
   schemeName: string;
   instanceNumber: number | null;
   kind: "BOOKING" | "INSTALLMENT";
+  billPartNumber?: number | null;
   installmentNumber: number | null;
   amount: number;
   paymentDate: string | null;
@@ -634,9 +653,9 @@ export async function dealerFollowUpDetail(ctx: AuthContext, dealerId: string, q
     .map((p) => ({
       ...bySchemeFigures(p, w),
       installments: p.rows.map((r) => ({
-        key: `${r.instanceId}-${r.installmentNumber}`,
+        key: `${r.billId ?? r.instanceId}-${r.billPartNumber ?? "legacy"}-${r.installmentNumber}`,
         instanceNumber: r.instanceNumber,
-        installmentNumber: r.installmentNumber,
+        billPartNumber: r.billPartNumber, installmentNumber: r.installmentNumber,
         plannedAmount: r.plannedAmount,
         plannedDate: r.plannedDate?.toISOString() ?? null,
         receivedAmount: r.receivedAmount,
@@ -661,8 +680,8 @@ export async function dealerFollowUpDetail(ctx: AuthContext, dealerId: string, q
       if (r.receivedAmount == null) continue;
       if (r.receivedDate && r.receivedDate.getTime() > w.paidCutoff.getTime()) continue; // after the snapshot
       payments.push({
-        key: `inst-${r.instanceId}-${r.installmentNumber}`,
-        schemeName: p.schemeName, instanceNumber: r.instanceNumber, kind: "INSTALLMENT", installmentNumber: r.installmentNumber,
+        key: `inst-${r.billId ?? r.instanceId}-${r.billPartNumber ?? "legacy"}-${r.installmentNumber}`,
+        schemeName: p.schemeName, instanceNumber: r.instanceNumber, kind: "INSTALLMENT", billPartNumber: r.billPartNumber, installmentNumber: r.installmentNumber,
         amount: r.receivedAmount,
         paymentDate: r.receivedDate?.toISOString() ?? null,
         dueDate: r.plannedDate?.toISOString() ?? null,
@@ -730,7 +749,7 @@ interface AchievementContext {
  * scheme's requirement + ACTIVE sales, filtered to the requested requirement type, plus product names.
  */
 async function loadAchievementContext(ctx: AuthContext, q: FollowUpQuery, type: "PRODUCT_BASED" | "VALUE_BASED"): Promise<AchievementContext> {
-  const plans = await loadPlans(ctx, { officerId: q.officerId });
+  const plans = await loadPlans(ctx, { officerId: q.officerId, financial: false });
   const dealerMeta = new Map<string, DealerMeta>();
   const schemeName = new Map<string, string>();
   const enrolledByScheme = new Map<string, Set<string>>();
@@ -970,7 +989,7 @@ interface OptionAchvContext {
 
 /** Load the caller's ENROLLED option plans (scope + officer honoured) + eligible pools + ACTIVE sales. */
 async function loadOptionAchievementContext(ctx: AuthContext, q: FollowUpQuery): Promise<OptionAchvContext> {
-  const plans = (await loadPlans(ctx, { officerId: q.officerId })).filter((p) => p.structure === "MULTIPLE_OPTIONS" && p.optionAchievementType != null);
+  const plans = (await loadPlans(ctx, { officerId: q.officerId, financial: false })).filter((p) => p.structure === "MULTIPLE_OPTIONS" && p.optionAchievementType != null);
   const dealerMeta = new Map<string, DealerMeta>();
   const schemeIds = new Set<string>();
   for (const p of plans) {

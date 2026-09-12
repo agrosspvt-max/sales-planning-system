@@ -37,7 +37,6 @@ const validQtyInput = () => ({
     { label: "Bronze", target: 100, valueWithoutGST: 10000, valueWithGST: 11800 },
     { label: "Silver", target: 200, valueWithoutGST: 20000, valueWithGST: 23600 },
   ],
-  installmentCalcTypes: ["PERCENTAGE", "PERCENTAGE"],
 });
 
 test("1. valid Multiple Options config returns no errors", () => {
@@ -76,9 +75,8 @@ test("6. duplicate targets are rejected (options must be distinguishable)", () =
   assert.ok(errs.some((e) => /same target/i.test(e)));
 });
 
-test("7. FIXED_AMOUNT installment type is rejected for options (percentage-only)", () => {
-  const errs = validateMultipleOptions({ ...validQtyInput(), installmentCalcTypes: ["FIXED_AMOUNT"] });
-  assert.ok(errs.some((e) => /percentage/i.test(e)));
+test("7. option validation is independent of installment mode", () => {
+  assert.deepEqual(validateMultipleOptions(validQtyInput()), []);
 });
 
 test("8. duplicate eligible product id is rejected", () => {
@@ -96,11 +94,11 @@ test("9. QUANTITY_BASED option normalizes target into targetQty (targetValue nul
   approx(o.valueWithGST, 23600);
 });
 
-test("10. VALUE_BASED option normalizes target into targetValue (targetQty null)", () => {
+test("10. VALUE_BASED master ignores legacy target and derives targetValue from With GST", () => {
   const o = normalizeOption({ label: null, target: 50000.567, valueWithoutGST: 40000, valueWithGST: 47200 }, "VALUE_BASED");
   assert.equal(o.label, null);
   assert.equal(o.targetQty, null);
-  approx(o.targetValue, 50000.57, "targetValue rounded to 2dp");
+  approx(o.targetValue, 47200, "With GST is the target");
 });
 
 /* --------------------------------- effective value / target resolver --------------------------------- */
@@ -256,6 +254,65 @@ test("25. contribution breakdown lists each eligible product's own sale (Quantit
   approx(a.contributions.find((c) => c.productId === "P1")!.achievedQty, 80);
   approx(a.contributions.find((c) => c.productId === "P2")!.achievedQty, 70);
   approx(a.contributions.find((c) => c.productId === "P3")!.achievedQty, 50);
+});
+
+test("Value Based requires only the two commercial values, not a target or label", () => {
+  assert.deepEqual(validateMultipleOptions({
+    achievementType: "VALUE_BASED", eligibleProductIds: ["P1"],
+    options: [{ valueWithoutGST: 20000, valueWithGST: 23600 }],
+  }), []);
+  const row = normalizeOption({ valueWithoutGST: 20000, valueWithGST: 23600.126 }, "VALUE_BASED");
+  assert.equal(row.label, null);
+  assert.equal(row.targetQty, null);
+  assert.equal(row.targetValue, 23600.13);
+  assert.equal(row.targetValue, row.valueWithGST);
+});
+
+test("Value Based still requires both positive commercial values", () => {
+  for (const option of [{ valueWithGST: 100 }, { valueWithoutGST: 100 }, { valueWithoutGST: 100, valueWithGST: 0 }]) {
+    assert.ok(validateMultipleOptions({ achievementType: "VALUE_BASED", eligibleProductIds: ["P1"], options: [option] }).length > 0);
+  }
+});
+
+test("every option requires With GST to be at least Without GST", () => {
+  const invalid = validateMultipleOptions({
+    achievementType: "VALUE_BASED", eligibleProductIds: ["P1"],
+    options: [{ valueWithoutGST: 20000, valueWithGST: 19999.99 }],
+  });
+  assert.ok(invalid.some((error) => /greater than or equal/i.test(error)));
+  assert.deepEqual(validateMultipleOptions({
+    achievementType: "QUANTITY_BASED", eligibleProductIds: ["P1"],
+    options: [{ target: 1, valueWithoutGST: 20000, valueWithGST: 20000 }],
+  }), []);
+});
+
+test("Quantity Based still requires its independent target", () => {
+  assert.ok(validateMultipleOptions({ ...validQtyInput(), options: [{ valueWithoutGST: 100, valueWithGST: 118 }] }).some(e => /target greater than zero/.test(e)));
+});
+
+test("Value Based duplicate detection uses GST target at stored monetary precision", () => {
+  const options = [
+    { target: 100, valueWithoutGST: 100, valueWithGST: 118.001 },
+    { target: 200, valueWithoutGST: 100, valueWithGST: 118.002 },
+  ];
+  assert.ok(validateMultipleOptions({ achievementType: "VALUE_BASED", eligibleProductIds: ["P1"], options }).some(e => /same target/.test(e)));
+  options[1].valueWithGST = 236;
+  options[1].target = 100;
+  assert.deepEqual(validateMultipleOptions({ achievementType: "VALUE_BASED", eligibleProductIds: ["P1"], options }), []);
+});
+
+test("editing a legacy Value option preserves its label and leaves existing snapshots authoritative", () => {
+  const legacy = { label: "Legacy", target: 50000, valueWithoutGST: 20000, valueWithGST: 23600 };
+  const edited = normalizeOption(legacy, "VALUE_BASED");
+  assert.equal(edited.label, "Legacy");
+  assert.equal(edited.targetValue, 23600);
+  assert.equal(legacy.target, 50000);
+  const oldTarget = effectiveOptionTarget({ achievementType: "VALUE_BASED", optionTargetQty: null, optionTargetValue: 50000 })!;
+  const newTarget = effectiveOptionTarget({ achievementType: "VALUE_BASED", optionTargetQty: edited.targetQty, optionTargetValue: edited.targetValue })!;
+  const sales = [{ dealerId: "old", productId: "P1", qty: 0, value: 23600 }, { dealerId: "new", productId: "P1", qty: 0, value: 23600 }];
+  const result = schemeOptionAchievement("VALUE_BASED", ["P1"], sales, new Map([["old", oldTarget], ["new", newTarget]]));
+  assert.equal(result.perDealer.find(d => d.dealerId === "old")!.achievement.completed, false);
+  assert.equal(result.perDealer.find(d => d.dealerId === "new")!.achievement.completed, true);
 });
 
 console.log(`\n${passed} passed`);

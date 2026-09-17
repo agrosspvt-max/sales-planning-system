@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/lib/scheme-achievement.test.ts && tsx src/lib/scheme-requirement.test.ts && tsx src/lib/scheme-follow-up.test.ts && tsx src/lib/scheme-upload.test.ts && tsx src/lib/scheme-options.test.ts && tsx src/lib/product-merge.test.ts && tsx src/features/planning/merge-aggregation.test.ts && tsx src/lib/recovery-population.test.ts && tsx src/lib/scheme-installments.test.ts && tsx src/lib/scheme-conversion-extension.test.ts && tsx src/lib/scheme-isolation.test.ts && tsx src/features/schemes/scheme-installment-flow.test.ts && tsx src/features/schemes/scheme-bills.test.ts",
+    "test": "tsx src/lib/scheme-achievement.test.ts && tsx src/lib/scheme-requirement.test.ts && tsx src/lib/scheme-follow-up.test.ts && tsx src/lib/scheme-upload.test.ts && tsx src/lib/scheme-options.test.ts && tsx src/lib/product-merge.test.ts && tsx src/features/planning/merge-aggregation.test.ts && tsx src/lib/recovery-population.test.ts && tsx src/lib/scheme-installments.test.ts && tsx src/lib/scheme-lifecycle.test.ts && tsx src/lib/scheme-create-plan-summary.test.ts && tsx src/lib/scheme-create-plan-draft.test.ts && tsx src/lib/scheme-dealer-universe.test.ts && tsx src/lib/calendar.test.ts && tsx src/features/navigation/nav-calendar.test.ts && tsx src/lib/scheme-conversion-extension.test.ts && tsx src/lib/scheme-plan-quantity.test.ts && tsx src/lib/scheme-isolation.test.ts && tsx src/features/schemes/scheme-plan-quantity-flow.test.ts && tsx src/features/schemes/scheme-installment-flow.test.ts && tsx src/features/schemes/scheme-summary-lifecycle.test.ts && tsx src/features/schemes/scheme-rm-routing.test.ts && tsx src/lib/rm-routing-contract.test.ts && tsx src/features/schemes/scheme-bills.test.ts",
     "test:db": "tsx scripts/scheme-upload-integration.ts",
     "format": "prettier --write .",
     "prisma:generate": "prisma generate",
@@ -18,7 +18,8 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:normalize-seasons": "tsx scripts/normalize-season-names.ts",
     "db:season-conflict-report": "tsx scripts/season-conflict-report.ts",
-    "db:delete-duplicate-season": "tsx scripts/delete-duplicate-season.ts"
+    "db:delete-duplicate-season": "tsx scripts/delete-duplicate-season.ts",
+    "db:backfill-orphan-pending-rm": "tsx scripts/backfill-orphan-pending-rm.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

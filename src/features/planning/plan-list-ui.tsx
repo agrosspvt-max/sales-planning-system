@@ -189,6 +189,31 @@ export function PillNav<T extends string>({ value, onChange, items }: { value: T
   );
 }
 
+/**
+ * Clean underlined secondary-tab navigation — the SAME style as Sales Planning's Seasonal / Monthly / Yearly
+ * tabs: plain text on the page (no enclosing box, no pill/segmented background), active tab in the primary
+ * colour with a blue bottom border, inactive tabs muted. On small screens it scrolls horizontally while
+ * keeping the same appearance.
+ */
+export function UnderlineTabs<T extends string>({ value, onChange, items }: { value: T; onChange: (v: T) => void; items: { value: T; label: string }[] }) {
+  return (
+    <div className="flex gap-1 overflow-x-auto border-b">
+      {items.map((it) => (
+        <button
+          key={it.value}
+          onClick={() => onChange(it.value)}
+          className={cn(
+            "whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+            value === it.value ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Convenience: unique options from rows for a field (for the Add-Filter dropdowns). */
 export function optionsFrom<T>(rows: T[], get: (r: T) => { id: string; label: string } | null): { value: string; label: string }[] {
   const map = new Map<string, string>();

@@ -16,9 +16,10 @@ function loadService<T>(name: string, prisma: object, overrides: Record<string, 
   const exports = {};
   const mocks: Record<string, unknown> = {
     "./scheme-bills.server": { billFinancialScope: {}, rejectLegacyBillWrite: async () => {} },
+    "./scheme-plan-quantity.server": { conversionQuantityPlanSelect: {}, applyConversionQuantity: async () => ({ split: false }) },
     "server-only": {}, "@/lib/prisma": { prisma }, "@/lib/audit": { writeAudit: async () => {} },
     "@/lib/http": { ApiError: class extends Error { constructor(public status: number, message: string) { super(message); } } },
-    "@/lib/scope": { getOfficerScope: async () => ({ all: true, ids: [] }), assertOfficerInScope: async () => {} },
+    "@/lib/scope": { getOfficerScope: async () => ({ all: true, ids: [] }), assertOfficerInScope: async () => {}, getCurrentManagerId: async () => null },
     "./scheme-master.server": { refreshSchemeStatuses: async () => {} },
     "./scheme-planning.server": { ensureInstances: async () => [{ id: "instance", instanceNumber: 1 }] },
     ...overrides,
@@ -83,13 +84,14 @@ async function main() {
   console.log("PASS master create/edit persists and validates Options Amount, mandatory fields, and GST values");
 
   let conversionTransactions = 0;
+  let conversionTimeout: number | undefined;
   const bills = loadService<typeof import("./scheme-bills.server")>("scheme-bills.server.ts", {
     dealerSchemePlan: { findUnique: async () => ({
       salesOfficerId: "admin", numberOfSchemes: 4, totalSchemeAmount: 400000,
       optionValueWithoutGST: null, optionValueWithGST: null, optionBookingAmount: null,
       scheme: { structure: "FIXED", schemeValueWithoutGST: 80000, schemeValueWithGST: 100000, bookingAmount: 0, installmentRules: [] },
     }) },
-    $transaction: async () => { conversionTransactions++; return { ok: true }; },
+    $transaction: async (_fn: unknown, options?: { timeout?: number }) => { conversionTransactions++; conversionTimeout = options?.timeout; return { ok: true }; },
   });
   const conversionBilling = (amountWithoutGST: string, amountWithGST: string) => ({
     billCount: 1, amountWithoutGST, amountWithGST,
@@ -100,7 +102,60 @@ async function main() {
   assert.equal(conversionTransactions, 0);
   await bills.saveBillConversion(ctx, "plan", { schemeStatus: "CONVERTED" }, conversionBilling("320000", "400000"));
   assert.equal(conversionTransactions, 1);
+  await bills.saveBillConversion(ctx, "plan", { schemeStatus: "CONVERTED", proceedingSchemes: 2, remainingDisposition: "CANCELLED" }, conversionBilling("160000", "200000"));
+  assert.equal(conversionTransactions, 2); // selected quantity uses the same frozen per-scheme values
+  assert.equal(conversionTimeout, 15000);
   console.log("PASS SO conversion enforces combined preset minimums before its transaction");
+
+  let lockQueries = 0;
+  let lockedReads = 0;
+  let billWrites = 0;
+  let planWrites = 0;
+  let appliedWithLockedPlan = false;
+  const lockedPlan = {
+    id: "plan", salesOfficerId: "admin", numberOfSchemes: 4, totalSchemeAmount: 400000,
+    optionValueWithoutGST: null, optionValueWithGST: null,
+    scheme: { structure: "FIXED", schemeValueWithoutGST: 80000, schemeValueWithGST: 100000 },
+    planStatus: "APPROVED", schemeStatus: "PENDING", enrollmentStatus: "PENDING_DOCUMENT", billMode: false,
+    billsLockedAt: null, soBillCount: null, soAmountWithoutGST: null, soAmountWithGST: null,
+    adminVerifiedAt: null, adminPrePlacementDays: null, prePlacementDays: null,
+  };
+  const billTx = {
+    $queryRaw: async () => { lockQueries++; return [{ id: "plan" }]; },
+    $executeRaw: async () => { billWrites++; return 1; },
+    dealerSchemePlan: {
+      findUnique: async () => { lockedReads++; return lockedPlan; },
+      update: async () => { planWrites++; },
+    },
+    dealerSchemeInstallment: { count: async () => 0 },
+    dealerSchemeInstance: { count: async () => 0 },
+    dealerSchemeBill: { findMany: async () => [] },
+  };
+  let focusedTimeout: number | undefined;
+  const focusedBills = loadService<typeof import("./scheme-bills.server")>("scheme-bills.server.ts", {
+    dealerSchemePlan: { findUnique: async () => ({
+      salesOfficerId: "admin", numberOfSchemes: 4, totalSchemeAmount: 400000,
+      optionValueWithoutGST: null, optionValueWithGST: null, optionBookingAmount: null,
+      scheme: { structure: "FIXED", schemeValueWithoutGST: 80000, schemeValueWithGST: 100000, bookingAmount: 0, installmentRules: [] },
+    }) },
+    $transaction: async (fn: (db: typeof billTx) => Promise<unknown>, options?: { timeout?: number }) => {
+      focusedTimeout = options?.timeout;
+      return fn(billTx);
+    },
+  }, {
+    "./scheme-plan-quantity.server": {
+      conversionQuantityPlanSelect: {},
+      applyConversionQuantity: async (_tx: unknown, _ctx: unknown, _id: unknown, _input: unknown, plan: unknown) => {
+        appliedWithLockedPlan = plan === lockedPlan;
+        return { split: true };
+      },
+    },
+  });
+  await focusedBills.saveBillConversion(ctx, "plan", { schemeStatus: "CONVERTED", proceedingSchemes: 2, remainingDisposition: "FUTURE_DRAFT" }, conversionBilling("160000", "200000"));
+  assert.deepEqual({ lockQueries, lockedReads, billWrites, planWrites, focusedTimeout, appliedWithLockedPlan }, {
+    lockQueries: 1, lockedReads: 1, billWrites: 1, planWrites: 1, focusedTimeout: 15000, appliedWithLockedPlan: true,
+  });
+  console.log("PASS combined billing reuses one locked plan and writes bills in the scoped transaction");
 
   let saved: Record<string, unknown> = {};
   let currentState = "DRAFT";

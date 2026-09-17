@@ -95,11 +95,13 @@ export async function loadEnrolledDealerIds(ctx: AuthContext, schemeIds: string[
     },
     select: { schemeId: true, dealerId: true },
   })) as { schemeId: string; dealerId: string }[];
+  const sets = new Map<string, Set<string>>();
   for (const r of rows) {
-    const list = out.get(r.schemeId);
-    if (list) list.push(r.dealerId);
-    else out.set(r.schemeId, [r.dealerId]);
+    let set = sets.get(r.schemeId);
+    if (!set) { set = new Set(); sets.set(r.schemeId, set); }
+    set.add(r.dealerId);
   }
+  for (const [schemeId, dealers] of sets) out.set(schemeId, [...dealers]);
   return out;
 }
 

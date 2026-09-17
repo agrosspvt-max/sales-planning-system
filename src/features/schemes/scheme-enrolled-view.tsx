@@ -45,15 +45,21 @@ interface Detail { scheme: SchemeInfo; dealers: DealerRow[]; canEditPlanned: boo
 interface ListRow { id: string; schemeName: string; enrolledDealers: number; partialDealers: number; startDate: string | null; endDate: string | null; isPerpetual: boolean; status: string }
 
 /** Enrolled Scheme — role-aware operational view. List of enrolled schemes → per-scheme installment tracker.
- *  Optional `officerId` scopes an RM to one team Sales Officer (server-validated); omitted = full scope. */
-export function EnrolledSchemesView({ officerId }: { officerId?: string } = {}) {
+ *  Optional `officerId` scopes an RM to one team Sales Officer (server-validated); omitted = full scope.
+ *  Optional `schemeStatusFilter` limits the list to OPEN ("Running") or CLOSED schemes — View Plan → Enrolled
+ *  Plans passes "OPEN" so that closed-scheme plans live only under Older Plans (exclusive archive). */
+export function EnrolledSchemesView({ officerId, schemeStatusFilter }: { officerId?: string; schemeStatusFilter?: "OPEN" | "CLOSED" } = {}) {
   const [openScheme, setOpenScheme] = useState<{ id: string; name: string } | null>(null);
   if (openScheme) return <EnrolledSchemeDetail schemeId={openScheme.id} officerId={officerId} onBack={() => setOpenScheme(null)} />;
-  return <EnrolledSchemeList officerId={officerId} onOpen={setOpenScheme} />;
+  return <EnrolledSchemeList officerId={officerId} schemeStatusFilter={schemeStatusFilter} onOpen={setOpenScheme} />;
 }
 
-function EnrolledSchemeList({ onOpen, officerId }: { onOpen: (s: { id: string; name: string }) => void; officerId?: string }) {
-  const { data, isLoading } = useQuery<ListRow[]>({ queryKey: ["enrolled-schemes", officerId ?? "all"], queryFn: () => api.get(`/api/schemes/enrolled${officerId ? `?officerId=${encodeURIComponent(officerId)}` : ""}`) });
+function EnrolledSchemeList({ onOpen, officerId, schemeStatusFilter }: { onOpen: (s: { id: string; name: string }) => void; officerId?: string; schemeStatusFilter?: "OPEN" | "CLOSED" }) {
+  const { data: raw, isLoading } = useQuery<ListRow[]>({ queryKey: ["enrolled-schemes", officerId ?? "all"], queryFn: () => api.get(`/api/schemes/enrolled${officerId ? `?officerId=${encodeURIComponent(officerId)}` : ""}`) });
+  // "Running" == open scheme, "Closed" == closed (see enrolledSchemes server mapping).
+  const data = schemeStatusFilter
+    ? (raw ?? []).filter((s) => (schemeStatusFilter === "OPEN" ? s.status === "Running" : s.status !== "Running"))
+    : raw;
   return (
     <div className="overflow-auto rounded-lg border bg-background">
       <Table>

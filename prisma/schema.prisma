@@ -50,7 +50,9 @@ model User {
   enrolledSchemePlans    DealerSchemePlan[]       @relation("EnrolledSchemePlans")
   schemePayments         SchemePayment[]          @relation("SchemePaymentCreatedBy")
   conversionExtensions   SchemeConversionExtension[] @relation("ConversionExtendedBy")
+  schemePlanQuantitySplits SchemePlanQuantitySplit[] @relation("SchemePlanQuantitySplitCreatedBy")
   schemeUploadBatches    SchemeUploadBatch[]      @relation("SchemeUploadBatches")
+  calendarNotes          CalendarNote[]           @relation("CalendarNoteOwner")
   group                  UserGroup?               @relation(fields: [groupId], references: [id])
 
   @@index([role])
@@ -167,6 +169,7 @@ model DealerSchemePlan {
   // --- Part E: new Plan Status / Scheme Status model (old planningStatus/enrollmentStatus kept during migration) ---
   planStatus       SchemePlanState        @default(DRAFT) // Draft → Pending for RM → Pending Approval → Approved (+ Returned/Rejected)
   schemeStatus     SchemeConversionStatus @default(PENDING) // appears only after Approved; SO-controlled
+  segmentNumber    Int                    @default(1) // 1 for existing/root plans; later values are split remainders only
   numberOfSchemes  Int                    @default(1) // dealer takes the same scheme N times (Allow Multi Schemes = Yes)
   totalSchemeAmount Decimal?              @db.Decimal(14, 2) // effective value (With GST) × numberOfSchemes
   soNote           String?                // optional per-dealer note written by the Sales Officer in Create Plan
@@ -226,8 +229,11 @@ model DealerSchemePlan {
   instances        DealerSchemeInstance[]
   payments         SchemePayment[]
   conversionExtensions SchemeConversionExtension[]
+  quantitySplitAsSource SchemePlanQuantitySplit? @relation("SchemePlanQuantitySplitSource")
+  quantitySplitAsFuture SchemePlanQuantitySplit? @relation("SchemePlanQuantitySplitFuture")
 
-  @@unique([schemeId, dealerId])
+  @@unique([schemeId, dealerId, segmentNumber])
+  @@index([schemeId, dealerId])
   @@index([schemeId])
   @@index([dealerId])
   @@index([salesOfficerId])
@@ -236,6 +242,26 @@ model DealerSchemePlan {
   @@index([planStatus])
   @@index([schemeStatus])
   @@index([selectedOptionId])
+}
+
+/// Immutable audit record for reducing an approved plan at conversion. The source plan keeps the quantity
+/// proceeding now; a FUTURE_DRAFT split links the remaining quantity to another ordinary DealerSchemePlan.
+model SchemePlanQuantitySplit {
+  id                  String                         @id @default(cuid())
+  sourcePlanId        String                         @unique
+  futurePlanId        String?                        @unique
+  originalQuantity    Int
+  proceedingQuantity  Int
+  remainingQuantity   Int
+  disposition         SchemePlanRemainderDisposition
+  createdById         String
+  createdAt           DateTime                       @default(now())
+  sourcePlan          DealerSchemePlan               @relation("SchemePlanQuantitySplitSource", fields: [sourcePlanId], references: [id], onDelete: Cascade)
+  futurePlan          DealerSchemePlan?              @relation("SchemePlanQuantitySplitFuture", fields: [futurePlanId], references: [id], onDelete: SetNull)
+  createdBy           User                           @relation("SchemePlanQuantitySplitCreatedBy", fields: [createdById], references: [id])
+
+  @@index([createdById])
+  @@index([disposition])
 }
 
 /// One Conversion Date Extension event for a dealer plan. Immutable history — the source of truth for how
@@ -782,6 +808,22 @@ model AuditLog {
   @@index([userId])
   @@index([entity])
   @@index([createdAt])
+}
+
+/// A personal calendar note pinned to a date by its owner. This is the ONLY calendar data that is stored:
+/// CONVERSION calendar events are PROJECTED at read time from DealerSchemePlan (never duplicated here).
+/// `date` is a date-only value (stored at midnight), matching how conversion dates are handled elsewhere.
+model CalendarNote {
+  id        String   @id @default(cuid())
+  ownerId   String
+  date      DateTime // the day this note is pinned to (date-only)
+  text      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  owner     User     @relation("CalendarNoteOwner", fields: [ownerId], references: [id])
+
+  @@index([ownerId, date])
+  @@index([date])
 }
 
 /// Field-level history of Super-Admin corrections to APPROVED plans (Admin Override / Edit Mode).
@@ -1388,6 +1430,11 @@ enum SchemeConversionStatus {
   PENDING
   CONVERTED
   DECLINED
+}
+
+enum SchemePlanRemainderDisposition {
+  CANCELLED
+  FUTURE_DRAFT
 }
 
 enum SchemeBookingStatus {

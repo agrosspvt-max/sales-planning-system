@@ -25,7 +25,7 @@ export interface SchemePlan {
   documentCompleted: boolean; documentType: string | null; verificationRemarks: string | null;
   enrolledByName: string | null; enrolledAt: string | null; createdAt: string;
   // Part E
-  planStatus: string; schemeStatus: string; numberOfSchemes: number; totalSchemeAmount: number; soNote: string | null; planningDate: string | null;
+  planStatus: string; schemeStatus: string; schemeClosed?: boolean; segmentNumber?: number; numberOfSchemes: number; totalSchemeAmount: number; soNote: string | null; planningDate: string | null;
   originalConversionDate: string | null; conversionExtensionCount: number; maxExtensionDays: number; maxExtensionAttempts: number;
   conversionExtensions: { extensionNumber: number; previousConversionDate: string; newConversionDate: string; daysAdded: number; extendedByName: string | null; createdAt: string }[];
   conversionDate: string | null; soBookingStatus: string | null; soBookingAmount: number | null; soDocumentStatus: string | null; billingDate: string | null;
@@ -38,6 +38,8 @@ export interface SchemePlan {
   // Pre-placement (Phase 11). prePlacementDays = SO/dealer requested; adminPrePlacementDays = Admin confirmed;
   // prePlacementMaxDays = scheme ceiling (0 ⇒ not available).
   prePlacementDays?: number | null; adminPrePlacementDays?: number | null; prePlacementMaxDays?: number;
+  quantitySplit?: { originalQuantity: number; proceedingQuantity: number; remainingQuantity: number; disposition: string; futurePlanId: string | null; createdAt: string } | null;
+  splitRemainder?: { sourcePlanId: string; allocatedQuantity: number } | null;
 }
 
 // Part E Plan Status labels/badges.

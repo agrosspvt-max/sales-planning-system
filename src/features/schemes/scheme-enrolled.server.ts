@@ -194,23 +194,26 @@ export async function enrolledSchemes(ctx: AuthContext, officerId?: string): Pro
   const officerFilter = officerId ? { salesOfficerId: officerId } : scope.all ? {} : { salesOfficerId: { in: scope.ids } };
   const plans = (await prisma.dealerSchemePlan.findMany({
     where: { ...billFinancialScope, ...officerFilter },
-    select: { schemeId: true, enrollmentStatus: true, scheme: { select: { schemeName: true, startDate: true, endDate: true, isPerpetual: true, status: true } } },
-  })) as { schemeId: string; enrollmentStatus: string; scheme: { schemeName: string; startDate: Date | null; endDate: Date | null; isPerpetual: boolean; status: string } }[];
+    select: { schemeId: true, dealerId: true, enrollmentStatus: true, scheme: { select: { schemeName: true, startDate: true, endDate: true, isPerpetual: true, status: true } } },
+  })) as { schemeId: string; dealerId: string; enrollmentStatus: string; scheme: { schemeName: string; startDate: Date | null; endDate: Date | null; isPerpetual: boolean; status: string } }[];
 
   const map = new Map<string, EnrolledSchemeListRow>();
+  const enrolledByScheme = new Map<string, Set<string>>();
+  const partialByScheme = new Map<string, Set<string>>();
   for (const p of plans) {
-    const cur = map.get(p.schemeId);
-    if (cur) { if (p.enrollmentStatus === "ENROLLED") cur.enrolledDealers++; else cur.partialDealers++; continue; }
-    map.set(p.schemeId, {
-      id: p.schemeId,
-      schemeName: p.scheme.schemeName,
-      enrolledDealers: p.enrollmentStatus === "ENROLLED" ? 1 : 0,
-      partialDealers: p.enrollmentStatus === "ENROLLED" ? 0 : 1,
-      startDate: p.scheme.startDate?.toISOString() ?? null,
-      endDate: p.scheme.endDate?.toISOString() ?? null,
-      isPerpetual: p.scheme.isPerpetual,
-      status: p.scheme.status === SchemeStatus.OPEN ? "Running" : "Closed",
+    if (!map.has(p.schemeId)) map.set(p.schemeId, {
+      id: p.schemeId, schemeName: p.scheme.schemeName, enrolledDealers: 0, partialDealers: 0,
+      startDate: p.scheme.startDate?.toISOString() ?? null, endDate: p.scheme.endDate?.toISOString() ?? null,
+      isPerpetual: p.scheme.isPerpetual, status: p.scheme.status === SchemeStatus.OPEN ? "Running" : "Closed",
     });
+    const target = p.enrollmentStatus === "ENROLLED" ? enrolledByScheme : partialByScheme;
+    let set = target.get(p.schemeId);
+    if (!set) { set = new Set(); target.set(p.schemeId, set); }
+    set.add(p.dealerId);
+  }
+  for (const [schemeId, row] of map) {
+    row.enrolledDealers = enrolledByScheme.get(schemeId)?.size ?? 0;
+    row.partialDealers = partialByScheme.get(schemeId)?.size ?? 0;
   }
   return [...map.values()].sort((a, b) => a.schemeName.localeCompare(b.schemeName));
 }

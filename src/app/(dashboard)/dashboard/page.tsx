@@ -8,6 +8,7 @@ import { formatCurrency, formatPercent } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DraftPlans } from "@/components/dashboard/draft-plans";
+import { UpcomingCard } from "@/features/calendar/upcoming-card";
 import {
   Table,
   TableBody,
@@ -17,12 +18,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { RankRow } from "@/features/reports/types";
+import { getCalendarEnabled } from "@/lib/recovery-config";
 
 export default async function DashboardPage() {
   const session = await auth();
   // requireAuth resolves the full context (incl. groupId) from the DB — needed for RM group scoping.
   const ctx = await requireAuth();
-  const data = await getDashboard(ctx);
+  const [data, calendarEnabled] = await Promise.all([getDashboard(ctx), getCalendarEnabled()]);
 
   return (
     <div className="space-y-6">
@@ -53,6 +55,8 @@ export default async function DashboardPage() {
           href="/planning/sales/plans"
         />
       </div>
+
+      {calendarEnabled && <UpcomingCard />}
 
       <DraftPlans role={ctx.role} />
 

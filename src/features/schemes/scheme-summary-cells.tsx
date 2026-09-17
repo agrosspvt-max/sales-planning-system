@@ -1,18 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
 import { cn, formatCurrency } from "@/lib/utils";
 import { TableCell, TableHead } from "@/components/ui/table";
 import { L, useLabel } from "@/features/labels/label-ui";
 import type { LabelKey } from "@/features/labels/labels";
+import { billingSide, type SchemePlan } from "./scheme-detail-dialog";
 
 /**
- * The eight shared Scheme-wise SUMMARY metric columns (View Plan → Scheme-wise), reused by the SO/RM table
+ * The shared Scheme-wise SUMMARY metric columns (View Plan → Scheme-wise), reused by the SO/RM table
  * (`SchemeWiseCollapsibleView`) and the Admin table (`SchemeReviewWorkspace`) so the calculation and the
- * presentation live in ONE place. Values come from the server aggregation (`schemeWiseSummary`) — this file
- * only renders them. Phase 1: display only (clickable detail + column filters arrive in Phase 2).
+ * presentation live in ONE place. The first eight values come from the server aggregation
+ * (`schemeWiseSummary`). Approved adds billing completion from the detailed plan payload, using the same
+ * filled/total calculation as the expanded dealer table.
  */
 
 /** The per-scheme metric fields this renderer needs (mirrors the server SchemeWiseSummaryRow). */
@@ -181,32 +183,122 @@ export function ColumnFilterHead({ labelKey, options, value, onApply, className 
 function MetricPopover({ open, onOpenChange, value, title, lines, className }: {
   open: boolean; onOpenChange: (open: boolean) => void; value: ReactNode; title: string; lines: { label: string; value: string | number }[]; className?: string;
 }) {
-  const ref = useRef<HTMLTableCellElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
+  const close = useCallback(() => { onOpenChange(false); setCoords(null); }, [onOpenChange]);
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onOpenChange(false); };
+    const GAP = 4;
+    const VIEWPORT_MARGIN = 8;
+    const place = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = popRef.current?.offsetWidth ?? 224; // w-56
+      const height = popRef.current?.offsetHeight ?? 128;
+      const roomBelow = window.innerHeight - rect.bottom - VIEWPORT_MARGIN;
+      const roomAbove = rect.top - VIEWPORT_MARGIN;
+      const placeAbove = roomBelow < height + GAP && roomAbove > roomBelow;
+      const preferredTop = placeAbove ? rect.top - height - GAP : rect.bottom + GAP;
+      const top = Math.max(VIEWPORT_MARGIN, Math.min(preferredTop, window.innerHeight - height - VIEWPORT_MARGIN));
+      const preferredLeft = rect.right - width;
+      const left = Math.max(VIEWPORT_MARGIN, Math.min(preferredLeft, window.innerWidth - width - VIEWPORT_MARGIN));
+      setCoords({ left, top });
+    };
+    place();
+    // The first pass uses the known w-56 width and an estimated height. Once the portal is mounted, measure
+    // its actual size and place it again so even the lowest/rightmost cell remains fully inside the viewport.
+    const frame = window.requestAnimationFrame(place);
+    const onDoc = (e: MouseEvent) => {
+      if (popRef.current?.contains(e.target as Node) || triggerRef.current?.contains(e.target as Node)) return;
+      close();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open, onOpenChange]);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, close]);
   return (
-    <TableCell ref={ref} className={cn("text-right", className)} onClick={(e) => e.stopPropagation()}>
-      <div className="relative inline-block text-left font-normal normal-case">
-        <button type="button" className="cursor-pointer hover:underline" onClick={() => onOpenChange(!open)}>{value}</button>
-        {open && (
-          <div className="absolute right-0 z-30 mt-1 w-56 rounded-md border bg-background p-2 text-xs shadow-md">
+    <TableCell className={cn("text-right", className)} onClick={(e) => e.stopPropagation()}>
+      <div className="inline-block text-left font-normal normal-case">
+        <button ref={triggerRef} type="button" className="cursor-pointer hover:underline" onClick={() => (open ? close() : onOpenChange(true))}>{value}</button>
+        {open && coords && createPortal(
+          <div
+            ref={popRef}
+            style={{ position: "fixed", left: coords.left, top: coords.top }}
+            className="z-50 w-56 rounded-md border bg-background p-2 text-xs shadow-md"
+          >
             <div className="mb-1 font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
             {lines.map((l, i) => (
               <div key={i} className="flex justify-between gap-3 py-0.5"><span className="text-muted-foreground">{l.label}</span><span className="tabular-nums font-medium">{l.value}</span></div>
             ))}
-          </div>
+          </div>,
+          document.body,
         )}
       </div>
     </TableCell>
   );
 }
 
+/**
+ * Compact Sales Officer(s) cell for the Scheme-wise parent table: shows the first officer, and when there are
+ * more, a clickable "+N" that opens a small popover listing the rest. Click (not hover) so it works on
+ * touchpads/touch. Order is deterministic (the caller passes officers in a stable order); the first stays
+ * fixed. Stops row-toggle propagation. Same popover visual language as the metric/filter popovers.
+ */
+export function SchemeOfficerCell({ names }: { names: string[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  if (names.length === 0) return <span className="text-muted-foreground">—</span>;
+  const [first, ...rest] = names;
+  if (rest.length === 0) return <span className="truncate">{first}</span>;
+  return (
+    <span ref={ref} className="relative inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+      <span className="max-w-[11rem] truncate">{first}</span>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="shrink-0 rounded bg-primary/15 px-1 text-xs font-medium text-foreground hover:bg-primary/25"
+        aria-label={`${rest.length} more Sales Officer${rest.length === 1 ? "" : "s"}`}
+      >
+        +{rest.length}
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-30 mt-1 w-56 rounded-md border bg-background p-2 text-left font-normal normal-case shadow-md">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Other Sales Officers</div>
+          <ul className="max-h-56 space-y-0.5 overflow-auto">
+            {rest.map((n, i) => <li key={i} className="text-sm">{n}</li>)}
+          </ul>
+        </div>
+      )}
+    </span>
+  );
+}
+
 /** The eight summary metric columns count — for colSpan math in the host tables. */
 export const SUMMARY_METRIC_COLS = 8;
+/** Approved adds Billing Completion Status at the far right. */
+export const APPROVED_METRIC_COLS = SUMMARY_METRIC_COLS + 1;
+/** In the Submitted tab five conversion/verification metrics are hidden (Converted Dealers, Converted Schemes,
+ *  Booking Amount, Document Status, Billing Status), leaving Planned Dealers · Planned Schemes · Total Amount.
+ *  Host tables use this for colSpan math so headers/cells/skeletons stay aligned. */
+export const SUBMITTED_METRIC_COLS = 3;
+export const metricColCount = (submitted: boolean, billingCompletion = false) => submitted ? SUBMITTED_METRIC_COLS : billingCompletion ? APPROVED_METRIC_COLS : SUMMARY_METRIC_COLS;
 
 /** A "numerator / denominator" ratio. Denominator 0 renders as an em dash (nothing to divide by). */
 function Ratio({ num, den }: { num: number; den: number }) {
@@ -218,21 +310,23 @@ interface FilterCtl { value: string[]; onApply: (v: string[]) => void }
 
 /** The eight metric header cells. When `booking`/`documents` controllers are passed those two become
  *  clickable multiselect filter headers; the rest stay plain label-driven headers. */
-export function SchemeSummaryHeads({ booking, documents }: { booking?: FilterCtl; documents?: FilterCtl } = {}) {
+export function SchemeSummaryHeads({ booking, documents, submitted = false, billingCompletion = false }: { booking?: FilterCtl; documents?: FilterCtl; submitted?: boolean; billingCompletion?: boolean } = {}) {
   return (
     <>
       <TableHead className="text-right"><L k="scheme_planning.col.planned_dealers" /></TableHead>
-      <TableHead className="text-right"><L k="scheme_planning.col.converted_dealers" /></TableHead>
+      {!submitted && <TableHead className="text-right"><L k="scheme_planning.col.converted_dealers" /></TableHead>}
       <TableHead className="text-right"><L k="scheme_planning.col.planned_schemes" /></TableHead>
-      <TableHead className="text-right"><L k="scheme_planning.col.converted_schemes" /></TableHead>
+      {!submitted && <TableHead className="text-right"><L k="scheme_planning.col.converted_schemes" /></TableHead>}
       <TableHead className="text-right"><L k="scheme_planning.col.total_amount" /></TableHead>
-      {booking
+      {/* Submitted hides Booking Amount / Document Status / Billing Status (verification metrics). */}
+      {!submitted && (booking
         ? <ColumnFilterHead labelKey="scheme_planning.col.booking_amount" options={BOOKING_OPTIONS} value={booking.value} onApply={booking.onApply} className="text-right" />
-        : <TableHead className="text-right"><L k="scheme_planning.col.booking_amount" /></TableHead>}
-      {documents
+        : <TableHead className="text-right"><L k="scheme_planning.col.booking_amount" /></TableHead>)}
+      {!submitted && (documents
         ? <ColumnFilterHead labelKey="scheme_planning.col.document_status" options={DOCUMENT_OPTIONS} value={documents.value} onApply={documents.onApply} className="text-right" />
-        : <TableHead className="text-right"><L k="scheme_planning.col.document_status" /></TableHead>}
-      <TableHead className="text-right"><L k="scheme_planning.col.billing_status" /></TableHead>
+        : <TableHead className="text-right"><L k="scheme_planning.col.document_status" /></TableHead>)}
+      {!submitted && <TableHead className="text-right"><L k="scheme_planning.col.billing_status" /></TableHead>}
+      {!submitted && billingCompletion && <TableHead className="text-right"><L k="scheme_planning.col.billing_completion_status" /></TableHead>}
     </>
   );
 }
@@ -248,29 +342,60 @@ export function SchemeSummaryHeads({ booking, documents }: { booking?: FilterCtl
  * - Document Status  = Admin-received / SO-converted
  * - Billing Status   = Admin billing filled / SO billing filled
  */
-export function SchemeSummaryValueCells({ m, activeDealers }: { m: SchemeSummaryMetrics; activeDealers: number }) {
+export function SchemeSummaryValueCells({ m, activeDealers, submitted = false, billingCompletionPlans }: { m: SchemeSummaryMetrics; activeDealers: number; submitted?: boolean; billingCompletionPlans?: SchemePlan[] }) {
   // A single "which popover is open" id per row → at most one breakdown visible at a time. Clicking a metric
   // in another row closes this one via MetricPopover's outside-click handler.
   const [openId, setOpenId] = useState<string | null>(null);
   const pop = (id: string) => ({ open: openId === id, onOpenChange: (o: boolean) => setOpenId(o ? id : null) });
+  const billingCompletion = billingCompletionPlans?.reduce((sum, plan) => {
+    const admin = billingSide(plan, "admin");
+    return { filled: sum.filled + admin.filled, total: sum.total + admin.total };
+  }, { filled: 0, total: 0 });
   return (
     <>
       <MetricPopover {...pop("plannedDealers")} value={<Ratio num={m.plannedDealers} den={activeDealers} />} title="Planned Dealers"
         lines={[{ label: "Planned", value: m.plannedDealers }, { label: "Active dealers", value: activeDealers }, { label: "Not planned", value: Math.max(0, activeDealers - m.plannedDealers) }]} />
-      <MetricPopover {...pop("convertedDealers")} value={<Ratio num={m.adminConvertedDealers} den={m.soConvertedDealers} />} title="Converted Dealers"
-        lines={[{ label: "SO Converted", value: m.soConvertedDealers }, { label: "Admin Confirmed", value: m.adminConvertedDealers }, { label: "Remaining", value: Math.max(0, m.soConvertedDealers - m.adminConvertedDealers) }]} />
+      {!submitted && (
+        <MetricPopover {...pop("convertedDealers")} value={<Ratio num={m.adminConvertedDealers} den={m.soConvertedDealers} />} title="Converted Dealers"
+          lines={[{ label: "SO Converted", value: m.soConvertedDealers }, { label: "Admin Confirmed", value: m.adminConvertedDealers }, { label: "Remaining", value: Math.max(0, m.soConvertedDealers - m.adminConvertedDealers) }]} />
+      )}
       <MetricPopover {...pop("plannedSchemes")} value={<span className="tabular-nums">{m.plannedSchemes}</span>} title="Planned Schemes"
         lines={[{ label: "Scheme units", value: m.plannedSchemes }, { label: "Dealers", value: m.plannedDealers }]} />
-      <MetricPopover {...pop("convertedSchemes")} value={<Ratio num={m.adminConvertedUnits} den={m.soConvertedUnits} />} title="Converted Schemes"
-        lines={[{ label: "SO Converted (units)", value: m.soConvertedUnits }, { label: "Admin Confirmed (units)", value: m.adminConvertedUnits }, { label: "Remaining", value: Math.max(0, m.soConvertedUnits - m.adminConvertedUnits) }]} />
+      {!submitted && (
+        <MetricPopover {...pop("convertedSchemes")} value={<Ratio num={m.adminConvertedUnits} den={m.soConvertedUnits} />} title="Converted Schemes"
+          lines={[{ label: "SO Converted (units)", value: m.soConvertedUnits }, { label: "Admin Confirmed (units)", value: m.adminConvertedUnits }, { label: "Remaining", value: Math.max(0, m.soConvertedUnits - m.adminConvertedUnits) }]} />
+      )}
       <MetricPopover {...pop("totalAmount")} value={<span className="tabular-nums">{formatCurrency(m.totalAmount)}</span>} title="Total Amount"
         lines={[{ label: "Admin-confirmed dealers", value: m.adminConvertedDealers }, { label: "Amount", value: formatCurrency(m.totalAmount) }]} />
-      <MetricPopover {...pop("bookingAmount")} value={<Ratio num={m.bookingReceived} den={m.soConvertedDealers} />} title="Booking Amount"
-        lines={[{ label: "Received", value: m.bookingReceived }, { label: "SO Converted", value: m.soConvertedDealers }, { label: "Not received / other", value: Math.max(0, m.soConvertedDealers - m.bookingReceived) }]} />
-      <MetricPopover {...pop("documentStatus")} value={<Ratio num={m.documentReceived} den={m.soConvertedDealers} />} title="Document Status"
-        lines={[{ label: "Admin received", value: m.documentReceived }, { label: "SO Converted", value: m.soConvertedDealers }, { label: "Not received", value: Math.max(0, m.soConvertedDealers - m.documentReceived) }]} />
-      <MetricPopover {...pop("billingStatus")} value={<Ratio num={m.adminBillingFilled} den={m.soBillingFilled} />} title="Billing Status"
-        lines={[{ label: "SO billing filled", value: m.soBillingFilled }, { label: "Admin billing filled", value: m.adminBillingFilled }, { label: "Remaining", value: Math.max(0, m.soBillingFilled - m.adminBillingFilled) }]} />
+      {/* Submitted hides Booking Amount / Document Status / Billing Status (verification metrics). */}
+      {!submitted && (
+        <MetricPopover {...pop("bookingAmount")} value={<Ratio num={m.bookingReceived} den={m.soConvertedDealers} />} title="Booking Amount"
+          lines={[{ label: "Received", value: m.bookingReceived }, { label: "SO Converted", value: m.soConvertedDealers }, { label: "Not received / other", value: Math.max(0, m.soConvertedDealers - m.bookingReceived) }]} />
+      )}
+      {!submitted && (
+        <MetricPopover {...pop("documentStatus")} value={<Ratio num={m.documentReceived} den={m.soConvertedDealers} />} title="Document Status"
+          lines={[{ label: "Admin received", value: m.documentReceived }, { label: "SO Converted", value: m.soConvertedDealers }, { label: "Not received", value: Math.max(0, m.soConvertedDealers - m.documentReceived) }]} />
+      )}
+      {!submitted && (
+        <MetricPopover {...pop("billingStatus")} value={<Ratio num={m.adminBillingFilled} den={m.soBillingFilled} />} title="Billing Status"
+          lines={[{ label: "SO billing filled", value: m.soBillingFilled }, { label: "Admin billing filled", value: m.adminBillingFilled }, { label: "Remaining", value: Math.max(0, m.soBillingFilled - m.adminBillingFilled) }]} />
+      )}
+      {!submitted && billingCompletion && (
+        <MetricPopover
+          {...pop("billingCompletionStatus")}
+          value={billingCompletion.total === 0
+            ? <span className="text-muted-foreground">—</span>
+            : billingCompletion.filled === billingCompletion.total
+              ? <span className="font-medium text-success">✓ Complete</span>
+              : <Ratio num={billingCompletion.filled} den={billingCompletion.total} />}
+          title="Billing Completion Status"
+          lines={[
+            { label: "Admin billing dates filled", value: billingCompletion.filled },
+            { label: "Applicable billing records", value: billingCompletion.total },
+            { label: "Remaining", value: Math.max(0, billingCompletion.total - billingCompletion.filled) },
+          ]}
+        />
+      )}
     </>
   );
 }

@@ -4,7 +4,7 @@ import { SchemeDateInput } from "./scheme-form-inputs";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, FileText, Eye, Save, Send } from "lucide-react";
+import { ArrowLeft, FileText, Eye, Plus, Save, Send } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatSchemeCurrency as formatCurrency, formatSchemeDate as formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -15,10 +15,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { L } from "@/features/labels/label-ui";
+import { L, useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
+import { UnderlineTabs } from "@/features/planning/plan-list-ui";
 import { PlanStateBadge } from "./scheme-detail-dialog";
-import { SchemeCreatePlanWorkspace } from "./scheme-create-plan";
+import { CreateSchemePlanDialog, SchemeCreatePlanWorkspace, schemeValueText, type RunningScheme as CreateRunningScheme } from "./scheme-create-plan";
 
 const BENEFIT_LABEL: Record<string, string> = { DOMESTIC_TOUR: "Domestic Tour", DOMESTIC_COUPLE_TOUR: "Domestic Couple Tour", FOREIGN_TOUR: "Foreign Tour", CREDIT_NOTE: "Credit Note", OTHER: "Other" };
 const CALC_LABEL: Record<string, string> = { PERCENTAGE: "Percentage", FIXED_AMOUNT: "Fixed Amount" };
@@ -37,6 +38,13 @@ interface RunningScheme {
  * planned lives on the View Plan route (/planning/scheme/plans), mirroring Sales and Recovery Planning.
  */
 export function SchemeOfficerWorkspace() {
+  // Secondary tabs — Open Schemes (read-only list of schemes available to plan) | Draft (the existing planning
+  // workspace, unchanged). Defaults to Open Schemes. Both stay MOUNTED and are toggled with `hidden` so
+  // switching tabs never discards in-progress Draft edits. Same clean underlined style as Admin's Create Plan.
+  const [tab, setTab] = useState<"open" | "draft">("open");
+  const [createOpen, setCreateOpen] = useState(false);
+  const lOpen = useLabel("scheme_planning.view.open_schemes");
+  const lDraft = useLabel("scheme_planning.view.draft");
   return (
     <div className="space-y-5">
       <PageHeader
@@ -45,10 +53,70 @@ export function SchemeOfficerWorkspace() {
         subtitle="Plan your dealers into running schemes and submit for approval."
       />
 
-      {/* Level 1 — Create New Plan | View Plans | Follow-up Plans */}
+      {/* Level 1 — Create New Plan | View Plans | Follow-up Plans (boxed segmented) */}
       <SchemePlanModeLinks mode="create" />
 
-      <SchemeCreatePlanWorkspace />
+      {/* Level 2 — tabs and primary create action share the same row, matching Sales Planning. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <UnderlineTabs value={tab} onChange={setTab} items={[{ value: "open", label: lOpen }, { value: "draft", label: lDraft }]} />
+        <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" /> Create Scheme Plan</Button>
+      </div>
+
+      <div className={tab === "open" ? undefined : "hidden"}><OpenSchemesTable /></div>
+      <div className={tab === "draft" ? undefined : "hidden"}><SchemeCreatePlanWorkspace draftOnly /></div>
+      {createOpen && <CreateSchemePlanDialog onClose={() => setCreateOpen(false)} onSaved={(action) => { if (action === "draft") setTab("draft"); }} />}
+    </div>
+  );
+}
+
+/**
+ * Sales Officer read-only "Open Schemes" list — the schemes available to plan against, presented like the
+ * Admin "View All Scheme" table but WITHOUT the Admin-only columns (States / Status / Actions / lock controls).
+ * Reuses the existing running-schemes data + service (`GET /api/schemes/running`, already officer-scoped and
+ * governed by the existing planning eligibility rules) — no new endpoint, no duplicate scheme data.
+ */
+function OpenSchemesTable() {
+  const { data, isLoading } = useQuery<CreateRunningScheme[]>({ queryKey: ["running-schemes"], queryFn: () => api.get("/api/schemes/running") });
+  const col = {
+    name: useLabel("scheme_master.col.scheme_name"),
+    period: useLabel("scheme_master.col.scheme_period"),
+    lastBooking: useLabel("scheme_master.col.last_booking_date"),
+    withoutGst: useLabel("scheme_master.col.without_gst"),
+    withGst: useLabel("scheme_master.col.with_gst"),
+    benefit: useLabel("scheme_master.col.benefit"),
+  };
+  return (
+    <div className="overflow-auto rounded-lg border bg-background">
+      <Table stickyFirstColumn>
+        <TableHeader>
+          <TableRow>
+            <TableHead>{col.name}</TableHead>
+            <TableHead>{col.period}</TableHead>
+            <TableHead>{col.lastBooking}</TableHead>
+            <TableHead className="text-right">{col.withoutGst}</TableHead>
+            <TableHead className="text-right">{col.withGst}</TableHead>
+            <TableHead>{col.benefit}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {isLoading ? (
+            <TableRow><TableCell colSpan={6}><Skeleton className="h-7 w-full" /></TableCell></TableRow>
+          ) : (data?.length ?? 0) === 0 ? (
+            <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">No running schemes for your State.</TableCell></TableRow>
+          ) : (
+            data!.map((s) => (
+              <TableRow key={s.id}>
+                <TableCell className="font-medium">{s.schemeName}</TableCell>
+                <TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate)} – ${formatDate(s.endDate)}`}</TableCell>
+                <TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate)}</TableCell>
+                <TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithoutGST)}</TableCell>
+                <TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithGST)}</TableCell>
+                <TableCell>{BENEFIT_LABEL[s.schemeBenefit] ?? s.schemeBenefit}</TableCell>
+              </TableRow>
+            ))
+          )}
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -137,7 +205,7 @@ interface PlanningCtx {
     allowMultipleSchemes: boolean; documentUrl: string | null; installments: { installmentNumber: number; calculationType: string; value: number; daysAfterBillingDate: number }[];
   };
   dealers: { id: string; name: string; territory: string | null }[];
-  existing: { dealerId: string; expectedBillingDate: string | null; planningStatus: string; enrollmentStatus: string; planStatus: string; numberOfSchemes: number }[];
+  existing: { dealerId: string; expectedBillingDate: string | null; planningStatus: string; enrollmentStatus: string; planStatus: string; numberOfSchemes: number; splitRemainder: boolean }[];
 }
 
 export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: { schemeId: string; onBack: () => void; enableRmScope?: boolean }) {
@@ -176,6 +244,7 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
     const e = existingByDealer.get(dealerId);
     return !!e && !EDITABLE.has(e.planStatus);
   };
+  const isQuantityLocked = (dealerId: string) => !!existingByDealer.get(dealerId)?.splitRemainder;
   const toggle = (dealerId: string) => {
     if (isLocked(dealerId)) return;
     setSelected((prev) => { const next = new Set(prev); if (next.has(dealerId)) next.delete(dealerId); else next.add(dealerId); return next; });
@@ -312,7 +381,7 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
                             {allowMulti && (
                               <>
                                 <TableCell>
-                                  <NativeSelect className="w-20" disabled={locked} value={String(n)} onChange={(e) => setCounts((prev) => ({ ...prev, [d.id]: Number(e.target.value) }))} options={Array.from({ length: 10 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))} />
+                                  <NativeSelect className="w-20" disabled={locked || isQuantityLocked(d.id)} value={String(n)} onChange={(e) => setCounts((prev) => ({ ...prev, [d.id]: Number(e.target.value) }))} options={Array.from({ length: 10 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))} />
                                 </TableCell>
                                 <TableCell className="text-right tabular-nums">{formatCurrency((scheme?.schemeValueWithGST ?? 0) * n)}</TableCell>
                               </>

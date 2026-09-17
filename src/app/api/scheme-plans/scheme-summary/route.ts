@@ -11,12 +11,15 @@ import { schemeWiseSummary } from "@/features/schemes/scheme-planning.server";
 export async function GET(req: NextRequest) {
   const p = req.nextUrl.searchParams;
   const list = (k: string) => (p.get(k) ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const lc = p.get("lifecycle");
+  const lifecycle = lc === "SUBMITTED" || lc === "APPROVED" || lc === "OLDER" ? lc : undefined;
   return handle(async () =>
     ok(
       await schemeWiseSummary(await requireAuth(), {
         officerId: p.get("officerId") ?? undefined,
         groupByOfficer: p.get("groupByOfficer") === "true",
         filters: { states: list("states"), officerIds: list("officers"), booking: list("booking"), documents: list("documents") },
+        lifecycle,
       }),
     ),
   );

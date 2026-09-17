@@ -20,6 +20,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { PlanStateBadge, type SchemePlan } from "./scheme-detail-dialog";
 import { L } from "@/features/labels/label-ui";
 import { schemeTable } from "./scheme-table-theme";
+import { oldestDraftPlanCreatedAt, schemeTypeLabel } from "@/lib/scheme-create-plan-summary";
+import { editableDraftSchemeIds, mergeDealerIntoEditableWorkingSet, type DealerPlanPayloadRow } from "@/lib/scheme-create-plan-draft";
 
 /**
  * CREATE PLAN — the scheme → dealer planning workspace (/planning/scheme for a Sales Officer, and the
@@ -60,7 +62,7 @@ const CALC_LABEL: Record<string, string> = { PERCENTAGE: "Percentage", FIXED_AMO
 /** Plan states whose dealer row the owner may still edit — mirrors the server's EDITABLE set. */
 const EDITABLE = new Set(["DRAFT", "RETURNED"]);
 /** ISO timestamp → the `yyyy-mm-dd` an <input type="date"> needs (file-local, as in the sibling views). */
-const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
+export const toDateInput = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
 
 /** A running scheme, as returned by `/api/schemes/running`. Exported so the Scheme Master menu can reuse
  *  the exact same Info / Document / Share dialogs (its rows are adapted to this shape). */
@@ -102,6 +104,10 @@ interface DealerRow {
   optionId: string | null;
   // Pre-placement (Phase 11). Requested days within the scheme ceiling (null ⇒ none).
   prePlacementDays: number | null;
+  /** A remainder created from an approved-plan quantity split. Quantity, option and frozen value are fixed. */
+  splitRemainder: boolean;
+  /** Persisted DealerSchemePlan creation time; unsaved local additions do not have one yet. */
+  createdAt: string | null;
 }
 
 const rowKey = (schemeId: string, dealerId: string) => `${schemeId}:${dealerId}`;
@@ -116,7 +122,50 @@ const rowValueWithGST = (scheme: RunningScheme, optionId: string | null): number
   return scheme.schemeValueWithGST ?? 0;
 };
 /** A row's total = per-scheme/option value × count, or its stored total for locked rows. */
-const rowTotal = (scheme: RunningScheme, r: DealerRow): number => (r.editable ? rowValueWithGST(scheme, r.optionId) * r.count : (r.storedTotal ?? rowValueWithGST(scheme, r.optionId) * r.count));
+const rowTotal = (scheme: RunningScheme, r: DealerRow): number => (r.editable && !r.splitRemainder ? rowValueWithGST(scheme, r.optionId) * r.count : (r.storedTotal ?? rowValueWithGST(scheme, r.optionId) * r.count));
+
+const optionSelectOptions = (scheme: RunningScheme) => [
+  { value: "", label: "Choose option…" },
+  ...(scheme.options ?? []).filter((option) => option.isActive).map((option) => ({
+    value: option.id,
+    label: `${option.label ? `${option.label} — ` : ""}${option.target ?? ""} · ${formatCurrency(option.valueWithGST)}`,
+  })),
+];
+
+/** Shared dealer-level planning controls used by both the existing Draft rows and the Open Schemes modal. */
+export function DealerSchemeOptionSelect({ scheme, value, onChange, className = "w-52" }: { scheme: RunningScheme; value: string | null; onChange: (value: string) => void; className?: string }) {
+  return <NativeSelect className={className} value={value ?? ""} onChange={(event) => onChange(event.target.value)} options={optionSelectOptions(scheme)} />;
+}
+
+export function DealerConversionDateInput({ scheme, value, onChange, className = "w-44" }: { scheme: RunningScheme; value: string; onChange: (value: string) => void; className?: string }) {
+  const min = scheme.startDate ? toDateInput(scheme.startDate) : undefined;
+  const max = !scheme.isPerpetual && scheme.endDate ? toDateInput(scheme.endDate) : undefined;
+  return <SchemeDateInput className={className} min={min} max={max} value={value} onValueChange={onChange} />;
+}
+
+export function DealerPrePlacementInput({ scheme, value, onChange, className = "w-24" }: { scheme: RunningScheme; value: number | null; onChange: (value: number | null) => void; className?: string }) {
+  const maximum = scheme.prePlacementMaxDays ?? 0;
+  return (
+    <Input
+      type="number"
+      min="0"
+      max={maximum}
+      className={className}
+      value={value == null ? "" : String(value)}
+      placeholder={`0–${maximum}`}
+      onChange={(event) => {
+        const raw = event.target.value;
+        const number = Number(raw);
+        onChange(raw === "" || !Number.isFinite(number) || number <= 0 ? null : Math.floor(number));
+      }}
+    />
+  );
+}
+
+export function DealerSchemeCountSelect({ scheme, value, onChange, className = "w-20" }: { scheme: RunningScheme; value: number; onChange: (value: number) => void; className?: string }) {
+  if (!scheme.allowMultipleSchemes) return <span className="tabular-nums">{value}</span>;
+  return <NativeSelect className={className} value={String(value)} onChange={(event) => onChange(Number(event.target.value))} options={Array.from({ length: 10 }, (_, index) => ({ value: String(index + 1), label: String(index + 1) }))} />;
+}
 
 /* --------------------------------- Workspace --------------------------------- */
 
@@ -128,7 +177,7 @@ const rowTotal = (scheme: RunningScheme, r: DealerRow): number => (r.editable ? 
  *                       acts on plans in View Plan, so this panel must not become an SO-scoped planning tool.
  * @param userId         The signed-in user, used only to pick the RM's own rows out of their team's plans.
  */
-export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = false, userId, controlledOfficerId, hideScopeSelector = false }: { enableRmScope?: boolean; readOnly?: boolean; userId?: string; controlledOfficerId?: string; hideScopeSelector?: boolean }) {
+export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = false, userId, controlledOfficerId, hideScopeSelector = false, draftOnly = false }: { enableRmScope?: boolean; readOnly?: boolean; userId?: string; controlledOfficerId?: string; hideScopeSelector?: boolean; draftOnly?: boolean }) {
   const qc = useQueryClient();
 
   // RM "My Dealers" (self) vs "My Team" (a chosen Sales Officer). Sales Officers never see this — same
@@ -149,7 +198,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
   const { data: schemes, isLoading } = useQuery<RunningScheme[]>({ queryKey: ["running-schemes"], queryFn: () => api.get("/api/schemes/running") });
   // Same endpoint and cache namespace the other views use: "mine" for a Sales Officer, "all" for the manager
   // roles. Scoping happens server-side in `listSchemePlans` (getOfficerScope) — never in the browser.
-  const { data: plans } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "create", enableRmScope || readOnly ? "all" : "mine"], queryFn: () => api.get("/api/scheme-plans?bucket=create") });
+  const { data: plans, isLoading: plansLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "create", enableRmScope || readOnly ? "all" : "mine"], queryFn: () => api.get("/api/scheme-plans?bucket=create") });
 
   // Which officer's rows this screen is planning. A Sales Officer only ever receives their own plans and the
   // Admin panel is deliberately organization-wide, so neither narrows; an RM receives their whole team from
@@ -159,6 +208,11 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
     () => (plans ?? []).filter((p) => (rowsOfficer ? p.salesOfficerId === rowsOfficer : true)),
     [plans, rowsOfficer],
   );
+  const visibleSchemes = useMemo(() => {
+    if (!draftOnly) return schemes ?? [];
+    const ids = editableDraftSchemeIds(plansForOfficer);
+    return (schemes ?? []).filter((scheme) => ids.has(scheme.id));
+  }, [draftOnly, plansForOfficer, schemes]);
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set()); // collapsed by default
   const toggle = (schemeId: string) =>
@@ -213,11 +267,13 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
         editable,
         optionId: edits[key]?.optionId !== undefined ? edits[key]!.optionId! : (p.selectedOptionId ?? null),
         prePlacementDays: edits[key]?.prePlacementDays !== undefined ? edits[key]!.prePlacementDays! : (p.prePlacementDays ?? null),
+        splitRemainder: !!p.splitRemainder,
+        createdAt: p.createdAt,
       });
     }
     for (const a of added[scheme.id] ?? []) {
       const key = rowKey(scheme.id, a.dealerId);
-      out.push({ dealerId: a.dealerId, dealerName: a.dealerName, officerName: null, planStatus: null, date: edits[key]?.date ?? "", count: edits[key]?.count ?? 1, note: edits[key]?.note ?? null, storedTotal: null, editable: true, optionId: edits[key]?.optionId ?? null, prePlacementDays: edits[key]?.prePlacementDays ?? null });
+      out.push({ dealerId: a.dealerId, dealerName: a.dealerName, officerName: null, planStatus: null, date: edits[key]?.date ?? "", count: edits[key]?.count ?? 1, note: edits[key]?.note ?? null, storedTotal: null, editable: true, optionId: edits[key]?.optionId ?? null, prePlacementDays: edits[key]?.prePlacementDays ?? null, splitRemainder: false, createdAt: null });
     }
     return out.sort((a, b) => a.dealerName.localeCompare(b.dealerName));
   };
@@ -230,9 +286,6 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
     setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], note: note.trim() || null } }; });
   const setOption = (schemeId: string, dealerId: string, optionId: string) =>
     setEdits((prev) => { const k = rowKey(schemeId, dealerId); return { ...prev, [k]: { ...prev[k], optionId: optionId || null } }; });
-  const setPrePlacement = (schemeId: string, dealerId: string, days: string) =>
-    setEdits((prev) => { const k = rowKey(schemeId, dealerId); const n = Number(days); return { ...prev, [k]: { ...prev[k], prePlacementDays: days === "" || !Number.isFinite(n) || n <= 0 ? null : Math.floor(n) } }; });
-
   /** Drop a dealer from the working set: an unsaved addition disappears, a saved draft/returned row is
    *  removed on the next save (which is what the existing server does with a de-selected editable row). */
   const dropRow = (schemeId: string, row: DealerRow) => {
@@ -333,6 +386,8 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
               <TableRow>
                 <TableHead className="w-8" />
                 <TableHead><L k="scheme_planning.col.scheme" /></TableHead>
+                <TableHead><L k="scheme_planning.col.date_of_creation" /></TableHead>
+                <TableHead><L k="scheme_planning.col.scheme_type" /></TableHead>
                 <TableHead className="text-right"><L k="scheme_planning.col.no_of_dealers" /></TableHead>
                 <TableHead className="text-right"><L k="scheme_planning.col.no_of_schemes" /></TableHead>
                 <TableHead className="text-right"><L k="scheme_planning.col.total_amount" /></TableHead>
@@ -340,26 +395,27 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
               </TableRow>
             </TableHeader>
             <TableBody>
-              {isLoading ? (
-                <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-              ) : (schemes?.length ?? 0) === 0 ? (
-                <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">{readOnly ? "No running schemes." : "No running schemes for your State."}</TableCell></TableRow>
+              {isLoading || (draftOnly && plansLoading) ? (
+                <TableRow><TableCell colSpan={8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+              ) : visibleSchemes.length === 0 ? (
+                <TableRow><TableCell colSpan={8} className="py-10 text-center text-muted-foreground">{draftOnly ? "No draft scheme plans." : readOnly ? "No running schemes." : "No running schemes for your State."}</TableCell></TableRow>
               ) : (
-                schemes!.map((s) => {
+                visibleSchemes.map((s) => {
                   const open = expanded.has(s.id);
                   const rows = rowsFor(s);
                   const editable = rows.filter((r) => r.editable);
                   const complete = editable.filter((r) => !!r.date);
                   const pendingRemoval = removedCount(s.id);
                   const dirty = editable.length > 0 || pendingRemoval > 0;
-                  const minDate = s.startDate ? toDateInput(s.startDate) : undefined;
-                  const maxDate = !s.isPerpetual && s.endDate ? toDateInput(s.endDate) : undefined;
+                  const oldestCreatedAt = oldestDraftPlanCreatedAt(rows);
                   return (
                     <Fragment key={s.id}>
                       {/* Parent row — scheme name, dealer count, and the actions that replaced "View Scheme". */}
                       <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(s.id)}>
                         <TableCell>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
                         <TableCell className="font-semibold">{s.schemeName}</TableCell>
+                        <TableCell className="whitespace-nowrap">{formatDate(oldestCreatedAt)}</TableCell>
+                        <TableCell className="whitespace-nowrap">{schemeTypeLabel(s.structure)}</TableCell>
                         {/* No. of Dealers = dealers planned in this scheme (current scope). Total Amount reuses the
                             SAME per-row planning total (schemeValueWithGST × count / stored total). One scheme per row. */}
                         <TableCell className="text-right tabular-nums">{rows.length}</TableCell>
@@ -378,7 +434,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
 
                       {open && (
                         <TableRow>
-                          <TableCell colSpan={6} className={schemeTable.nestedCell}>
+                          <TableCell colSpan={8} className={schemeTable.nestedCell}>
                             <div className={schemeTable.nestedInset}>
                               <div className={schemeTable.nestedShell}>
                                 <Table>
@@ -406,13 +462,8 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                           {readOnly && <TableCell>{r.officerName ?? "—"}</TableCell>}
                                           {s.structure === "MULTIPLE_OPTIONS" && (
                                             <TableCell>
-                                              {r.editable ? (
-                                                <NativeSelect
-                                                  className="w-52"
-                                                  value={r.optionId ?? ""}
-                                                  onChange={(e) => setOption(s.id, r.dealerId, e.target.value)}
-                                                  options={[{ value: "", label: "Choose option…" }, ...(s.options ?? []).filter((o) => o.isActive).map((o) => ({ value: o.id, label: `${o.label ? `${o.label} — ` : ""}${o.target ?? ""}${s.optionAchievementType === "VALUE_BASED" ? "" : ""} · ${formatCurrency(o.valueWithGST)}` }))]}
-                                                />
+                                              {r.editable && !r.splitRemainder ? (
+                                                <DealerSchemeOptionSelect scheme={s} value={r.optionId} onChange={(value) => setOption(s.id, r.dealerId, value)} />
                                               ) : (
                                                 <span>{s.options?.find((o) => o.id === r.optionId)?.label ?? (r.optionId ? "Selected" : "—")}</span>
                                               )}
@@ -420,19 +471,19 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                           )}
                                           <TableCell>
                                             {r.editable ? (
-                                              <SchemeDateInput className="w-44" min={minDate} max={maxDate} value={r.date} onValueChange={(v) => setDate(s.id, r.dealerId, v)} />
+                                              <DealerConversionDateInput scheme={s} value={r.date} onChange={(value) => setDate(s.id, r.dealerId, value)} />
                                             ) : r.date ? formatDateShort(r.date) : <span className="text-muted-foreground">—</span>}
                                           </TableCell>
                                           {(s.prePlacementMaxDays ?? 0) > 0 && (
                                             <TableCell>
                                               {r.editable ? (
-                                                <Input type="number" min="0" max={s.prePlacementMaxDays} className="w-24" value={r.prePlacementDays == null ? "" : String(r.prePlacementDays)} placeholder={`0–${s.prePlacementMaxDays}`} onChange={(e) => setPrePlacement(s.id, r.dealerId, e.target.value)} />
+                                                <DealerPrePlacementInput scheme={s} value={r.prePlacementDays} onChange={(value) => setEdits((prev) => { const key = rowKey(s.id, r.dealerId); return { ...prev, [key]: { ...prev[key], prePlacementDays: value } }; })} />
                                               ) : <span className="tabular-nums">{r.prePlacementDays ?? "—"}</span>}
                                             </TableCell>
                                           )}
                                           <TableCell>
-                                            {r.editable && s.allowMultipleSchemes ? (
-                                              <NativeSelect className="w-20" value={String(r.count)} onChange={(e) => setCount(s.id, r.dealerId, Number(e.target.value))} options={Array.from({ length: 10 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))} />
+                                            {r.editable && s.allowMultipleSchemes && !r.splitRemainder ? (
+                                              <DealerSchemeCountSelect scheme={s} value={r.count} onChange={(value) => setCount(s.id, r.dealerId, value)} />
                                             ) : <span className="tabular-nums">{r.count}</span>}
                                           </TableCell>
                                           <TableCell className="text-right tabular-nums">{formatCurrency(rowTotal(s, r))}</TableCell>
@@ -444,7 +495,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                                   <Button variant="ghost" size="sm" title={r.note ? "Edit note" : "Add note"} onClick={() => setNoteFor({ schemeId: s.id, dealerId: r.dealerId, dealerName: r.dealerName, note: r.note ?? "" })}>
                                                     <StickyNote className={cn("h-4 w-4", r.note && "text-success")} />
                                                   </Button>
-                                                  <Button variant="ghost" size="sm" title="Remove this dealer from the plan" onClick={() => dropRow(s.id, r)}><X className="h-4 w-4" /></Button>
+                                                  {!r.splitRemainder && <Button variant="ghost" size="sm" title="Remove this dealer from the plan" onClick={() => dropRow(s.id, r)}><X className="h-4 w-4" /></Button>}
                                                 </div>
                                               )}
                                             </TableCell>
@@ -523,6 +574,169 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
         />
       )}
     </div>
+  );
+}
+
+/* --------------------------------- Open Schemes create modal --------------------------------- */
+
+interface PlanningDealerChoiceData {
+  dealers: { id: string; name: string; territory: string | null }[];
+  existing: { dealerId: string; schemeId: string; editable: boolean }[];
+}
+
+type CreateSchemePlanAction = "draft" | "submit";
+
+/** Dealer-first entry point. Persistence deliberately calls the same full-working-set draft endpoints as the
+ * expanded Draft table; the selected dealer is merged with existing editable rows before every write. */
+export function CreateSchemePlanDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (action: CreateSchemePlanAction) => void }) {
+  const qc = useQueryClient();
+  const { data: schemes, isLoading: schemesLoading } = useQuery<RunningScheme[]>({ queryKey: ["running-schemes"], queryFn: () => api.get("/api/schemes/running") });
+  const { data: scope, isLoading: dealersLoading } = useQuery<PlanningDealerChoiceData>({ queryKey: ["scheme-planning-dealers"], queryFn: () => api.get("/api/scheme-plans/planning-dealers") });
+  const { data: plans, isLoading: plansLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "create", "mine"], queryFn: () => api.get("/api/scheme-plans?bucket=create") });
+
+  const [dealerId, setDealerId] = useState("");
+  const [schemeId, setSchemeId] = useState("");
+  const [date, setDate] = useState("");
+  const [count, setCount] = useState(1);
+  const [optionId, setOptionId] = useState<string | null>(null);
+  const [prePlacementDays, setPrePlacementDays] = useState<number | null>(null);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const dealer = scope?.dealers.find((row) => row.id === dealerId);
+  const scheme = schemes?.find((row) => row.id === schemeId);
+  const availableSchemes = useMemo(() => {
+    if (!dealerId) return [];
+    return (schemes ?? []).filter((candidate) => {
+      const matches = (scope?.existing ?? []).filter((row) => row.dealerId === dealerId && row.schemeId === candidate.id);
+      return matches.length === 0 || matches.some((row) => row.editable);
+    });
+  }, [dealerId, schemes, scope]);
+
+  const resetPlanningFields = (nextSchemeId: string) => {
+    const existing = (plans ?? []).find((plan) => plan.schemeId === nextSchemeId && plan.dealerId === dealerId && EDITABLE.has(plan.planStatus));
+    setDate(existing ? toDateInput(existing.expectedBillingDate) : "");
+    setCount(existing?.numberOfSchemes || 1);
+    setOptionId(existing?.selectedOptionId ?? null);
+    setPrePlacementDays(existing?.prePlacementDays ?? null);
+    setNote(existing?.soNote ?? "");
+    setError(null);
+  };
+
+  const save = useMutation({
+    mutationFn: async (action: CreateSchemePlanAction) => {
+      if (!dealer || !scheme) throw new Error("Choose a Dealer and Scheme.");
+      if (action === "submit" && !date) throw new Error("Conversion Date is required before submitting.");
+      if (action === "submit" && scheme.structure === "MULTIPLE_OPTIONS" && !optionId) throw new Error("Scheme Option is required before submitting.");
+      const selected: DealerPlanPayloadRow = {
+        dealerId: dealer.id,
+        expectedBillingDate: date || null,
+        numberOfSchemes: scheme.allowMultipleSchemes ? count : 1,
+        note: note.trim() || null,
+        optionId: scheme.structure === "MULTIPLE_OPTIONS" ? optionId : null,
+        prePlacementDays: (scheme.prePlacementMaxDays ?? 0) > 0 ? prePlacementDays : null,
+      };
+      const dealers = mergeDealerIntoEditableWorkingSet(plans ?? [], scheme.id, selected);
+      return api.post(action === "submit" ? "/api/scheme-plans/submit-draft" : "/api/scheme-plans/save-draft", {
+        schemeId: scheme.id,
+        dealers,
+        ...(action === "submit" ? { submitDealerIds: [dealer.id] } : {}),
+      });
+    },
+    onSuccess: (_result, action) => {
+      qc.invalidateQueries({ queryKey: ["scheme-plans"] });
+      qc.invalidateQueries({ queryKey: ["scheme-planning-dealers"] });
+      onSaved(action);
+      onClose();
+    },
+    onError: (cause) => setError((cause as Error).message),
+  });
+
+  const submitReady = !!dealer && !!scheme && !!date && (scheme.structure !== "MULTIPLE_OPTIONS" || !!optionId);
+  const value = scheme ? rowValueWithGST(scheme, optionId) * (scheme.allowMultipleSchemes ? count : 1) : 0;
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+        <DialogHeader><DialogTitle>Create Scheme Plan</DialogTitle></DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Choose Dealer *</Label>
+            {dealersLoading ? <Skeleton className="h-9 w-full" /> : (
+              <NativeSelect
+                placeholder="Select a dealer…"
+                value={dealerId}
+                onChange={(event) => {
+                  setDealerId(event.target.value);
+                  setSchemeId("");
+                  resetPlanningFields("");
+                }}
+                options={(scope?.dealers ?? []).map((row) => ({ value: row.id, label: row.territory ? `${row.name} · ${row.territory}` : row.name }))}
+              />
+            )}
+            {!dealersLoading && (scope?.dealers.length ?? 0) === 0 && <p className="text-sm text-muted-foreground">No dealers are currently assigned to you.</p>}
+          </div>
+
+          {dealerId && (
+            <div className="space-y-1.5">
+              <Label>Choose Scheme *</Label>
+              {schemesLoading || plansLoading ? <Skeleton className="h-9 w-full" /> : (
+                <NativeSelect
+                  placeholder="Select a scheme…"
+                  value={schemeId}
+                  onChange={(event) => {
+                    const nextSchemeId = event.target.value;
+                    setSchemeId(nextSchemeId);
+                    resetPlanningFields(nextSchemeId);
+                  }}
+                  options={availableSchemes.map((row) => ({ value: row.id, label: row.schemeName }))}
+                />
+              )}
+              {!schemesLoading && !plansLoading && availableSchemes.length === 0 && <p className="text-sm text-muted-foreground">This dealer is already planned into every open scheme.</p>}
+            </div>
+          )}
+
+          {scheme && (
+            <div className="grid gap-4 border-t pt-4 sm:grid-cols-2">
+              {scheme.structure === "MULTIPLE_OPTIONS" && (
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label>Scheme Option *</Label>
+                  <DealerSchemeOptionSelect scheme={scheme} value={optionId} onChange={(value) => setOptionId(value || null)} className="w-full" />
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <Label>Conversion Date *</Label>
+                <DealerConversionDateInput scheme={scheme} value={date} onChange={setDate} className="w-full" />
+              </div>
+              {(scheme.prePlacementMaxDays ?? 0) > 0 && (
+                <div className="space-y-1.5">
+                  <Label>Pre-placement (days)</Label>
+                  <DealerPrePlacementInput scheme={scheme} value={prePlacementDays} onChange={setPrePlacementDays} className="w-full" />
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <Label>Number of Schemes</Label>
+                <DealerSchemeCountSelect scheme={scheme} value={count} onChange={setCount} className="w-full" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Total Amount</Label>
+                <div className="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-sm font-medium tabular-nums">{formatCurrency(value)}</div>
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Note</Label>
+                <Textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} placeholder="Optional note for this dealer" />
+              </div>
+            </div>
+          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={save.isPending}>Cancel</Button>
+          <Button variant="outline" disabled={!dealer || !scheme || save.isPending || plansLoading} onClick={() => { setError(null); save.mutate("draft"); }}><Save className="h-4 w-4" /> {save.isPending && save.variables === "draft" ? "Saving…" : "Save Draft"}</Button>
+          <Button disabled={!submitReady || save.isPending || plansLoading} onClick={() => { setError(null); save.mutate("submit"); }}><Send className="h-4 w-4" /> {save.isPending && save.variables === "submit" ? "Submitting…" : "Submit"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

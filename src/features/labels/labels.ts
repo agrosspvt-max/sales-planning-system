@@ -118,8 +118,20 @@ export const DEFAULT_LABELS = {
   "scheme_planning.view.scheme_wise": "Scheme-wise",
   "scheme_planning.view.dealer_wise": "Dealer-wise",
   "scheme_planning.view.enrolled_scheme": "Enrolled Scheme",
+  // View Plan lifecycle tabs (Submitted | Approved | Enrolled Plans | Older Plans)
+  "scheme_planning.view.submitted": "Submitted",
+  "scheme_planning.view.approved": "Approved",
+  "scheme_planning.view.enrolled_plans": "Enrolled Plans",
+  "scheme_planning.view.older_plans": "Older Plans",
+  // Submitted tab count strip
+  "scheme_planning.view.total_schemes": "Total Schemes",
+  "scheme_planning.view.rm_pending": "RM Pending",
+  "scheme_planning.view.admin_pending": "Admin Pending",
   "scheme_planning.view.view_all_scheme": "View All Scheme",
   "scheme_planning.view.planned_scheme": "Planned Scheme",
+  // Sales Officer Create Plan secondary tabs (Open Schemes | Draft)
+  "scheme_planning.view.open_schemes": "Open Schemes",
+  "scheme_planning.view.draft": "Draft",
   "scheme_planning.view.my_schemes": "My Schemes",
   "scheme_planning.view.team_schemes": "Team Schemes",
   "scheme_planning.view.all_plan_view": "All Plan View",
@@ -134,6 +146,8 @@ export const DEFAULT_LABELS = {
 
   // Review / summary table column headers
   "scheme_planning.col.scheme": "Scheme",
+  "scheme_planning.col.date_of_creation": "Date of Creation",
+  "scheme_planning.col.scheme_type": "Scheme Type",
   "scheme_planning.col.dealers": "Dealers",
   "scheme_planning.col.no_of_dealers": "No. of Dealers",
   "scheme_planning.col.no_of_schemes": "No. of Schemes",
@@ -145,6 +159,7 @@ export const DEFAULT_LABELS = {
   "scheme_planning.col.booking_amount": "Booking Amount",
   "scheme_planning.col.document_status": "Document Status",
   "scheme_planning.col.billing_status": "Billing Status",
+  "scheme_planning.col.billing_completion_status": "Billing Completion Status",
   "scheme_planning.col.sales_officers": "Sales Officer(s)",
   "scheme_planning.col.state": "State",
   "scheme_planning.col.plan_status": "Plan Status",
@@ -306,6 +321,30 @@ export const DEFAULT_LABELS = {
   "scheme_master.form.col_amount": "Amount (₹)",
   "scheme_master.form.days_after_billing": "Days after Billing Date",
   "scheme_master.form.scheme_document": "Scheme Document",
+  // Scheme Payment section — installment mode dropdown + payment table column/row headers
+  "scheme_master.form.installment_mode": "Installment Mode",
+  "scheme_master.form.installment_mode.percentage": "Percentage",
+  "scheme_master.form.installment_mode.amount": "Amount",
+  "scheme_master.form.col_scheme_payment": "Scheme Payment",
+  "scheme_master.form.col_payment_details": "Payment Details",
+  "scheme_master.form.row_booking_amount": "Booking Amount",
+  "scheme_master.form.row_installment": "Installment",
+  "scheme_master.form.row_total": "Total",
+  // Options builder — the "Option" column header (rows render "Option 1", "Option 2", … dynamically)
+  "scheme_master.form.option_col.option": "Option",
+  // Generic form choices / actions used across the Create Scheme form
+  "scheme_master.form.yes": "Yes",
+  "scheme_master.form.no": "No",
+  "scheme_master.form.remove": "Remove",
+  "scheme_master.form.no_limit": "No Limit",
+  "scheme_master.form.disabled": "Disabled",
+  // Scheme Benefit dropdown display values (the underlying enum values are DB constants, never renamed)
+  "scheme_master.form.benefit.domestic_tour": "Domestic Tour",
+  "scheme_master.form.benefit.foreign_tour": "Foreign Tour",
+  "scheme_master.form.benefit.credit_note": "Credit Note",
+  "scheme_master.form.benefit.special_gift": "Special Gift",
+  "scheme_master.form.benefit.gold_silver": "Gold / Silver",
+  "scheme_master.form.benefit.other": "Other",
 
   /* =====================================================================================
    * SCHEME UPLOAD (Phase 7) — the dedicated date-range achievement upload tab. Structural
@@ -323,6 +362,43 @@ export const DEFAULT_LABELS = {
   "scheme_upload.analyze": "Analyze",
   "scheme_upload.review": "Review",
   "scheme_upload.confirm_import": "Confirm Import",
+
+  /* =====================================================================================
+   * CALENDAR (operational calendar over Scheme Planning). Structural, user-visible labels only —
+   * conversion events are projected from DealerSchemePlan, never stored, and are never renamed here.
+   * ===================================================================================== */
+  "calendar.nav": "Calendar",
+  "calendar.title": "Calendar",
+  "calendar.today": "Today",
+  "calendar.prev_month": "Previous Month",
+  "calendar.next_month": "Next Month",
+  "calendar.all_officers": "All Sales Officers",
+  "calendar.conversion": "Conversion",
+  "calendar.note": "Note",
+  "calendar.add_note": "Add Note",
+  "calendar.edit_note": "Edit Note",
+  "calendar.delete_note": "Delete Note",
+  "calendar.save_note": "Save Note",
+  "calendar.cancel": "Cancel",
+  "calendar.note_placeholder": "Write a note for this day…",
+  "calendar.date_changed": "Date changed",
+  "calendar.previous_date": "Previous Date",
+  "calendar.new_date": "New Date",
+  "calendar.upcoming": "Upcoming",
+  "calendar.upcoming_days": "Upcoming — Next 5 Days",
+  "calendar.no_upcoming": "No upcoming events.",
+  "calendar.no_events": "No events on this date.",
+  "calendar.schemes": "Schemes",
+  "calendar.scheme": "Scheme",
+  // Event status chips (derived from the plan's existing planStatus + schemeStatus — display only)
+  "calendar.status.planned": "Planned",
+  "calendar.status.submitted": "Submitted",
+  "calendar.status.approved": "Approved",
+  "calendar.status.converted": "Converted",
+  "calendar.status.enrolled": "Enrolled",
+  "calendar.status.declined": "Declined",
+  "calendar.status.returned": "Returned",
+  "calendar.status.rejected": "Rejected",
 } as const;
 
 export type LabelKey = keyof typeof DEFAULT_LABELS;
@@ -364,6 +440,7 @@ export function labelMeta(key: LabelKey): LabelMeta {
   if (key.startsWith("scheme_master.page.") || key.startsWith("scheme_master.action.") || key.startsWith("scheme_master.filter.") || key.startsWith("scheme_master.view.")) return { module: "Scheme Master", group: "View Buttons" };
   if (key.startsWith("scheme_master.")) return { module: "Scheme Master", group: "View Buttons" };
   if (key.startsWith("scheme_upload.")) return { module: "Scheme Upload", group: "View Buttons" };
+  if (key.startsWith("calendar.")) return { module: "Calendar", group: "View Buttons" };
   if (key.startsWith("recovery.")) return { module: "Recovery Planning", group: key.includes(".section.") ? "Sections" : "Table Columns" };
   if (key.startsWith("col.") || key.startsWith("seasonal.") || key.startsWith("monthView.") || key.startsWith("monthly.") || key.startsWith("summary.") || key.startsWith("dealerSummary.") || key.startsWith("productPlan.")) {
     return { module: "Sales Planning", group: key.includes(".section.") ? "Sections" : "Table Columns" };

@@ -7,6 +7,7 @@ import {
   Store,
   Users,
   CalendarRange,
+  CalendarDays,
   Megaphone,
   Settings,
   Link2,
@@ -50,6 +51,9 @@ export const NAV_ITEMS: NavItem[] = [
   // Each module has its own [Create New Plan | View Plans] toggle inside, so Create and View are no
   // longer separate sidebar items. Import + Approvals stay as their own independent entries.
   { label: "Create/View Plans", href: "/planning/create", icon: ClipboardList, roles: ALL_ROLES, group: "Planning" },
+  // Operational calendar over Scheme Planning conversion dates (+ personal notes). All roles; scope is
+  // applied server-side (SO = own, RM = team, Admin = global).
+  { label: "Calendar", href: "/planning/calendar", icon: CalendarDays, roles: ALL_ROLES, group: "Planning" },
   {
     label: "Import Seasonal Plan",
     href: "/planning/sales/import",
@@ -113,8 +117,8 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "RM Assignments", href: "/assignments/rm", icon: Network, roles: ADMIN_ONLY, group: "Organization" },
 ];
 
-export function navForRole(role: Role): NavItem[] {
-  return NAV_ITEMS.filter((item) => item.roles.includes(role)).map((item) =>
+export function navForRole(role: Role, calendarEnabled = true): NavItem[] {
+  return NAV_ITEMS.filter((item) => item.roles.includes(role) && (calendarEnabled || item.href !== "/planning/calendar")).map((item) =>
     item.children ? { ...item, children: item.children.filter((c) => c.roles.includes(role)) } : item,
   );
 }

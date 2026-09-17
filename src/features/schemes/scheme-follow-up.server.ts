@@ -989,7 +989,10 @@ interface OptionAchvContext {
 
 /** Load the caller's ENROLLED option plans (scope + officer honoured) + eligible pools + ACTIVE sales. */
 async function loadOptionAchievementContext(ctx: AuthContext, q: FollowUpQuery): Promise<OptionAchvContext> {
-  const plans = (await loadPlans(ctx, { officerId: q.officerId, financial: false })).filter((p) => p.structure === "MULTIPLE_OPTIONS" && p.optionAchievementType != null);
+  const optionPlans = (await loadPlans(ctx, { officerId: q.officerId, financial: false })).filter((p) => p.structure === "MULTIPLE_OPTIONS" && p.optionAchievementType != null);
+  // Quantity-split segments are separate financial schedules but still one dealer's participation in the
+  // same Scheme Master. Achievement and follow-up targets therefore count that dealer once.
+  const plans = [...new Map(optionPlans.map((p) => [`${p.schemeId}|${p.dealerId}`, p])).values()];
   const dealerMeta = new Map<string, DealerMeta>();
   const schemeIds = new Set<string>();
   for (const p of plans) {

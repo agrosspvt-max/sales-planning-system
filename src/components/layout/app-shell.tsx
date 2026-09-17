@@ -22,7 +22,7 @@ interface AppUser {
   role: Role;
 }
 
-export function AppShell({ user, children }: { user: AppUser; children: React.ReactNode }) {
+export function AppShell({ user, children, calendarEnabled = true }: { user: AppUser; children: React.ReactNode; calendarEnabled?: boolean }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   // Groups the user has manually collapsed. The active section is always forced open
   // regardless of this set, so navigation never hides the current page.
@@ -30,7 +30,7 @@ export function AppShell({ user, children }: { user: AppUser; children: React.Re
   // Second-level (nested parent) collapse state, keyed by the parent item's href.
   const [collapsedSub, setCollapsedSub] = useState<Set<string>>(new Set());
   const pathname = usePathname();
-  const items = navForRole(user.role);
+  const items = navForRole(user.role, calendarEnabled);
 
   // One centralized computation of the active page + its section. The sidebar reuses this
   // instead of each item running its own prefix test — so only one leaf can be selected.

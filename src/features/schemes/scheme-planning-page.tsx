@@ -18,14 +18,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { PillNav } from "@/features/planning/plan-list-ui";
+import { PillNav, UnderlineTabs } from "@/features/planning/plan-list-ui";
 import { L, useLabel } from "@/features/labels/label-ui";
 import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, MarkedValue, conversionDateCell, bookingCell, documentCell, BillingDateValue, PlannedConversionCell, type SchemePlan } from "./scheme-detail-dialog";
 import { schemeTable, verifyTint } from "./scheme-table-theme";
-import { SchemeSummaryHeads, SchemeSummaryValueCells, ColumnFilterHead, SUMMARY_METRIC_COLS, ZERO_METRICS, EMPTY_SUMMARY_FILTERS, summaryFilterQuery, type SchemeWiseSummaryPayload, type SummaryFilters } from "./scheme-summary-cells";
+import { SchemeSummaryHeads, SchemeSummaryValueCells, SchemeOfficerCell, ColumnFilterHead, metricColCount, ZERO_METRICS, EMPTY_SUMMARY_FILTERS, summaryFilterQuery, type SchemeWiseSummaryPayload, type SummaryFilters } from "./scheme-summary-cells";
 import { SchemeOfficerWorkspace, SchemePlanningView } from "./scheme-officer-workspace";
 import { SchemeCreatePlanWorkspace } from "./scheme-create-plan";
-import { SchemeOfficerViewPlan, DealerWiseComingSoon, SchemeWiseCollapsibleView } from "./scheme-view-plan";
+import { SchemeOfficerViewPlan, DealerWiseComingSoon, SchemeWiseCollapsibleView, SchemeLifecycleTabs, planLifecycle, type Lifecycle } from "./scheme-view-plan";
 import { SchemeManagerModeLinks } from "./scheme-follow-up-view";
 import { SchemeMasterPage } from "./scheme-master-page";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
@@ -35,14 +35,15 @@ const uniq = (xs: (string | null)[]) => [...new Set(xs.filter(Boolean) as string
 /** Compact "3 Approved · 1 Pending for RM · 1 Returned" from a group's dealer plans (by planStatus). */
 function planSummary(plans: SchemePlan[]): string {
   const counts = new Map<string, number>();
-  for (const p of plans) counts.set(p.planStatus, (counts.get(p.planStatus) ?? 0) + 1);
+  for (const p of plans) counts.set(p.planStatus, (counts.get(p.planStatus) ?? 0) + (p.numberOfSchemes || 1));
   return [...counts.entries()].map(([s, n]) => `${n} ${PLAN_STATUS_LABEL[s] ?? s}`).join(" · ");
 }
 /** Compact scheme-status summary "2 Converted · 1 Pending" (by schemeStatus). */
 function schemeSummary(plans: SchemePlan[]): string {
-  const converted = plans.filter((p) => p.schemeStatus === "CONVERTED").length;
-  const declined = plans.filter((p) => p.schemeStatus === "DECLINED").length;
-  const pending = plans.length - converted - declined;
+  const units = (rows: SchemePlan[]) => rows.reduce((sum, p) => sum + (p.numberOfSchemes || 1), 0);
+  const converted = units(plans.filter((p) => p.schemeStatus === "CONVERTED"));
+  const declined = units(plans.filter((p) => p.schemeStatus === "DECLINED"));
+  const pending = units(plans) - converted - declined;
   const parts: string[] = [];
   if (converted) parts.push(`${converted} Converted`);
   if (declined) parts.push(`${declined} Declined`);
@@ -155,7 +156,6 @@ function SchemeAllPlanView({ userId, officers }: { userId: string; officers: { i
 function SchemeManagerViewPlans({ role, userId }: { role: Role; userId: string }) {
   const [scope, setScope] = useState<"self" | "team" | "all" | "review">("self");
   const [officerId, setOfficerId] = useState("");
-  const [tab, setTab] = useState<"scheme" | "enrolled">("scheme");
   const [planningId, setPlanningId] = useState<string | null>(null); // "Continue Planning" (My Schemes only)
   const { data: officers = [] } = useTeamOfficers();
   // Labels resolved unconditionally (before any early return) so hook order is stable.
@@ -163,8 +163,6 @@ function SchemeManagerViewPlans({ role, userId }: { role: Role; userId: string }
   const lTeam = useLabel("scheme_planning.view.team_schemes");
   const lAll = useLabel("scheme_planning.view.all_plans");
   const lReview = useLabel("scheme_planning.view.review");
-  const lSchemeWise = useLabel("scheme_planning.view.scheme_wise");
-  const lEnrolled = useLabel("scheme_planning.view.enrolled_scheme");
 
   if (planningId) return <SchemePlanningView schemeId={planningId} onBack={() => setPlanningId(null)} />;
 
@@ -192,16 +190,9 @@ function SchemeManagerViewPlans({ role, userId }: { role: Role; userId: string }
       ) : scope === "team" && !officerId ? (
         <div className="rounded-lg border bg-background py-10 text-center text-muted-foreground">Select a Sales Officer to view their plans.</div>
       ) : (
-        <>
-          <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">View</div>
-            <div className="flex flex-wrap items-center gap-3">
-              <PillNav value={tab} onChange={setTab} items={[{ value: "scheme", label: lSchemeWise }, { value: "enrolled", label: lEnrolled }]} />
-            </div>
-          </div>
-          {tab === "enrolled" ? (
-            <EnrolledSchemesView officerId={effOfficer} />
-          ) : (
+        <SchemeLifecycleTabs
+          key={scope + (officerId || "")}
+          renderSchemeWise={(lifecycle: Lifecycle) => (
             <SchemeWiseCollapsibleView
               onOpen={setPlanningId}
               officerId={scope === "all" ? undefined : effOfficer}
@@ -209,9 +200,11 @@ function SchemeManagerViewPlans({ role, userId }: { role: Role; userId: string }
               ownUserId={userId}
               showAction={scope === "self"}
               showOfficerCol={scope !== "all"}
+              lifecycle={lifecycle}
             />
           )}
-        </>
+          renderEnrolled={() => <EnrolledSchemesView officerId={effOfficer} schemeStatusFilter="OPEN" />}
+        />
       )}
     </div>
   );
@@ -235,6 +228,8 @@ function SchemeAdminCreatePlan({ role }: { role: Role }) {
   // Two inner options: "View All Scheme" (the Scheme Master list, its internal Enrolled pill hidden here)
   // and "Planned Scheme" (the existing read-only Planned Dealers by Scheme section — moved, not redesigned).
   const [adminView, setAdminView] = useState<"schemes" | "planned">("schemes");
+  const lViewAll = useLabel("scheme_planning.view.view_all_scheme");
+  const lPlanned = useLabel("scheme_planning.view.planned_scheme");
   return (
     <div className="space-y-5">
       <SchemeMasterPage
@@ -244,11 +239,13 @@ function SchemeAdminCreatePlan({ role }: { role: Role }) {
           <div className="space-y-3">
             {/* Top-level module bar — unchanged (Create Plan | View Plan | Follow-up Plans). */}
             <SchemeManagerModeLinks active="planning" role={role} />
-            {/* Inner two-option toggle for Admin Create Plan. */}
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setAdminView("schemes")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", adminView === "schemes" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.view_all_scheme" /></button>
-              <button type="button" onClick={() => setAdminView("planned")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", adminView === "planned" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.planned_scheme" /></button>
-            </div>
+            {/* Inner secondary tabs for Admin Create Plan — clean underlined tabs (Sales Planning style),
+                on their own line below the primary Create Plan | View Plan | Follow-up Plans navigation. */}
+            <UnderlineTabs
+              value={adminView}
+              onChange={setAdminView}
+              items={[{ value: "schemes", label: lViewAll }, { value: "planned", label: lPlanned }]}
+            />
           </div>
         }
         hideList={adminView !== "schemes"}
@@ -314,9 +311,16 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
   // Column filters (State / Sales Officer / Booking / Document) recalculate the metrics server-side.
   const [filters, setFilters] = useState<SummaryFilters>(EMPTY_SUMMARY_FILTERS);
   const filterQ = summaryFilterQuery(filters);
-  const { data: summary } = useQuery<SchemeWiseSummaryPayload>({ queryKey: ["scheme-summary", "all", filterQ], queryFn: () => api.get(`/api/scheme-plans/scheme-summary${filterQ ? `?${filterQ}` : ""}`), enabled: isAdmin });
+  // Admin View Plan lifecycle tabs (first level) + Scheme-wise/Dealer-wise (second level). The lifecycle
+  // narrows the SAME review table + summary; Submitted keeps the admin approve/return/reject dropdown,
+  // Approved keeps Verify. RM's chrome is unchanged (it reaches Review via the RM View Plans scope bar).
+  const [adminLifecycle, setAdminLifecycle] = useState<Lifecycle | "ENROLLED">("SUBMITTED");
+  const [adminRep, setAdminRep] = useState<"scheme" | "dealer">("scheme");
+  // The summary metrics must match the rows the current lifecycle tab shows (Submitted/Approved/Older).
+  const summaryLifecycle: Lifecycle | undefined = isAdmin && adminLifecycle !== "ENROLLED" ? adminLifecycle : undefined;
+  const summaryQ = [filterQ, summaryLifecycle ? `lifecycle=${summaryLifecycle}` : ""].filter(Boolean).join("&");
+  const { data: summary } = useQuery<SchemeWiseSummaryPayload>({ queryKey: ["scheme-summary", "all", filterQ, summaryLifecycle ?? "all"], queryFn: () => api.get(`/api/scheme-plans/scheme-summary${summaryQ ? `?${summaryQ}` : ""}`), enabled: isAdmin && adminRep === "scheme" && adminLifecycle !== "ENROLLED" });
   const summaryByScheme = useMemo(() => new Map((summary?.rows ?? []).map((r) => [r.schemeId, r])), [summary]);
-  const activeDealers = summary?.activeDealers ?? 0;
   const stateOptions = useMemo(() => (summary?.filterOptions.states ?? []).map((s) => ({ value: s, label: s })), [summary]);
   const officerOptions = useMemo(() => (summary?.filterOptions.officers ?? []).map((o) => ({ value: o.id, label: o.name })), [summary]);
   // Filter the grouped rows client-side by the SAME selection (Admin only) so rows/detail match the filtered
@@ -334,24 +338,43 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
   // RM gets a "Running Schemes" tab to CREATE plans (skips RM approval); Admin has no create.
   const [view, setView] = useState<ReviewView>("review");
   const [verifyCols, setVerifyCols] = useState(true); // horizontal collapse of the 4 verification columns (UI-only, expanded by default)
-  // Admin View-Plan tab labels (global label dictionary).
-  const adminViewTabs: { value: ReviewView; label: string }[] = [
-    { value: "review", label: useLabel("scheme_planning.view.scheme_wise") },
+  // Admin View-Plan tab labels (global label dictionary): first-level lifecycle + second-level view.
+  const adminLifecycleTabs: { value: Lifecycle | "ENROLLED"; label: string }[] = [
+    { value: "SUBMITTED", label: useLabel("scheme_planning.view.submitted") },
+    { value: "APPROVED", label: useLabel("scheme_planning.view.approved") },
+    { value: "ENROLLED", label: useLabel("scheme_planning.view.enrolled_plans") },
+    { value: "OLDER", label: useLabel("scheme_planning.view.older_plans") },
+  ];
+  const adminRepTabs: { value: "scheme" | "dealer"; label: string }[] = [
+    { value: "scheme", label: useLabel("scheme_planning.view.scheme_wise") },
     { value: "dealer", label: useLabel("scheme_planning.view.dealer_wise") },
-    { value: "enrolled", label: useLabel("scheme_planning.view.enrolled_scheme") },
   ];
   const invalidate = () => qc.invalidateQueries({ queryKey: ["scheme-plans"] });
 
   const groups = useMemo<SchemeGroup[]>(() => {
     const map = new Map<string, SchemeGroup>();
-    // Admin filters narrow the population; RM has no filter UI so planMatches passes everything.
-    for (const p of (rows ?? []).filter(planMatches)) {
+    // Admin filters narrow the population; RM has no filter UI so planMatches passes everything. For Admin the
+    // active lifecycle tab (Submitted/Approved/Older) further filters which plans the table shows.
+    const lcMatch = (p: SchemePlan) => !isAdmin || adminLifecycle === "ENROLLED" || planLifecycle(p) === adminLifecycle;
+    for (const p of (rows ?? []).filter(planMatches).filter(lcMatch)) {
       const g = map.get(p.schemeId) ?? { schemeId: p.schemeId, schemeName: p.schemeName, plans: [] };
       g.plans.push(p);
       map.set(p.schemeId, g);
     }
     return [...map.values()].sort((a, b) => a.schemeName.localeCompare(b.schemeName));
-  }, [rows, planMatches]);
+  }, [rows, planMatches, isAdmin, adminLifecycle]);
+
+  // Admin Submitted-tab counts (across the filtered, submitted rows) for the count strip.
+  const adminSubmittedCounts = useMemo(() => {
+    let rm = 0, admin = 0, total = 0;
+    for (const g of groups) for (const p of g.plans) {
+      const units = p.numberOfSchemes || 1;
+      total += units;
+      if (p.planStatus === "PENDING_RM") rm += units;
+      else if (p.planStatus === "PENDING_APPROVAL") admin += units;
+    }
+    return { rm, admin, total };
+  }, [groups]);
 
   const submit = useMutation({ mutationFn: (id: string) => api.post(`/api/scheme-plans/${id}/submit`, {}), onSuccess: invalidate, onError: (e) => alert((e as Error).message) });
   const act = useMutation({
@@ -385,9 +408,23 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
   // Dealers an RM may return in bulk for a scheme (plans pending for RM, not the RM's own).
   const rmReturnable = (g: SchemeGroup) => g.plans.filter((p) => isManager && p.salesOfficerId !== userId && p.planStatus === "PENDING_RM");
 
-  // Admin View-Plan Scheme-wise: Scheme, State, Sales Officer(s), + 8 summary metrics, Actions.
+  // Admin Submitted → the expanded dealer rows use the SAME six-column config as the Sales Officer Submitted
+  // view (Dealer · Planned Conversion · Schemes · Total Amount · Planning Date · Plan Status) — no Sales
+  // Officer / State / Scheme Status / verification columns. Approved & Older keep the full lifecycle table.
+  // Scoped to Admin so RM Review is unaffected. Presentation-only: same data, same query, same grouping.
+  const submitted = isAdmin && adminLifecycle === "SUBMITTED";
+  const approved = isAdmin && adminLifecycle === "APPROVED";
+
+  // Admin View-Plan Scheme-wise: Scheme, State, Sales Officer(s), + summary metrics. Submitted hides four
+  // verification metrics (Converted Dealers, Booking Amount, Document Status, Billing Status), so the metric
+  // count — and therefore the colSpan for skeleton/empty/nested rows — shrinks accordingly.
   // RM Review (unchanged): Scheme, Planned Dealers, Converted Dealers, Sales Officer(s), State, Plan Status, Scheme Status, Actions.
-  const COLS = isAdmin ? 3 + SUMMARY_METRIC_COLS : 8;
+  const COLS = isAdmin ? 3 + metricColCount(submitted, approved) : 8;
+
+  // What the body renders. Admin maps its lifecycle/representation tabs onto the existing panels: Dealer-wise →
+  // placeholder, Enrolled Plans → the Enrolled view (open schemes only), everything else → the review table
+  // (filtered to the active lifecycle). RM keeps its own Review / Running / Enrolled pills.
+  const effectiveView: ReviewView = isAdmin ? (adminRep === "dealer" ? "dealer" : adminLifecycle === "ENROLLED" ? "enrolled" : "review") : view;
 
   return (
     <div className="space-y-5">
@@ -418,12 +455,17 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
         Enrolled Scheme pills, unchanged.
       */}
       {isAdmin ? (
-        <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">View</div>
-          <div className="flex flex-wrap items-center gap-3">
-            <PillNav value={view} onChange={setView} items={adminViewTabs} />
+        <>
+          {/* First level (PLAN TYPE) — Submitted | Approved | Enrolled Plans | Older Plans (boxed segmented). */}
+          <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Plan Type</div>
+            <div className="flex flex-wrap items-center gap-3">
+              <PillNav value={adminLifecycle} onChange={setAdminLifecycle} items={adminLifecycleTabs} />
+            </div>
           </div>
-        </div>
+          {/* Second level — Scheme-wise | Dealer-wise, as clean underlined tabs (Sales Planning style). */}
+          <UnderlineTabs value={adminRep} onChange={setAdminRep} items={adminRepTabs} />
+        </>
       ) : (
         <div className="flex gap-2">
           <button type="button" onClick={() => setView("review")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "review" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}><L k="scheme_planning.view.review" /></button>
@@ -432,7 +474,7 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
         </div>
       )}
 
-      {view === "enrolled" ? <EnrolledSchemesView /> : view === "dealer" ? <DealerWiseComingSoon /> : view === "running" ? (
+      {effectiveView === "enrolled" ? <EnrolledSchemesView {...(isAdmin ? { schemeStatusFilter: "OPEN" as const } : {})} /> : effectiveView === "dealer" ? <DealerWiseComingSoon /> : effectiveView === "running" ? (
         /*
           RM create tab — the same collapsible Create Plan workspace the Sales Officer uses, with the RM's
           existing My Dealers / My Team → Sales Officer scope control (`enableRmScope`). The scope itself is
@@ -440,6 +482,14 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
         */
         <SchemeCreatePlanWorkspace enableRmScope userId={userId} />
       ) : (
+      <>
+      {isAdmin && adminLifecycle === "SUBMITTED" && (
+        <div className="mb-4 flex flex-wrap gap-3">
+          <div className="rounded-lg border bg-muted/20 px-4 py-2"><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.view.total_schemes" /></div><div className="text-xl font-semibold tabular-nums">{adminSubmittedCounts.total}</div></div>
+          <div className="rounded-lg border bg-muted/20 px-4 py-2"><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.view.rm_pending" /></div><div className="text-xl font-semibold tabular-nums">{adminSubmittedCounts.rm}</div></div>
+          <div className="rounded-lg border bg-muted/20 px-4 py-2"><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.view.admin_pending" /></div><div className="text-xl font-semibold tabular-nums">{adminSubmittedCounts.admin}</div></div>
+        </div>
+      )}
       <div className={schemeTable.outer}>
         <Table>
           <TableHeader>
@@ -451,6 +501,8 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                   <ColumnFilterHead labelKey="scheme_planning.col.state" options={stateOptions} value={filters.states} onApply={(v) => setFilters((f) => ({ ...f, states: v }))} />
                   <ColumnFilterHead labelKey="scheme_planning.col.sales_officers" options={officerOptions} value={filters.officers} onApply={(v) => setFilters((f) => ({ ...f, officers: v }))} />
                   <SchemeSummaryHeads
+                    submitted={submitted}
+                    billingCompletion={approved}
                     booking={{ value: filters.booking, onApply: (v) => setFilters((f) => ({ ...f, booking: v })) }}
                     documents={{ value: filters.documents, onApply: (v) => setFilters((f) => ({ ...f, documents: v })) }}
                   />
@@ -488,15 +540,16 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                       {isAdmin ? (
                         <>
                           <TableCell>{states.length ? states.map((s) => <Badge key={s} variant="secondary" className="mr-1">{s}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell>
-                          <TableCell className="max-w-[16rem] truncate" title={officers.join(", ")}>{officers.length <= 1 ? officers[0] ?? "—" : `${officers[0]} +${officers.length - 1}`}</TableCell>
-                          {/* Metrics from the shared server aggregation (admin-confirmed lifecycle, scope denom). */}
-                          <SchemeSummaryValueCells m={summaryByScheme.get(g.schemeId) ?? ZERO_METRICS} activeDealers={activeDealers} />
+                          <TableCell className="max-w-[16rem]"><SchemeOfficerCell names={officers} /></TableCell>
+                          {/* Metrics from the shared server aggregation; the Planned Dealers denominator is this
+                              scheme's own officers' combined dealer universe (per-row, not the global count). */}
+                          <SchemeSummaryValueCells submitted={submitted} m={summaryByScheme.get(g.schemeId) ?? ZERO_METRICS} activeDealers={summaryByScheme.get(g.schemeId)?.activeDealers ?? 0} billingCompletionPlans={approved ? g.plans : undefined} />
                         </>
                       ) : (
                         <>
-                          <TableCell className="text-right tabular-nums">{g.plans.length}</TableCell>
-                          <TableCell className="text-right tabular-nums">{g.plans.filter((p) => p.schemeStatus === "CONVERTED").length}</TableCell>
-                          <TableCell className="max-w-[16rem] truncate" title={officers.join(", ")}>{officers.length <= 1 ? officers[0] ?? "—" : `${officers[0]} +${officers.length - 1}`}</TableCell>
+                          <TableCell className="text-right tabular-nums">{new Set(g.plans.map((p) => p.dealerId)).size}</TableCell>
+                          <TableCell className="text-right tabular-nums">{new Set(g.plans.filter((p) => p.schemeStatus === "CONVERTED").map((p) => p.dealerId)).size}</TableCell>
+                          <TableCell className="max-w-[16rem]"><SchemeOfficerCell names={officers} /></TableCell>
                           <TableCell>{states.length ? states.map((s) => <Badge key={s} variant="secondary" className="mr-1">{s}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">{planSummary(g.plans)}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">{schemeSummary(g.plans)}</TableCell>
@@ -531,25 +584,38 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                               <TableHeader>
                                 <TableRow>
                                   <TableHead><L k="scheme_planning.nested.dealer" /></TableHead>
-                                  <TableHead><L k="scheme_planning.nested.sales_officer" /></TableHead>
-                                  <TableHead><L k="scheme_planning.nested.state" /></TableHead>
-                                  <TableHead><L k="scheme_planning.nested.planned_conversion" /></TableHead>
-                                  <TableHead><L k="scheme_planning.nested.plan_status" /></TableHead>
-                                  <TableHead><L k="scheme_planning.nested.scheme_status" /></TableHead>
-                                  <TableHead className="w-8 border-l p-0 text-center">
-                                    <button type="button" title={verifyCols ? "Hide verification details" : "Show verification details"} aria-label={verifyCols ? "Hide verification details" : "Show verification details"} onClick={() => setVerifyCols((v) => !v)} className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
-                                      {verifyCols ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                                    </button>
-                                  </TableHead>
-                                  {verifyCols && (
+                                  {submitted ? (
                                     <>
-                                      <TableHead className={verifyTint.conversion.head}><L k="scheme_planning.nested.conversion_date" /></TableHead>
-                                      <TableHead className={verifyTint.booking.head}><L k="scheme_planning.nested.booking_amount" /></TableHead>
-                                      <TableHead className={verifyTint.document.head}><L k="scheme_planning.nested.document_status" /></TableHead>
-                                      <TableHead className={verifyTint.billing.head}><L k="scheme_planning.nested.billing_date" /></TableHead>
+                                      <TableHead><L k="scheme_planning.nested.planned_conversion" /></TableHead>
+                                      <TableHead className="text-right"><L k="scheme_planning.nested.schemes" /></TableHead>
+                                      <TableHead className="text-right"><L k="scheme_planning.nested.total_amount" /></TableHead>
+                                      <TableHead><L k="scheme_planning.nested.planning_date" /></TableHead>
+                                      <TableHead><L k="scheme_planning.nested.plan_status" /></TableHead>
+                                      <TableHead className="border-l text-right"><L k="scheme_planning.nested.actions" /></TableHead>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <TableHead><L k="scheme_planning.nested.sales_officer" /></TableHead>
+                                      <TableHead><L k="scheme_planning.nested.state" /></TableHead>
+                                      <TableHead><L k="scheme_planning.nested.planned_conversion" /></TableHead>
+                                      <TableHead><L k="scheme_planning.nested.plan_status" /></TableHead>
+                                      <TableHead><L k="scheme_planning.nested.scheme_status" /></TableHead>
+                                      <TableHead className="w-8 border-l p-0 text-center">
+                                        <button type="button" title={verifyCols ? "Hide verification details" : "Show verification details"} aria-label={verifyCols ? "Hide verification details" : "Show verification details"} onClick={() => setVerifyCols((v) => !v)} className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
+                                          {verifyCols ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                        </button>
+                                      </TableHead>
+                                      {verifyCols && (
+                                        <>
+                                          <TableHead className={verifyTint.conversion.head}><L k="scheme_planning.nested.conversion_date" /></TableHead>
+                                          <TableHead className={verifyTint.booking.head}><L k="scheme_planning.nested.booking_amount" /></TableHead>
+                                          <TableHead className={verifyTint.document.head}><L k="scheme_planning.nested.document_status" /></TableHead>
+                                          <TableHead className={verifyTint.billing.head}><L k="scheme_planning.nested.billing_date" /></TableHead>
+                                        </>
+                                      )}
+                                      <TableHead className="border-l text-right"><L k="scheme_planning.nested.actions" /></TableHead>
                                     </>
                                   )}
-                                  <TableHead className="border-l text-right"><L k="scheme_planning.nested.actions" /></TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -566,6 +632,36 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                                         </div>
                                       ) : r.dealerName}
                                     </TableCell>
+                                    {submitted ? (
+                                      <>
+                                        {/* Same six columns as the Sales Officer Submitted view + an Admin-only Actions column. */}
+                                        <TableCell><PlannedConversionCell plan={r} /></TableCell>
+                                        <TableCell className="text-right tabular-nums">{r.numberOfSchemes}</TableCell>
+                                        <TableCell className="text-right tabular-nums">{formatCurrency(r.totalSchemeAmount)}</TableCell>
+                                        <TableCell>{r.planningDate ? formatDateShort(r.planningDate) : <span className="text-muted-foreground">—</span>}</TableCell>
+                                        <TableCell><PlanStateBadge status={r.planStatus} /></TableCell>
+                                        <TableCell className="border-l text-right">
+                                          <div className="flex items-center justify-end gap-1">
+                                            {canAdminAct(r) && (
+                                              <NativeSelect
+                                                className="w-32"
+                                                value=""
+                                                disabled={adminAct.isPending}
+                                                onChange={(e) => {
+                                                  const a = e.target.value;
+                                                  e.currentTarget.value = "";
+                                                  if (a === "approve") adminAct.mutate({ id: r.id, action: "approve" });
+                                                  else if (a === "return") setReason({ title: `Return dealer — ${r.dealerName}`, confirmLabel: "Return dealer", require: true, run: (remarks) => adminAct.mutate({ id: r.id, action: "return", remarks }) });
+                                                  else if (a === "reject") setReason({ title: `Reject dealer — ${r.dealerName}`, confirmLabel: "Reject dealer", require: true, run: (remarks) => adminAct.mutate({ id: r.id, action: "reject", remarks }) });
+                                                }}
+                                                options={[{ value: "", label: "Action…" }, { value: "approve", label: "Approved" }, { value: "return", label: "Return" }, { value: "reject", label: "Reject" }]}
+                                              />
+                                            )}
+                                          </div>
+                                        </TableCell>
+                                      </>
+                                    ) : (
+                                    <>
                                     <TableCell>{r.salesOfficerName}</TableCell>
                                     <TableCell>{r.state ? <Badge variant="secondary">{r.state}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
                                     <TableCell><PlannedConversionCell plan={r} /></TableCell>
@@ -618,6 +714,8 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                                         {!isAdmin && <Button size="sm" variant="ghost" onClick={() => setDetail(r)}><Eye className="h-4 w-4" /> Info</Button>}
                                       </div>
                                     </TableCell>
+                                    </>
+                                    )}
                                   </TableRow>
                                 ))}
                               </TableBody>
@@ -634,6 +732,7 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
           </TableBody>
         </Table>
       </div>
+      </>
       )}
 
       {detail && <SchemePlanDialog plan={detail} canVerify={false} onClose={() => setDetail(null)} />}
@@ -867,4 +966,3 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
     </Dialog>
   );
 }
-

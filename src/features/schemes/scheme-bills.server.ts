@@ -8,6 +8,8 @@ import { getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { effectiveBookingAmount } from "@/lib/scheme-installments";
 import { soPlanBills, adminPlanBills, assertBillParts, assertBillTotals, combinedPresetValueErrors, billSchedule } from "@/lib/scheme-bills";
+import { quantitySplitDecision } from "@/lib/scheme-plan-quantity";
+import { applyConversionQuantity, conversionQuantityPlanSelect, type ConversionQuantityPlan } from "./scheme-plan-quantity.server";
 
 /** Financial reads include active bill schedules without pretending partial verification is enrollment. */
 export const billFinancialScope = { OR: [
@@ -45,6 +47,14 @@ async function lockedPlan(tx: Prisma.TransactionClient, id: string, scope: Await
   if (plan.planStatus !== "APPROVED") throw new ApiError(409, "Only approved plans support conversion/verification");
   return plan;
 }
+async function lockedConversionPlan(tx: Prisma.TransactionClient, id: string, scope: Awaited<ReturnType<typeof getOfficerScope>>): Promise<ConversionQuantityPlan> {
+  await tx.$queryRaw`SELECT "id" FROM "DealerSchemePlan" WHERE "id" = ${id} FOR UPDATE`;
+  const plan = await tx.dealerSchemePlan.findUnique({ where: { id }, select: conversionQuantityPlanSelect });
+  if (!plan) throw new ApiError(404, "Scheme plan not found");
+  if (!scope.all && !scope.ids.includes(plan.salesOfficerId)) throw new ApiError(403, "You cannot manage this scheme plan");
+  if (plan.planStatus !== "APPROVED") throw new ApiError(409, "Only approved plans support conversion/verification");
+  return plan;
+}
 function parse<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, raw: unknown): T {
   const result = schema.safeParse(raw);
   if (!result.success) throw new ApiError(422, result.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; "));
@@ -55,21 +65,30 @@ const billSelect = { id: true, partNumber: true, soBillDate: true, adminBillDate
 export async function rejectLegacyBillWrite(planId: string, db: Pick<Prisma.TransactionClient, "dealerSchemePlan"> = prisma) {
   if (await db.dealerSchemePlan.count({ where: { id: planId, OR: [{ billMode: true }, { instances: { some: { billMode: true } } }] } })) throw new ApiError(409, "Use combined plan billing; legacy billing cannot overwrite bill records");
 }
-interface SoCommon { schemeStatus: string; conversionDate?: Date | null; soBookingStatus?: "RECEIVED" | "PARTIAL" | "NOT_RECEIVED" | null; soBookingAmount?: number | null; soDocumentStatus?: "SIGNED_BUT_NOT_SENT" | "SIGNED_AND_SENT" | "HARD_COPY_SENT" | "DOC_RECEIVED" | null }
+interface SoCommon { schemeStatus: string; proceedingSchemes?: number; remainingDisposition?: "CANCELLED" | "FUTURE_DRAFT" | null; conversionDate?: Date | null; soBookingStatus?: "RECEIVED" | "PARTIAL" | "NOT_RECEIVED" | null; soBookingAmount?: number | null; soDocumentStatus?: "SIGNED_BUT_NOT_SENT" | "SIGNED_AND_SENT" | "HARD_COPY_SENT" | "DOC_RECEIVED" | null }
+function presetValueErrors(source: Pick<ConversionQuantityPlan, "numberOfSchemes" | "totalSchemeAmount" | "optionValueWithoutGST" | "optionValueWithGST" | "scheme">, common: SoCommon, data: z.infer<typeof soPlanBills>): string[] {
+  let quantity;
+  try { quantity = quantitySplitDecision(source.numberOfSchemes || 1, common.proceedingSchemes, common.remainingDisposition); }
+  catch (error) { throw new ApiError(422, (error as Error).message); }
+  const units = quantity.proceedingQuantity;
+  const presetWithoutGST = new Prisma.Decimal(source.scheme.structure === "MULTIPLE_OPTIONS" ? source.optionValueWithoutGST ?? 0 : source.scheme.schemeValueWithoutGST ?? 0).times(units);
+  const presetWithGST = source.totalSchemeAmount == null
+    ? new Prisma.Decimal(source.scheme.structure === "MULTIPLE_OPTIONS" ? source.optionValueWithGST ?? 0 : source.scheme.schemeValueWithGST ?? 0).times(units)
+    : new Prisma.Decimal(source.totalSchemeAmount).div(source.numberOfSchemes || 1).times(units).toDecimalPlaces(2);
+  return combinedPresetValueErrors(data, { amountWithoutGST: presetWithoutGST.toString(), amountWithGST: presetWithGST.toString() });
+}
 export async function saveBillConversion(ctx: AuthContext, planId: string, common: SoCommon, raw: unknown) {
   if (common.schemeStatus !== "CONVERTED") throw new ApiError(422, "Combined bills require Converted status");
   const data = parse(soPlanBills, raw);
   check(() => { assertBillParts(data.billCount, data.bills); assertBillTotals(data, data.bills); });
   const { source, scope } = await prepare(ctx, planId);
-  const units = source.numberOfSchemes || 1;
-  const presetWithoutGST = new Prisma.Decimal(source.scheme.structure === "MULTIPLE_OPTIONS" ? source.optionValueWithoutGST ?? 0 : source.scheme.schemeValueWithoutGST ?? 0).times(units);
-  const presetWithGST = source.totalSchemeAmount == null
-    ? new Prisma.Decimal(source.scheme.structure === "MULTIPLE_OPTIONS" ? source.optionValueWithGST ?? 0 : source.scheme.schemeValueWithGST ?? 0).times(units)
-    : new Prisma.Decimal(source.totalSchemeAmount);
-  const minimumErrors = combinedPresetValueErrors(data, { amountWithoutGST: presetWithoutGST.toString(), amountWithGST: presetWithGST.toString() });
+  const minimumErrors = presetValueErrors(source, common, data);
   if (minimumErrors.length) throw new ApiError(422, minimumErrors.join(" "));
   return prisma.$transaction(async tx => {
-    const plan = await lockedPlan(tx, planId, scope);
+    const plan = await lockedConversionPlan(tx, planId, scope);
+    const lockedMinimumErrors = presetValueErrors(plan, common, data);
+    if (lockedMinimumErrors.length) throw new ApiError(422, lockedMinimumErrors.join(" "));
+    await applyConversionQuantity(tx, ctx, planId, common, plan);
     if (!plan.billMode) {
       if (await tx.dealerSchemeInstallment.count({ where: { instance: { dealerSchemePlanId: planId } } })) throw new ApiError(409, "Existing instance-linked schedules require a separate correction workflow; they cannot be converted or regenerated");
       // Old verified/enrolled records are not reinterpreted. Unscheduled instance-bill references are retained.
@@ -89,7 +108,7 @@ export async function saveBillConversion(ctx: AuthContext, planId: string, commo
       schemeStatus: "CONVERTED", conversionDate: common.conversionDate, soBookingStatus: common.soBookingStatus, soBookingAmount: common.soBookingAmount, soDocumentStatus: common.soDocumentStatus } });
     await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: JSON.stringify({ event: "SO combined bills submitted", before: { ...plan, bills: before }, after: { ...common, billing: data } }) }, tx);
     return { ok: true as const };
-  });
+  }, { timeout: 15000 });
 }
 interface AdminCommon { adminConversionDate: Date; adminBookingStatus: "RECEIVED" | "PARTIAL" | "NOT_RECEIVED"; adminBookingAmount?: number | null; adminDocumentStatus: string; adminPrePlacementDays?: number | null; remarks?: string }
 export async function verifyBills(ctx: AuthContext, planId: string, common: AdminCommon, raw: unknown) {

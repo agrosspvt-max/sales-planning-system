@@ -39,7 +39,10 @@ export async function updatePlanningConfig(ctx: AuthContext, raw: unknown): Prom
 
 /* ------------------------------ Recovery config --------------------------- */
 
-const recoveryConfigSchema = z.object({ dueValidation: z.coerce.boolean() });
+const recoveryConfigSchema = z.object({
+  dueValidation: z.coerce.boolean(),
+  calendarEnabled: z.coerce.boolean().default(true),
+});
 
 export async function loadRecoveryConfig(ctx: AuthContext): Promise<RecoveryConfig> {
   assertAdmin(ctx);
@@ -54,7 +57,7 @@ export async function updateRecoveryConfig(ctx: AuthContext, raw: unknown): Prom
     userId: ctx.userId,
     action: "UPDATE",
     entity: "recoveryConfig",
-    summary: `Recovery configuration set — Due Recovery Validation: ${saved.dueValidation ? "ON" : "OFF"}`,
+    summary: `Recovery configuration set — Due Recovery Validation: ${saved.dueValidation ? "ON" : "OFF"}, Calendar: ${saved.calendarEnabled ? "ON" : "OFF"}`,
   });
   return saved;
 }

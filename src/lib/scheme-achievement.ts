@@ -18,6 +18,8 @@
  *    Decimal(14,2) / Decimal(14,3) columns. Comparisons round to that precision to avoid float noise.
  */
 
+import { effectiveProductQuantityTarget } from "./scheme-plan-quantity";
+
 export type SchemeRequirementType = "NONE" | "PRODUCT_BASED" | "VALUE_BASED";
 export type SchemeValueMode = "INDIVIDUAL" | "COMBINED";
 
@@ -128,9 +130,10 @@ export interface DealerProductAchievement {
 export function dealerProductAchievement(
   req: SchemeRequirement,
   dealerSums: Map<string, { qty: number; value: number }>,
+  proceedingUnits = 1,
 ): DealerProductAchievement {
   const items: ProductItem[] = req.products.map((p) => {
-    const requiredQty = round3(p.requiredQty ?? 0);
+    const requiredQty = effectiveProductQuantityTarget(p.requiredQty ?? 0, proceedingUnits);
     const achievedQty = round3(dealerSums.get(p.productId)?.qty ?? 0);
     return {
       productId: p.productId,
@@ -171,24 +174,26 @@ export function schemeProductAchievement(
   req: SchemeRequirement,
   sales: SchemeSaleFact[],
   enrolledDealerIds: string[],
+  proceedingUnitsByDealer: ReadonlyMap<string, number> = new Map(),
 ): SchemeProductAchievement {
   const enrolled = new Set(enrolledDealerIds);
   const byDealer = salesByDealerProduct(sales, enrolled);
   const perDealer = enrolledDealerIds.map((dealerId) => ({
     dealerId,
-    achievement: dealerProductAchievement(req, byDealer.get(dealerId) ?? new Map()),
+    achievement: dealerProductAchievement(req, byDealer.get(dealerId) ?? new Map(), proceedingUnitsByDealer.get(dealerId) ?? 1),
   }));
 
   // Scheme "Products Completed" = per product, aggregate achieved (Σ dealers) >= aggregate required
   // (requiredQty × enrolled count). Dealers with no sales still add to the required denominator.
   const dealerCount = enrolledDealerIds.length;
+  const proceedingUnits = enrolledDealerIds.reduce((sum, dealerId) => sum + (proceedingUnitsByDealer.get(dealerId) ?? 1), 0);
   const aggAchievedByProduct = new Map<string, number>();
   for (const byProduct of byDealer.values()) {
     for (const [pid, s] of byProduct) aggAchievedByProduct.set(pid, round3((aggAchievedByProduct.get(pid) ?? 0) + s.qty));
   }
   let productsCompleted = 0;
   for (const p of req.products) {
-    const aggReq = round3((p.requiredQty ?? 0) * dealerCount);
+    const aggReq = effectiveProductQuantityTarget(p.requiredQty ?? 0, proceedingUnits);
     const aggAch = round3(aggAchievedByProduct.get(p.productId) ?? 0);
     if (qtyGte(aggAch, aggReq)) productsCompleted += 1;
   }

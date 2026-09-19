@@ -34,4 +34,7 @@ function createPrisma(): PrismaClient {
 
 export const prisma = globalForPrisma.prisma ?? createPrisma();
 
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+// Pin the client to this process/isolate in every environment. Module caching normally already gives one
+// production client, while globalThis also protects against the same module being evaluated through more than
+// one server bundle. Serverless isolates still have their own client, as required by their process boundary.
+globalForPrisma.prisma = prisma;

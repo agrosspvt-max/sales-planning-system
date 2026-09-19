@@ -27,6 +27,7 @@ function loadService<T>(name: string, prisma: object): T {
     "server-only": {},
     "./scheme-bills.server": { saveBillConversion: async () => {}, verifyBills: async () => {}, rejectLegacyBillWrite: async () => {} },
     "./scheme-plan-quantity.server": { applyConversionQuantity: async () => ({ split: false }) },
+    "./scheme-bill-product.server": { productBillingForPlans: async () => new Map() },
     "./scheme-master.server": { refreshSchemeStatuses: async () => {} },
     "@/lib/prisma": { prisma },
     "@/lib/audit": { writeAudit: async () => {} },

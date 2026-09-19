@@ -26,10 +26,21 @@ export interface SchemePlan {
   enrolledByName: string | null; enrolledAt: string | null; createdAt: string;
   // Part E
   planStatus: string; schemeStatus: string; schemeClosed?: boolean; segmentNumber?: number; numberOfSchemes: number; totalSchemeAmount: number; soNote: string | null; planningDate: string | null;
-  originalConversionDate: string | null; conversionExtensionCount: number; maxExtensionDays: number; maxExtensionAttempts: number;
+  // Conversion Follow-up: without-GST planned / actual(converted) amounts (derived server-side).
+  plannedAmountWithoutGST?: number; actualAmountWithoutGST?: number;
+  // Product-Quantity-Based billing snapshot (committed products + rates + saved per-bill quantities).
+  productBilling?: {
+    active: true;
+    mode: "QUANTITY_TARGET" | "VALUE_TARGET";
+    products: { productId: string; name: string; committedQty: number | null; perSchemeCommittedQty?: number | null; rateWithoutGST: number; rateWithGST: number }[];
+    bills: { partNumber: number; productId: string; soQty: number | null; adminQty: number | null }[];
+  } | null;
+  originalConversionDate: string | null; conversionExtensionCount: number; maxExtensionDays: number; maxExtensionAttempts: number; maxBillCount?: number;
   conversionExtensions: { extensionNumber: number; previousConversionDate: string; newConversionDate: string; daysAdded: number; extendedByName: string | null; createdAt: string }[];
   conversionDate: string | null; soBookingStatus: string | null; soBookingAmount: number | null; soDocumentStatus: string | null; billingDate: string | null;
   adminConversionDate: string | null; adminBookingStatus: string | null; adminBookingAmount: number | null; adminDocumentStatus: string | null; adminBillingDate: string | null; adminVerifiedAt: string | null;
+  // Booking coverage: per-scheme booking amount + how many schemes the verified Paid booking covers.
+  bookingAmountPerScheme?: number; adminBookingSchemeCount?: number | null;
   soBillingSameForAll: boolean; adminBillingSameForAll: boolean;
   instances: { instanceNumber: number; soBillingDate: string | null; adminBillingDate: string | null }[];
   // Multiple Options (Phase 10). selectedOptionId = the live/committed option; option* = frozen snapshot.

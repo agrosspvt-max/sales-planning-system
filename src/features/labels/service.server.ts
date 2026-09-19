@@ -10,21 +10,37 @@ import { DEFAULT_LABELS } from "./labels";
  * table). Only Super Admin may write. Only known label keys are accepted — never arbitrary data.
  */
 const SETTING_KEY = "labelOverrides";
+const LABEL_CACHE_TTL_MS = Number(process.env.LABEL_SETTING_CACHE_TTL_MS ?? 10_000);
+let overrideCache: { value: Record<string, string>; expiresAt: number } | null = null;
+let overrideLookup: Promise<Record<string, string>> | null = null;
+
+function rememberOverrides(value: Record<string, string>) {
+  overrideCache = { value: { ...value }, expiresAt: Date.now() + Math.max(0, LABEL_CACHE_TTL_MS) };
+  return { ...value };
+}
 
 async function readOverrides(): Promise<Record<string, string>> {
-  const row = (await prisma.systemSetting.findUnique({ where: { key: SETTING_KEY }, select: { value: true } })) as { value: string } | null;
-  if (!row) return {};
-  try {
-    const parsed = JSON.parse(row.value) as unknown;
-    if (parsed && typeof parsed === "object") {
-      const out: Record<string, string> = {};
-      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) if (k in DEFAULT_LABELS && typeof v === "string") out[k] = v;
-      return out;
+  if (overrideCache && overrideCache.expiresAt > Date.now()) return { ...overrideCache.value };
+  if (overrideLookup) return overrideLookup.then((value) => ({ ...value }));
+  overrideLookup = prisma.systemSetting.findUnique({ where: { key: SETTING_KEY }, select: { value: true } }).then((row) => {
+    if (!row) return rememberOverrides({});
+    try {
+      const parsed = JSON.parse(row.value) as unknown;
+      if (parsed && typeof parsed === "object") {
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) if (k in DEFAULT_LABELS && typeof v === "string") out[k] = v;
+        return rememberOverrides(out);
+      }
+    } catch {
+      /* corrupt value → treat as no overrides */
     }
-  } catch {
-    /* corrupt value → treat as no overrides */
+    return rememberOverrides({});
+  });
+  try {
+    return await overrideLookup;
+  } finally {
+    overrideLookup = null;
   }
-  return {};
 }
 
 /** Overrides + whether the caller may edit them (Super Admin only). */
@@ -54,5 +70,5 @@ export async function setLabelOverride(ctx: AuthContext, raw: unknown): Promise<
     create: { key: SETTING_KEY, value: JSON.stringify(overrides) },
     update: { value: JSON.stringify(overrides) },
   });
-  return overrides;
+  return rememberOverrides(overrides);
 }

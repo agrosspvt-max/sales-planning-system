@@ -34,7 +34,7 @@ export const conversionQuantityPlanSelect = {
   soBillCount: true, adminBillCount: true, soAmountWithoutGST: true, soAmountWithGST: true,
   adminAmountWithoutGST: true, adminAmountWithGST: true, bookingAmount: true, bookingBillNumber: true,
   quantitySplitAsSource: { select: { id: true } },
-  scheme: { select: { structure: true, schemeValueWithoutGST: true, schemeValueWithGST: true } },
+  scheme: { select: { structure: true, schemeValueWithoutGST: true, schemeValueWithGST: true, numberOfBills: true } },
   instances: {
     select: {
       id: true, instanceNumber: true, soBillingDate: true, adminBillingDate: true, billMode: true, billsLockedAt: true,

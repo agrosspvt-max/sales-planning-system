@@ -113,6 +113,45 @@ export const DEFAULT_LABELS = {
   "scheme_planning.nav.create_plan": "Create Plan",
   "scheme_planning.nav.view_plan": "View Plan",
   "scheme_planning.nav.follow_up": "Follow-up Plans",
+  "scheme_planning.nav.follow_up_monitor": "Follow Up",
+
+  // Follow Up hub — VIEW segmented control (Follow-up Type) + shared representation tabs
+  "scheme_planning.follow_up.conversion": "Conversion Follow-up",
+  "scheme_planning.follow_up.billing": "Billing Follow-up",
+  "scheme_planning.follow_up.payment": "Payment Follow-up",
+  "scheme_planning.follow_up.scheme_wise": "Scheme-wise Follow-up",
+  "scheme_planning.follow_up.dealer_wise": "Dealer-wise Follow-up",
+  // Conversion Follow-up — scheme-level columns
+  "scheme_planning.follow_up.col.planned_dealers": "Planned Dealers",
+  "scheme_planning.follow_up.col.planned_units": "Planned Sch. Units",
+  "scheme_planning.follow_up.col.plan_amount_wo_gst": "Plan Amt. w/o GST",
+  "scheme_planning.follow_up.col.sold_units": "Sold Sch. Units",
+  "scheme_planning.follow_up.col.actual_amount_wo_gst": "Actual Amt. w/o GST",
+  "scheme_planning.follow_up.col.booking_amount": "Booking Amt.",
+  "scheme_planning.follow_up.col.document_status": "Doc. Status",
+  // Conversion Follow-up — dealer-level columns
+  "scheme_planning.follow_up.col.dealer": "Dealer",
+  "scheme_planning.follow_up.col.planned_amount": "Planned Amt.",
+  "scheme_planning.follow_up.col.conversion_date": "Conversion Date",
+  "scheme_planning.follow_up.col.plan_status": "Plan Status",
+  "scheme_planning.follow_up.col.scheme_status": "Scheme Status",
+  "scheme_planning.follow_up.col.action": "Action",
+  // Follow Up hub — page title/subtitle + empty/select states
+  "scheme_planning.follow_up.title": "Follow Up",
+  "scheme_planning.follow_up.subtitle": "Monitor conversion progress across scheme plans. Read-only aggregation over existing plan data.",
+  "scheme_planning.follow_up.empty": "No approved scheme plans to follow up yet.",
+  "scheme_planning.follow_up.select_officer": "Select a Sales Officer to view their conversion follow-up.",
+
+  // Shared structural section headings (the boxed segmented-control captions)
+  "scheme_planning.section.scope": "Scope",
+  "scheme_planning.section.view": "View",
+  "scheme_planning.section.plan_type": "Plan Type",
+
+  // Shared states / common action buttons across Scheme Planning
+  "scheme_planning.state.coming_soon": "Coming Soon",
+  "scheme_planning.state.no_team_officers": "No Sales Officers on your team yet.",
+  "scheme_planning.action.verify": "Verify",
+  "scheme_planning.action.update": "Update",
 
   // View / secondary flip buttons
   "scheme_planning.view.scheme_wise": "Scheme-wise",
@@ -232,8 +271,12 @@ export const DEFAULT_LABELS = {
   "scheme_master.requirement.applicable_products": "Applicable Products",
   "scheme_master.requirement.add_product": "Add Product",
   "scheme_master.requirement.col.product": "Product",
-  "scheme_master.requirement.col.required_qty": "Required Quantity",
+  "scheme_master.requirement.col.required_qty": "Scheme Qty",
   "scheme_master.requirement.col.required_value": "Required Value",
+  "scheme_master.requirement.col.rate_without_gst": "Rate W/O GST",
+  "scheme_master.requirement.col.rate_with_gst": "Rate + GST",
+  "scheme_master.requirement.col.amount_without_gst": "Amount W/O GST",
+  "scheme_master.requirement.col.amount_with_gst": "Amount With GST",
 
   /* =====================================================================================
    * SCHEME MASTER — full form / table / action labels (Phase 8). Centrally editable, user-visible
@@ -255,6 +298,7 @@ export const DEFAULT_LABELS = {
   "scheme_master.col.last_booking_date": "Last Booking Date",
   "scheme_master.col.without_gst": "Without GST",
   "scheme_master.col.with_gst": "With GST",
+  "scheme_master.col.options_quantity_scheme_value": "As Per Scheme",
   "scheme_master.col.benefit": "Benefit",
   "scheme_master.col.status": "Status",
   "scheme_master.col.actions": "Actions",
@@ -292,6 +336,7 @@ export const DEFAULT_LABELS = {
   "scheme_master.form.structure": "Scheme Structure",
   "scheme_master.form.structure.fixed": "Fixed Scheme",
   "scheme_master.form.structure.options": "Options Scheme",
+  "scheme_master.form.number_of_bills": "No. of Bills",
   "scheme_master.form.achievement_type": "Achievement Type",
   "scheme_master.form.achievement_type.quantity": "Product Quantity Based",
   "scheme_master.form.achievement_type.value": "Value Based",
@@ -422,7 +467,12 @@ const SCHEME_PLANNING_META: Partial<Record<LabelKey, LabelMeta>> = {} as Partial
     for (const k of Object.keys(DEFAULT_LABELS) as LabelKey[]) if (k.startsWith(prefix)) SCHEME_PLANNING_META[k] = { module: M, group };
   };
   assign("scheme_planning.nav.", "Navigation / Flip Buttons");
+  assign("scheme_planning.section.", "Sections");
+  assign("scheme_planning.state.", "View Buttons");
+  assign("scheme_planning.action.", "Navigation / Flip Buttons");
   assign("scheme_planning.view.", "View Buttons");
+  assign("scheme_planning.follow_up.", "View Buttons"); // sub-tabs (broad) …
+  assign("scheme_planning.follow_up.col.", "Table Columns"); // … then columns override
   assign("scheme_planning.col.", "Table Columns");
   assign("scheme_planning.nested.", "Nested/Collapsible Table Columns");
   assign("scheme_planning.enrolled.col.", "Table Columns");

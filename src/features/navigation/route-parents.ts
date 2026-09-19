@@ -20,6 +20,7 @@ const PARENTS: Record<string, string> = {
   "/planning/scheme": "/planning/create",
   "/planning/scheme/plans": "/planning/view", // …and browsed from View Plans
   "/planning/scheme/follow-up": "/planning/view", // Follow-up Plans — recovery follow-up over enrolled schemes
+  "/planning/scheme/follow-up-monitor": "/planning/view", // Follow Up — conversion/billing/payment monitoring hub
   "/planning/party": "/planning/create",
   // Onboarding.
   "/onboarding/history": "/onboarding",

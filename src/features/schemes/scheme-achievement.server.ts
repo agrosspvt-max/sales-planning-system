@@ -27,6 +27,7 @@ import {
   type SchemeOptionAchievement,
   type OptionUploadImpactRow,
 } from "@/lib/scheme-options";
+import { effectiveProceedingSchemeUnits, effectiveProductQuantityTarget } from "@/lib/scheme-plan-quantity";
 
 /**
  * DB adapter for the shared scheme calculation engine (`@/lib/scheme-achievement`).
@@ -105,6 +106,28 @@ export async function loadEnrolledDealerIds(ctx: AuthContext, schemeIds: string[
   return out;
 }
 
+/** Effective Product Quantity units per distinct dealer. Split segments contribute only when that segment is
+ * enrolled; Future Draft/Cancelled quantities therefore cannot inflate the current target. */
+export async function loadEnrolledDealerSchemeUnits(ctx: AuthContext, schemeIds: string[]): Promise<Map<string, Map<string, number>>> {
+  const out = new Map<string, Map<string, number>>();
+  if (schemeIds.length === 0) return out;
+  const scope = await getOfficerScope(ctx);
+  const rows = (await prisma.dealerSchemePlan.findMany({
+    where: {
+      schemeId: { in: schemeIds },
+      enrollmentStatus: SchemeEnrollmentStatus.ENROLLED,
+      ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }),
+    },
+    select: { schemeId: true, dealerId: true, numberOfSchemes: true },
+  })) as { schemeId: string; dealerId: string; numberOfSchemes: number }[];
+  for (const row of rows) {
+    let byDealer = out.get(row.schemeId);
+    if (!byDealer) { byDealer = new Map(); out.set(row.schemeId, byDealer); }
+    byDealer.set(row.dealerId, (byDealer.get(row.dealerId) ?? 0) + effectiveProceedingSchemeUnits(row.numberOfSchemes || 1));
+  }
+  return out;
+}
+
 /* --------------------------------- active scheme sales --------------------------------- */
 
 /** Active (non-superseded) SchemeSale facts per scheme, batched. Superseded scopes are excluded.
@@ -177,20 +200,25 @@ export async function loadOptionSnapshotTargets(
       enrollmentStatus: SchemeEnrollmentStatus.ENROLLED,
       ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }),
     },
-    select: { schemeId: true, dealerId: true, optionTargetQty: true, optionTargetValue: true },
-  })) as { schemeId: string; dealerId: string; optionTargetQty: unknown; optionTargetValue: unknown }[];
+    select: { schemeId: true, dealerId: true, numberOfSchemes: true, optionTargetQty: true, optionTargetValue: true },
+  })) as { schemeId: string; dealerId: string; numberOfSchemes: number; optionTargetQty: unknown; optionTargetValue: unknown }[];
   for (const r of rows) {
     const cfg = configByScheme.get(r.schemeId);
     if (!cfg) continue;
-    const target = effectiveOptionTarget({
+    const perSchemeTarget = effectiveOptionTarget({
       achievementType: cfg.optionAchievementType,
       optionTargetQty: r.optionTargetQty == null ? null : num(r.optionTargetQty),
       optionTargetValue: r.optionTargetValue == null ? null : num(r.optionTargetValue),
     });
-    if (target == null) continue; // dealer has no frozen snapshot for this achievement type
+    if (perSchemeTarget == null) continue; // dealer has no frozen snapshot for this achievement type
+    const target = cfg.optionAchievementType === "QUANTITY_BASED"
+      ? effectiveProductQuantityTarget(perSchemeTarget, effectiveProceedingSchemeUnits(r.numberOfSchemes || 1))
+      : perSchemeTarget;
     let m = out.get(r.schemeId);
     if (!m) { m = new Map(); out.set(r.schemeId, m); }
-    m.set(r.dealerId, target);
+    // A dealer remains one dealer even when quantity-split segments enroll at different times. Quantity
+    // targets add across the enrolled segments; Value Based keeps its established single-target behavior.
+    m.set(r.dealerId, cfg.optionAchievementType === "QUANTITY_BASED" ? (m.get(r.dealerId) ?? 0) + target : target);
   }
   return out;
 }
@@ -213,9 +241,9 @@ export interface SchemeAchievementResult {
 export async function computeSchemeAchievement(ctx: AuthContext, schemeIds: string[]): Promise<Map<string, SchemeAchievementResult>> {
   const out = new Map<string, SchemeAchievementResult>();
   if (schemeIds.length === 0) return out;
-  const [requirements, enrolled, sales, optionConfig] = await Promise.all([
+  const [requirements, enrolledUnits, sales, optionConfig] = await Promise.all([
     loadSchemeRequirements(schemeIds),
-    loadEnrolledDealerIds(ctx, schemeIds),
+    loadEnrolledDealerSchemeUnits(ctx, schemeIds),
     loadActiveSchemeSales(schemeIds),
     loadSchemeOptionConfig(schemeIds),
   ]);
@@ -238,11 +266,12 @@ export async function computeSchemeAchievement(ctx: AuthContext, schemeIds: stri
       });
       continue;
     }
-    const enrolledIds = enrolled.get(schemeId) ?? [];
+    const unitsByDealer = enrolledUnits.get(schemeId) ?? new Map<string, number>();
+    const enrolledIds = [...unitsByDealer.keys()];
     out.set(schemeId, {
       schemeId,
       requirement: req,
-      product: req.type === "PRODUCT_BASED" ? schemeProductAchievement(req, schemeSales, enrolledIds) : null,
+      product: req.type === "PRODUCT_BASED" ? schemeProductAchievement(req, schemeSales, enrolledIds, unitsByDealer) : null,
       value: req.type === "VALUE_BASED" ? schemeValueAchievement(req, schemeSales, enrolledIds) : null,
       option: null,
     });

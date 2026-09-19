@@ -31,13 +31,53 @@ export const billDate = z
     return result;
   });
 const part = z.number().int().min(1).max(5);
+export const LEGACY_MAX_SCHEME_BILLS = 5;
+
+/**
+ * Scheme Master bill limits are persisted as 1–5. Falling back to 5 preserves the historical conversion
+ * boundary for any row loaded before the additive column is available to a caller.
+ */
+export function normalizeSchemeBillLimit(value: number | null | undefined): number {
+  return Number.isInteger(value) && value! >= 1 && value! <= LEGACY_MAX_SCHEME_BILLS
+    ? value!
+    : LEGACY_MAX_SCHEME_BILLS;
+}
+
+/** SO choices come from the Scheme Master ceiling. A saved historical count remains renderable unchanged. */
+export function allowedSchemeBillCounts(maximum: number | null | undefined, savedCount?: number | null): number[] {
+  const configuredMaximum = normalizeSchemeBillLimit(maximum);
+  const allowed = Array.from({ length: configuredMaximum }, (_, index) => index + 1);
+  if (Number.isInteger(savedCount) && savedCount! > configuredMaximum && savedCount! <= LEGACY_MAX_SCHEME_BILLS)
+    allowed.push(savedCount!);
+  return allowed;
+}
+
+/** Returns the server validation message for the Scheme Master ceiling, or null when the count is allowed. */
+export function schemeBillLimitError(
+  requestedCount: number,
+  maximum: number | null | undefined,
+  savedCount?: number | null,
+): string | null {
+  if (!Number.isInteger(requestedCount) || requestedCount < 1)
+    return "Number of bills must be a positive whole number.";
+  if (requestedCount > LEGACY_MAX_SCHEME_BILLS)
+    return `Number of bills cannot exceed ${LEGACY_MAX_SCHEME_BILLS}.`;
+  const configuredMaximum = normalizeSchemeBillLimit(maximum);
+  if (requestedCount > configuredMaximum && requestedCount !== savedCount)
+    return `Number of bills cannot exceed the Scheme Master limit of ${configuredMaximum}.`;
+  return null;
+}
+// Product-Quantity-Based schemes carry per-product quantities per bill; the amounts are derived server-side
+// from qty × snapshot rate (never trusted from the client). Optional → Value Based / amount-based bills are
+// unchanged. `qty` is a 3-dp non-negative quantity.
+const billProductQty = z.object({ productId: z.string().min(1), qty: z.coerce.number().min(0) });
 export const soPlanBills = z.object({
   billCount: part, amountWithoutGST: decimal, amountWithGST: decimal,
-  bills: z.array(z.object({ partNumber: part, soBillDate: billDate, amountWithoutGST: decimal, amountWithGST: decimal })).min(1).max(5),
+  bills: z.array(z.object({ partNumber: part, soBillDate: billDate, amountWithoutGST: decimal, amountWithGST: decimal, products: z.array(billProductQty).max(200).optional() })).min(1).max(5),
 });
 export const adminPlanBills = z.object({
   billCount: part, amountWithoutGST: decimal, amountWithGST: decimal,
-  bills: z.array(z.object({ partNumber: part, adminBillDate: billDate.nullable(), amountWithoutGST: decimal, amountWithGST: decimal })).min(1).max(5),
+  bills: z.array(z.object({ partNumber: part, adminBillDate: billDate.nullable(), amountWithoutGST: decimal, amountWithGST: decimal, products: z.array(billProductQty).max(200).optional() })).min(1).max(5),
 });
 
 /** Shared server/browser split: integer paise, remainder in the highest-numbered bill. */

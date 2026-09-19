@@ -3,6 +3,7 @@ import { saveBillConversion, verifyBills, rejectLegacyBillWrite } from "./scheme
 import { billDate } from "@/lib/scheme-bills";
 import type { BillInstanceInfo, PlanBillInfo } from "@/lib/scheme-bills";
 import { Role, SchemeStatus, SchemePlanStatus, SchemeEnrollmentStatus, SchemePlanState, SchemeConversionStatus, SchemeBookingStatus, SchemeSoDocStatus, SchemeAdminDocStatus } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -12,6 +13,8 @@ import { refreshSchemeStatuses } from "./scheme-master.server";
 import { extensionAttemptsEnabled, hasExtensionAttemptsRemaining, isConversionExtensionStatusEligible, isWithinConversionExtensionDayLimit } from "@/lib/scheme-conversion-extension";
 import { planLifecycle, type SchemePlanLifecycle } from "@/lib/scheme-lifecycle";
 import { combinedDealerUniverse } from "@/lib/scheme-dealer-universe";
+import { bookingCoverage } from "@/lib/scheme-booking-coverage";
+import { productBillingForPlans, type ProductBilling } from "./scheme-bill-product.server";
 import { applyConversionQuantity } from "./scheme-plan-quantity.server";
 
 /**
@@ -83,6 +86,12 @@ export interface SchemePlanRow {
   segmentNumber: number;
   numberOfSchemes: number;
   totalSchemeAmount: number;
+  /** Planned amount EXCLUDING GST (per-unit scheme/option value without GST × numberOfSchemes). Derived, not
+   *  stored — the without-GST counterpart of the planned totalSchemeAmount. Used by Conversion Follow-up. */
+  plannedAmountWithoutGST: number;
+  /** Actual/converted amount EXCLUDING GST — 0 until the dealer is CONVERTED, then the Admin-confirmed
+   *  without-GST amount (mirrors the with-GST `totalSchemeAmount` computation). Used by Conversion Follow-up. */
+  actualAmountWithoutGST: number;
   soNote: string | null; // optional per-dealer Sales Officer note
   // Conversion Date Extension. expectedBillingDate is the CURRENT planned conversion date; original is the
   // baseline ceiling anchor; the scheme's max* are the configured limits; history lists each extension.
@@ -90,6 +99,7 @@ export interface SchemePlanRow {
   conversionExtensionCount: number;
   maxExtensionDays: number;
   maxExtensionAttempts: number;
+  maxBillCount: number;
   conversionExtensions: { extensionNumber: number; previousConversionDate: string; newConversionDate: string; daysAdded: number; extendedByName: string | null; createdAt: string }[];
   planningDate: string | null; // when the SO submitted the plan (= submittedAt)
   conversionDate: string | null;
@@ -100,6 +110,12 @@ export interface SchemePlanRow {
   adminConversionDate: string | null;
   adminBookingStatus: string | null;
   adminBookingAmount: number | null;
+  /** Per-scheme booking amount (scheme.bookingAmount for FIXED, option booking for MULTIPLE_OPTIONS). Feeds
+   *  the Verify modal's Required Amount = No. of Schemes × this. */
+  bookingAmountPerScheme: number;
+  /** How many of this plan's proceeding schemes the Admin's Paid booking is verified to cover (null until set;
+   *  Conversion Follow-up treats a Paid-but-null plan as covering all its schemes). */
+  adminBookingSchemeCount: number | null;
   adminDocumentStatus: string | null;
   adminBillingDate: string | null;
   adminVerifiedAt: string | null;
@@ -125,6 +141,9 @@ export interface SchemePlanRow {
   prePlacementMaxDays: number; // scheme ceiling, carried for the UI
   quantitySplit: { originalQuantity: number; proceedingQuantity: number; remainingQuantity: number; disposition: string; futurePlanId: string | null; createdAt: string } | null;
   splitRemainder: { sourcePlanId: string; allocatedQuantity: number } | null;
+  /** Product-Quantity-Based billing snapshot (committed products + rates + saved per-bill quantities) — null
+   *  for Value Based / non-quantity schemes. Drives the SO/Admin product-quantity billing UI. */
+  productBilling: ProductBilling | null;
 }
 
 type RawInstance = { id: string; billMode: boolean; soBillCount: number | null; adminBillCount: number | null; adminAmountWithoutGST: unknown; adminAmountWithGST: unknown; bookingAmount: unknown; billsLockedAt: Date | null;
@@ -144,11 +163,11 @@ type RawPlan = {
   conversionDate: Date | null; soBookingStatus: string | null; soBookingAmount: unknown; soDocumentStatus: string | null; billingDate: Date | null;
   adminConversionDate: Date | null; adminBookingStatus: string | null; adminBookingAmount: unknown; adminDocumentStatus: string | null; adminBillingDate: Date | null; adminVerifiedAt: Date | null;
   soBillingSameForAll: boolean; adminBillingSameForAll: boolean; instances: RawInstance[];
-  selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithoutGST: unknown; optionValueWithGST: unknown;
+  selectedOptionId: string | null; optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown; optionValueWithoutGST: unknown; optionValueWithGST: unknown; optionBookingAmount: unknown;
   prePlacementDays: number | null; adminPrePlacementDays: number | null;
   quantitySplitAsSource: { originalQuantity: number; proceedingQuantity: number; remainingQuantity: number; disposition: string; futurePlanId: string | null; createdAt: Date } | null;
   quantitySplitAsFuture: { sourcePlanId: string; remainingQuantity: number } | null;
-  scheme: { schemeName: string; status: string; schemeValueWithoutGST: unknown; schemeValueWithGST: unknown; structure: string; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays: number };
+  scheme: { schemeName: string; status: string; schemeValueWithoutGST: unknown; schemeValueWithGST: unknown; bookingAmount: unknown; structure: string; requirementType: string | null; optionAchievementType: string | null; maxExtensionDays: number; maxExtensionAttempts: number; numberOfBills: number; prePlacementMaxDays: number };
   dealer: { name: string };
   salesOfficer: { name: string; territory: string | null; group: { name: string } | null };
   rmActedBy: { name: string } | null;
@@ -156,7 +175,7 @@ type RawPlan = {
 };
 const PLAN_INCLUDE = {
   bills: { orderBy: { partNumber: "asc" } },
-  scheme: { select: { schemeName: true, status: true, schemeValueWithoutGST: true, schemeValueWithGST: true, structure: true, maxExtensionDays: true, maxExtensionAttempts: true, prePlacementMaxDays: true } },
+  scheme: { select: { schemeName: true, status: true, schemeValueWithoutGST: true, schemeValueWithGST: true, bookingAmount: true, structure: true, requirementType: true, optionAchievementType: true, maxExtensionDays: true, maxExtensionAttempts: true, numberOfBills: true, prePlacementMaxDays: true } },
   dealer: { select: { name: true } },
   salesOfficer: { select: { name: true, territory: true, group: { select: { name: true } } } },
   rmActedBy: { select: { name: true } },
@@ -174,6 +193,16 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
   const total = r.billMode && r.adminAmountWithGST != null ? asNum(r.adminAmountWithGST) : r.instances.some(i => i.billMode && i.adminAmountWithGST != null)
     ? r.instances.reduce((sum, i) => sum + asNum(i.adminAmountWithGST ?? (r.scheme.structure === "MULTIPLE_OPTIONS" ? r.optionValueWithGST : r.scheme.schemeValueWithGST)), 0)
     : plannedTotal;
+  // Without-GST counterparts (Conversion Follow-up). Planned mirrors plannedTotal but uses the without-GST
+  // per-unit value; actual mirrors `total` (Admin-confirmed when billed, else planned) but is 0 until the
+  // dealer is CONVERTED, so the "Actual Amt. w/o GST" column reflects genuinely converted value only.
+  const perUnitWithoutGST = asNum(r.scheme.structure === "MULTIPLE_OPTIONS" ? r.optionValueWithoutGST : r.scheme.schemeValueWithoutGST);
+  const plannedAmountWithoutGST = perUnitWithoutGST * (r.numberOfSchemes || 1);
+  const actualAmountWithoutGST = r.schemeStatus !== "CONVERTED" ? 0
+    : r.billMode && r.adminAmountWithoutGST != null ? asNum(r.adminAmountWithoutGST)
+    : r.instances.some(i => i.billMode && i.adminAmountWithoutGST != null)
+      ? r.instances.reduce((sum, i) => sum + asNum(i.adminAmountWithoutGST ?? perUnitWithoutGST), 0)
+      : plannedAmountWithoutGST;
   return {
     id: r.id,
     schemeId: r.schemeId,
@@ -203,11 +232,14 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
     segmentNumber: r.segmentNumber ?? 1,
     numberOfSchemes: r.numberOfSchemes || 1,
     totalSchemeAmount: total,
+    plannedAmountWithoutGST,
+    actualAmountWithoutGST,
     soNote: r.soNote ?? null,
     originalConversionDate: r.originalConversionDate?.toISOString() ?? null,
     conversionExtensionCount: r.conversionExtensionCount ?? 0,
     maxExtensionDays: r.scheme.maxExtensionDays ?? 0,
     maxExtensionAttempts: r.scheme.maxExtensionAttempts ?? 0,
+    maxBillCount: r.scheme.numberOfBills ?? 5,
     conversionExtensions: (r.conversionExtensions ?? []).map((e) => ({
       extensionNumber: e.extensionNumber,
       previousConversionDate: e.previousConversionDate.toISOString(),
@@ -225,6 +257,10 @@ function toPlanRow(r: RawPlan): SchemePlanRow {
     adminConversionDate: r.adminConversionDate?.toISOString() ?? null,
     adminBookingStatus: r.adminBookingStatus,
     adminBookingAmount: r.adminBookingAmount == null ? null : asNum(r.adminBookingAmount),
+    bookingAmountPerScheme: asNum(r.scheme.structure === "MULTIPLE_OPTIONS" ? r.optionBookingAmount : r.scheme.bookingAmount),
+    // Enriched from the raw column after the main query (the generated client cannot see the new column here).
+    adminBookingSchemeCount: null,
+  productBilling: null, // enriched (raw SQL) after the main query for product-rate billing plans
     adminDocumentStatus: r.adminDocumentStatus,
     adminBillingDate: r.adminBillingDate?.toISOString() ?? null,
     adminVerifiedAt: r.adminVerifiedAt?.toISOString() ?? null,
@@ -301,6 +337,31 @@ const planLifecycleWhere = (lifecycle?: SchemePlanLifecycle) =>
  * `bucket` enforces the Create Plan / View Plan separation: "create" = Draft/Returned/Rejected only;
  * "view" = everything past the editable stage; omitted = all (e.g. the by-scheme detail dialog).
  */
+/**
+ * Fill each row's `adminBookingSchemeCount` from the raw column. The generated Prisma client is not
+ * regenerated in this environment, so the new column is read via raw SQL and merged in. Null-safe and cheap
+ * (one query for the whole page). Mutates and returns the same array.
+ */
+async function enrichBookingSchemeCount<T extends { id: string; adminBookingSchemeCount: number | null }>(rows: T[]): Promise<T[]> {
+  if (rows.length === 0) return rows;
+  const counts = await prisma.$queryRaw<{ id: string; adminBookingSchemeCount: number | null }[]>`
+    SELECT "id", "adminBookingSchemeCount" FROM "DealerSchemePlan" WHERE "id" = ANY(${rows.map((r) => r.id)})`;
+  const map = new Map(counts.map((c) => [c.id, c.adminBookingSchemeCount == null ? null : Number(c.adminBookingSchemeCount)] as const));
+  for (const r of rows) r.adminBookingSchemeCount = map.get(r.id) ?? null;
+  return rows;
+}
+
+/** Attach product-rate billing data (products + frozen/current rates + saved per-bill quantities). Batched;
+ * only Product Quantity Based and Options Value Based plans hit the extra queries. */
+async function enrichProductBilling(rows: SchemePlanRow[], raws: RawPlan[]): Promise<void> {
+  const pbMap = await productBillingForPlans(raws.map((r) => ({
+    id: r.id, schemeId: r.schemeId, structure: r.scheme.structure,
+    requirementType: r.scheme.requirementType, optionAchievementType: r.scheme.optionAchievementType,
+    optionTargetQty: r.optionTargetQty == null ? null : Number(r.optionTargetQty), numberOfSchemes: r.numberOfSchemes || 1, billMode: r.billMode,
+  })));
+  for (const row of rows) row.productBilling = pbMap.get(row.id) ?? null;
+}
+
 export async function listSchemePlans(ctx: AuthContext, schemeId?: string, officerId?: string, bucket?: "view" | "create"): Promise<SchemePlanRow[]> {
   const scope = await getOfficerScope(ctx);
   if (officerId) await assertOfficerInScope(ctx, officerId);
@@ -310,7 +371,9 @@ export async function listSchemePlans(ctx: AuthContext, schemeId?: string, offic
     include: PLAN_INCLUDE,
     orderBy: { createdAt: "desc" },
   })) as unknown as RawPlan[];
-  return rows.map(toPlanRow);
+  const out = await enrichBookingSchemeCount(rows.map(toPlanRow));
+  await enrichProductBilling(out, rows);
+  return out;
 }
 
 /* --------------------------------- Scheme-wise summary --------------------------------- */
@@ -616,7 +679,9 @@ export async function getSchemePlan(ctx: AuthContext, id: string): Promise<Schem
   if (!r) throw new ApiError(404, "Scheme plan not found");
   const scope = await getOfficerScope(ctx);
   if (!scope.all && !scope.ids.includes(r.salesOfficerId)) throw new ApiError(403, "You cannot view this scheme plan");
-  return toPlanRow(r);
+  const [row] = await enrichBookingSchemeCount([toPlanRow(r)]);
+  await enrichProductBilling([row], [r]);
+  return row;
 }
 
 /* --------------------------------- Create / Submit (SO/RM) --------------------------------- */
@@ -730,8 +795,9 @@ export async function adminActOnSchemePlan(ctx: AuthContext, id: string, raw: un
 /* --------------------------------- Scheme instances --------------------------------- */
 
 /** Read a plan's instances (ordered). */
-async function listInstances(planId: string): Promise<{ id: string; instanceNumber: number }[]> {
-  return (await prisma.dealerSchemeInstance.findMany({ where: { dealerSchemePlanId: planId }, select: { id: true, instanceNumber: true }, orderBy: { instanceNumber: "asc" } })) as { id: string; instanceNumber: number }[];
+type InstanceDb = Pick<Prisma.TransactionClient, "dealerSchemePlan" | "dealerSchemeInstance">;
+async function listInstances(planId: string, db: InstanceDb = prisma): Promise<{ id: string; instanceNumber: number }[]> {
+  return (await db.dealerSchemeInstance.findMany({ where: { dealerSchemePlanId: planId }, select: { id: true, instanceNumber: true }, orderBy: { instanceNumber: "asc" } })) as { id: string; instanceNumber: number }[];
 }
 
 /**
@@ -741,13 +807,13 @@ async function listInstances(planId: string): Promise<{ id: string; instanceNumb
  * instances are fabricated over its existing payment history. Expansion happens ONLY in expandInstances
  * (the explicit planning entry point).
  */
-export async function ensureInstances(planId: string): Promise<{ id: string; instanceNumber: number }[]> {
-  const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id: planId }, select: { id: true } })) as { id: string } | null;
+export async function ensureInstances(planId: string, db: InstanceDb = prisma): Promise<{ id: string; instanceNumber: number }[]> {
+  const plan = (await db.dealerSchemePlan.findUnique({ where: { id: planId }, select: { id: true } })) as { id: string } | null;
   if (!plan) return [];
-  const existing = await listInstances(planId);
+  const existing = await listInstances(planId, db);
   if (!existing.some((i) => i.instanceNumber === 1)) {
-    await prisma.dealerSchemeInstance.create({ data: { dealerSchemePlanId: planId, instanceNumber: 1 } });
-    return listInstances(planId);
+    await db.dealerSchemeInstance.create({ data: { dealerSchemePlanId: planId, instanceNumber: 1 } });
+    return listInstances(planId, db);
   }
   return existing;
 }
@@ -758,24 +824,45 @@ export async function ensureInstances(planId: string): Promise<{ id: string; ins
  * installments, no billing dates). Never runs for enrolled plans; only prunes while editable. Because it is
  * reached solely through active planning, legacy records that are merely read/verified are never expanded.
  */
-export async function expandInstances(planId: string): Promise<void> {
-  const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id: planId }, select: { numberOfSchemes: true, planStatus: true, enrollmentStatus: true } })) as { numberOfSchemes: number; planStatus: string; enrollmentStatus: string } | null;
-  if (!plan || plan.enrollmentStatus === SchemeEnrollmentStatus.ENROLLED) return;
-  const count = Math.min(Math.max(plan.numberOfSchemes || 1, 1), 10);
-  const editable = plan.planStatus === SchemePlanState.DRAFT || plan.planStatus === SchemePlanState.RETURNED;
-  const existing = (await prisma.dealerSchemeInstance.findMany({
-    where: { dealerSchemePlanId: planId },
-    select: { id: true, instanceNumber: true, soBillingDate: true, adminBillingDate: true, _count: { select: { installments: true } } },
-    orderBy: { instanceNumber: "asc" },
-  })) as { id: string; instanceNumber: number; soBillingDate: Date | null; adminBillingDate: Date | null; _count: { installments: number } }[];
-  const have = new Set(existing.map((i) => i.instanceNumber));
-  for (let n = 1; n <= count; n++) {
-    if (!have.has(n)) await prisma.dealerSchemeInstance.create({ data: { dealerSchemePlanId: planId, instanceNumber: n } });
+export async function expandInstances(planId: string, db: InstanceDb = prisma): Promise<void> {
+  await expandInstancesForPlans([planId], db);
+}
+
+/** Batch the explicit planning expansion for an entire bulk save. The desired instance rows are calculated
+ * from two transactional reads, then applied with at most one createMany and one deleteMany. */
+async function expandInstancesForPlans(planIds: string[], db: InstanceDb): Promise<void> {
+  if (planIds.length === 0) return;
+  const plans = (await db.dealerSchemePlan.findMany({
+    where: { id: { in: planIds }, enrollmentStatus: { not: SchemeEnrollmentStatus.ENROLLED } },
+    select: { id: true, numberOfSchemes: true, planStatus: true },
+  })) as { id: string; numberOfSchemes: number; planStatus: string }[];
+  if (plans.length === 0) return;
+  const activePlanIds = plans.map((plan) => plan.id);
+  const existing = (await db.dealerSchemeInstance.findMany({
+    where: { dealerSchemePlanId: { in: activePlanIds } },
+    select: { id: true, dealerSchemePlanId: true, instanceNumber: true, soBillingDate: true, adminBillingDate: true, _count: { select: { installments: true } } },
+  })) as { id: string; dealerSchemePlanId: string; instanceNumber: number; soBillingDate: Date | null; adminBillingDate: Date | null; _count: { installments: number } }[];
+  const existingByPlan = new Map<string, typeof existing>();
+  for (const instance of existing) existingByPlan.set(instance.dealerSchemePlanId, [...(existingByPlan.get(instance.dealerSchemePlanId) ?? []), instance]);
+
+  const toCreate: Prisma.DealerSchemeInstanceCreateManyInput[] = [];
+  const toDelete: string[] = [];
+  for (const plan of plans) {
+    const count = Math.min(Math.max(plan.numberOfSchemes || 1, 1), 10);
+    const planInstances = existingByPlan.get(plan.id) ?? [];
+    const have = new Set(planInstances.map((instance) => instance.instanceNumber));
+    for (let instanceNumber = 1; instanceNumber <= count; instanceNumber++) {
+      if (!have.has(instanceNumber)) toCreate.push({ dealerSchemePlanId: plan.id, instanceNumber });
+    }
+    const editable = plan.planStatus === SchemePlanState.DRAFT || plan.planStatus === SchemePlanState.RETURNED;
+    if (editable) {
+      toDelete.push(...planInstances
+        .filter((instance) => instance.instanceNumber > count && instance._count.installments === 0 && !instance.soBillingDate && !instance.adminBillingDate)
+        .map((instance) => instance.id));
+    }
   }
-  if (editable) {
-    const surplus = existing.filter((i) => i.instanceNumber > count && i._count.installments === 0 && !i.soBillingDate && !i.adminBillingDate).map((i) => i.id);
-    if (surplus.length) await prisma.dealerSchemeInstance.deleteMany({ where: { id: { in: surplus } } });
-  }
+  if (toCreate.length > 0) await db.dealerSchemeInstance.createMany({ data: toCreate });
+  if (toDelete.length > 0) await db.dealerSchemeInstance.deleteMany({ where: { id: { in: toDelete } } });
 }
 
 /* --------------------------------- Admin verification + enrollment --------------------------------- */
@@ -786,6 +873,9 @@ const verifySchema = z.object({
   adminConversionDate: z.coerce.date(),
   adminBookingStatus: z.nativeEnum(SchemeBookingStatus),
   adminBookingAmount: z.coerce.number().min(0).nullable().optional(),
+  // Booking coverage: how many of the plan's proceeding schemes the Paid booking covers (1..numberOfSchemes).
+  // Optional for backward compatibility — omitted ⇒ no coverage recorded and the received-amount check is skipped.
+  adminBookingSchemeCount: z.coerce.number().int().min(1).max(10).nullable().optional(),
   adminDocumentStatus: z.nativeEnum(SchemeAdminDocStatus),
   adminBillingSameForAll: z.boolean().optional(),
   adminBillingDate: z.coerce.date().nullable().optional(), // single (same-for-all) — legacy/compat
@@ -825,19 +915,41 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT "id" FROM "DealerSchemePlan" WHERE "id" = ${id} FOR UPDATE`;
   await rejectLegacyBillWrite(id, tx);
-  const plan = (await tx.dealerSchemePlan.findUnique({ where: { id }, select: { planStatus: true } })) as { planStatus: string } | null;
+  const plan = (await tx.dealerSchemePlan.findUnique({
+    where: { id },
+    select: { planStatus: true, numberOfSchemes: true, optionBookingAmount: true, scheme: { select: { structure: true, bookingAmount: true } } },
+  })) as { planStatus: string; numberOfSchemes: number; optionBookingAmount: unknown; scheme: { structure: string; bookingAmount: unknown } } | null;
   if (!plan) throw new ApiError(404, "Scheme plan not found");
   if (plan.planStatus !== SchemePlanState.APPROVED) throw new ApiError(409, "Only an approved plan can be verified");
 
   if (data.adminBookingStatus === SchemeBookingStatus.PARTIAL && (data.adminBookingAmount == null || data.adminBookingAmount <= 0)) {
     throw new ApiError(422, "Enter the partial booking amount");
   }
+
+  // Booking coverage (Paid only): validate the selected scheme count and the received amount. Coverage is
+  // recorded for reporting/aggregation and does NOT move schemes forward — the SO conversion split is the
+  // structural boundary. Skipped when the count is omitted (backward-compatible with pre-feature callers).
+  const proceedingSchemes = plan.numberOfSchemes || 1;
+  const bookingPerScheme = asNum(plan.scheme.structure === "MULTIPLE_OPTIONS" ? plan.optionBookingAmount : plan.scheme.bookingAmount);
+  const recordCoverage = data.adminBookingStatus === SchemeBookingStatus.RECEIVED && data.adminBookingSchemeCount != null;
+  if (recordCoverage) {
+    const cov = bookingCoverage({
+      plannedSchemes: proceedingSchemes,
+      selectedCount: data.adminBookingSchemeCount!,
+      bookingPerScheme,
+      receivedAmount: data.adminBookingAmount ?? 0,
+    });
+    if (!cov.valid) throw new ApiError(422, cov.error ?? "Invalid booking coverage");
+  }
+  // The stored coverage count: the selected count for a Paid booking with an explicit selection; otherwise
+  // cleared (a non-Paid booking or a legacy call covers nothing explicit).
+  const bookingSchemeCount = recordCoverage ? data.adminBookingSchemeCount! : null;
   // A billing date may be saved once booking is Paid — including the special "Question-Mark Converted" case
   // (Paid + document Not Received). Document-received is NOT required to record the date; it remains required
   // for enrollment (see `enrollmentEligible`), so a question-mark plan saves its date but does not enroll.
   const readyForBilling = data.adminBookingStatus === SchemeBookingStatus.RECEIVED;
 
-  const instances = await ensureInstances(id);
+  const instances = await ensureInstances(id, tx);
   // Resolve the Admin billing date per instance. Same-for-all (default) applies one date to every
   // instance; otherwise use the per-instance array. Billing dates are ignored unless readyForBilling.
   const sameForAll = data.adminBillingSameForAll ?? true;
@@ -851,10 +963,10 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
     throw new ApiError(422, "A billing date can only be set once booking is Paid");
   }
 
-  // Persist per-instance admin billing dates.
-  for (const inst of instances) {
-    await tx.dealerSchemeInstance.update({ where: { id: inst.id }, data: { adminBillingDate: dateFor(inst.instanceNumber) } });
-  }
+  // Same-for-all is the common path and can update every instance in one statement. Distinct dates retain the
+  // existing per-instance writes because each row has different data.
+  if (sameForAll) await tx.dealerSchemeInstance.updateMany({ where: { id: { in: instances.map((inst) => inst.id) } }, data: { adminBillingDate: dateFor(1) } });
+  else for (const inst of instances) await tx.dealerSchemeInstance.update({ where: { id: inst.id }, data: { adminBillingDate: dateFor(inst.instanceNumber) } });
   const everyInstanceBilled = instances.length > 0 && instances.every((inst) => dateFor(inst.instanceNumber) != null);
   const eligible = enrollmentEligible(data) && everyInstanceBilled;
 
@@ -879,6 +991,9 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
         : {}),
     },
   });
+  // Persist the booking coverage count via raw SQL: the generated Prisma client is not regenerated in this
+  // environment, so the new `adminBookingSchemeCount` column is written directly. Additive + null-safe.
+  await tx.$executeRaw`UPDATE "DealerSchemePlan" SET "adminBookingSchemeCount" = ${bookingSchemeCount} WHERE "id" = ${id}`;
   await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: eligible ? "Dealer enrolled after verification" : "Scheme verification saved" }, tx);
   return { enrolled: eligible, eligible };
   });
@@ -1154,135 +1269,151 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
   const inPayload = new Set(data.dealers.map((d) => d.dealerId));
   const submitSet = new Set<string>(submit ? (data.submitDealerIds ?? [...inPayload]) : []);
   const goesForward = (dealerId: string) => submitSet.has(dealerId);
-  const existing = (await prisma.dealerSchemePlan.findMany({
-    where: { schemeId: data.schemeId, salesOfficerId: targetOfficerId },
-    select: {
-      id: true, dealerId: true, planStatus: true, segmentNumber: true, numberOfSchemes: true,
-      totalSchemeAmount: true, selectedOptionId: true, installmentBalance: true,
-      optionLabel: true, optionTargetQty: true, optionTargetValue: true,
-      optionValueWithoutGST: true, optionValueWithGST: true, optionBookingAmount: true,
-      quantitySplitAsFuture: { select: { sourcePlanId: true, remainingQuantity: true } },
-    },
-  })) as {
-    id: string; dealerId: string; planStatus: string; segmentNumber: number; numberOfSchemes: number;
-    totalSchemeAmount: unknown; selectedOptionId: string | null; installmentBalance: boolean;
-    optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown;
-    optionValueWithoutGST: unknown; optionValueWithGST: unknown; optionBookingAmount: unknown;
-    quantitySplitAsFuture: { sourcePlanId: string; remainingQuantity: number } | null;
-  }[];
-  const allByDealer = new Map<string, typeof existing>();
-  for (const row of existing) allByDealer.set(row.dealerId, [...(allByDealer.get(row.dealerId) ?? []), row]);
-  const editableByDealer = new Map<string, (typeof existing)[number]>();
-  for (const [dealerId, rows] of allByDealer) {
-    const editable = rows.filter((row) => EDITABLE.has(row.planStatus));
-    if (editable.length > 1) throw new ApiError(409, "Multiple editable segments exist for this dealer and scheme; resolve the historical records before continuing");
-    if (editable[0]) editableByDealer.set(dealerId, editable[0]);
-  }
-
-  if (submit) {
-    for (const id of submitSet) if (!inPayload.has(id)) throw new ApiError(422, "A dealer marked for submission is not part of this plan");
-    if (submitSet.size === 0) throw new ApiError(422, "Select at least one dealer to submit");
-    // Only the dealers actually going forward must be complete; the others stay in Draft on purpose.
-    for (const d of data.dealers) if (goesForward(d.dealerId) && !d.expectedBillingDate) throw new ApiError(422, "Every dealer needs a Conversion Date before submitting");
-    // Multiple Options: a dealer being submitted must have selected exactly one ACTIVE option (server-enforced).
-    if (isOptions) {
-      for (const d of data.dealers) {
-        if (!goesForward(d.dealerId)) continue;
-        const frozenRemainder = editableByDealer.get(d.dealerId)?.quantitySplitAsFuture;
-        const opt = d.optionId ? optionsById.get(d.optionId) : null;
-        if (!opt) throw new ApiError(422, "Every dealer must select a scheme option before submitting");
-        if (!frozenRemainder && !opt.isActive) throw new ApiError(422, "A selected option has been discontinued — choose an active option");
-      }
-    }
-  }
-  // Even on draft save, a provided option must belong to this scheme (never trust the client).
-  if (isOptions) for (const d of data.dealers) if (d.optionId && !optionsById.has(d.optionId)) throw new ApiError(422, "Selected option does not belong to this scheme");
-
-  const selected = new Set(data.dealers.map((d) => d.dealerId));
-
-  let drafted = 0;
-  let submitted = 0;
-  // Old status (kept in sync during migration) + new Part E planStatus, resolved PER DEALER so a partial
-  // submission can promote some rows while the rest are written as Draft in the same call.
-  // RM approval is required ONLY when the plan owner (targetOfficerId) actually has an applicable RM, using
-  // getCurrentManagerId — the SAME group-based authority as Seasonal/Monthly/Recovery. RM-created plans skip
-  // RM approval (RM is the approver) → Pending Approval (Admin), unchanged. An SO with no RM in their group
-  // ALSO skips → Pending Approval, so the plan is never stuck at a Pending-for-RM stage no one can action.
   const managerId = isRm ? null : await getCurrentManagerId(targetOfficerId);
   const toRm = managerId != null;
-  const legacyNextFor = (forward: boolean) => (forward ? (toRm ? SchemePlanStatus.SUBMITTED : SchemePlanStatus.RM_APPROVED) : SchemePlanStatus.DRAFT);
-  const planNextFor = (forward: boolean) => (forward ? (toRm ? SchemePlanState.PENDING_RM : SchemePlanState.PENDING_APPROVAL) : SchemePlanState.DRAFT);
-  const submitStampFor = (forward: boolean) => (forward ? { submittedAt: new Date(), ...(isRm ? { rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: null } : { rmActedById: null, rmActedAt: null, rmRemarks: null }) } : {});
+  return prisma.$transaction(async (tx) => {
+    // Read the editable working set through the same transaction that mutates it, so the status/segment
+    // decisions and every resulting write share one rollback boundary.
+    const existing = (await tx.dealerSchemePlan.findMany({
+      where: { schemeId: data.schemeId, salesOfficerId: targetOfficerId },
+      select: {
+        id: true, dealerId: true, planStatus: true, segmentNumber: true, numberOfSchemes: true,
+        totalSchemeAmount: true, selectedOptionId: true, installmentBalance: true,
+        optionLabel: true, optionTargetQty: true, optionTargetValue: true,
+        optionValueWithoutGST: true, optionValueWithGST: true, optionBookingAmount: true,
+        quantitySplitAsFuture: { select: { sourcePlanId: true, remainingQuantity: true } },
+      },
+    })) as {
+      id: string; dealerId: string; planStatus: string; segmentNumber: number; numberOfSchemes: number;
+      totalSchemeAmount: unknown; selectedOptionId: string | null; installmentBalance: boolean;
+      optionLabel: string | null; optionTargetQty: unknown; optionTargetValue: unknown;
+      optionValueWithoutGST: unknown; optionValueWithGST: unknown; optionBookingAmount: unknown;
+      quantitySplitAsFuture: { sourcePlanId: string; remainingQuantity: number } | null;
+    }[];
+    const allByDealer = new Map<string, typeof existing>();
+    for (const row of existing) allByDealer.set(row.dealerId, [...(allByDealer.get(row.dealerId) ?? []), row]);
+    const editableByDealer = new Map<string, (typeof existing)[number]>();
+    for (const [dealerId, rows] of allByDealer) {
+      const editable = rows.filter((row) => EDITABLE.has(row.planStatus));
+      if (editable.length > 1) throw new ApiError(409, "Multiple editable segments exist for this dealer and scheme; resolve the historical records before continuing");
+      if (editable[0]) editableByDealer.set(dealerId, editable[0]);
+    }
 
-  const num = (v: unknown) => (v == null ? null : Number((v as { toString(): string }).toString()));
-  const affectedIds: string[] = [];
-  for (const d of data.dealers) {
-    const date = validateDate(d.expectedBillingDate ?? null);
-    const cur = editableByDealer.get(d.dealerId);
-    // Locked history may still be present in legacy callers' working-set payloads. It is display-only here:
-    // leave it untouched and, critically, do not create another segment outside the split service.
-    if (!cur && (allByDealer.get(d.dealerId)?.length ?? 0) > 0) continue;
-    const frozenRemainder = cur?.quantitySplitAsFuture ?? null;
-    const requestedCount = countFor(d.numberOfSchemes);
-    if (frozenRemainder && requestedCount !== cur!.numberOfSchemes) {
-      throw new ApiError(422, `The future segment quantity is fixed at ${cur!.numberOfSchemes}; it cannot be changed in Create Plan`);
-    }
-    if (frozenRemainder && (d.optionId ?? null) !== cur!.selectedOptionId) {
-      throw new ApiError(422, "The scheme option is frozen from the original approved plan and cannot be changed for its future segment");
-    }
-    const count = frozenRemainder ? cur!.numberOfSchemes : requestedCount;
-    const forward = goesForward(d.dealerId);
-    // Effective per-scheme value: option value (Multiple Options) or scheme value (Fixed).
-    const total = frozenRemainder ? num(cur!.totalSchemeAmount) ?? 0 : effGstFor(d.optionId) * count;
-    // Option fields. Always store selectedOptionId (draft may be incomplete → null). Freeze the snapshot
-    // ONLY when the row goes forward (submit) so master option edits during approval can't move a committed
-    // dealer; refresh the snapshot from the live option on each (re)submission (e.g. after RETURNED).
-    const opt = isOptions && d.optionId ? optionsById.get(d.optionId) : null;
-    const optionData = frozenRemainder
-      ? { selectedOptionId: cur!.selectedOptionId }
-      : isOptions
-      ? {
-          selectedOptionId: d.optionId ?? null,
-          ...(forward && opt
-            ? { optionLabel: opt.label, optionTargetQty: num(opt.targetQty), optionTargetValue: num(opt.targetValue), optionValueWithoutGST: num(opt.valueWithoutGST), optionValueWithGST: num(opt.valueWithGST), optionBookingAmount: num(opt.bookingAmount) ?? num(scheme.bookingAmount) ?? 0 }
-            : {}),
+    if (submit) {
+      for (const id of submitSet) if (!inPayload.has(id)) throw new ApiError(422, "A dealer marked for submission is not part of this plan");
+      if (submitSet.size === 0) throw new ApiError(422, "Select at least one dealer to submit");
+      // Only the dealers actually going forward must be complete; the others stay in Draft on purpose.
+      for (const d of data.dealers) if (goesForward(d.dealerId) && !d.expectedBillingDate) throw new ApiError(422, "Every dealer needs a Conversion Date before submitting");
+      // Multiple Options: a dealer being submitted must have selected exactly one ACTIVE option (server-enforced).
+      if (isOptions) {
+        for (const d of data.dealers) {
+          if (!goesForward(d.dealerId)) continue;
+          const frozenRemainder = editableByDealer.get(d.dealerId)?.quantitySplitAsFuture;
+          const opt = d.optionId ? optionsById.get(d.optionId) : null;
+          if (!opt) throw new ApiError(422, "Every dealer must select a scheme option before submitting");
+          if (!frozenRemainder && !opt.isActive) throw new ApiError(422, "A selected option has been discontinued — choose an active option");
         }
-      : {};
-    // Optional per-dealer note. Only applied when the payload carries the key (undefined = leave unchanged);
-    // an empty/whitespace note clears it. Notes never gate save/submit.
-    const noteData = d.note === undefined ? {} : { soNote: d.note?.trim() || null };
-    // Pre-placement (Phase 11): SO/dealer requested days, clamped to the scheme ceiling. undefined ⇒ leave
-    // unchanged; only meaningful when the scheme allows pre-placement (prePlacementMaxDays > 0).
-    const preData = d.prePlacementDays === undefined
-      ? {}
-      : { prePlacementDays: scheme.prePlacementMaxDays > 0 && (d.prePlacementDays ?? 0) > 0 ? Math.min(d.prePlacementDays as number, scheme.prePlacementMaxDays) : null };
-    const legacyNext = legacyNextFor(forward);
-    const planNext = planNextFor(forward);
-    const submitStamp = { ...submitStampFor(forward), ...(forward ? { installmentBalance: frozenRemainder ? cur!.installmentBalance : scheme.installmentBalance } : {}) };
-    if (!cur) {
-      // While the plan is editable, the original (extension baseline) tracks the planned conversion date.
-      const created = await prisma.dealerSchemePlan.create({ data: { schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, segmentNumber: 1, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, originalConversionDate: date, ...noteData, ...optionData, ...preData, ...submitStamp }, select: { id: true } });
-      affectedIds.push(created.id);
-      if (forward) submitted++; else drafted++;
-    } else if (EDITABLE.has(cur.planStatus)) {
-      await prisma.dealerSchemePlan.update({ where: { id: cur.id }, data: { expectedBillingDate: date, originalConversionDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...noteData, ...optionData, ...preData, ...submitStamp } });
-      affectedIds.push(cur.id);
-      if (forward) submitted++; else drafted++;
+      }
     }
-    // else: locked (already in RM queue or beyond) — leave untouched.
-  }
+    // Even on draft save, a provided option must belong to this scheme (never trust the client).
+    if (isOptions) for (const d of data.dealers) if (d.optionId && !optionsById.has(d.optionId)) throw new ApiError(422, "Selected option does not belong to this scheme");
 
-  // Remove editable rows de-selected from this officer's working draft.
-  const omittedSplitRemainder = existing.find((e) => EDITABLE.has(e.planStatus) && e.quantitySplitAsFuture && !selected.has(e.dealerId));
-  if (omittedSplitRemainder) throw new ApiError(422, "A future quantity segment cannot be removed from Create Plan; choose its outcome when converting that segment");
-  const toRemove = existing.filter((e) => EDITABLE.has(e.planStatus) && !e.quantitySplitAsFuture && !selected.has(e.dealerId)).map((e) => e.id);
-  if (toRemove.length) await prisma.dealerSchemePlan.deleteMany({ where: { id: { in: toRemove } } });
+    const selected = new Set(data.dealers.map((d) => d.dealerId));
 
-  // Explicit new-flow expansion: match each affected plan's instances to its numberOfSchemes.
-  for (const id of affectedIds) await expandInstances(id);
+    let drafted = 0;
+    let submitted = 0;
+    // Old status (kept in sync during migration) + new Part E planStatus, resolved PER DEALER so a partial
+    // submission can promote some rows while the rest are written as Draft in the same call.
+    // RM approval is required ONLY when the plan owner (targetOfficerId) actually has an applicable RM, using
+    // getCurrentManagerId — the SAME group-based authority as Seasonal/Monthly/Recovery. RM-created plans skip
+    // RM approval (RM is the approver) → Pending Approval (Admin), unchanged. An SO with no RM in their group
+    // ALSO skips → Pending Approval, so the plan is never stuck at a Pending-for-RM stage no one can action.
+    const legacyNextFor = (forward: boolean) => (forward ? (toRm ? SchemePlanStatus.SUBMITTED : SchemePlanStatus.RM_APPROVED) : SchemePlanStatus.DRAFT);
+    const planNextFor = (forward: boolean) => (forward ? (toRm ? SchemePlanState.PENDING_RM : SchemePlanState.PENDING_APPROVAL) : SchemePlanState.DRAFT);
+    const submitStampFor = (forward: boolean) => (forward ? { submittedAt: new Date(), ...(isRm ? { rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: null } : { rmActedById: null, rmActedAt: null, rmRemarks: null }) } : {});
 
-  await writeAudit({ userId: ctx.userId, action: submit ? "UPDATE" : "CREATE", entity: "dealerSchemePlan", entityId: data.schemeId, summary: submit ? `Scheme plan submitted (${submitted} dealers${drafted ? `, ${drafted} kept in draft` : ""})` : `Scheme draft saved (${drafted} dealers)` });
-  return { drafted, submitted };
+    const num = (v: unknown) => (v == null ? null : Number((v as { toString(): string }).toString()));
+    const affectedIds: string[] = [];
+    const planCreates: Prisma.DealerSchemePlanCreateManyInput[] = [];
+    const planUpdates: { id: string; data: Prisma.DealerSchemePlanUncheckedUpdateInput }[] = [];
+    for (const d of data.dealers) {
+      const date = validateDate(d.expectedBillingDate ?? null);
+      const cur = editableByDealer.get(d.dealerId);
+      // Locked history may still be present in legacy callers' working-set payloads. It is display-only here:
+      // leave it untouched and, critically, do not create another segment outside the split service.
+      if (!cur && (allByDealer.get(d.dealerId)?.length ?? 0) > 0) continue;
+      const frozenRemainder = cur?.quantitySplitAsFuture ?? null;
+      const requestedCount = countFor(d.numberOfSchemes);
+      if (frozenRemainder && requestedCount !== cur!.numberOfSchemes) {
+        throw new ApiError(422, `The future segment quantity is fixed at ${cur!.numberOfSchemes}; it cannot be changed in Create Plan`);
+      }
+      if (frozenRemainder && (d.optionId ?? null) !== cur!.selectedOptionId) {
+        throw new ApiError(422, "The scheme option is frozen from the original approved plan and cannot be changed for its future segment");
+      }
+      const count = frozenRemainder ? cur!.numberOfSchemes : requestedCount;
+      const forward = goesForward(d.dealerId);
+      // Effective per-scheme value: option value (Multiple Options) or scheme value (Fixed).
+      const total = frozenRemainder ? num(cur!.totalSchemeAmount) ?? 0 : effGstFor(d.optionId) * count;
+      // Option fields. Always store selectedOptionId (draft may be incomplete → null). Freeze the snapshot
+      // ONLY when the row goes forward (submit) so master option edits during approval can't move a committed
+      // dealer; refresh the snapshot from the live option on each (re)submission (e.g. after RETURNED).
+      const opt = isOptions && d.optionId ? optionsById.get(d.optionId) : null;
+      const optionData = frozenRemainder
+        ? { selectedOptionId: cur!.selectedOptionId }
+        : isOptions
+        ? {
+            selectedOptionId: d.optionId ?? null,
+            ...(forward && opt
+              ? { optionLabel: opt.label, optionTargetQty: num(opt.targetQty), optionTargetValue: num(opt.targetValue), optionValueWithoutGST: num(opt.valueWithoutGST), optionValueWithGST: num(opt.valueWithGST), optionBookingAmount: num(opt.bookingAmount) ?? num(scheme.bookingAmount) ?? 0 }
+              : {}),
+          }
+        : {};
+      // Optional per-dealer note. Only applied when the payload carries the key (undefined = leave unchanged);
+      // an empty/whitespace note clears it. Notes never gate save/submit.
+      const noteData = d.note === undefined ? {} : { soNote: d.note?.trim() || null };
+      // Pre-placement (Phase 11): SO/dealer requested days, clamped to the scheme ceiling. undefined ⇒ leave
+      // unchanged; only meaningful when the scheme allows pre-placement (prePlacementMaxDays > 0).
+      const preData = d.prePlacementDays === undefined
+        ? {}
+        : { prePlacementDays: scheme.prePlacementMaxDays > 0 && (d.prePlacementDays ?? 0) > 0 ? Math.min(d.prePlacementDays as number, scheme.prePlacementMaxDays) : null };
+      const legacyNext = legacyNextFor(forward);
+      const planNext = planNextFor(forward);
+      const submitStamp = { ...submitStampFor(forward), ...(forward ? { installmentBalance: frozenRemainder ? cur!.installmentBalance : scheme.installmentBalance } : {}) };
+      if (!cur) {
+        // While the plan is editable, the original (extension baseline) tracks the planned conversion date.
+        planCreates.push({ schemeId: data.schemeId, dealerId: d.dealerId, salesOfficerId: targetOfficerId, segmentNumber: 1, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, expectedBillingDate: date, originalConversionDate: date, ...noteData, ...optionData, ...preData, ...submitStamp });
+        if (forward) submitted++; else drafted++;
+      } else if (EDITABLE.has(cur.planStatus)) {
+        planUpdates.push({ id: cur.id, data: { expectedBillingDate: date, originalConversionDate: date, planningStatus: legacyNext, planStatus: planNext, numberOfSchemes: count, totalSchemeAmount: total, ...noteData, ...optionData, ...preData, ...submitStamp } });
+        if (forward) submitted++; else drafted++;
+      }
+      // else: locked (already in RM queue or beyond) — leave untouched.
+    }
+
+    // New dealer plans have independent data but no generated id dependencies until instance expansion, so
+    // PostgreSQL can create and return all of them in one round trip. Existing rows retain their exact
+    // per-record update semantics because their payloads may differ.
+    if (planCreates.length > 0) {
+      const created = await tx.dealerSchemePlan.createManyAndReturn({ data: planCreates, select: { id: true } });
+      affectedIds.push(...created.map((plan) => plan.id));
+    }
+    for (const update of planUpdates) {
+      await tx.dealerSchemePlan.update({ where: { id: update.id }, data: update.data });
+      affectedIds.push(update.id);
+    }
+
+    // Remove editable rows de-selected from this officer's working draft.
+    const omittedSplitRemainder = existing.find((e) => EDITABLE.has(e.planStatus) && e.quantitySplitAsFuture && !selected.has(e.dealerId));
+    if (omittedSplitRemainder) throw new ApiError(422, "A future quantity segment cannot be removed from Create Plan; choose its outcome when converting that segment");
+    const toRemove = existing.filter((e) => EDITABLE.has(e.planStatus) && !e.quantitySplitAsFuture && !selected.has(e.dealerId)).map((e) => e.id);
+    if (toRemove.length) await tx.dealerSchemePlan.deleteMany({ where: { id: { in: toRemove } } });
+
+    // Explicit new-flow expansion retains the same preservation rules, but batches the whole working set.
+    await expandInstancesForPlans(affectedIds, tx);
+
+    await writeAudit({ userId: ctx.userId, action: submit ? "UPDATE" : "CREATE", entity: "dealerSchemePlan", entityId: data.schemeId, summary: submit ? `Scheme plan submitted (${submitted} dealers${drafted ? `, ${drafted} kept in draft` : ""})` : `Scheme draft saved (${drafted} dealers)` }, tx);
+    return { drafted, submitted };
+  }, { timeout: 15000 });
 }
 
 export function saveSchemeDraft(ctx: AuthContext, raw: unknown) {
@@ -1336,16 +1467,15 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
 
   // Per-instance SO billing dates. Same-for-all (default) applies one date to every instance; otherwise
   // the per-instance array. Cleared when not Converted. SO dates are informational; Admin dates are truth.
-  const instances = await ensureInstances(planId);
+  const instances = await ensureInstances(planId, tx);
   const sameForAll = data.billingSameForAll ?? true;
   const byNum = new Map((data.billingDates ?? []).map((d) => [d.instanceNumber, d.date] as const));
   const soDateFor = (instanceNumber: number): Date | null => {
     if (!converting) return null;
     return sameForAll ? (data.billingDate ?? null) : (byNum.get(instanceNumber) ?? null);
   };
-  for (const inst of instances) {
-    await tx.dealerSchemeInstance.update({ where: { id: inst.id }, data: { soBillingDate: soDateFor(inst.instanceNumber) } });
-  }
+  if (sameForAll) await tx.dealerSchemeInstance.updateMany({ where: { id: { in: instances.map((inst) => inst.id) } }, data: { soBillingDate: soDateFor(1) } });
+  else for (const inst of instances) await tx.dealerSchemeInstance.update({ where: { id: inst.id }, data: { soBillingDate: soDateFor(inst.instanceNumber) } });
 
   await tx.dealerSchemePlan.update({
     where: { id: planId },

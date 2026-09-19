@@ -1,6 +1,6 @@
 "use client";
 
-import { SchemeBillFields, initialBillEditor, billEditorPayload, rebalanceBills } from "./scheme-bill-fields";
+import { SchemeBillFields, initialBillEditor, initialProductBillEditor, billEditorPayload, rebalanceBills, productBillingForProceedingUnits, recomputeProductBillEditor } from "./scheme-bill-fields";
 import { combinedPresetValueErrors } from "@/lib/scheme-bills";
 import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import { Fragment, useMemo, useState, type ReactNode } from "react";
@@ -82,7 +82,7 @@ export function SchemeLifecycleTabs({ renderSchemeWise, renderEnrolled }: {
     <>
       {/* First level (PLAN TYPE) — Submitted | Approved | Enrolled Plans | Older Plans (boxed segmented). */}
       <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Plan Type</div>
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.section.plan_type" /></div>
         <div className="flex flex-wrap items-center gap-3"><PillNav value={tab} onChange={setTab} items={lifecycleTabs} /></div>
       </div>
       {/* Second level — Scheme-wise | Dealer-wise, as clean underlined tabs (Sales Planning style). */}
@@ -139,7 +139,7 @@ export function DealerWiseComingSoon() {
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
           <Clock className="h-6 w-6 text-muted-foreground" />
         </div>
-        <p className="text-lg font-medium">Coming Soon</p>
+        <p className="text-lg font-medium"><L k="scheme_planning.state.coming_soon" /></p>
         <p className="max-w-md text-sm text-muted-foreground">The Dealer-wise view is not available yet. Use Scheme-wise in the meantime.</p>
       </CardContent>
     </Card>
@@ -420,9 +420,9 @@ export function SchemeWiseCollapsibleView({ officerId, groupByOfficer = false, o
 /* --------------------------------- SO conversion entry --------------------------------- */
 
 /** SO conversion entry: set Scheme Status and (when Converted) record conversion details + billing date(s). */
-function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: { plan: SchemePlan; onClose: () => void; onSaved: () => void; salesOfficerView?: boolean }) {
+export function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: { plan: SchemePlan; onClose: () => void; onSaved: () => void; salesOfficerView?: boolean }) {
   const partBills = !!plan.billing && !plan.billing.legacySchedules;
-  const [billRows, setBillRows] = useState(() => initialBillEditor(plan, false));
+  const [billRows, setBillRows] = useState(() => plan.productBilling?.active ? initialProductBillEditor(plan, false) : initialBillEditor(plan, false));
   const allocatedCount = plan.numberOfSchemes || 1;
   const splitLocked = !!plan.quantitySplit;
   const [proceedingSchemes, setProceedingSchemes] = useState(allocatedCount);
@@ -457,10 +457,12 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
     if (partBills && plan.billing) {
       const perUnitWithout = Number(plan.billing.defaultAmountWithoutGST || 0) / allocatedCount;
       const perUnitWith = Number(plan.billing.defaultAmountWithGST || 0) / allocatedCount;
-      setBillRows((row) => rebalanceBills(row, {
-        amountWithoutGST: String(Number((perUnitWithout * next).toFixed(2))),
-        amountWithGST: String(Number((perUnitWith * next).toFixed(2))),
-      }));
+      setBillRows((row) => plan.productBilling?.active
+        ? recomputeProductBillEditor(row, productBillingForProceedingUnits(plan.productBilling, next), false)
+        : rebalanceBills(row, {
+            amountWithoutGST: String(Number((perUnitWithout * next).toFixed(2))),
+            amountWithGST: String(Number((perUnitWith * next).toFixed(2))),
+          }));
     }
   };
   const effectivePlan = useMemo<SchemePlan>(() => {
@@ -475,6 +477,9 @@ function ConversionModal({ plan, onClose, onSaved, salesOfficerView = false }: {
         defaultAmountWithoutGST: String(Number((Number(plan.billing.defaultAmountWithoutGST || 0) * factor).toFixed(2))),
         defaultAmountWithGST: String(Number((Number(plan.billing.defaultAmountWithGST || 0) * factor).toFixed(2))),
       },
+      productBilling: plan.productBilling?.active
+        ? productBillingForProceedingUnits(plan.productBilling, proceedingSchemes)
+        : plan.productBilling,
     };
   }, [plan, proceedingSchemes, allocatedCount]);
 

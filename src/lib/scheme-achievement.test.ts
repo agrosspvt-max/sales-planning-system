@@ -228,6 +228,25 @@ test("cross-scheme dealer combine (Products Completed sums across schemes)", () 
   assert.equal(c.achievedQty, 2320);
   assert.equal(c.remainingQty, 180);
 });
+test("Product Quantity achievement scales target by proceeding units while dealer count stays distinct", () => {
+  const req = productReq([{ productId: "ADAM", requiredQty: 100 }]);
+  const units = new Map([["D1", 3]]);
+  const below = schemeProductAchievement(req, [{ dealerId: "D1", productId: "ADAM", qty: 100, value: 0 }], ["D1"], units);
+  assert.equal(below.dealerCount, 1);
+  assert.equal(below.requiredQty, 300);
+  assert.equal(below.perDealer[0].achievement.productsCompleted, 0);
+  const met = schemeProductAchievement(req, [{ dealerId: "D1", productId: "ADAM", qty: 300, value: 0 }], ["D1"], units);
+  assert.equal(met.requiredQty, 300);
+  assert.equal(met.perDealer[0].achievement.productsCompleted, 1);
+});
+test("Product Quantity achievement preserves over-achievement", () => {
+  const req = productReq([{ productId: "ADAM", requiredQty: 100 }]);
+  const result = schemeProductAchievement(req, [{ dealerId: "D1", productId: "ADAM", qty: 350, value: 0 }], ["D1"], new Map([["D1", 3]]));
+  assert.equal(result.requiredQty, 300);
+  assert.equal(result.achievedQty, 350);
+  assert.equal(result.remainingQty, 0);
+  assert.equal(result.perDealer[0].achievement.productsCompleted, 1);
+});
 test("upload impact: previous + new, completion transition", () => {
   const req = productReq([{ productId: "ADAM", requiredQty: 1000 }]);
   const previous = new Map([["D1|ADAM", { qty: 400, value: 0 }]]);

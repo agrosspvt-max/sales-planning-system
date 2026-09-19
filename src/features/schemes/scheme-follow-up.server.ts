@@ -27,6 +27,7 @@ import {
   dealerOptionAchievement,
   type OptionAchievementType,
 } from "@/lib/scheme-options";
+import { effectiveProceedingSchemeUnits, effectiveProductQuantityTarget } from "@/lib/scheme-plan-quantity";
 
 /**
  * FOLLOW-UP PLANS — the recovery layer over enrolled schemes (Scheme Follow-up + Dealer Follow-up).
@@ -738,6 +739,7 @@ interface AchievementContext {
   dealerMeta: Map<string, DealerMeta>;
   schemeName: Map<string, string>;
   enrolledByScheme: Map<string, Set<string>>;
+  proceedingUnitsByScheme: Map<string, Map<string, number>>;
   requirements: Awaited<ReturnType<typeof loadSchemeRequirements>>;
   sales: Awaited<ReturnType<typeof loadActiveSchemeSales>>;
   relevant: string[]; // scheme ids whose requirementType matches the requested type
@@ -753,12 +755,16 @@ async function loadAchievementContext(ctx: AuthContext, q: FollowUpQuery, type: 
   const dealerMeta = new Map<string, DealerMeta>();
   const schemeName = new Map<string, string>();
   const enrolledByScheme = new Map<string, Set<string>>();
+  const proceedingUnitsByScheme = new Map<string, Map<string, number>>();
   for (const p of plans) {
     if (!dealerMeta.has(p.dealerId)) dealerMeta.set(p.dealerId, { dealerName: p.dealerName, town: p.town, salesOfficerName: p.salesOfficerName, state: p.state, mobile: p.mobile });
     schemeName.set(p.schemeId, p.schemeName);
     let set = enrolledByScheme.get(p.schemeId);
     if (!set) { set = new Set(); enrolledByScheme.set(p.schemeId, set); }
     set.add(p.dealerId);
+    let units = proceedingUnitsByScheme.get(p.schemeId);
+    if (!units) { units = new Map(); proceedingUnitsByScheme.set(p.schemeId, units); }
+    units.set(p.dealerId, (units.get(p.dealerId) ?? 0) + effectiveProceedingSchemeUnits(p.numberOfSchemes || 1));
   }
   const schemeIds = [...schemeName.keys()];
   const [requirements, sales] = await Promise.all([loadSchemeRequirements(schemeIds), loadActiveSchemeSales(schemeIds)]);
@@ -766,7 +772,7 @@ async function loadAchievementContext(ctx: AuthContext, q: FollowUpQuery, type: 
   const productIds = new Set<string>();
   for (const id of relevant) for (const pr of requirements.get(id)!.products) productIds.add(pr.productId);
   const productName = await loadProductNames([...productIds]);
-  return { dealerMeta, schemeName, enrolledByScheme, requirements, sales, relevant, productName };
+  return { dealerMeta, schemeName, enrolledByScheme, proceedingUnitsByScheme, requirements, sales, relevant, productName };
 }
 
 const enrolledIdsOf = (c: AchievementContext, schemeId: string): string[] => [...(c.enrolledByScheme.get(schemeId) ?? [])];
@@ -805,7 +811,7 @@ const productLinesOf = (c: AchievementContext, ach: DealerProductAchievement): P
 export async function schemeProductFollowUp(ctx: AuthContext, q: FollowUpQuery): Promise<{ rows: SchemeProductRow[] }> {
   const c = await loadAchievementContext(ctx, q, "PRODUCT_BASED");
   const rows = c.relevant.map((schemeId) => {
-    const ach: SchemeProductAchievement = schemeProductAchievement(c.requirements.get(schemeId)!, c.sales.get(schemeId) ?? [], enrolledIdsOf(c, schemeId));
+    const ach: SchemeProductAchievement = schemeProductAchievement(c.requirements.get(schemeId)!, c.sales.get(schemeId) ?? [], enrolledIdsOf(c, schemeId), c.proceedingUnitsByScheme.get(schemeId));
     const dealers: ProductDealerBlock[] = ach.perDealer.map((pd) => {
       const m = c.dealerMeta.get(pd.dealerId);
       const a = pd.achievement;
@@ -829,7 +835,7 @@ export async function dealerProductFollowUp(ctx: AuthContext, q: FollowUpQuery):
   const c = await loadAchievementContext(ctx, q, "PRODUCT_BASED");
   // Compute each scheme's achievement once; dealer rows read their own slice from perDealer.
   const perScheme = new Map<string, SchemeProductAchievement>();
-  for (const id of c.relevant) perScheme.set(id, schemeProductAchievement(c.requirements.get(id)!, c.sales.get(id) ?? [], enrolledIdsOf(c, id)));
+  for (const id of c.relevant) perScheme.set(id, schemeProductAchievement(c.requirements.get(id)!, c.sales.get(id) ?? [], enrolledIdsOf(c, id), c.proceedingUnitsByScheme.get(id)));
 
   const dealerIds = new Set<string>();
   for (const id of c.relevant) for (const d of c.enrolledByScheme.get(id) ?? []) dealerIds.add(d);
@@ -982,7 +988,7 @@ export interface DealerOptionRow {
 interface OptionAchvContext {
   dealerMeta: Map<string, DealerMeta>;
   schemeMeta: Map<string, { schemeName: string; achievementType: OptionAchievementType; eligible: Set<string> }>;
-  plans: PlanModel[]; // MULTIPLE_OPTIONS only
+  plans: (PlanModel & { effectiveAchievementTarget: number })[]; // MULTIPLE_OPTIONS only, one per dealer/scheme
   productName: Map<string, string>;
   salesByScheme: Map<string, Map<string, Map<string, { qty: number; value: number }>>>; // schemeId → dealerId → productId → sums
 }
@@ -990,9 +996,22 @@ interface OptionAchvContext {
 /** Load the caller's ENROLLED option plans (scope + officer honoured) + eligible pools + ACTIVE sales. */
 async function loadOptionAchievementContext(ctx: AuthContext, q: FollowUpQuery): Promise<OptionAchvContext> {
   const optionPlans = (await loadPlans(ctx, { officerId: q.officerId, financial: false })).filter((p) => p.structure === "MULTIPLE_OPTIONS" && p.optionAchievementType != null);
-  // Quantity-split segments are separate financial schedules but still one dealer's participation in the
-  // same Scheme Master. Achievement and follow-up targets therefore count that dealer once.
-  const plans = [...new Map(optionPlans.map((p) => [`${p.schemeId}|${p.dealerId}`, p])).values()];
+  // Quantity-split segments remain separate financial schedules but one dealer participation. Quantity
+  // targets add the effective units of each enrolled segment; Value Based keeps its established one-target
+  // interpretation and is otherwise untouched by this Product Quantity fix.
+  const byDealerScheme = new Map<string, PlanModel & { effectiveAchievementTarget: number }>();
+  for (const p of optionPlans) {
+    const key = `${p.schemeId}|${p.dealerId}`;
+    const perSchemeTarget = effectiveOptionTarget({ achievementType: p.optionAchievementType, optionTargetQty: p.optionTargetQty, optionTargetValue: p.optionTargetValue }) ?? 0;
+    const target = p.optionAchievementType === "QUANTITY_BASED"
+      ? effectiveProductQuantityTarget(perSchemeTarget, effectiveProceedingSchemeUnits(p.numberOfSchemes || 1))
+      : perSchemeTarget;
+    const current = byDealerScheme.get(key);
+    if (!current) byDealerScheme.set(key, { ...p, effectiveAchievementTarget: target });
+    else if (p.optionAchievementType === "QUANTITY_BASED") current.effectiveAchievementTarget += target;
+    else byDealerScheme.set(key, { ...p, effectiveAchievementTarget: target });
+  }
+  const plans = [...byDealerScheme.values()];
   const dealerMeta = new Map<string, DealerMeta>();
   const schemeIds = new Set<string>();
   for (const p of plans) {
@@ -1041,8 +1060,8 @@ function optionContribLines(c: OptionAchvContext, eligible: Set<string>, dealerS
 }
 
 /** Compute one dealer+scheme option achievement block from the context (shared by both views). */
-function optionDealerBlock(c: OptionAchvContext, p: PlanModel, meta: { achievementType: OptionAchievementType; eligible: Set<string> }): OptionDealerBlock {
-  const target = effectiveOptionTarget({ achievementType: meta.achievementType, optionTargetQty: p.optionTargetQty, optionTargetValue: p.optionTargetValue }) ?? 0;
+function optionDealerBlock(c: OptionAchvContext, p: OptionAchvContext["plans"][number], meta: { achievementType: OptionAchievementType; eligible: Set<string> }): OptionDealerBlock {
+  const target = p.effectiveAchievementTarget;
   const dealerSums = c.salesByScheme.get(p.schemeId)?.get(p.dealerId) ?? new Map<string, { qty: number; value: number }>();
   const a = dealerOptionAchievement(meta.achievementType, target, meta.eligible, dealerSums);
   const m = c.dealerMeta.get(p.dealerId);

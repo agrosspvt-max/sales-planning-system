@@ -26,3 +26,21 @@ export function SchemePlanningComingSoon() {
     </div>
   );
 }
+
+/**
+ * Inline "Coming Soon" panel for a single section/sub-tab (e.g. Follow Up → Billing / Payment). Unlike
+ * `SchemePlanningComingSoon` it renders no PageHeader — the host page already supplies the header and tabs.
+ */
+export function SchemeSectionComingSoon({ title, badge = "Coming Soon" }: { title: string; badge?: string }) {
+  return (
+    <Card className="opacity-80">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+        <CardTitle className="flex items-center gap-2 text-base"><Gift className="h-5 w-5 text-primary" /> {title}</CardTitle>
+        <Badge variant="muted">{badge}</Badge>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{title} is being finalised and will be available here soon.</p>
+      </CardContent>
+    </Card>
+  );
+}

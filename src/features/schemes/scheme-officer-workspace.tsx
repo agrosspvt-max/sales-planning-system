@@ -84,6 +84,8 @@ function OpenSchemesTable() {
     withoutGst: useLabel("scheme_master.col.without_gst"),
     withGst: useLabel("scheme_master.col.with_gst"),
     benefit: useLabel("scheme_master.col.benefit"),
+    // Product-Quantity-Based options show the scheme-level representation, matching Scheme Master.
+    optionsSchemeValue: useLabel("scheme_master.col.options_quantity_scheme_value"),
   };
   return (
     <div className="overflow-auto rounded-lg border bg-background">
@@ -104,16 +106,21 @@ function OpenSchemesTable() {
           ) : (data?.length ?? 0) === 0 ? (
             <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">No running schemes for your State.</TableCell></TableRow>
           ) : (
-            data!.map((s) => (
+            data!.map((s) => {
+              // Same rule as Scheme Master: a Product-Quantity-Based options scheme shows "As Per Scheme"
+              // (not the per-option "Per option") for both value columns. Value-Based options keep "Per option".
+              const valueText = s.structure === "MULTIPLE_OPTIONS" && s.optionAchievementType === "QUANTITY_BASED" ? col.optionsSchemeValue : null;
+              return (
               <TableRow key={s.id}>
                 <TableCell className="font-medium">{s.schemeName}</TableCell>
                 <TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate)} – ${formatDate(s.endDate)}`}</TableCell>
                 <TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate)}</TableCell>
-                <TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithoutGST)}</TableCell>
-                <TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithGST)}</TableCell>
+                <TableCell className="text-right tabular-nums">{valueText ?? schemeValueText(s.schemeValueWithoutGST)}</TableCell>
+                <TableCell className="text-right tabular-nums">{valueText ?? schemeValueText(s.schemeValueWithGST)}</TableCell>
                 <TableCell>{BENEFIT_LABEL[s.schemeBenefit] ?? s.schemeBenefit}</TableCell>
               </TableRow>
-            ))
+              );
+            })
           )}
         </TableBody>
       </Table>
@@ -126,12 +133,14 @@ function OpenSchemesTable() {
  * route, matching the Sales Planning and Recovery Planning modules. Follow-up Plans (Requirement 3) is an
  * ADDITION alongside the existing two: nothing inside View Plans is renamed, moved or merged.
  */
-export type SchemePlanMode = "create" | "view" | "followup";
+export type SchemePlanMode = "create" | "view" | "followup" | "monitor";
 
 const MODE_LINKS: { mode: SchemePlanMode; href: string; labelKey: LabelKey }[] = [
   { mode: "create", href: "/planning/scheme", labelKey: "scheme_planning.nav.create_plan" },
   { mode: "view", href: "/planning/scheme/plans", labelKey: "scheme_planning.nav.view_plan" },
   { mode: "followup", href: "/planning/scheme/follow-up", labelKey: "scheme_planning.nav.follow_up" },
+  // "Follow Up" — the NEW monitoring hub (Conversion / Billing / Payment), separate from "Follow-up Plans".
+  { mode: "monitor", href: "/planning/scheme/follow-up-monitor", labelKey: "scheme_planning.nav.follow_up_monitor" },
 ];
 
 export function SchemePlanModeLinks({ mode }: { mode: SchemePlanMode }) {
@@ -285,7 +294,7 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
                 </div>
               )}
             </div>
-            {scope === "team" && (officers?.length ?? 0) === 0 && <p className="mt-2 text-xs text-muted-foreground">No Sales Officers on your team yet.</p>}
+            {scope === "team" && (officers?.length ?? 0) === 0 && <p className="mt-2 text-xs text-muted-foreground"><L k="scheme_planning.state.no_team_officers" /></p>}
           </CardContent>
         </Card>
       )}

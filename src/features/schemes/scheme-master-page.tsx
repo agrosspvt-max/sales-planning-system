@@ -22,6 +22,7 @@ import { useLabel } from "@/features/labels/label-ui";
 import { validateSchemeRequirement } from "@/lib/scheme-requirement";
 import { validateMultipleOptions } from "@/lib/scheme-options";
 import { computeInstallmentAmounts, bookingExceedsFinalInstallment, installmentValueColumns } from "@/lib/scheme-installments";
+import { productAmounts } from "@/lib/scheme-product-quantity-billing";
 import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import { SchemeDetailDialog } from "./scheme-detail-dialog";
 import { EnrolledSchemesView } from "./scheme-enrolled-view";
@@ -43,7 +44,8 @@ type RequirementProduct = { productId: string; requiredQty: number | null; requi
 type Structure = "FIXED" | "MULTIPLE_OPTIONS";
 type OptionAchievementType = "QUANTITY_BASED" | "VALUE_BASED";
 type SchemeOption = { bookingAmount?: number | null; id?: string; label: string | null; target: number | null; valueWithoutGST: number; valueWithGST: number; isActive: boolean };
-type Scheme = { installmentBalance?: boolean; id: string; schemeName: string; isPerpetual: boolean; startDate: string | null; endDate: string | null; bookingLastDate: string | null; schemeValueWithoutGST: number | null; schemeValueWithGST: number | null; bookingAmount: number | null; schemeBenefit: Benefit; benefitDetails: string | null; otherBenefitDetails: string | null; allowMultipleSchemes: boolean; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays?: number; documentUrl: string | null; status: "OPEN" | "CLOSED"; states: State[]; installments: Installment[]; requirementType?: ReqType; valueMode?: ValueMode | null; combinedRequiredValue?: number | null; requirementProducts?: RequirementProduct[]; structure?: Structure; optionAchievementType?: OptionAchievementType | null; options?: SchemeOption[]; eligibleProductIds?: string[] };
+type Scheme = { installmentBalance?: boolean; id: string; schemeName: string; isPerpetual: boolean; startDate: string | null; endDate: string | null; bookingLastDate: string | null; schemeValueWithoutGST: number | null; schemeValueWithGST: number | null; bookingAmount: number | null; schemeBenefit: Benefit; benefitDetails: string | null; otherBenefitDetails: string | null; allowMultipleSchemes: boolean; numberOfBills?: number; maxExtensionDays: number; maxExtensionAttempts: number; prePlacementMaxDays?: number; documentUrl: string | null; status: "OPEN" | "CLOSED"; states: State[]; installments: Installment[]; requirementType?: ReqType; valueMode?: ValueMode | null; combinedRequiredValue?: number | null; requirementProducts?: RequirementProduct[]; structure?: Structure; optionAchievementType?: OptionAchievementType | null; options?: SchemeOption[]; eligibleProductIds?: string[]; productRates?: ProductRate[] };
+type ProductRate = { productId: string; rateWithoutGST: number; rateWithGST: number };
 type ProductOption = { productId: string; name: string; isActive: boolean };
 const benefits: Record<Exclude<Benefit, "DOMESTIC_COUPLE_TOUR">, string> = { DOMESTIC_TOUR: "Domestic Tour", FOREIGN_TOUR: "Foreign Tour", CREDIT_NOTE: "Credit Note", OTHER: "Other" };
 const specialBenefitDetails: Record<Extract<BenefitChoice, "SPECIAL_GIFT" | "GOLD_SILVER">, string> = { SPECIAL_GIFT: "Special Gift", GOLD_SILVER: "Gold / Silver" };
@@ -211,6 +213,7 @@ export function SchemeMasterPage({ canManage = true, crumbs, nav, hideViewToggle
     colLastBooking: useLabel("scheme_master.col.last_booking_date"),
     colWithoutGst: useLabel("scheme_master.col.without_gst"),
     colWithGst: useLabel("scheme_master.col.with_gst"),
+    optionsQuantitySchemeValue: useLabel("scheme_master.col.options_quantity_scheme_value"),
     colBenefit: useLabel("scheme_master.col.benefit"),
     colStatus: useLabel("scheme_master.col.status"),
     colActions: useLabel("scheme_master.col.actions"),
@@ -254,7 +257,7 @@ export function SchemeMasterPage({ canManage = true, crumbs, nav, hideViewToggle
       <button type="button" onClick={() => setView("enrolled")} className={cn("rounded-full border px-4 py-1.5 text-sm font-medium", view === "enrolled" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted")}>{ML.enrolledScheme}</button>
     </div>
     )}
-    {hideList ? null : !hideViewToggle && view === "enrolled" ? <EnrolledSchemesView /> : <div className="overflow-auto rounded-lg border bg-background"><Table stickyFirstColumn><TableHeader><TableRow><TableHead>{ML.colName}</TableHead><TableHead>{ML.colStates}</TableHead><TableHead>{ML.colPeriod}</TableHead><TableHead>{ML.colLastBooking}</TableHead><TableHead className="text-right">{ML.colWithoutGst}</TableHead><TableHead className="text-right">{ML.colWithGst}</TableHead><TableHead>{ML.colBenefit}</TableHead><TableHead>{ML.colStatus}</TableHead>{canManage && <TableHead className="text-right">{ML.colActions}</TableHead>}</TableRow></TableHeader><TableBody>{isLoading ? <TableRow><TableCell colSpan={canManage ? 9 : 8}><Skeleton className="h-7 w-full" /></TableCell></TableRow> : !data?.length ? <TableRow><TableCell colSpan={canManage ? 9 : 8} className="py-10 text-center text-muted-foreground">No schemes found.</TableCell></TableRow> : data.map((s) => <TableRow key={s.id}><TableCell className="font-medium"><button type="button" className="text-left text-primary hover:underline" onClick={() => setDetail(s)} title="View dealer plans">{s.schemeName}</button>{s.documentUrl && <a href={s.documentUrl} target="_blank" rel="noreferrer" className="ml-2 inline-block text-primary" title="Open scheme document"><FileText className="h-4 w-4" /></a>}</TableCell><TableCell>{s.states.map((x) => x.name).join(", ")}</TableCell><TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate!)} – ${formatDate(s.endDate!)}`}</TableCell><TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate!)}</TableCell><TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithoutGST)}</TableCell><TableCell className="text-right tabular-nums">{schemeValueText(s.schemeValueWithGST)}</TableCell><TableCell>{benefits[s.schemeBenefit as Exclude<Benefit, "DOMESTIC_COUPLE_TOUR">] ?? "Domestic Couple Tour"}{s.benefitDetails ? ` · ${s.benefitDetails}` : ""}</TableCell><TableCell><Badge variant={s.status === "OPEN" ? "success" : "muted"}>{s.status}</Badge></TableCell>{canManage && <TableCell className="text-right"><div className="flex items-center justify-end gap-1"><SchemeRowMenu hasDocument={!!s.documentUrl} onInfo={() => setInfoFor(s)} onDoc={() => setDocFor(s)} onShare={() => void shareScheme(s)} onEdit={() => setEditing(s)} onDelete={() => setDeleting(s)} />{s.status === "OPEN" && <Button variant="ghost" size="sm" onClick={() => setClosing(s)} title="Close scheme" disabled={close.isPending}><Unlock className="h-4 w-4" /></Button>}{s.status === "CLOSED" && <Button variant="ghost" size="sm" onClick={() => setReopening(s)} title={isExpired(s) ? "Closed (period expired) — reopening requires extending the end date" : "Closed — click to reopen"} disabled={reopen.isPending}><Lock className="h-4 w-4" /></Button>}</div></TableCell>}</TableRow>)}</TableBody></Table></div>}
+    {hideList ? null : !hideViewToggle && view === "enrolled" ? <EnrolledSchemesView /> : <div className="overflow-auto rounded-lg border bg-background"><Table stickyFirstColumn><TableHeader><TableRow><TableHead>{ML.colName}</TableHead><TableHead>{ML.colStates}</TableHead><TableHead>{ML.colPeriod}</TableHead><TableHead>{ML.colLastBooking}</TableHead><TableHead className="text-right">{ML.colWithoutGst}</TableHead><TableHead className="text-right">{ML.colWithGst}</TableHead><TableHead>{ML.colBenefit}</TableHead><TableHead>{ML.colStatus}</TableHead>{canManage && <TableHead className="text-right">{ML.colActions}</TableHead>}</TableRow></TableHeader><TableBody>{isLoading ? <TableRow><TableCell colSpan={canManage ? 9 : 8}><Skeleton className="h-7 w-full" /></TableCell></TableRow> : !data?.length ? <TableRow><TableCell colSpan={canManage ? 9 : 8} className="py-10 text-center text-muted-foreground">No schemes found.</TableCell></TableRow> : data.map((s) => { const valueText = s.structure === "MULTIPLE_OPTIONS" && s.optionAchievementType === "QUANTITY_BASED" ? ML.optionsQuantitySchemeValue : null; return <TableRow key={s.id}><TableCell className="font-medium"><button type="button" className="text-left text-primary hover:underline" onClick={() => setDetail(s)} title="View dealer plans">{s.schemeName}</button>{s.documentUrl && <a href={s.documentUrl} target="_blank" rel="noreferrer" className="ml-2 inline-block text-primary" title="Open scheme document"><FileText className="h-4 w-4" /></a>}</TableCell><TableCell>{s.states.map((x) => x.name).join(", ")}</TableCell><TableCell>{s.isPerpetual ? "Perpetual" : `${formatDate(s.startDate!)} – ${formatDate(s.endDate!)}`}</TableCell><TableCell>{s.isPerpetual ? "—" : formatDate(s.bookingLastDate!)}</TableCell><TableCell className="text-right tabular-nums">{valueText ?? schemeValueText(s.schemeValueWithoutGST)}</TableCell><TableCell className="text-right tabular-nums">{valueText ?? schemeValueText(s.schemeValueWithGST)}</TableCell><TableCell>{benefits[s.schemeBenefit as Exclude<Benefit, "DOMESTIC_COUPLE_TOUR">] ?? "Domestic Couple Tour"}{s.benefitDetails ? ` · ${s.benefitDetails}` : ""}</TableCell><TableCell><Badge variant={s.status === "OPEN" ? "success" : "muted"}>{s.status}</Badge></TableCell>{canManage && <TableCell className="text-right"><div className="flex items-center justify-end gap-1"><SchemeRowMenu hasDocument={!!s.documentUrl} onInfo={() => setInfoFor(s)} onDoc={() => setDocFor(s)} onShare={() => void shareScheme(s)} onEdit={() => setEditing(s)} onDelete={() => setDeleting(s)} />{s.status === "OPEN" && <Button variant="ghost" size="sm" onClick={() => setClosing(s)} title="Close scheme" disabled={close.isPending}><Unlock className="h-4 w-4" /></Button>}{s.status === "CLOSED" && <Button variant="ghost" size="sm" onClick={() => setReopening(s)} title={isExpired(s) ? "Closed (period expired) — reopening requires extending the end date" : "Closed — click to reopen"} disabled={reopen.isPending}><Lock className="h-4 w-4" /></Button>}</div></TableCell>}</TableRow>; })}</TableBody></Table></div>}
     {create && <SchemeDialog states={states} onClose={() => setCreate(false)} onSaved={() => { setCreate(false); invalidate(); }} />}{editing && <SchemeDialog scheme={editing} states={states} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); invalidate(); }} />}
     {detail && <SchemeDetailDialog schemeId={detail.id} schemeName={detail.schemeName} canVerify={canManage} onClose={() => setDetail(null)} />}
     <ConfirmDialog
@@ -289,25 +292,40 @@ export function SchemeMasterPage({ canManage = true, crumbs, nav, hideViewToggle
  * no product is auto-selected, duplicates are prevented, and saved products load unchanged in edit mode.
  * Used for the Multiple Options eligible-product pool — selection semantics (a set of ids) are unchanged.
  */
-function EligibleProductRows({ products, value, onChange, addLabel, removeLabel, productName, maxProducts }: { products: ProductOption[]; value: string[]; onChange: (ids: string[]) => void; addLabel: string; removeLabel: string; productName: (id: string) => string; maxProducts?: number }) {
+function EligibleProductRateRows({ products, value, onChange, rates, onRateChange, addLabel, removeLabel, productName, productLabel, rateWithoutLabel, rateWithLabel }: {
+  products: ProductOption[];
+  value: string[];
+  onChange: (ids: string[]) => void;
+  rates: Record<string, { rateWithoutGST: string; rateWithGST: string }>;
+  onRateChange: (productId: string, patch: Partial<{ rateWithoutGST: string; rateWithGST: string }>) => void;
+  addLabel: string;
+  removeLabel: string;
+  productName: (id: string) => string;
+  productLabel: string;
+  rateWithoutLabel: string;
+  rateWithLabel: string;
+}) {
   const [rows, setRows] = useState<string[]>(value.length ? value : [""]);
-  const publish = (next: string[]) => { setRows(next); onChange([...new Set(next.filter((x) => x !== ""))]); };
-  const used = new Set(rows.filter((x) => x !== ""));
-  const optionsFor = (cur: string) => products.filter((p) => p.productId === cur || !used.has(p.productId));
-  return (
-    <div className="space-y-2">
-      {rows.map((id, i) => (
-        <div key={i} className="flex items-start gap-2">
-          <div className="flex-1">
-            <NativeSelect value={id} onChange={(e) => publish(rows.map((r, idx) => (idx === i ? e.target.value : r)))} options={[{ value: "", label: "Select Product" }, ...optionsFor(id).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
-            {id !== "" && !products.some((p) => p.productId === id) && <p className="mt-1 text-xs text-muted-foreground">{productName(id)}</p>}
-          </div>
-          <Button type="button" variant="ghost" size="sm" onClick={() => publish(rows.length > 1 ? rows.filter((_, idx) => idx !== i) : [""])} title={removeLabel}><X className="h-3 w-3" /></Button>
-        </div>
-      ))}
-      {(maxProducts == null || rows.length < maxProducts) && <Button type="button" variant="outline" size="sm" onClick={() => publish([...rows, ""])}><Plus className="h-3 w-3" /> {addLabel}</Button>}
+  const publish = (next: string[]) => { setRows(next); onChange([...new Set(next.filter(Boolean))]); };
+  const used = new Set(rows.filter(Boolean));
+  const optionsFor = (current: string) => products.filter((p) => p.productId === current || !used.has(p.productId));
+  return <div className="space-y-2">
+    <div className="overflow-x-auto">
+      <Table className="min-w-[620px] table-fixed">
+        <TableHeader><TableRow><TableHead className="w-64">{productLabel} *</TableHead><TableHead className="w-36">{rateWithoutLabel} *</TableHead><TableHead className="w-36">{rateWithLabel} *</TableHead><TableHead className="w-12" /></TableRow></TableHeader>
+        <TableBody>{rows.map((id, index) => <TableRow key={index}>
+          <TableCell>
+            <NativeSelect className="w-full" value={id} onChange={(event) => publish(rows.map((row, rowIndex) => rowIndex === index ? event.target.value : row))} options={[{ value: "", label: "Select Product" }, ...optionsFor(id).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
+            {id && !products.some((p) => p.productId === id) && <p className="mt-1 text-xs text-muted-foreground">{productName(id)}</p>}
+          </TableCell>
+          <TableCell><FormattedNumberInput disabled={!id} value={id ? rates[id]?.rateWithoutGST ?? "" : ""} onValueChange={(rateWithoutGST) => id && onRateChange(id, { rateWithoutGST })} placeholder="Enter rate" /></TableCell>
+          <TableCell><FormattedNumberInput disabled={!id} value={id ? rates[id]?.rateWithGST ?? "" : ""} onValueChange={(rateWithGST) => id && onRateChange(id, { rateWithGST })} placeholder="Enter rate" /></TableCell>
+          <TableCell><Button type="button" variant="ghost" size="sm" onClick={() => publish(rows.length > 1 ? rows.filter((_, rowIndex) => rowIndex !== index) : [""])} title={removeLabel}><X className="h-3 w-3" /></Button></TableCell>
+        </TableRow>)}</TableBody>
+      </Table>
     </div>
-  );
+    <Button type="button" variant="outline" size="sm" onClick={() => publish([...rows, ""])}><Plus className="h-3 w-3" /> {addLabel}</Button>
+  </div>;
 }
 
 /** One bordered, content-sized section card for the Create/Edit Scheme form. Same visual language across
@@ -321,6 +339,17 @@ function FormSection({ title, children }: { title: string; children: ReactNode }
       {children}
     </section>
   );
+}
+
+function calculatedProductAmounts(qty: string, rateWithoutGST: string, rateWithGST: string) {
+  return productAmounts(Number(qty), {
+    rateWithoutGST: Number(rateWithoutGST),
+    rateWithGST: Number(rateWithGST),
+  });
+}
+
+function CalculatedAmountInput({ value, label }: { value: string | number; label: string }) {
+  return <FormattedNumberInput aria-label={label} value={value} onValueChange={() => undefined} readOnly className="bg-muted/40 text-right tabular-nums text-muted-foreground" />;
 }
 
 function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; states: State[]; onClose: () => void; onSaved: () => void }) {
@@ -355,10 +384,12 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
 
   // ---- Scheme Requirement (Phase 5). Belongs to the SCHEME, not to dealers. A real basis must be chosen;
   // qty/value are kept as strings while editing (empty = not entered). ----
-  type ReqRow = { productId: string; requiredQty: string; requiredValue: string };
+  type ReqRow = { productId: string; requiredQty: string; requiredValue: string; rateWithoutGST: string; rateWithGST: string };
+  // Per-product rate snapshot lookup (Product-Quantity-Based) → seeds the rate inputs when editing.
+  const rateFor = (pid: string) => scheme?.productRates?.find((r) => r.productId === pid);
   const [reqType, setReqType] = useState<ReqType | "">(scheme?.requirementType === "NONE" ? "" : (scheme?.requirementType ?? ""));
   const [reqRows, setReqRows] = useState<ReqRow[]>(
-    scheme?.requirementProducts?.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty != null ? String(p.requiredQty) : "", requiredValue: p.requiredValue != null ? String(p.requiredValue) : "" })) ?? [],
+    scheme?.requirementProducts?.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty != null ? String(p.requiredQty) : "", requiredValue: p.requiredValue != null ? String(p.requiredValue) : "", rateWithoutGST: rateFor(p.productId)?.rateWithoutGST != null ? String(rateFor(p.productId)!.rateWithoutGST) : "", rateWithGST: rateFor(p.productId)?.rateWithGST != null ? String(rateFor(p.productId)!.rateWithGST) : "" })) ?? [],
   );
   const { data: productData } = useQuery<{ products: ProductOption[] }>({ queryKey: ["scheme-req-products"], queryFn: () => api.get("/api/products/master") });
   const productOptions = productData?.products ?? [];
@@ -367,7 +398,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const availableProducts = productOptions.filter((p) => !usedProductIds.has(p.productId));
 
   // A new product row starts EMPTY — no product is auto-selected; the user must pick one ("Select Product").
-  const emptyReqRow = (): ReqRow => ({ productId: "", requiredQty: "", requiredValue: "" });
+  const emptyReqRow = (): ReqRow => ({ productId: "", requiredQty: "", requiredValue: "", rateWithoutGST: "", rateWithGST: "" });
   const addReqRow = () => setReqRows((rows) => [...rows, emptyReqRow()]);
   const updateReqRow = (idx: number, patch: Partial<ReqRow>) => setReqRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   const removeReqRow = (idx: number) => setReqRows((rows) => rows.filter((_, i) => i !== idx));
@@ -375,6 +406,15 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const changeReqType = (t: ReqType | "") => { setReqType(t); if (t && t !== "NONE") setReqRows((rows) => (rows.length === 0 ? [emptyReqRow()] : rows)); };
   // Products still selectable for a given row = the ones not used elsewhere, plus the row's own current pick.
   const optionsForRow = (currentId: string) => productOptions.filter((p) => p.productId === currentId || !usedProductIds.has(p.productId));
+  const fixedProductTotals = reqRows.reduce((totals, row) => {
+    const amounts = calculatedProductAmounts(row.requiredQty, row.rateWithoutGST, row.rateWithGST);
+    return {
+      withoutGST: Math.round((totals.withoutGST + amounts.withoutGST) * 100) / 100,
+      withGST: Math.round((totals.withGST + amounts.withGST) * 100) / 100,
+    };
+  }, { withoutGST: 0, withGST: 0 });
+  const effectiveValueWithoutGST = reqType === "PRODUCT_BASED" ? String(fixedProductTotals.withoutGST) : valueWithoutGST;
+  const effectiveValueWithGST = reqType === "PRODUCT_BASED" ? String(fixedProductTotals.withGST) : valueWithGST;
 
   // Build the shared requirement shape (validation + persistence use the SAME normalizer contract).
   // Fixed + Value Based ALWAYS uses COMBINED (the Value Mode selector was removed): Scheme Value
@@ -396,31 +436,86 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     })),
   });
   const requirementErrors = validateSchemeRequirement(requirementInput());
-  const requirementValid = reqType !== "" && reqType !== "NONE" && requirementErrors.length === 0;
+  const fixedProductRatesValid = reqRows.length > 0 && reqRows.every((row) => row.productId && row.rateWithoutGST !== "" && row.rateWithGST !== ""
+    && Number(row.rateWithoutGST) > 0 && Number(row.rateWithGST) >= Number(row.rateWithoutGST));
+  const requirementValid = reqType !== "" && reqType !== "NONE" && requirementErrors.length === 0 && fixedProductRatesValid;
 
   // ---- Multiple Options (Phase 10). A scheme is FIXED (existing behaviour) or MULTIPLE_OPTIONS: an
   // achievement type + an eligible product pool + ≥1 option (label? + target + value pair). Scheme-level
   // value fields are unused for options (sent null); installment rules are shared across options. ----
   // Labels are retained for historical round-tripping, but are no longer editable.
   type OptRow = { bookingAmount: string; id?: string; label: string; target: string; valueWithoutGST: string; valueWithGST: string; isActive: boolean };
+  type OptionProductRate = { rateWithoutGST: string; rateWithGST: string };
   const [structure, setStructure] = useState<Structure | "">(scheme?.structure ?? "");
+  // New schemes intentionally start on Select...; existing schemes load the persisted value (legacy rows = 5).
+  const [numberOfBills, setNumberOfBills] = useState(scheme?.numberOfBills != null ? String(scheme.numberOfBills) : "");
   // Create starts UNSELECTED ("Select Achievement Type"); Edit loads the saved type.
   const [optAchType, setOptAchType] = useState<OptionAchievementType | "">(scheme?.optionAchievementType ?? "");
   const [eligibleIds, setEligibleIds] = useState<string[]>(scheme?.eligibleProductIds ?? []);
+  // Options product rates are keyed by product so Value Based can retain several eligible products. Quantity
+  // Based continues to use only the first/sole eligible product.
+  const [optionProductRates, setOptionProductRates] = useState<Record<string, OptionProductRate>>(() => Object.fromEntries(
+    (scheme?.productRates ?? []).map((rate) => [rate.productId, { rateWithoutGST: String(rate.rateWithoutGST), rateWithGST: String(rate.rateWithGST) }]),
+  ));
+  const changeEligibleProducts = (ids: string[]) => {
+    const nextIds = [...new Set(ids.filter(Boolean))];
+    setEligibleIds(nextIds);
+    setOptionProductRates((current) => Object.fromEntries(nextIds.map((productId) => [
+      productId,
+      current[productId] ?? { rateWithoutGST: "", rateWithGST: "" },
+    ])));
+  };
+  const updateOptionProductRate = (productId: string, patch: Partial<OptionProductRate>) => setOptionProductRates((current) => ({
+    ...current,
+    [productId]: { rateWithoutGST: current[productId]?.rateWithoutGST ?? "", rateWithGST: current[productId]?.rateWithGST ?? "", ...patch },
+  }));
+  const primaryOptionRate = optionProductRates[eligibleIds[0] ?? ""] ?? { rateWithoutGST: "", rateWithGST: "" };
   const [optRows, setOptRows] = useState<OptRow[]>(
     scheme?.options?.map((o) => ({ bookingAmount: String(o.bookingAmount ?? scheme.bookingAmount ?? 0), id: o.id, label: o.label ?? "", target: o.target != null ? String(o.target) : "", valueWithoutGST: String(o.valueWithoutGST), valueWithGST: String(o.valueWithGST), isActive: o.isActive })) ?? [],
   );
   const addOptRow = () => setOptRows((r) => [...r, { bookingAmount: "", label: "", target: "", valueWithoutGST: "", valueWithGST: "", isActive: true }]);
   const updateOptRow = (i: number, patch: Partial<OptRow>) => setOptRows((r) => r.map((x, idx) => (idx === i ? { ...x, ...patch } : x)));
   const removeOptRow = (i: number) => setOptRows((r) => r.filter((_, idx) => idx !== i));
+  const effectiveOptionAmounts = (option: OptRow) => calculatedProductAmounts(option.target, primaryOptionRate.rateWithoutGST, primaryOptionRate.rateWithGST);
+  const optionValueWithoutGST = (option: OptRow): string | number => optAchType === "QUANTITY_BASED"
+    ? option.target === "" || primaryOptionRate.rateWithoutGST === "" ? "" : effectiveOptionAmounts(option).withoutGST
+    : option.valueWithoutGST;
+  const optionValueWithGST = (option: OptRow): string | number => optAchType === "QUANTITY_BASED"
+    ? option.target === "" || primaryOptionRate.rateWithGST === "" ? "" : effectiveOptionAmounts(option).withGST
+    : option.valueWithGST;
   const multipleOptionsInput = () => ({
     achievementType: optAchType as OptionAchievementType, // "" is caught by validateMultipleOptions (gates Save)
     eligibleProductIds: eligibleIds,
-    options: optRows.map((o) => ({ label: o.label.trim() || null, target: optAchType === "QUANTITY_BASED" && o.target !== "" ? Number(o.target) : null, valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST) })),
+    options: optRows.map((o) => {
+      const withoutGST = optionValueWithoutGST(o);
+      const withGST = optionValueWithGST(o);
+      return { label: o.label.trim() || null, target: optAchType === "QUANTITY_BASED" && o.target !== "" ? Number(o.target) : null, valueWithoutGST: withoutGST === "" ? null : Number(withoutGST), valueWithGST: withGST === "" ? null : Number(withGST) };
+    }),
   });
+
+  // Per-product billing rates payload. Options persists a rate pair for every eligible product; Fixed persists
+  // rates for Product Quantity and Value Based requirement products.
+  const buildProductRates = (): ProductRate[] => {
+    if (structure === "MULTIPLE_OPTIONS") {
+      return eligibleIds.flatMap((productId) => {
+        const rate = optionProductRates[productId];
+        if (!rate || rate.rateWithoutGST === "" || rate.rateWithGST === "") return [];
+        return [{ productId, rateWithoutGST: Number(rate.rateWithoutGST), rateWithGST: Number(rate.rateWithGST) }];
+      });
+    }
+    if (reqType !== "PRODUCT_BASED" && reqType !== "VALUE_BASED") return [];
+    return reqRows
+      .filter((r) => r.productId && r.rateWithoutGST !== "" && r.rateWithGST !== "")
+      .map((r) => ({ productId: r.productId, rateWithoutGST: Number(r.rateWithoutGST), rateWithGST: Number(r.rateWithGST) }));
+  };
   const optionErrors = structure === "MULTIPLE_OPTIONS" ? validateMultipleOptions(multipleOptionsInput()) : [];
   const optionBookingsValid = optRows.length > 0 && optRows.every((option) => option.bookingAmount !== "" && Number(option.bookingAmount) >= 0);
-  const optionsValid = optionErrors.length === 0 && optionBookingsValid;
+  const optionRatesValid = eligibleIds.length > 0 && eligibleIds.every((productId) => {
+    const rate = optionProductRates[productId];
+    if (!rate) return false;
+    return rate.rateWithoutGST !== "" && rate.rateWithGST !== "" && Number(rate.rateWithoutGST) > 0 && Number(rate.rateWithGST) >= Number(rate.rateWithoutGST);
+  });
+  const optionsValid = optionErrors.length === 0 && optionBookingsValid && optionRatesValid;
   const isOptions = structure === "MULTIPLE_OPTIONS";
   const changeStructure = (s: Structure | "") => {
     setStructure(s);
@@ -442,6 +537,10 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     colProduct: useLabel("scheme_master.requirement.col.product"),
     colQty: useLabel("scheme_master.requirement.col.required_qty"),
     colValue: useLabel("scheme_master.requirement.col.required_value"),
+    rateWithoutGst: useLabel("scheme_master.requirement.col.rate_without_gst"),
+    rateWithGst: useLabel("scheme_master.requirement.col.rate_with_gst"),
+    amountWithoutGst: useLabel("scheme_master.requirement.col.amount_without_gst"),
+    amountWithGst: useLabel("scheme_master.requirement.col.amount_with_gst"),
   };
   // Centrally-editable Scheme Master FORM labels (Admin → Labels).
   const FL = {
@@ -462,6 +561,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     structure: useLabel("scheme_master.form.structure"),
     structureFixed: useLabel("scheme_master.form.structure.fixed"),
     structureOptions: useLabel("scheme_master.form.structure.options"),
+    numberOfBills: useLabel("scheme_master.form.number_of_bills"),
     achievementType: useLabel("scheme_master.form.achievement_type"),
     achQuantity: useLabel("scheme_master.form.achievement_type.quantity"),
     achValue: useLabel("scheme_master.form.achievement_type.value"),
@@ -532,8 +632,8 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
     ? [{ value: maxExtAttempts, label: maxExtAttempts === "0" ? FL.disabled : maxExtAttempts }]
     : [];
 
-  const gstValue = Number(valueWithGST) || 0;
-  const fixedGstValid = valueWithoutGST === "" || valueWithGST === "" || Math.round(Number(valueWithGST) * 100) >= Math.round(Number(valueWithoutGST) * 100);
+  const gstValue = Number(effectiveValueWithGST) || 0;
+  const fixedGstValid = effectiveValueWithoutGST === "" || effectiveValueWithGST === "" || Math.round(Number(effectiveValueWithGST) * 100) >= Math.round(Number(effectiveValueWithoutGST) * 100);
   const calcType: CalcType = installmentMode || installments[0]?.calculationType || "PERCENTAGE";
   const round2 = (n: number) => Math.round(n * 100) / 100;
   // Booking Amount (scheme-level) is deducted from the FINAL installment by the shared calculator.
@@ -549,7 +649,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
   const effInstallments = installments.map((r, i) => (i === installments.length - 1 ? { ...r, value: finalValue } : r));
   const paymentColumns = installmentValueColumns({
     structure: (structure || "FIXED") as Structure, achievementType: optAchType, valueWithGST: gstValue, bookingAmount: booking,
-    options: optRows.map(o => ({ target: o.target === "" ? null : Number(o.target), valueWithGST: Number(o.valueWithGST) || 0, bookingAmount: Number(o.bookingAmount) || 0 })),
+    options: optRows.map(o => ({ target: o.target === "" ? null : Number(o.target), valueWithGST: Number(optionValueWithGST(o)) || 0, bookingAmount: Number(o.bookingAmount) || 0 })),
   });
   const columnAmounts = paymentColumns.map(c => computeInstallmentAmounts(effInstallments, c.valueWithGST, c.bookingAmount, installmentBalance));
   const finalNegative = installments.length > 0 && finalValue < -1e-9;
@@ -579,9 +679,11 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
       startDate: isPerpetual ? null : startDate, endDate: isPerpetual ? null : endDate, bookingLastDate: isPerpetual ? null : bookingLastDate,
       bookingAmount: bookingAmount === "" ? null : bookingAmount, schemeBenefit: benefit, benefitDetails: benefit === "OTHER" ? benefitDetails : null,
       otherBenefitDetails: otherBenefitDetails.trim(), allowMultipleSchemes: multiple === "yes",
+      numberOfBills: Number(numberOfBills),
       maxExtensionDays: Number(maxExtDays) || 0, maxExtensionAttempts: Number(maxExtAttempts) || 0, prePlacementMaxDays: Number(prePlacementMaxDays) || 0, documentUrl: documentUrl || null,
       installments: effInstallments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value) || 0, daysAfterBillingDate: Number(r.daysAfterBillingDate) || 0 })),
       structure: structure as Structure,
+      productRates: buildProductRates(),
     };
     if (isOptions) {
       // MULTIPLE_OPTIONS: no scheme-level value (null → "Per option"); requirement is replaced by the option pool.
@@ -589,14 +691,18 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
         ...common,
         schemeValueWithoutGST: null, schemeValueWithGST: null,
         optionAchievementType: optAchType || null, eligibleProductIds: eligibleIds,
-        options: optRows.map((o) => ({ bookingAmount: o.bookingAmount === "" ? null : Number(o.bookingAmount), id: o.id, label: o.label.trim() || null, target: optAchType === "QUANTITY_BASED" && o.target !== "" ? Number(o.target) : null, valueWithoutGST: o.valueWithoutGST === "" ? null : Number(o.valueWithoutGST), valueWithGST: o.valueWithGST === "" ? null : Number(o.valueWithGST), isActive: o.isActive })),
+        options: optRows.map((o) => {
+          const withoutGST = optionValueWithoutGST(o);
+          const withGST = optionValueWithGST(o);
+          return { bookingAmount: o.bookingAmount === "" ? null : Number(o.bookingAmount), id: o.id, label: o.label.trim() || null, target: optAchType === "QUANTITY_BASED" && o.target !== "" ? Number(o.target) : null, valueWithoutGST: withoutGST === "" ? null : Number(withoutGST), valueWithGST: withGST === "" ? null : Number(withGST), isActive: o.isActive };
+        }),
         requirementType: "NONE", valueMode: null, combinedRequiredValue: null, requirementProducts: [],
       };
     }
     const req = requirementInput();
     return {
       ...common,
-      schemeValueWithoutGST: valueWithoutGST, schemeValueWithGST: valueWithGST,
+      schemeValueWithoutGST: effectiveValueWithoutGST, schemeValueWithGST: effectiveValueWithGST,
       optionAchievementType: null, eligibleProductIds: [], options: [],
       requirementType: req.requirementType, valueMode: req.valueMode, combinedRequiredValue: req.combinedRequiredValue, requirementProducts: req.products,
     };
@@ -642,23 +748,52 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                     <Label>{L.type} *</Label>
                     <NativeSelect value={optAchType} onChange={(e) => setOptAchType(e.target.value as OptionAchievementType | "")} options={[{ value: "", label: "Select..." }, { value: "QUANTITY_BASED", label: FL.achQuantity }, { value: "VALUE_BASED", label: FL.achValue }]} />
                   </div>
+                  <div className="space-y-1.5">
+                    <Label>{FL.numberOfBills} *</Label>
+                    <NativeSelect value={numberOfBills} onChange={(e) => setNumberOfBills(e.target.value)} options={[{ value: "", label: "Select..." }, ...[1, 2, 3, 4, 5].map((value) => ({ value: String(value), label: String(value) }))]} />
+                  </div>
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs font-medium text-muted-foreground">{FL.eligibleProducts} *</Label>
-                  {/* SAME product-selection pattern as Fixed: "Select Product" dropdown rows + "+ Add Product". */}
-                  <EligibleProductRows products={productOptions} value={eligibleIds} onChange={setEligibleIds} addLabel={L.addProduct} removeLabel={FL.remove} productName={productName} maxProducts={optAchType === "QUANTITY_BASED" ? 1 : undefined} />
+                  {optAchType === "QUANTITY_BASED" ? (
+                    <div className="overflow-x-auto">
+                      <Table className="min-w-[620px] table-fixed">
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="w-64">{L.colProduct} *</TableHead>
+                            <TableHead className="w-36">{L.rateWithoutGst} *</TableHead>
+                            <TableHead className="w-36">{L.rateWithGst} *</TableHead>
+                            <TableHead className="w-12" />
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          <TableRow>
+                            <TableCell>
+                              <NativeSelect className="w-full" value={eligibleIds[0] ?? ""} onChange={(e) => changeEligibleProducts(e.target.value ? [e.target.value] : [])} options={[{ value: "", label: "Select Product" }, ...productOptions.map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
+                              {eligibleIds[0] && !productOptions.some((p) => p.productId === eligibleIds[0]) && <p className="mt-1 text-xs text-muted-foreground">{productName(eligibleIds[0])}</p>}
+                            </TableCell>
+                            <TableCell><FormattedNumberInput value={primaryOptionRate.rateWithoutGST} onValueChange={(rateWithoutGST) => eligibleIds[0] && updateOptionProductRate(eligibleIds[0], { rateWithoutGST })} placeholder="Enter rate" /></TableCell>
+                            <TableCell><FormattedNumberInput value={primaryOptionRate.rateWithGST} onValueChange={(rateWithGST) => eligibleIds[0] && updateOptionProductRate(eligibleIds[0], { rateWithGST })} placeholder="Enter rate" /></TableCell>
+                            <TableCell><Button type="button" variant="ghost" size="sm" onClick={() => changeEligibleProducts([])} title={FL.remove}><X className="h-3 w-3" /></Button></TableCell>
+                          </TableRow>
+                        </TableBody>
+                      </Table>
+                    </div>
+                  ) : (
+                    <EligibleProductRateRows products={productOptions} value={eligibleIds} onChange={changeEligibleProducts} rates={optionProductRates} onRateChange={updateOptionProductRate} addLabel={L.addProduct} removeLabel={FL.remove} productName={productName} productLabel={L.colProduct} rateWithoutLabel={L.rateWithoutGst} rateWithLabel={L.rateWithGst} />
+                  )}
                 </div>
                 <div className="space-y-2">
                   <Label className="text-sm font-semibold">{FL.optionsBuilder} *</Label>
                   {optRows.length > 0 && (
                     <div className="overflow-x-auto">
-                      <Table className={optAchType === "QUANTITY_BASED" ? "min-w-[640px]" : "min-w-[520px]"}>
+                      <Table className={optAchType === "QUANTITY_BASED" ? "min-w-[720px] table-fixed" : "min-w-[520px]"}>
                         <TableHeader>
                           <TableRow>
                             <TableHead className="w-24">{FL.optColOption}</TableHead>
                             {optAchType === "QUANTITY_BASED" && <TableHead className="w-32">{FL.optColTarget} (Qty) *</TableHead>}
-                            <TableHead className="w-36">{FL.optColValueWithout} *</TableHead>
-                            <TableHead className="w-36">{FL.optColValueWith} *</TableHead>
+                            <TableHead className="w-40">{optAchType === "QUANTITY_BASED" ? L.amountWithoutGst : FL.optColValueWithout} *</TableHead>
+                            <TableHead className="w-40">{optAchType === "QUANTITY_BASED" ? L.amountWithGst : FL.optColValueWith} *</TableHead>
                             <TableHead className="w-16 text-center">{FL.optColActive} *</TableHead>
                           </TableRow>
                         </TableHeader>
@@ -667,8 +802,8 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                             <TableRow key={i}>
                               <TableCell className="font-medium">{FL.optColOption} {i + 1}</TableCell>
                               {optAchType === "QUANTITY_BASED" && <TableCell><FormattedNumberInput value={o.target} onValueChange={(target) => updateOptRow(i, { target })} placeholder="Enter quantity" /></TableCell>}
-                              <TableCell><FormattedNumberInput value={o.valueWithoutGST} onValueChange={(valueWithoutGST) => updateOptRow(i, { valueWithoutGST })} placeholder="Enter amount" /></TableCell>
-                              <TableCell><FormattedNumberInput value={o.valueWithGST} onValueChange={(valueWithGST) => updateOptRow(i, { valueWithGST })} placeholder="Enter amount" /></TableCell>
+                              <TableCell>{optAchType === "QUANTITY_BASED" ? <CalculatedAmountInput label={`${FL.optColOption} ${i + 1} ${L.amountWithoutGst}`} value={optionValueWithoutGST(o)} /> : <FormattedNumberInput value={o.valueWithoutGST} onValueChange={(valueWithoutGST) => updateOptRow(i, { valueWithoutGST })} placeholder="Enter amount" />}</TableCell>
+                              <TableCell>{optAchType === "QUANTITY_BASED" ? <CalculatedAmountInput label={`${FL.optColOption} ${i + 1} ${L.amountWithGst}`} value={optionValueWithGST(o)} /> : <FormattedNumberInput value={o.valueWithGST} onValueChange={(valueWithGST) => updateOptRow(i, { valueWithGST })} placeholder="Enter amount" />}</TableCell>
                               <TableCell><div className="flex items-center justify-center gap-1"><input type="checkbox" aria-label={`Option ${i + 1} active`} checked={o.isActive} onChange={(e) => updateOptRow(i, { isActive: e.target.checked })} /><Button type="button" variant="ghost" size="sm" onClick={() => removeOptRow(i)} title={FL.remove} aria-label={`Remove option ${i + 1}`}><X className="h-3 w-3" /></Button></div></TableCell>
                             </TableRow>
                           ))}
@@ -679,7 +814,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                   {/* Add Option — wrapped in a block so it always sits on its OWN line below the "Options" label
                       (the label is inline), left aligned, whether or not any options have been added. */}
                   <div><Button type="button" variant="outline" size="sm" onClick={addOptRow}><Plus className="h-3 w-3" /> {FL.addOption}</Button></div>
-                  {!optionsValid && optRows.length > 0 && <p className="text-xs text-destructive">{optionErrors[0] ?? "Booking Amount is required for every option."}</p>}
+                  {!optionsValid && optRows.length > 0 && <p className="text-xs text-destructive">{optionErrors[0] ?? (!optionRatesValid ? "Rate W/O GST and Rate + GST are required for every eligible product." : "Booking Amount is required for every option.")}</p>}
                 </div>
               </div>
             ) : (
@@ -692,17 +827,25 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                       <Label>{L.type} *</Label>
                       <NativeSelect value={reqType} onChange={(e) => changeReqType(e.target.value as ReqType | "")} options={[{ value: "", label: "Select..." }, { value: "PRODUCT_BASED", label: L.typeProduct }, { value: "VALUE_BASED", label: L.typeValue }]} />
                     </div>
+                    <div className="space-y-1.5">
+                      <Label>{FL.numberOfBills} *</Label>
+                      <NativeSelect value={numberOfBills} onChange={(e) => setNumberOfBills(e.target.value)} options={[{ value: "", label: "Select..." }, ...[1, 2, 3, 4, 5].map((value) => ({ value: String(value), label: String(value) }))]} />
+                    </div>
                   </div>
                   {reqType !== "" && reqType !== "NONE" && (
                     <div className="space-y-2">
-                      <Label className="text-xs font-medium text-muted-foreground">{reqType === "VALUE_BASED" ? L.applicableProducts : L.colProduct} *</Label>
+                      <Label className="text-xs font-medium text-muted-foreground">{reqType === "VALUE_BASED" ? FL.eligibleProducts : L.colProduct} *</Label>
                       {reqRows.length > 0 && (
-                        <div className="overflow-auto">
-                          <Table>
+                        <div className="overflow-x-auto">
+                          <Table className={reqType === "PRODUCT_BASED" ? "min-w-[980px] table-fixed" : "min-w-[620px] table-fixed"}>
                             <TableHeader>
                               <TableRow>
-                                <TableHead>{L.colProduct} *</TableHead>
-                                {reqType === "PRODUCT_BASED" && <TableHead className="w-40">{L.colQty} *</TableHead>}
+                                <TableHead className={reqType === "PRODUCT_BASED" ? "w-52" : "w-64"}>{L.colProduct} *</TableHead>
+                                {reqType === "PRODUCT_BASED" && <TableHead className="w-28">{L.colQty} *</TableHead>}
+                                <TableHead className="w-36">{L.rateWithoutGst} *</TableHead>
+                                {reqType === "PRODUCT_BASED" && <TableHead className="w-40">{L.amountWithoutGst}</TableHead>}
+                                <TableHead className="w-36">{L.rateWithGst} *</TableHead>
+                                {reqType === "PRODUCT_BASED" && <TableHead className="w-40">{L.amountWithGst}</TableHead>}
                                 <TableHead className="w-12" />
                               </TableRow>
                             </TableHeader>
@@ -711,10 +854,14 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                                 <TableRow key={i}>
                                   <TableCell>
                                     {/* No product is pre-selected — a new row starts on the "Select Product" placeholder. */}
-                                    <NativeSelect value={r.productId} onChange={(e) => updateReqRow(i, { productId: e.target.value })} options={[{ value: "", label: "Select Product" }, ...optionsForRow(r.productId).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
+                                    <NativeSelect className="w-full" value={r.productId} onChange={(e) => updateReqRow(i, { productId: e.target.value })} options={[{ value: "", label: "Select Product" }, ...optionsForRow(r.productId).map((p) => ({ value: p.productId, label: p.isActive ? p.name : `${p.name} (inactive)` }))]} />
                                     {r.productId !== "" && !productOptions.some((p) => p.productId === r.productId) && <p className="mt-1 text-xs text-muted-foreground">{productName(r.productId)}</p>}
                                   </TableCell>
                                   {reqType === "PRODUCT_BASED" && <TableCell><FormattedNumberInput value={r.requiredQty} onValueChange={(requiredQty) => updateReqRow(i, { requiredQty })} placeholder="Enter quantity" /></TableCell>}
+                                  <TableCell><FormattedNumberInput value={r.rateWithoutGST} onValueChange={(rateWithoutGST) => updateReqRow(i, { rateWithoutGST })} placeholder="Enter rate" /></TableCell>
+                                  {reqType === "PRODUCT_BASED" && <TableCell><CalculatedAmountInput label={`${productName(r.productId)} ${L.amountWithoutGst}`} value={r.requiredQty === "" || r.rateWithoutGST === "" ? "" : calculatedProductAmounts(r.requiredQty, r.rateWithoutGST, r.rateWithGST).withoutGST} /></TableCell>}
+                                  <TableCell><FormattedNumberInput value={r.rateWithGST} onValueChange={(rateWithGST) => updateReqRow(i, { rateWithGST })} placeholder="Enter rate" /></TableCell>
+                                  {reqType === "PRODUCT_BASED" && <TableCell><CalculatedAmountInput label={`${productName(r.productId)} ${L.amountWithGst}`} value={r.requiredQty === "" || r.rateWithGST === "" ? "" : calculatedProductAmounts(r.requiredQty, r.rateWithoutGST, r.rateWithGST).withGST} /></TableCell>}
                                   <TableCell><Button type="button" variant="ghost" size="sm" onClick={() => removeReqRow(i)} title={FL.remove}><X className="h-3 w-3" /></Button></TableCell>
                                 </TableRow>
                               ))}
@@ -724,14 +871,14 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
                       )}
                       {/* Add Product — left aligned, always BELOW the product rows (same interaction pattern as Multiple Options). */}
                       <Button type="button" variant="outline" size="sm" disabled={availableProducts.length === 0} onClick={addReqRow}><Plus className="h-3 w-3" /> {L.addProduct}</Button>
-                      {!requirementValid && reqRows.length > 0 && <p className="text-xs text-destructive">{requirementErrors[0]}</p>}
+                      {!requirementValid && reqRows.length > 0 && <p className="text-xs text-destructive">{requirementErrors[0] ?? "Rate W/O GST and Rate + GST are required for every product, and Rate + GST cannot be lower than Rate W/O GST."}</p>}
                     </div>
                   )}
                 </div>
                 {/* Scheme Value pair — AFTER the Scheme Basis / product rows, per the required sequence. */}
                 <div className="grid grid-cols-1 gap-3 border-t pt-3 sm:grid-cols-2">
-                  <div className="space-y-1.5"><Label>{FL.valueWithoutGst} *</Label><FormattedNumberInput value={valueWithoutGST} onValueChange={setValueWithoutGST} placeholder="Enter amount" /></div>
-                  <div className="space-y-1.5"><Label>{FL.valueWithGst} *</Label><FormattedNumberInput value={valueWithGST} onValueChange={setValueWithGST} placeholder="Enter amount" />{!fixedGstValid && <p className="text-xs text-destructive">Scheme Value (With GST) must be greater than or equal to Scheme Value (Without GST).</p>}</div>
+                  <div className="space-y-1.5"><Label>{FL.valueWithoutGst} *</Label>{reqType === "PRODUCT_BASED" ? <CalculatedAmountInput label={FL.valueWithoutGst} value={effectiveValueWithoutGST} /> : <FormattedNumberInput value={valueWithoutGST} onValueChange={setValueWithoutGST} placeholder="Enter amount" />}</div>
+                  <div className="space-y-1.5"><Label>{FL.valueWithGst} *</Label>{reqType === "PRODUCT_BASED" ? <CalculatedAmountInput label={FL.valueWithGst} value={effectiveValueWithGST} /> : <FormattedNumberInput value={valueWithGST} onValueChange={setValueWithGST} placeholder="Enter amount" />}{!fixedGstValid && <p className="text-xs text-destructive">Scheme Value (With GST) must be greater than or equal to Scheme Value (Without GST).</p>}</div>
                 </div>
               </div>
             )}
@@ -829,7 +976,7 @@ function SchemeDialog({ scheme, states, onClose, onSaved }: { scheme?: Scheme; s
         </div>
         <DialogFooter className="shrink-0 border-t pt-4">
           <Button variant="outline" onClick={onClose}>{FL.cancel}</Button>
-          <Button disabled={!name.trim() || !stateIds.length || !structure || !multiple || !benefit || !otherBenefitDetails.trim() || !prePlacementMaxDays || !maxExtDays || maxExtAttempts === "" || (!isPerpetual && (!startDate || !endDate || !bookingLastDate)) || installments.length === 0 || !installmentMode || (!isOptions && (bookingAmount === "" || valueWithoutGST === "" || valueWithGST === "" || !fixedGstValid)) || (benefit === "OTHER" && !benefitDetails.trim()) || !installValid || (isOptions ? !optionsValid : !requirementValid) || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{scheme ? FL.saveChanges : FL.saveScheme}</Button>
+          <Button disabled={!name.trim() || !stateIds.length || !structure || !multiple || !numberOfBills || !benefit || !otherBenefitDetails.trim() || !prePlacementMaxDays || !maxExtDays || maxExtAttempts === "" || (!isPerpetual && (!startDate || !endDate || !bookingLastDate)) || installments.length === 0 || !installmentMode || (!isOptions && (bookingAmount === "" || effectiveValueWithoutGST === "" || effectiveValueWithGST === "" || !fixedGstValid)) || (benefit === "OTHER" && !benefitDetails.trim()) || !installValid || (isOptions ? !optionsValid : !requirementValid) || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{scheme ? FL.saveChanges : FL.saveScheme}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

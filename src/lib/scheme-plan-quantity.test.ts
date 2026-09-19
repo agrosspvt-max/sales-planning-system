@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { distinctPlanTotals, quantityPortionAmount, quantitySplitDecision } from "./scheme-plan-quantity";
+import { distinctPlanTotals, effectiveProceedingSchemeUnits, quantityPortionAmount, quantitySplitDecision } from "./scheme-plan-quantity";
+
+assert.equal(effectiveProceedingSchemeUnits(1), 1);
+assert.equal(effectiveProceedingSchemeUnits(3), 3);
+assert.equal(effectiveProceedingSchemeUnits(4, 2), 2);
 
 assert.deepEqual(quantitySplitDecision(4, 4, undefined), {
   originalQuantity: 4, proceedingQuantity: 4, remainingQuantity: 0, disposition: null, split: false,

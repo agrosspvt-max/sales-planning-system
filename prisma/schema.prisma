@@ -92,6 +92,9 @@ model Scheme {
   benefitDetails       String?
   otherBenefitDetails  String?
   allowMultipleSchemes Boolean         @default(false)
+  // Maximum combined bills the SO may declare during conversion. Existing schemes default to the legacy
+  // limit of 5; Create/Edit requires an explicit 1–5 selection at the application boundary.
+  numberOfBills        Int             @default(5)
   // Conversion Date Extension config. Days 0 disables extensions. Attempts: 0 = disabled,
   // -1 = unlimited attempts, positive value = maximum attempts.
   maxExtensionDays     Int             @default(0) // total calendar days a dealer may push the ORIGINAL conversion date
@@ -194,6 +197,11 @@ model DealerSchemePlan {
   adminConversionDate DateTime?
   adminBookingStatus  SchemeBookingStatus?
   adminBookingAmount  Decimal?            @db.Decimal(14, 2)
+  // Booking-amount coverage (additive, nullable → historical-safe): how many of this plan's proceeding scheme
+  // instances the Admin's Paid booking is verified to cover. Coverage/validation/reporting only — it does NOT
+  // move schemes forward (the SO conversion split remains the structural boundary). NULL for plans verified
+  // before this feature (treated as covering all schemes when Paid). Consumed by Conversion Follow-up.
+  adminBookingSchemeCount Int?
   adminDocumentStatus SchemeAdminDocStatus?
   adminBillingDate    DateTime?
   // Pre-placement (Phase 11). prePlacementDays = SO/dealer requested days (within Scheme.prePlacementMaxDays);
@@ -329,9 +337,35 @@ model DealerSchemeBill {
   updatedAt DateTime @updatedAt
   instance DealerSchemeInstance? @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   installments DealerSchemeInstallment[]
+  billProducts DealerSchemeBillProduct[]
   @@unique([planId, partNumber])
   @@unique([instanceId, partNumber])
   @@unique([id, instanceId])
+}
+
+/// Per-product, per-bill quantities for product-rate billing (Product Quantity Based and Options Value Based).
+/// One row per (bill, product):
+/// the SO's planned/proposed quantity and the Admin's actual/verified quantity, with the product RATE
+/// SNAPSHOTTED at conversion (so later Scheme Master edits never change a historical bill). Bill amounts are
+/// derived from these (Admin actual qty × snapshot rate = verified bill amount = installment base). The
+/// bill's own amount fields remain the authoritative installment base; this table is the auditable source.
+/// `productId` is stored plain (no FK relation) to avoid touching the Product model; integrity is enforced
+/// at the application layer. Cascades with its bill.
+model DealerSchemeBillProduct {
+  id             String   @id @default(cuid())
+  billId         String
+  bill           DealerSchemeBill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  productId      String
+  soQty          Decimal? @db.Decimal(14, 3) // SO planned/proposed quantity for this product on this bill
+  adminQty       Decimal? @db.Decimal(14, 3) // Admin actual/verified quantity (authoritative)
+  rateWithoutGST Decimal  @db.Decimal(14, 2) // snapshotted at conversion
+  rateWithGST    Decimal  @db.Decimal(14, 2)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([billId, productId])
+  @@index([billId])
+  @@index([productId])
 }
 
 /// Bill-linked schedules are immutable after creation. A null billId preserves legacy instance schedules.
@@ -422,6 +456,10 @@ model SchemeRequirementProduct {
   productId     String
   requiredQty   Decimal? @db.Decimal(14, 3)
   requiredValue Decimal? @db.Decimal(14, 2)
+  // FIXED Product Quantity and Value Based schemes: per-product billing rates. Additive + nullable keeps
+  // legacy rows historical-safe; new/edited schemes require them. Snapshotted at conversion.
+  rateWithoutGST Decimal? @db.Decimal(14, 2)
+  rateWithGST    Decimal? @db.Decimal(14, 2)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   scheme        Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
@@ -463,6 +501,10 @@ model SchemeEligibleProduct {
   id        String   @id @default(cuid())
   schemeId  String
   productId String
+  // OPTIONS schemes: per-product billing rates for Quantity Based and Value Based billing.
+  // Additive + nullable → historical-safe. Snapshotted onto the plan at conversion.
+  rateWithoutGST Decimal? @db.Decimal(14, 2)
+  rateWithGST    Decimal? @db.Decimal(14, 2)
   createdAt DateTime @default(now())
   scheme    Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
   product   Product  @relation(fields: [productId], references: [id])

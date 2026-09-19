@@ -327,13 +327,15 @@ const ShareButton = ({ onClick }: { onClick: () => void }) => (
  *
  * `active="planning"` is the first item in both bars, so the RM bar renders exactly as it always has.
  */
-export function SchemeManagerModeLinks({ active, role }: { active: "planning" | "view" | "followup"; role: Role }) {
-  // Both manager roles now use the three-section bar. RM gained Create Plan / View Plans (the SO-style
+export function SchemeManagerModeLinks({ active, role }: { active: "planning" | "view" | "followup" | "monitor"; role: Role }) {
+  // Both manager roles now use the four-section bar. RM gained Create Plan / View Plans (the SO-style
   // planning workflow) alongside the existing Review (a flip inside View Plans) and Follow-up.
-  const items: { key: "planning" | "view" | "followup"; href: string; labelKey: LabelKey }[] = [
+  const items: { key: "planning" | "view" | "followup" | "monitor"; href: string; labelKey: LabelKey }[] = [
     { key: "planning", href: "/planning/scheme", labelKey: "scheme_planning.nav.create_plan" },
     { key: "view", href: "/planning/scheme/plans", labelKey: "scheme_planning.nav.view_plan" },
     { key: "followup", href: "/planning/scheme/follow-up", labelKey: "scheme_planning.nav.follow_up" },
+    // "Follow Up" — the NEW monitoring hub (Conversion / Billing / Payment), separate from "Follow-up Plans".
+    { key: "monitor", href: "/planning/scheme/follow-up-monitor", labelKey: "scheme_planning.nav.follow_up_monitor" },
   ];
   void role;
   return (
@@ -381,14 +383,14 @@ export function SchemeFollowUpPage({ role }: { role: Role }) {
 
       {isManager && (
         <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Scope</div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.section.scope" /></div>
           <div className="flex flex-wrap items-center gap-3">
             <PillNav value={scope} onChange={(v) => { setScope(v); setOfficerId(""); }} items={[{ value: "self", label: myLbl }, { value: "team", label: teamLbl }]} />
             {scope === "team" && (
               <NativeSelect className="w-56" placeholder="Select a Sales Officer…" value={officerId} onChange={(e) => setOfficerId(e.target.value)} options={officers.map((o) => ({ value: o.id, label: o.name }))} />
             )}
           </div>
-          {scope === "team" && officers.length === 0 && <p className="text-xs text-muted-foreground">No Sales Officers on your team yet.</p>}
+          {scope === "team" && officers.length === 0 && <p className="text-xs text-muted-foreground"><L k="scheme_planning.state.no_team_officers" /></p>}
         </div>
       )}
 
@@ -493,7 +495,7 @@ function FollowUpWorkspace({ officerId }: { officerId?: string } = {}) {
     <div className="space-y-5">
       {/* Level 2 — Scheme Follow-up | Dealer Follow-up, plus the snapshot filters. */}
       <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">View</div>
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.section.view" /></div>
         <div className="flex flex-wrap items-center gap-3">
           <PillNav value={tab} onChange={setTab} items={TABS} />
           {/* Sub-view: Installments (default) | Product Based | Value Based — same pattern for both tabs. */}

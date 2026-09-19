@@ -372,7 +372,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                 </div>
               )}
             </div>
-            {scope === "team" && (officers?.length ?? 0) === 0 && <p className="mt-2 text-xs text-muted-foreground">No Sales Officers on your team yet.</p>}
+            {scope === "team" && (officers?.length ?? 0) === 0 && <p className="mt-2 text-xs text-muted-foreground"><L k="scheme_planning.state.no_team_officers" /></p>}
           </CardContent>
         </Card>
       )}

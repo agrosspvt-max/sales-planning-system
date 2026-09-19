@@ -46,18 +46,20 @@ function loadScheme(managerFor: (officerId: string) => string | null, rows: {
       findUnique: async () => rows.plan ?? null,
       findFirst: async () => null,
       findMany: async () => [],
-      create: async ({ data }: { data: Record<string, unknown> }) => record(data),
+      createManyAndReturn: async ({ data }: { data: Record<string, unknown>[] }) => data.map((row) => record(row)),
       update: async ({ data }: { data: Record<string, unknown> }) => record(data),
     },
     dealerAssignment: { findFirst: async () => ({ id: "a1" }), findMany: async () => rows.assignments ?? [] },
     scheme: { findUnique: async () => rows.scheme ?? null },
     user: { findMany: async () => [] },
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
   };
   const exports = {};
   const mocks: Record<string, unknown> = {
     "server-only": {},
     "./scheme-bills.server": { saveBillConversion: async () => {}, verifyBills: async () => {}, rejectLegacyBillWrite: async () => {} },
     "./scheme-plan-quantity.server": { applyConversionQuantity: async () => ({ split: false }) },
+    "./scheme-bill-product.server": { productBillingForPlans: async () => new Map() },
     "./scheme-master.server": { refreshSchemeStatuses: async () => {} },
     "@/lib/prisma": { prisma },
     "@/lib/audit": { writeAudit: async () => {} },

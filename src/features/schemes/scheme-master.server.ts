@@ -7,6 +7,7 @@ import { writeAudit } from "@/lib/audit";
 import { validateSchemeRequirement, normalizeSchemeRequirement } from "@/lib/scheme-requirement";
 import { validateMultipleOptions, normalizeOption, type OptionAchievementType } from "@/lib/scheme-options";
 import { bookingExceedsFinalInstallment } from "@/lib/scheme-installments";
+import { billTotals } from "@/lib/scheme-product-quantity-billing";
 
 // One installment of the payout schedule for Scheme Value (With GST).
 const installmentInput = z.object({
@@ -41,6 +42,15 @@ const requirementProductInput = z.object({
   requiredValue: z.coerce.number().nullable().optional(),
 });
 
+// Per-product billing rates. Applies by productId to every FIXED requirement product (Product Quantity or
+// Value Based) and every OPTIONS eligible product. Persisted on normalized product rows and snapshotted onto
+// each bill-product row at conversion.
+const productRateInput = z.object({
+  productId: z.string().min(1),
+  rateWithoutGST: z.coerce.number().positive(),
+  rateWithGST: z.coerce.number().positive(),
+});
+
 // One Multiple Options row (Phase 10). id present ⇒ an existing option (update path); absent ⇒ new option.
 const schemeOptionInput = z.object({
   id: z.string().optional(),
@@ -52,7 +62,7 @@ const schemeOptionInput = z.object({
   isActive: z.boolean(),
 });
 
-const schemeInput = z.object({
+const schemeInputBase = z.object({
   schemeName: z.string().trim().min(1, "Scheme Name is required").max(200),
   stateIds: z.array(z.string().min(1)).min(1, "Select at least one State"),
   isPerpetual: z.boolean().default(false),
@@ -67,6 +77,7 @@ const schemeInput = z.object({
   benefitDetails: z.string().trim().max(500).nullable().optional(),
   otherBenefitDetails: z.string().trim().min(1, "Other Benefit Details are required").max(500),
   allowMultipleSchemes: z.boolean(),
+  numberOfBills: z.coerce.number().int("No. of Bills must be a whole number").min(1, "Select No. of Bills").max(5, "No. of Bills cannot exceed 5"),
   maxExtensionDays: z.coerce.number().int().min(1, "Select SO Conversion Extension").max(365),
   maxExtensionAttempts: z.coerce.number().int().min(-1).max(20),
   // Pre-placement MASTER ceiling (Phase 11). 0 ⇒ not available. Actual per-dealer days are chosen in planning.
@@ -86,7 +97,41 @@ const schemeInput = z.object({
   optionAchievementType: z.nativeEnum(SchemeOptionAchievementType).nullable().optional(),
   eligibleProductIds: z.array(z.string().min(1)).max(500).optional().default([]),
   options: z.array(schemeOptionInput).max(50).optional().default([]),
-}).superRefine((value, ctx) => {
+  // Product-rate billing values keyed by productId. Validated in superRefine.
+  productRates: z.array(productRateInput).max(500).optional().default([]),
+});
+
+type SchemeInputBase = z.infer<typeof schemeInputBase>;
+
+/**
+ * Product Quantity monetary values are derived data. Normalize them before business validation so neither
+ * persistence nor installment/booking validation can be influenced by client-calculated totals. The rate
+ * pair entered for this master definition is persisted with the product row and becomes the conversion-time
+ * snapshot; historical bill calculations continue to use their existing DealerSchemeBillProduct snapshot.
+ */
+function deriveProductQuantityValues(value: SchemeInputBase): SchemeInputBase {
+  const rates = new Map(value.productRates.map((rate) => [rate.productId, rate]));
+  if (value.structure === SchemeStructure.FIXED && value.requirementType === SchemeRequirementType.PRODUCT_BASED) {
+    const amounts = billTotals(value.requirementProducts.map((product) => ({
+      quantity: product.requiredQty ?? 0,
+      rate: rates.get(product.productId) ?? { rateWithoutGST: 0, rateWithGST: 0 },
+    })));
+    return { ...value, schemeValueWithoutGST: amounts.withoutGST, schemeValueWithGST: amounts.withGST };
+  }
+  if (value.structure === SchemeStructure.MULTIPLE_OPTIONS && value.optionAchievementType === SchemeOptionAchievementType.QUANTITY_BASED) {
+    const rate = rates.get(value.eligibleProductIds[0] ?? "") ?? { rateWithoutGST: 0, rateWithGST: 0 };
+    return {
+      ...value,
+      options: value.options.map((option) => {
+        const amounts = billTotals([{ quantity: option.target ?? 0, rate }]);
+        return { ...option, valueWithoutGST: amounts.withoutGST, valueWithGST: amounts.withGST };
+      }),
+    };
+  }
+  return value;
+}
+
+const schemeInput = schemeInputBase.transform(deriveProductQuantityValues).superRefine((value, ctx) => {
   if (!value.isPerpetual && (!value.startDate || !value.endDate || !value.bookingLastDate)) {
     for (const field of ["startDate", "endDate", "bookingLastDate"] as const) if (!value[field]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: "This date is required unless the scheme is perpetual" });
   }
@@ -109,6 +154,18 @@ const schemeInput = z.object({
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["options"], message });
     }
     if (value.optionAchievementType == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["optionAchievementType"], message: "Select an achievement type" });
+    const eligible = value.eligibleProductIds ?? [];
+    // Product-Quantity-Based OPTIONS retains its existing exactly-one-product rule.
+    if ((value.optionAchievementType ?? "QUANTITY_BASED") === SchemeOptionAchievementType.QUANTITY_BASED) {
+      if (eligible.length !== 1) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["eligibleProductIds"], message: "A Product Quantity Based options scheme must have exactly one eligible product." });
+    }
+    // Both Options bases bill from product quantity × rate. Value Based has no product quantity target, but
+    // every eligible product still requires the same rate pair.
+    for (const pid of eligible) {
+      const r = (value.productRates ?? []).find((x) => x.productId === pid);
+      if (!r || !(r.rateWithoutGST > 0) || !(r.rateWithGST > 0)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["productRates"], message: "Rate W/O GST and Rate + GST are required for every eligible product." });
+      else if (r.rateWithGST < r.rateWithoutGST) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["productRates"], message: "Rate + GST must be greater than or equal to Rate W/O GST." });
+    }
     for (let index = 0; index < value.options.length; index++) {
       if (value.options[index].bookingAmount == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["options", index, "bookingAmount"], message: "Booking Amount is required for every option" });
     }
@@ -168,6 +225,15 @@ const schemeInput = z.object({
     })) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requirementProducts"], message });
     }
+    // Both Fixed bases bill from product quantity × rate. Value Based has no product quantity target, but
+    // every eligible requirement product still requires the same rate pair.
+    if (value.requirementType === SchemeRequirementType.PRODUCT_BASED || value.requirementType === SchemeRequirementType.VALUE_BASED) {
+      for (const p of value.requirementProducts ?? []) {
+        const r = (value.productRates ?? []).find((x) => x.productId === p.productId);
+        if (!r || !(r.rateWithoutGST > 0) || !(r.rateWithGST > 0)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["productRates"], message: "Rate W/O GST and Rate + GST are required for every product." });
+        else if (r.rateWithGST < r.rateWithoutGST) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["productRates"], message: "Rate + GST must be greater than or equal to Rate W/O GST." });
+      }
+    }
   }
 });
 
@@ -176,18 +242,35 @@ function assertAdmin(ctx: AuthContext) {
 }
 
 /** Reusable end-date rule for a future scheduler. Booking date never closes a scheme; neither does a perpetual scheme. */
-export async function refreshSchemeStatuses(now = new Date()) {
-  return prisma.scheme.updateMany({
-    where: { status: SchemeStatus.OPEN, isPerpetual: false, endDate: { lt: now } },
+let statusRefreshInFlight: Promise<{ count: number }> | null = null;
+export async function refreshSchemeStatuses(now?: Date) {
+  const run = (at: Date) => prisma.scheme.updateMany({
+    where: { status: SchemeStatus.OPEN, isPerpetual: false, endDate: { lt: at } },
     data: { status: SchemeStatus.CLOSED },
   });
+  // Explicit timestamps are deterministic/scheduler calls and must always run. Normal request-time calls share
+  // only an overlapping write; there is no TTL, so business-visible expiry semantics are unchanged.
+  if (now) return run(now);
+  if (statusRefreshInFlight) return statusRefreshInFlight;
+  statusRefreshInFlight = run(new Date());
+  try {
+    return await statusRefreshInFlight;
+  } finally {
+    statusRefreshInFlight = null;
+  }
 }
 
 type InstallmentRow = { installmentNumber: number; calculationType: SchemeCalcType; value: unknown; daysAfterBillingDate: number };
 const mapInstallments = (rules: InstallmentRow[]) => rules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value), daysAfterBillingDate: r.daysAfterBillingDate }));
 
-type RequirementProductRow = { productId: string; requiredQty: unknown; requiredValue: unknown };
+type RequirementProductRow = { productId: string; requiredQty: unknown; requiredValue: unknown; rateWithoutGST?: unknown; rateWithGST?: unknown };
 const mapRequirementProducts = (rows: RequirementProductRow[]) => rows.map((r) => ({ productId: r.productId, requiredQty: r.requiredQty == null ? null : Number(r.requiredQty), requiredValue: r.requiredValue == null ? null : Number(r.requiredValue) }));
+
+export interface ProductRateRow { productId: string; rateWithoutGST: number; rateWithGST: number }
+type ProductRateSource = { productId: string; rateWithoutGST?: unknown; rateWithGST?: unknown };
+const mapProductRates = (...groups: ProductRateSource[][]): ProductRateRow[] => groups.flatMap((rows) => rows
+  .filter((r) => r.rateWithoutGST != null && r.rateWithGST != null)
+  .map((r) => ({ productId: r.productId, rateWithoutGST: Number(r.rateWithoutGST), rateWithGST: Number(r.rateWithGST) })));
 
 const numOrNull = (v: unknown): number | null => (v == null ? null : Number(v.toString()));
 type OptionRow = { id: string; label: string | null; targetQty: unknown; targetValue: unknown; valueWithoutGST: unknown; valueWithGST: unknown; bookingAmount: unknown; sortOrder: number; isActive: boolean };
@@ -195,7 +278,7 @@ const mapOptions = (rows: OptionRow[]) => rows.slice().sort((a, b) => a.sortOrde
   id: o.id, label: o.label, target: numOrNull(o.targetQty) ?? numOrNull(o.targetValue), targetQty: numOrNull(o.targetQty), targetValue: numOrNull(o.targetValue),
   valueWithoutGST: Number(o.valueWithoutGST), valueWithGST: Number(o.valueWithGST), bookingAmount: numOrNull(o.bookingAmount), sortOrder: o.sortOrder, isActive: o.isActive,
 }));
-const OPTION_INCLUDE = { options: { orderBy: { sortOrder: "asc" } as const }, eligibleProducts: { select: { productId: true } } };
+const OPTION_INCLUDE = { options: { orderBy: { sortOrder: "asc" } as const }, eligibleProducts: { select: { productId: true, rateWithoutGST: true, rateWithGST: true } } };
 
 export async function listSchemes(ctx: AuthContext, filters: { status?: string | null; stateId?: string | null }) {
   await refreshSchemeStatuses();
@@ -205,14 +288,14 @@ export async function listSchemes(ctx: AuthContext, filters: { status?: string |
     include: { states: { include: { group: { select: { id: true, name: true } } } }, createdBy: { select: { name: true } }, installmentRules: true, requirementProducts: true, ...OPTION_INCLUDE },
     orderBy: [{ isPerpetual: "desc" }, { endDate: "desc" }, { updatedAt: "desc" }],
   });
-  return rows.map((s) => ({ ...s, schemeValueWithoutGST: numOrNull(s.schemeValueWithoutGST), schemeValueWithGST: numOrNull(s.schemeValueWithGST), bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount), combinedRequiredValue: s.combinedRequiredValue == null ? null : Number(s.combinedRequiredValue), states: s.states.map((x) => x.group), installments: mapInstallments(s.installmentRules), requirementProducts: mapRequirementProducts(s.requirementProducts), options: mapOptions(s.options as OptionRow[]), eligibleProductIds: (s.eligibleProducts as { productId: string }[]).map((e) => e.productId) }));
+  return rows.map((s) => ({ ...s, schemeValueWithoutGST: numOrNull(s.schemeValueWithoutGST), schemeValueWithGST: numOrNull(s.schemeValueWithGST), bookingAmount: s.bookingAmount == null ? null : Number(s.bookingAmount), combinedRequiredValue: s.combinedRequiredValue == null ? null : Number(s.combinedRequiredValue), states: s.states.map((x) => x.group), installments: mapInstallments(s.installmentRules), requirementProducts: mapRequirementProducts(s.requirementProducts), options: mapOptions(s.options as OptionRow[]), eligibleProductIds: (s.eligibleProducts as ProductRateSource[]).map((e) => e.productId), productRates: mapProductRates(s.requirementProducts as RequirementProductRow[], s.eligibleProducts as ProductRateSource[]) }));
 }
 
 export async function getScheme(ctx: AuthContext, id: string) {
   await refreshSchemeStatuses();
   const row = await prisma.scheme.findUnique({ where: { id }, include: { states: { include: { group: { select: { id: true, name: true } } } }, installmentRules: true, requirementProducts: true, ...OPTION_INCLUDE } });
   if (!row) throw new ApiError(404, "Scheme not found");
-  return { ...row, schemeValueWithoutGST: numOrNull(row.schemeValueWithoutGST), schemeValueWithGST: numOrNull(row.schemeValueWithGST), bookingAmount: row.bookingAmount == null ? null : Number(row.bookingAmount), combinedRequiredValue: row.combinedRequiredValue == null ? null : Number(row.combinedRequiredValue), stateIds: row.states.map((x) => x.groupId), states: row.states.map((x) => x.group), installments: mapInstallments(row.installmentRules), requirementProducts: mapRequirementProducts(row.requirementProducts), options: mapOptions(row.options as OptionRow[]), eligibleProductIds: (row.eligibleProducts as { productId: string }[]).map((e) => e.productId) };
+  return { ...row, schemeValueWithoutGST: numOrNull(row.schemeValueWithoutGST), schemeValueWithGST: numOrNull(row.schemeValueWithGST), bookingAmount: row.bookingAmount == null ? null : Number(row.bookingAmount), combinedRequiredValue: row.combinedRequiredValue == null ? null : Number(row.combinedRequiredValue), stateIds: row.states.map((x) => x.groupId), states: row.states.map((x) => x.group), installments: mapInstallments(row.installmentRules), requirementProducts: mapRequirementProducts(row.requirementProducts), options: mapOptions(row.options as OptionRow[]), eligibleProductIds: (row.eligibleProducts as ProductRateSource[]).map((e) => e.productId), productRates: mapProductRates(row.requirementProducts as RequirementProductRow[], row.eligibleProducts as ProductRateSource[]) };
 }
 
 export async function schemeStateOptions() {
@@ -225,8 +308,8 @@ type SchemeData = z.infer<typeof schemeInput>;
  *  MULTIPLE_OPTIONS nulls the scheme-level value pair + requirement fields (values live on each option). */
 function schemeScalarData(data: SchemeData) {
   const { stateIds, installments, requirementType, valueMode, combinedRequiredValue, requirementProducts,
-    structure, optionAchievementType, eligibleProductIds, options, schemeValueWithoutGST, schemeValueWithGST, ...rest } = data;
-  void stateIds; void installments; void eligibleProductIds; void options;
+    structure, optionAchievementType, eligibleProductIds, options, schemeValueWithoutGST, schemeValueWithGST, productRates, ...rest } = data;
+  void stateIds; void installments; void eligibleProductIds; void options; void productRates;
   const normalized = rest.isPerpetual ? { ...rest, startDate: null, endDate: null, bookingLastDate: null } : rest;
   const isOptions = structure === SchemeStructure.MULTIPLE_OPTIONS;
   const req = isOptions ? null : normalizeSchemeRequirement({ requirementType, valueMode: valueMode ?? null, combinedRequiredValue: combinedRequiredValue ?? null, products: requirementProducts });
@@ -262,14 +345,15 @@ export async function createScheme(ctx: AuthContext, raw: unknown) {
   const data = schemeInput.parse(raw);
   const { scalar, isOptions, reqProducts, achievementType } = schemeScalarData(data);
   const eligible = [...new Set(data.eligibleProductIds ?? [])];
+  const rates = new Map((data.productRates ?? []).map((r) => [r.productId, r]));
   const scheme = await prisma.scheme.create({
     data: {
       ...scalar,
       createdById: ctx.userId,
       states: { create: data.stateIds.map((groupId) => ({ groupId })) },
       installmentRules: { create: data.installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
-      requirementProducts: { create: reqProducts.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
-      eligibleProducts: { create: isOptions ? eligible.map((productId) => ({ productId })) : [] },
+      requirementProducts: { create: reqProducts.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue, rateWithoutGST: rates.get(p.productId)?.rateWithoutGST ?? null, rateWithGST: rates.get(p.productId)?.rateWithGST ?? null })) },
+      eligibleProducts: { create: isOptions ? eligible.map((productId) => ({ productId, rateWithoutGST: rates.get(productId)?.rateWithoutGST ?? null, rateWithGST: rates.get(productId)?.rateWithGST ?? null })) : [] },
       options: { create: isOptions ? optionCreateRows(data.options, achievementType) : [] },
     },
   });
@@ -282,15 +366,46 @@ export async function updateScheme(ctx: AuthContext, id: string, raw: unknown) {
   const data = schemeInput.parse(raw);
   const { scalar, isOptions, reqProducts, achievementType } = schemeScalarData(data);
   const eligible = [...new Set(data.eligibleProductIds ?? [])];
+  const rates = new Map((data.productRates ?? []).map((r) => [r.productId, r]));
 
   // Structure can only change while NO dealer has been planned into the scheme (protects committed snapshots).
-  const existing = (await prisma.scheme.findUnique({ where: { id }, select: { structure: true, _count: { select: { dealerPlans: true } } } })) as { structure: string; _count: { dealerPlans: number } } | null;
+  const existing = (await prisma.scheme.findUnique({ where: { id }, select: { structure: true, numberOfBills: true, _count: { select: { dealerPlans: true } } } })) as { structure: string; numberOfBills: number; _count: { dealerPlans: number } } | null;
   if (!existing) throw new ApiError(404, "Scheme not found");
   if (existing.structure !== data.structure && existing._count.dealerPlans > 0) {
     throw new ApiError(409, "The scheme structure cannot be changed after dealers have been planned into this scheme.");
   }
+  if (existing.numberOfBills !== data.numberOfBills) {
+    const conversionActivity = await prisma.dealerSchemePlan.count({
+      where: {
+        schemeId: id,
+        OR: [
+          { schemeStatus: "CONVERTED" },
+          { conversionDate: { not: null } },
+          { billMode: true },
+          { soBillCount: { not: null } },
+          { adminBillCount: { not: null } },
+          { bills: { some: {} } },
+          { adminVerifiedAt: { not: null } },
+          { instances: { some: { OR: [{ billMode: true }, { bills: { some: {} } }, { installments: { some: {} } }] } } },
+        ],
+      },
+    });
+    if (conversionActivity > 0) {
+      throw new ApiError(409, "No. of Bills cannot be changed after conversion, billing, installment, or Admin verification activity exists.");
+    }
+  }
 
   await prisma.$transaction(async (tx) => {
+    // Existing option ids are untrusted request data. Resolve ownership inside the same transaction and reject
+    // the whole save before its first write if any id is not an option of the scheme being edited. The generic
+    // response intentionally does not reveal whether a foreign option exists or which scheme owns it.
+    const current = (await tx.schemeOption.findMany({ where: { schemeId: id }, select: { id: true, _count: { select: { dealerPlans: true } } } })) as { id: string; _count: { dealerPlans: number } }[];
+    const incoming = isOptions ? (data.options ?? []) : [];
+    const ownedIds = new Set(current.map((option) => option.id));
+    if (incoming.some((option) => option.id && !ownedIds.has(option.id))) {
+      throw new ApiError(404, "Scheme option not found");
+    }
+
     await tx.scheme.update({
       where: { id },
       data: {
@@ -298,30 +413,35 @@ export async function updateScheme(ctx: AuthContext, id: string, raw: unknown) {
         states: { deleteMany: {}, create: data.stateIds.map((groupId) => ({ groupId })) },
         installmentRules: { deleteMany: {}, create: data.installments.map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: r.value, daysAfterBillingDate: r.daysAfterBillingDate })) },
         // Requirement/eligible rows carry no plan FK, so replace is safe and never touches SchemeSale history.
-        requirementProducts: { deleteMany: {}, create: reqProducts.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue })) },
-        eligibleProducts: { deleteMany: {}, create: isOptions ? eligible.map((productId) => ({ productId })) : [] },
+        requirementProducts: { deleteMany: {}, create: reqProducts.map((p) => ({ productId: p.productId, requiredQty: p.requiredQty, requiredValue: p.requiredValue, rateWithoutGST: rates.get(p.productId)?.rateWithoutGST ?? null, rateWithGST: rates.get(p.productId)?.rateWithGST ?? null })) },
+        eligibleProducts: { deleteMany: {}, create: isOptions ? eligible.map((productId) => ({ productId, rateWithoutGST: rates.get(productId)?.rateWithoutGST ?? null, rateWithGST: rates.get(productId)?.rateWithGST ?? null })) : [] },
       },
     });
 
     // Options need a RECONCILE (not deleteMany+create): an option selected by a dealer is FK-Restricted and
     // must be DISCONTINUED (isActive=false), never deleted — preserving the dealer's committed snapshot.
-    const current = (await tx.schemeOption.findMany({ where: { schemeId: id }, select: { id: true, _count: { select: { dealerPlans: true } } } })) as { id: string; _count: { dealerPlans: number } }[];
-    const incoming = isOptions ? (data.options ?? []) : [];
     const incomingIds = new Set(incoming.filter((o) => o.id).map((o) => o.id as string));
-    // Remove/discontinue options no longer present.
-    for (const cur of current) {
-      if (incomingIds.has(cur.id)) continue;
-      if (cur._count.dealerPlans > 0) await tx.schemeOption.update({ where: { id: cur.id }, data: { isActive: false, discontinuedAt: new Date() } });
-      else await tx.schemeOption.delete({ where: { id: cur.id } });
-    }
-    // Update existing + create new (sortOrder = payload order).
+    // Remove/discontinue options no longer present. Distinct historical handling is preserved, but each group
+    // is now one statement instead of one update/delete round-trip per option.
+    const removed = current.filter((cur) => !incomingIds.has(cur.id));
+    const discontinuedIds = removed.filter((cur) => cur._count.dealerPlans > 0).map((cur) => cur.id);
+    const deletableIds = removed.filter((cur) => cur._count.dealerPlans === 0).map((cur) => cur.id);
+    if (discontinuedIds.length > 0) await tx.schemeOption.updateMany({ where: { schemeId: id, id: { in: discontinuedIds } }, data: { isActive: false, discontinuedAt: new Date() } });
+    if (deletableIds.length > 0) await tx.schemeOption.deleteMany({ where: { schemeId: id, id: { in: deletableIds } } });
+
+    // Existing rows retain their identity/FKs. New rows have no caller-visible id yet, so createMany safely
+    // collapses them to one statement while preserving the payload sort order.
+    const newRows: ReturnType<typeof optionCreateRows> = [];
     for (let i = 0; i < incoming.length; i++) {
       const o = incoming[i];
       const nrm = normalizeOption(o, achievementType);
       const row = { label: nrm.label, targetQty: nrm.targetQty, targetValue: nrm.targetValue, valueWithoutGST: nrm.valueWithoutGST, valueWithGST: nrm.valueWithGST, bookingAmount: o.bookingAmount, sortOrder: i, isActive: o.isActive ?? true };
-      if (o.id) await tx.schemeOption.update({ where: { id: o.id }, data: row });
-      else await tx.schemeOption.create({ data: { ...row, schemeId: id } });
+      if (o.id) {
+        const result = await tx.schemeOption.updateMany({ where: { id: o.id, schemeId: id }, data: row });
+        if (result.count !== 1) throw new ApiError(404, "Scheme option not found");
+      } else newRows.push(row);
     }
+    if (newRows.length > 0) await tx.schemeOption.createMany({ data: newRows.map((row) => ({ ...row, schemeId: id })) });
   });
 
   await refreshSchemeStatuses();

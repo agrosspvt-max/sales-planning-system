@@ -7,8 +7,11 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { effectiveBookingAmount } from "@/lib/scheme-installments";
-import { soPlanBills, adminPlanBills, assertBillParts, assertBillTotals, combinedPresetValueErrors, billSchedule } from "@/lib/scheme-bills";
-import { quantitySplitDecision } from "@/lib/scheme-plan-quantity";
+import { bookingCoverage } from "@/lib/scheme-booking-coverage";
+import { computeProductQuantityBills } from "@/lib/scheme-product-quantity-billing";
+import { isProductQuantityScheme, usesProductRateBilling, committedProductsForScheme, upsertBillProduct, upsertBillProducts, type BillProductInput, type CommittedProduct } from "./scheme-bill-product.server";
+import { soPlanBills, adminPlanBills, assertBillParts, assertBillTotals, combinedPresetValueErrors, billSchedule, schemeBillLimitError } from "@/lib/scheme-bills";
+import { effectiveProceedingSchemeUnits, quantitySplitDecision } from "@/lib/scheme-plan-quantity";
 import { applyConversionQuantity, conversionQuantityPlanSelect, type ConversionQuantityPlan } from "./scheme-plan-quantity.server";
 
 /** Financial reads include active bill schedules without pretending partial verification is enrollment. */
@@ -31,9 +34,9 @@ const select = {
 async function prepare(ctx: AuthContext, id: string) {
   const scope = await getOfficerScope(ctx);
   const source = await prisma.dealerSchemePlan.findUnique({ where: { id }, select: {
-    salesOfficerId: true, numberOfSchemes: true, totalSchemeAmount: true,
+    salesOfficerId: true, schemeId: true, numberOfSchemes: true, totalSchemeAmount: true, optionTargetQty: true, billMode: true, soBillCount: true,
     optionValueWithoutGST: true, optionValueWithGST: true, optionBookingAmount: true,
-    scheme: { select: { structure: true, schemeValueWithoutGST: true, schemeValueWithGST: true, bookingAmount: true, installmentRules: true } },
+    scheme: { select: { structure: true, requirementType: true, optionAchievementType: true, schemeValueWithoutGST: true, schemeValueWithGST: true, bookingAmount: true, numberOfBills: true, installmentRules: true } },
   } });
   if (!source) throw new ApiError(404, "Scheme plan not found");
   if (!scope.all && !scope.ids.includes(source.salesOfficerId)) throw new ApiError(403, "You cannot manage this scheme plan");
@@ -61,16 +64,26 @@ function parse<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, raw: unknown): T 
   return result.data;
 }
 function check(fn: () => void) { try { fn(); } catch(e) { throw new ApiError(422, (e as Error).message); } }
+function assertSchemeBillLimit(requestedCount: number, maximum: number, savedCount: number | null) {
+  const message = schemeBillLimitError(requestedCount, maximum, savedCount);
+  if (message) throw new ApiError(422, message);
+}
+function assertProductRates(products: CommittedProduct[]) {
+  if (products.length === 0 || products.some((p) => !(p.rateWithoutGST > 0) || !(p.rateWithGST > 0))) {
+    throw new ApiError(422, "Every eligible product must have valid Scheme Master rates before product billing can be submitted.");
+  }
+}
 const billSelect = { id: true, partNumber: true, soBillDate: true, adminBillDate: true, soAmountWithoutGST: true, soAmountWithGST: true, amountWithoutGST: true, amountWithGST: true, verifiedAt: true, _count: { select: { installments: true } } } as const;
 export async function rejectLegacyBillWrite(planId: string, db: Pick<Prisma.TransactionClient, "dealerSchemePlan"> = prisma) {
   if (await db.dealerSchemePlan.count({ where: { id: planId, OR: [{ billMode: true }, { instances: { some: { billMode: true } } }] } })) throw new ApiError(409, "Use combined plan billing; legacy billing cannot overwrite bill records");
 }
 interface SoCommon { schemeStatus: string; proceedingSchemes?: number; remainingDisposition?: "CANCELLED" | "FUTURE_DRAFT" | null; conversionDate?: Date | null; soBookingStatus?: "RECEIVED" | "PARTIAL" | "NOT_RECEIVED" | null; soBookingAmount?: number | null; soDocumentStatus?: "SIGNED_BUT_NOT_SENT" | "SIGNED_AND_SENT" | "HARD_COPY_SENT" | "DOC_RECEIVED" | null }
-function presetValueErrors(source: Pick<ConversionQuantityPlan, "numberOfSchemes" | "totalSchemeAmount" | "optionValueWithoutGST" | "optionValueWithGST" | "scheme">, common: SoCommon, data: z.infer<typeof soPlanBills>): string[] {
-  let quantity;
-  try { quantity = quantitySplitDecision(source.numberOfSchemes || 1, common.proceedingSchemes, common.remainingDisposition); }
+function conversionProceedingUnits(source: Pick<ConversionQuantityPlan, "numberOfSchemes">, common: SoCommon): number {
+  try { return quantitySplitDecision(source.numberOfSchemes || 1, common.proceedingSchemes, common.remainingDisposition).proceedingQuantity; }
   catch (error) { throw new ApiError(422, (error as Error).message); }
-  const units = quantity.proceedingQuantity;
+}
+function presetValueErrors(source: Pick<ConversionQuantityPlan, "numberOfSchemes" | "totalSchemeAmount" | "optionValueWithoutGST" | "optionValueWithGST" | "scheme">, common: SoCommon, data: z.infer<typeof soPlanBills>): string[] {
+  const units = conversionProceedingUnits(source, common);
   const presetWithoutGST = new Prisma.Decimal(source.scheme.structure === "MULTIPLE_OPTIONS" ? source.optionValueWithoutGST ?? 0 : source.scheme.schemeValueWithoutGST ?? 0).times(units);
   const presetWithGST = source.totalSchemeAmount == null
     ? new Prisma.Decimal(source.scheme.structure === "MULTIPLE_OPTIONS" ? source.optionValueWithGST ?? 0 : source.scheme.schemeValueWithGST ?? 0).times(units)
@@ -80,14 +93,37 @@ function presetValueErrors(source: Pick<ConversionQuantityPlan, "numberOfSchemes
 export async function saveBillConversion(ctx: AuthContext, planId: string, common: SoCommon, raw: unknown) {
   if (common.schemeStatus !== "CONVERTED") throw new ApiError(422, "Combined bills require Converted status");
   const data = parse(soPlanBills, raw);
-  check(() => { assertBillParts(data.billCount, data.bills); assertBillTotals(data, data.bills); });
   const { source, scope } = await prepare(ctx, planId);
-  const minimumErrors = presetValueErrors(source, common, data);
+  assertSchemeBillLimit(data.billCount, source.scheme.numberOfBills, source.soBillCount);
+  // Product-rate billing derives bill amounts from quantities × the historical Scheme Master rate. Product
+  // Quantity schemes reconcile committed quantities; Value Based schemes retain the monetary preset check.
+  const isPQ = isProductQuantityScheme(source.scheme.structure, source.scheme.requirementType, source.scheme.optionAchievementType);
+  const supportsRateBilling = usesProductRateBilling(source.scheme.structure, source.scheme.requirementType, source.scheme.optionAchievementType);
+  let committed: CommittedProduct[] = [];
+  if (supportsRateBilling) {
+    committed = await committedProductsForScheme(source.schemeId, source.scheme.structure, source.scheme.optionAchievementType, source.scheme.requirementType, source.optionTargetQty == null ? null : Number(source.optionTargetQty), conversionProceedingUnits(source, common), planId);
+  }
+  const legacyManualValueBilling = supportsRateBilling && !isPQ && source.billMode && !committed.some((product) => product.historicalSnapshot);
+  const isRateBilling = supportsRateBilling && !legacyManualValueBilling;
+  if (isRateBilling) {
+    assertProductRates(committed);
+    const res = computeProductQuantityBills(data.bills.map((b) => ({ partNumber: b.partNumber, products: b.products })), committed, "so");
+    if (res.errors.length) throw new ApiError(422, res.errors.join(" "));
+    for (const b of data.bills) { const a = res.billAmounts.get(b.partNumber)!; b.amountWithoutGST = a.withoutGST.toFixed(2); b.amountWithGST = a.withGST.toFixed(2); }
+    data.amountWithoutGST = res.total.withoutGST.toFixed(2); data.amountWithGST = res.total.withGST.toFixed(2);
+  }
+  check(() => { assertBillParts(data.billCount, data.bills); assertBillTotals(data, data.bills); });
+  const minimumErrors = isPQ ? [] : presetValueErrors(source, common, data);
   if (minimumErrors.length) throw new ApiError(422, minimumErrors.join(" "));
   return prisma.$transaction(async tx => {
     const plan = await lockedConversionPlan(tx, planId, scope);
-    const lockedMinimumErrors = presetValueErrors(plan, common, data);
-    if (lockedMinimumErrors.length) throw new ApiError(422, lockedMinimumErrors.join(" "));
+    // The Scheme Master ceiling is re-read with the locked plan so the server remains authoritative even if
+    // a client submits stale dropdown data. An already-saved historical count may only be resubmitted unchanged.
+    assertSchemeBillLimit(data.billCount, plan.scheme.numberOfBills, plan.soBillCount);
+    if (!isPQ) {
+      const lockedMinimumErrors = presetValueErrors(plan, common, data);
+      if (lockedMinimumErrors.length) throw new ApiError(422, lockedMinimumErrors.join(" "));
+    }
     await applyConversionQuantity(tx, ctx, planId, common, plan);
     if (!plan.billMode) {
       if (await tx.dealerSchemeInstallment.count({ where: { instance: { dealerSchemePlanId: planId } } })) throw new ApiError(409, "Existing instance-linked schedules require a separate correction workflow; they cannot be converted or regenerated");
@@ -106,17 +142,57 @@ export async function saveBillConversion(ctx: AuthContext, planId: string, commo
     }
     await tx.dealerSchemePlan.update({ where: { id: planId }, data: { billMode: true, soBillCount: data.billCount, soAmountWithoutGST: data.amountWithoutGST, soAmountWithGST: data.amountWithGST,
       schemeStatus: "CONVERTED", conversionDate: common.conversionDate, soBookingStatus: common.soBookingStatus, soBookingAmount: common.soBookingAmount, soDocumentStatus: common.soDocumentStatus } });
+    if (isRateBilling) {
+      // Persist the SO planned per-product quantities with the rate SNAPSHOT (historical integrity).
+      const billIdRows = await tx.dealerSchemeBill.findMany({ where: { planId }, select: { id: true, partNumber: true } });
+      const rateBy = new Map(committed.map((c) => [c.productId, c]));
+      for (const bill of data.bills) {
+        const dbBill = billIdRows.find((x) => x.partNumber === bill.partNumber);
+        if (!dbBill) continue;
+        for (const line of bill.products ?? []) {
+          const rate = rateBy.get(line.productId);
+          if (!rate) continue;
+          await upsertBillProduct(tx, { billId: dbBill.id, productId: line.productId, soQty: line.qty, rateWithoutGST: rate.rateWithoutGST, rateWithGST: rate.rateWithGST });
+        }
+      }
+    }
     await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: JSON.stringify({ event: "SO combined bills submitted", before: { ...plan, bills: before }, after: { ...common, billing: data } }) }, tx);
     return { ok: true as const };
   }, { timeout: 15000 });
 }
-interface AdminCommon { adminConversionDate: Date; adminBookingStatus: "RECEIVED" | "PARTIAL" | "NOT_RECEIVED"; adminBookingAmount?: number | null; adminDocumentStatus: string; adminPrePlacementDays?: number | null; remarks?: string }
+interface AdminCommon { adminConversionDate: Date; adminBookingStatus: "RECEIVED" | "PARTIAL" | "NOT_RECEIVED"; adminBookingAmount?: number | null; adminBookingSchemeCount?: number | null; adminDocumentStatus: string; adminPrePlacementDays?: number | null; remarks?: string }
 export async function verifyBills(ctx: AuthContext, planId: string, common: AdminCommon, raw: unknown) {
   if (ctx.role !== "SUPER_ADMIN") throw new ApiError(403, "Only Admin can verify bills");
   const data = parse(adminPlanBills, raw);
+  const { source, scope } = await prepare(ctx, planId);
+  // Product-rate billing derives verified amounts from Admin ACTUAL quantities × historical rates. The result
+  // is the authoritative installment base; Admin actual quantity may differ from the SO proposal.
+  const supportsRateBilling = usesProductRateBilling(source.scheme.structure, source.scheme.requirementType, source.scheme.optionAchievementType);
+  const isPQ = isProductQuantityScheme(source.scheme.structure, source.scheme.requirementType, source.scheme.optionAchievementType);
+  let committed: CommittedProduct[] = [];
+  if (supportsRateBilling) {
+    committed = await committedProductsForScheme(source.schemeId, source.scheme.structure, source.scheme.optionAchievementType, source.scheme.requirementType, source.optionTargetQty == null ? null : Number(source.optionTargetQty), effectiveProceedingSchemeUnits(source.numberOfSchemes || 1), planId);
+  }
+  const legacyManualValueBilling = supportsRateBilling && !isPQ && source.billMode && !committed.some((product) => product.historicalSnapshot);
+  const isRateBilling = supportsRateBilling && !legacyManualValueBilling;
+  if (isRateBilling) {
+    assertProductRates(committed);
+    const res = computeProductQuantityBills(data.bills.map((b) => ({ partNumber: b.partNumber, products: b.products })), committed, "admin");
+    if (res.errors.length) throw new ApiError(422, res.errors.join(" "));
+    for (const b of data.bills) { const a = res.billAmounts.get(b.partNumber)!; b.amountWithoutGST = a.withoutGST.toFixed(2); b.amountWithGST = a.withGST.toFixed(2); }
+    data.amountWithoutGST = res.total.withoutGST.toFixed(2); data.amountWithGST = res.total.withGST.toFixed(2);
+  }
   check(() => { assertBillParts(data.billCount, data.bills); assertBillTotals(data, data.bills); });
   if (data.bills.some(b => b.adminBillDate) && common.adminBookingStatus !== "RECEIVED") throw new ApiError(422, "Booking must be Paid before verifying a bill");
-  const { source, scope } = await prepare(ctx, planId);
+  // Booking coverage (Paid + explicit count): validate the selected scheme count and received amount. Coverage
+  // is reporting-only and does NOT change the combined-bill schedule (that uses the SO-split proceeding count).
+  const bookingCovers = common.adminBookingStatus === "RECEIVED" && common.adminBookingSchemeCount != null;
+  if (bookingCovers) {
+    const perScheme = effectiveBookingAmount(source.scheme.structure, Number(source.scheme.bookingAmount ?? 0), source.optionBookingAmount == null ? null : Number(source.optionBookingAmount));
+    const cov = bookingCoverage({ plannedSchemes: source.numberOfSchemes || 1, selectedCount: common.adminBookingSchemeCount!, bookingPerScheme: perScheme, receivedAmount: common.adminBookingAmount ?? 0 });
+    if (!cov.valid) throw new ApiError(422, cov.error ?? "Invalid booking coverage");
+  }
+  const bookingSchemeCount = bookingCovers ? common.adminBookingSchemeCount! : null;
   const rules = source.scheme.installmentRules.map(r => ({ ...r, value: Number(r.value) }));
   return prisma.$transaction(async tx => {
     const plan = await lockedPlan(tx, planId, scope);
@@ -160,7 +236,26 @@ export async function verifyBills(ctx: AuthContext, planId: string, common: Admi
       adminConversionDate: common.adminConversionDate, adminBookingStatus: common.adminBookingStatus, adminBookingAmount: common.adminBookingStatus === "NOT_RECEIVED" ? null : common.adminBookingAmount,
       adminDocumentStatus: common.adminDocumentStatus as "RECEIVED_SOFT" | "RECEIVED_HARD" | "NOT_RECEIVED", adminPrePlacementDays: adminPre, verificationRemarks: common.remarks?.trim() || null, adminVerifiedAt: new Date(), adminVerifiedById: ctx.userId,
       enrollmentStatus: complete ? "ENROLLED" : "PENDING_DOCUMENT", ...(complete ? { enrolledAt: plan.enrolledAt ?? new Date(), enrolledById: ctx.userId } : {}) } });
+    if (isRateBilling) {
+      // Persist the Admin ACTUAL per-product quantities (the verified quantities that produced the bill
+      // amounts above) alongside the rate snapshot. soQty is preserved (COALESCE in upsert).
+      const billIdRows = await tx.dealerSchemeBill.findMany({ where: { planId }, select: { id: true, partNumber: true } });
+      const rateBy = new Map(committed.map((c) => [c.productId, c]));
+      const productRows: BillProductInput[] = [];
+      for (const bill of data.bills) {
+        const dbBill = billIdRows.find((x) => x.partNumber === bill.partNumber);
+        if (!dbBill) continue;
+        for (const line of bill.products ?? []) {
+          const rate = rateBy.get(line.productId);
+          if (!rate) continue;
+          productRows.push({ billId: dbBill.id, productId: line.productId, adminQty: line.qty, rateWithoutGST: rate.rateWithoutGST, rateWithGST: rate.rateWithGST });
+        }
+      }
+      await upsertBillProducts(tx, productRows);
+    }
+    // Persist booking coverage via raw SQL (client not regenerated in this environment). Additive + null-safe.
+    await tx.$executeRaw`UPDATE "DealerSchemePlan" SET "adminBookingSchemeCount" = ${bookingSchemeCount} WHERE "id" = ${planId}`;
     await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: JSON.stringify({ event: "Admin combined bill verification", before: { ...plan, bills: before }, after: { ...common, billing: data, bookingReserved: booking, enrolled: complete } }) }, tx);
     return { enrolled: complete, eligible: complete };
-  });
+  }, { timeout: 15000 });
 }

@@ -1,7 +1,8 @@
 "use client";
 
-import { SchemeBillFields, initialBillEditor, billEditorPayload } from "./scheme-bill-fields";
+import { SchemeBillFields, initialBillEditor, initialProductBillEditor, billEditorPayload } from "./scheme-bill-fields";
 import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
+import { bookingCoverage } from "@/lib/scheme-booking-coverage";
 import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -75,14 +76,14 @@ function RmScopeBar<T extends string>({ value, onChange, items, officers, office
 }) {
   return (
     <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Scope</div>
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.section.scope" /></div>
       <div className="flex flex-wrap items-center gap-3">
         <PillNav value={value} onChange={onChange} items={items} />
         {showOfficer && (
           <NativeSelect className="w-56" placeholder="Select a Sales Officer…" value={officerId} onChange={(e) => onOfficer(e.target.value)} options={officers.map((o) => ({ value: o.id, label: o.name }))} />
         )}
       </div>
-      {showOfficer && officers.length === 0 && <p className="text-xs text-muted-foreground">No Sales Officers on your team yet.</p>}
+      {showOfficer && officers.length === 0 && <p className="text-xs text-muted-foreground"><L k="scheme_planning.state.no_team_officers" /></p>}
     </div>
   );
 }
@@ -458,7 +459,7 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
         <>
           {/* First level (PLAN TYPE) — Submitted | Approved | Enrolled Plans | Older Plans (boxed segmented). */}
           <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Plan Type</div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="scheme_planning.section.plan_type" /></div>
             <div className="flex flex-wrap items-center gap-3">
               <PillNav value={adminLifecycle} onChange={setAdminLifecycle} items={adminLifecycleTabs} />
             </div>
@@ -782,9 +783,9 @@ function AdminMark({ mark }: { mark: "" | "✓" | "!" | "✕" }) {
  * (conversion date + booking Received + document Received + billing date). Billing date is disabled until
  * booking + document are both Received. Previously-saved Admin values re-populate on reopen.
  */
-function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClose: () => void; onSaved: () => void }) {
+export function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClose: () => void; onSaved: () => void }) {
   const partBills = plan.billing?.billMode ?? false;
-  const [billRows, setBillRows] = useState(() => initialBillEditor(plan, true));
+  const [billRows, setBillRows] = useState(() => plan.productBilling?.active ? initialProductBillEditor(plan, true) : initialBillEditor(plan, true));
   const count = plan.numberOfSchemes || 1;
   const multi = count > 1;
   const instNums = Array.from({ length: count }, (_, i) => i + 1);
@@ -792,6 +793,13 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
   const [convDate, setConvDate] = useState(toDateInput(plan.adminConversionDate));
   const [booking, setBooking] = useState(plan.adminBookingStatus ?? "");
   const [bookingAmount, setBookingAmount] = useState(plan.adminBookingAmount != null ? String(plan.adminBookingAmount) : "");
+  // Booking coverage — how many of the plan's proceeding schemes this Paid booking covers (1..count). Seeds
+  // from a prior verification, else defaults to all schemes. Only used when booking is Paid.
+  const [bookingCount, setBookingCount] = useState(plan.adminBookingSchemeCount ?? count);
+  const bookingPerScheme = plan.bookingAmountPerScheme ?? 0;
+  const coverage = booking === "RECEIVED"
+    ? bookingCoverage({ plannedSchemes: count, selectedCount: bookingCount, bookingPerScheme, receivedAmount: Number(bookingAmount) || 0 })
+    : null;
   const [doc, setDoc] = useState(plan.adminDocumentStatus ?? "");
   const [sameForAll, setSameForAll] = useState(plan.adminBillingSameForAll ?? true);
   const [billDate, setBillDate] = useState(toDateInput(plan.adminBillingDate ?? plan.instances.find((i) => i.instanceNumber === 1)?.adminBillingDate ?? null));
@@ -835,6 +843,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
       ...(partBills ? { billing: billEditorPayload(billRows, true) } : {}),
       adminBookingStatus: booking,
       adminBookingAmount: booking === "NOT_RECEIVED" ? null : (bookingAmount ? Number(bookingAmount) : null),
+      adminBookingSchemeCount: booking === "RECEIVED" ? bookingCount : null,
       adminDocumentStatus: doc,
       adminBillingSameForAll: !perInstance,
       adminBillingDate: billingEnabled && !perInstance ? (billDate || null) : null,
@@ -876,6 +885,24 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
                     {booking && booking !== "NOT_RECEIVED" && <FormattedNumberInput disabled={partBills && plan.billing?.locked} className="w-28" placeholder="Amount" value={bookingAmount} onValueChange={setBookingAmount} />}
                     <AdminMark mark={bookingMark} />
                   </div>
+                  {/* Paid: choose how many schemes the booking covers → Required, and show the Excess. The count
+                      is coverage/reporting only; it does not move schemes forward (SO conversion split does). */}
+                  {booking === "RECEIVED" && (
+                    <div className="mt-2 space-y-1 text-xs">
+                      {count > 1 && (
+                        <div className="flex items-center gap-2">
+                          <span className="w-28 text-muted-foreground">No. of Schemes</span>
+                          <NativeSelect className="w-20" value={String(bookingCount)} onChange={(e) => setBookingCount(Number(e.target.value))} options={Array.from({ length: count }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))} />
+                          <span className="text-muted-foreground">of {count}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2"><span className="w-28 text-muted-foreground">Required Amount</span><span className="tabular-nums font-medium">{formatCurrency(coverage?.requiredAmount ?? 0)}</span></div>
+                      {coverage && coverage.valid && coverage.excessAmount > 0 && (
+                        <div className="flex items-center gap-2"><span className="w-28 text-muted-foreground">Excess Amount</span><span className="tabular-nums font-medium text-success">{formatCurrency(coverage.excessAmount)}</span></div>
+                      )}
+                      {coverage && !coverage.valid && bookingAmount !== "" && <p className="text-destructive">{coverage.error}</p>}
+                    </div>
+                  )}
                 </Cell>
               </tr>
               <tr>
@@ -960,7 +987,7 @@ function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan; onClo
         </p>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={mut.isPending || !coreComplete} onClick={() => { setError(null); mut.mutate(); }}>{mut.isPending ? "Updating…" : "Update"}</Button>
+          <Button disabled={mut.isPending || !coreComplete || (coverage ? !coverage.valid : false)} onClick={() => { setError(null); mut.mutate(); }}>{mut.isPending ? "Updating…" : "Update"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

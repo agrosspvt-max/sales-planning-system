@@ -13,13 +13,9 @@ import { isProductQuantityScheme, usesProductRateBilling, committedProductsForSc
 import { soPlanBills, adminPlanBills, assertBillParts, assertBillTotals, combinedPresetValueErrors, billSchedule, schemeBillLimitError } from "@/lib/scheme-bills";
 import { effectiveProceedingSchemeUnits, quantitySplitDecision } from "@/lib/scheme-plan-quantity";
 import { applyConversionQuantity, conversionQuantityPlanSelect, type ConversionQuantityPlan } from "./scheme-plan-quantity.server";
+import { billFinancialScope } from "@/lib/scheme-financial-scope";
 
-/** Financial reads include active bill schedules without pretending partial verification is enrollment. */
-export const billFinancialScope = { OR: [
-  { enrollmentStatus: "ENROLLED" as const },
-  { bills: { some: { verifiedAt: { not: null } } } },
-  { instances: { some: { bills: { some: { verifiedAt: { not: null } } } } } }, // historical instance-owned bills
-] };
+export { billFinancialScope };
 export const planInstallmentWhere = (planId: string) => ({ OR: [{ instance: { dealerSchemePlanId: planId } }, { bill: { planId } }] });
 const select = {
   id: true, salesOfficerId: true, planStatus: true, schemeStatus: true, enrollmentStatus: true,

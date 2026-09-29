@@ -1,10 +1,14 @@
 import "server-only";
 import { z } from "zod";
-import { Role } from "@prisma/client";
+import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
-import { monthRange, upcomingRange, dateKey, projectConversionEvents, type ConversionEvent, type ConversionEventInput } from "@/lib/calendar";
+import {
+  monthRange, upcomingRange, dateKey,
+  projectConversionEvents, type ConversionEvent, type ConversionEventInput,
+  projectPartyAppointmentEvents, type PartyAppointmentEvent, type PartyAppointmentInput,
+} from "@/lib/calendar";
 import { getCalendarEnabled } from "@/lib/recovery-config";
 
 /**
@@ -77,7 +81,45 @@ async function loadNotes(ctx: AuthContext, gte: Date, lt: Date, officerId?: stri
   }));
 }
 
-export interface CalendarPayload { events: ConversionEvent[]; notes: CalendarNoteDto[]; canFilterOfficers: boolean; officers: { id: string; name: string }[] }
+/**
+ * APPROVED Party Plans within [gte, lt), scoped like conversions (SO own, RM team, Admin all; optional
+ * `officerId` narrows to one Sales Officer within the caller's scope). Read via raw SQL because the generated
+ * Prisma client does not yet expose PartyPlan in this environment. Only APPROVED rows are selected, and the
+ * date is read as a pure "YYYY-MM-DD" (`appointmentDate::text`) so no timezone shift is possible. One ranged,
+ * scoped query — never per-day — so there is no N+1.
+ */
+async function loadPartyAppointments(ctx: AuthContext, gte: Date, lt: Date, officerId?: string): Promise<PartyAppointmentInput[]> {
+  // Resolve the same officer scope the conversion query uses, as an explicit id list (or "all").
+  let scopeClause: Prisma.Sql;
+  if (officerId) {
+    await assertOfficerInScope(ctx, officerId);
+    scopeClause = Prisma.sql`AND p."salesOfficerId" = ${officerId}`;
+  } else {
+    const scope = await getOfficerScope(ctx);
+    scopeClause = scope.all
+      ? Prisma.empty
+      : scope.ids.length > 0
+        ? Prisma.sql`AND p."salesOfficerId" IN (${Prisma.join(scope.ids)})`
+        : Prisma.sql`AND FALSE`;
+  }
+  // Half-open [gte, lt) on the DATE column, comparing against date literals (no time component).
+  const gteKey = dateKey(gte)!;
+  const ltKey = dateKey(lt)!;
+  const rows = await prisma.$queryRaw<{ id: string; partyName: string | null; marketName: string | null; appointmentDate: string | null; salesOfficerId: string; salesOfficerName: string }[]>(Prisma.sql`
+    SELECT p."id", p."partyName", p."marketName", p."appointmentDate"::text AS "appointmentDate",
+           p."salesOfficerId", u."name" AS "salesOfficerName"
+    FROM "PartyPlan" p JOIN "User" u ON u."id" = p."salesOfficerId"
+    WHERE p."status" = 'APPROVED'
+      AND p."appointmentDate" IS NOT NULL
+      AND p."appointmentDate" >= ${gteKey}::date AND p."appointmentDate" < ${ltKey}::date
+      ${scopeClause}`);
+  return rows.map((r) => ({
+    id: r.id, partyName: r.partyName, marketName: r.marketName, appointmentDate: r.appointmentDate,
+    salesOfficerId: r.salesOfficerId, salesOfficerName: r.salesOfficerName,
+  }));
+}
+
+export interface CalendarPayload { events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[]; canFilterOfficers: boolean; officers: { id: string; name: string }[] }
 
 /** One month of the calendar for the caller's scope. `officerId` (Admin/RM) narrows to one Sales Officer. */
 export async function calendarMonth(ctx: AuthContext, opts: { year: number; month: number; officerId?: string }): Promise<CalendarPayload> {
@@ -89,11 +131,12 @@ export async function calendarMonth(ctx: AuthContext, opts: { year: number; mont
     select: PLAN_SELECT,
   })) as unknown as PlanRow[];
   const events = projectConversionEvents(rows.map(toInput));
+  const partyEvents = projectPartyAppointmentEvents(await loadPartyAppointments(ctx, gte, lt, officerId));
   const notes = await loadNotes(ctx, gte, lt, officerId);
   const scope = await getOfficerScope(ctx);
   const canFilterOfficers = ctx.role !== Role.SALES_OFFICER;
   const officers = canFilterOfficers ? await officerOptions(ctx, scope) : [];
-  return { events, notes, canFilterOfficers, officers };
+  return { events, partyEvents, notes, canFilterOfficers, officers };
 }
 
 /** Officer options for the Admin/RM filter — the officers in the caller's scope. */
@@ -104,13 +147,18 @@ async function officerOptions(ctx: AuthContext, scope: { all: boolean; ids: stri
 }
 
 export interface UpcomingItem {
-  kind: "CONVERSION" | "NOTE";
+  kind: "CONVERSION" | "PARTY_APPOINTMENT" | "NOTE";
   dateKey: string;
   event?: ConversionEvent;
+  partyEvent?: PartyAppointmentEvent;
   note?: CalendarNoteDto;
 }
 
-/** Upcoming conversions + notes within [today, today+days) for the caller's scope — future-only, sorted by date. */
+/** Sort priority within a day: conversions first, then party appointments, then notes. */
+const UPCOMING_KIND_ORDER: Record<UpcomingItem["kind"], number> = { CONVERSION: 0, PARTY_APPOINTMENT: 1, NOTE: 2 };
+
+/** Upcoming conversions + party appointments + notes within [today, today+days) for the caller's scope —
+ *  future-only, sorted by date then kind. */
 export async function calendarUpcoming(ctx: AuthContext, days = 5): Promise<UpcomingItem[]> {
   await assertCalendarEnabled();
   const { gte, lt } = upcomingRange(new Date(), days);
@@ -119,12 +167,14 @@ export async function calendarUpcoming(ctx: AuthContext, days = 5): Promise<Upco
     select: PLAN_SELECT,
   })) as unknown as PlanRow[];
   const events = projectConversionEvents(rows.map(toInput));
+  const partyEvents = projectPartyAppointmentEvents(await loadPartyAppointments(ctx, gte, lt));
   const notes = await loadNotes(ctx, gte, lt);
   const items: UpcomingItem[] = [
     ...events.map((e): UpcomingItem => ({ kind: "CONVERSION", dateKey: e.dateKey, event: e })),
+    ...partyEvents.map((e): UpcomingItem => ({ kind: "PARTY_APPOINTMENT", dateKey: e.dateKey, partyEvent: e })),
     ...notes.map((n): UpcomingItem => ({ kind: "NOTE", dateKey: n.dateKey, note: n })),
   ];
-  return items.sort((a, b) => (a.dateKey === b.dateKey ? (a.kind === "NOTE" ? 1 : -1) : a.dateKey.localeCompare(b.dateKey)));
+  return items.sort((a, b) => (a.dateKey === b.dateKey ? UPCOMING_KIND_ORDER[a.kind] - UPCOMING_KIND_ORDER[b.kind] : a.dateKey.localeCompare(b.dateKey)));
 }
 
 /* ------------------------------ Notes CRUD (owner-only writes) ------------------------------ */

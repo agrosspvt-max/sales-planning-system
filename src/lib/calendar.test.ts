@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   dateKey, monthRange, upcomingRange, isUpcoming, conversionEventStatus,
   projectConversionEvents, groupEventsByOfficer, type ConversionEventInput,
+  projectPartyAppointmentEvents, type PartyAppointmentInput,
 } from "./calendar";
 
 let passed = 0;
@@ -101,6 +102,66 @@ test("monthRange: whole month half-open", () => {
   const { gte, lt } = monthRange(2026, 9);
   assert.equal(dateKey(gte), "2026-09-01");
   assert.equal(dateKey(lt), "2026-10-01");
+});
+
+/* ---------- Party Appointment projection (Phase 2) ---------- */
+const party = (over: Partial<PartyAppointmentInput> = {}): PartyAppointmentInput => ({
+  id: "pp1", partyName: "ABC Traders", marketName: "Bhopal", appointmentDate: "2026-09-22",
+  salesOfficerId: "so1", salesOfficerName: "Subham Yadav", ...over,
+});
+
+test("Party: one event on the exact appointment date with Party Name + Market", () => {
+  const [e] = projectPartyAppointmentEvents([party()]);
+  assert.equal(e.type, "PARTY_APPOINTMENT");
+  assert.equal(e.dateKey, "2026-09-22", "appointment date used exactly");
+  assert.equal(e.partyName, "ABC Traders");
+  assert.equal(e.marketName, "Bhopal");
+  assert.equal(e.salesOfficerId, "so1");
+});
+test("Party: appointment date does NOT shift by timezone (business date preserved)", () => {
+  // A Date at UTC midnight and a plain string must both yield the same yyyy-mm-dd.
+  const [fromString] = projectPartyAppointmentEvents([party({ appointmentDate: "2026-09-22" })]);
+  const [fromDate] = projectPartyAppointmentEvents([party({ appointmentDate: new Date("2026-09-22T00:00:00.000Z") })]);
+  assert.equal(fromString.dateKey, "2026-09-22");
+  assert.equal(fromDate.dateKey, "2026-09-22");
+});
+test("Party: a plan with no appointment date produces no event", () => {
+  assert.equal(projectPartyAppointmentEvents([party({ appointmentDate: null })]).length, 0);
+});
+test("Party: a plan with no Market still projects (Market optional in display)", () => {
+  const [e] = projectPartyAppointmentEvents([party({ marketName: null })]);
+  assert.equal(e.partyName, "ABC Traders");
+  assert.equal(e.marketName, null);
+});
+test("Party: multiple appointments on the SAME day are all projected", () => {
+  const events = projectPartyAppointmentEvents([
+    party({ id: "a", partyName: "ABC Traders", appointmentDate: "2026-09-22" }),
+    party({ id: "b", partyName: "XYZ Traders", appointmentDate: "2026-09-22" }),
+  ]);
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.filter((e) => e.dateKey === "2026-09-22").map((e) => e.partyName).sort(), ["ABC Traders", "XYZ Traders"]);
+});
+test("Party: same approved plan projects EXACTLY ONE event (no duplication)", () => {
+  const events = projectPartyAppointmentEvents([party({ id: "pp1" })]);
+  assert.equal(events.length, 1, "one row → one event; derivation is idempotent");
+});
+test("Party: events group by Sales Officer for the Admin/RM view", () => {
+  const events = projectPartyAppointmentEvents([
+    party({ id: "a", salesOfficerId: "so2", salesOfficerName: "Rahul Patidar", partyName: "P2" }),
+    party({ id: "b", salesOfficerId: "so1", salesOfficerName: "Subham Yadav", partyName: "P1" }),
+  ]);
+  const groups = groupEventsByOfficer(events);
+  assert.deepEqual(groups.map((g) => g.salesOfficerName), ["Rahul Patidar", "Subham Yadav"]);
+});
+test("Party + Conversion can share a date without interfering", () => {
+  const conv = projectConversionEvents([plan({ expectedBillingDate: "2026-09-22" })]);
+  const parties = projectPartyAppointmentEvents([party({ appointmentDate: "2026-09-22" })]);
+  assert.equal(conv.length, 1);
+  assert.equal(parties.length, 1);
+  assert.equal(conv[0].type, "CONVERSION");
+  assert.equal(parties[0].type, "PARTY_APPOINTMENT");
+  // Distinct event streams — one does not overwrite or absorb the other.
+  assert.notEqual(conv[0].type, parties[0].type);
 });
 
 console.log(`\n${passed} calendar projection tests passed`);

@@ -3,6 +3,22 @@ export interface ApiErrorBody {
   issues?: Record<string, string[]>;
 }
 
+/**
+ * Error thrown by the API client for a non-OK response. Carries the HTTP `status` so callers can react to
+ * specific conditions (e.g. autosave treating 409 as a stale-batch conflict rather than a retryable failure).
+ * Still a plain `Error` with the server message, so existing `(e as Error).message` handling is unchanged.
+ */
+export class ApiRequestError extends Error {
+  status: number;
+  issues?: Record<string, string[]>;
+  constructor(status: number, message: string, issues?: Record<string, string[]>) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.issues = issues;
+  }
+}
+
 // Guards against firing multiple sign-outs when several requests 401 at once (e.g. Recovery +
 // Notifications + Labels all firing on one page after the session became invalid).
 let signingOut = false;
@@ -34,7 +50,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const err = body as ApiErrorBody;
     if (res.status === 401) void handleUnauthenticated();
-    throw new Error(err.error ?? "Request failed");
+    throw new ApiRequestError(res.status, err.error ?? "Request failed", err.issues);
   }
   return body as T;
 }

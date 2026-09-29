@@ -25,6 +25,8 @@ export function UpcomingCard() {
     note: useLabel("calendar.note"),
     scheme: useLabel("calendar.scheme"),
     schemes: useLabel("calendar.schemes"),
+    partyAppointment: useLabel("calendar.party_appointment"),
+    market: useLabel("calendar.market"),
   };
 
   return (
@@ -48,6 +50,12 @@ export function UpcomingCard() {
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.conversion}</div>
                     <div className="truncate font-medium">{it.event.dealerName}</div>
                     <div className="text-xs text-muted-foreground">{it.event.numberOfSchemes} {it.event.numberOfSchemes === 1 ? L.scheme : L.schemes} · {formatCurrency(it.event.totalSchemeAmount)}</div>
+                  </Link>
+                ) : it.kind === "PARTY_APPOINTMENT" && it.partyEvent ? (
+                  <Link href="/planning/party/view" className="min-w-0 flex-1 hover:underline">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.partyAppointment}</div>
+                    <div className="truncate font-medium">{it.partyEvent.partyName}</div>
+                    {it.partyEvent.marketName && <div className="text-xs text-muted-foreground">{L.market}: {it.partyEvent.marketName}</div>}
                   </Link>
                 ) : it.note ? (
                   <Link href="/planning/calendar" className="min-w-0 flex-1 hover:underline">

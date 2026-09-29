@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { DEFAULT_LABELS } from "./labels";
+import { DEFAULT_LABELS, resolveLabels, type LabelKey } from "./labels";
 
 /**
  * Label overrides are persisted as ONE JSON row in the existing SystemSetting key/value store (no new
@@ -46,6 +46,11 @@ async function readOverrides(): Promise<Record<string, string>> {
 /** Overrides + whether the caller may edit them (Super Admin only). */
 export async function getLabelState(ctx: AuthContext): Promise<{ overrides: Record<string, string>; canEdit: boolean }> {
   return { overrides: await readOverrides(), canEdit: ctx.role === Role.SUPER_ADMIN };
+}
+
+/** Server-side access to the same override → default label map consumed by LabelProvider. */
+export async function getResolvedLabels(): Promise<Record<LabelKey, string>> {
+  return resolveLabels(await readOverrides()) as Record<LabelKey, string>;
 }
 
 const patchSchema = z.object({

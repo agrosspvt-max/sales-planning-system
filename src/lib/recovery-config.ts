@@ -8,10 +8,15 @@ import { prisma } from "@/lib/prisma";
  */
 export const RECOVERY_DUE_VALIDATION_KEY = "recovery.dueValidation";
 export const CALENDAR_ENABLED_KEY = "calendar.enabled";
+export const AUTO_TASKS_ENABLED_KEY = "recovery.autoTasksEnabled";
 
 export interface RecoveryConfig {
   dueValidation: boolean; // ON (default): enforce Due ≥ Overdue + Due before Running is editable
   calendarEnabled: boolean; // ON (default): expose Calendar routes, APIs, navigation and reminders
+  // OFF (default): purely a VISIBILITY switch for the "Today's Auto Tasks" block in Daily Work. It never
+  // disables, deletes, stops or alters any Auto Task internal behaviour — scheduling, materialization,
+  // rescheduling, payment and the Daily Report all run server-side regardless of this flag.
+  autoTasksEnabled: boolean;
 }
 
 // DashboardLayout reads this flag on every authenticated navigation. A short process-local cache removes that
@@ -31,7 +36,7 @@ function rememberCalendarEnabled(value: boolean): boolean {
 /** Read the recovery config (safe default ON). Cheap; call per request as needed. */
 export async function getRecoveryConfig(): Promise<RecoveryConfig> {
   const rows = (await prisma.systemSetting.findMany({
-    where: { key: { in: [RECOVERY_DUE_VALIDATION_KEY, CALENDAR_ENABLED_KEY] } },
+    where: { key: { in: [RECOVERY_DUE_VALIDATION_KEY, CALENDAR_ENABLED_KEY, AUTO_TASKS_ENABLED_KEY] } },
     select: { key: true, value: true },
   })) as { key: string; value: string }[];
   const values = new Map(rows.map((row) => [row.key, row.value]));
@@ -39,6 +44,8 @@ export async function getRecoveryConfig(): Promise<RecoveryConfig> {
   const config = {
     dueValidation: values.get(RECOVERY_DUE_VALIDATION_KEY) !== "false",
     calendarEnabled: values.get(CALENDAR_ENABLED_KEY) !== "false",
+    // Auto Tasks block defaults OFF: only an explicit "true" shows it (missing/anything else stays hidden).
+    autoTasksEnabled: values.get(AUTO_TASKS_ENABLED_KEY) === "true",
   };
   rememberCalendarEnabled(config.calendarEnabled);
   return config;
@@ -65,6 +72,18 @@ export async function getCalendarEnabled(): Promise<boolean> {
   }
 }
 
+/**
+ * Fast single-flag read of the Auto Tasks VISIBILITY switch (default OFF). Used only to decide whether the
+ * Daily Work UI renders the "Today's Auto Tasks" block — never to gate any Auto Task server behaviour.
+ */
+export async function getAutoTasksEnabled(): Promise<boolean> {
+  const row = await prisma.systemSetting.findUnique({
+    where: { key: AUTO_TASKS_ENABLED_KEY },
+    select: { value: true },
+  });
+  return row?.value === "true";
+}
+
 /** Upsert the recovery config. */
 export async function saveRecoveryConfig(config: RecoveryConfig): Promise<RecoveryConfig> {
   await prisma.$transaction([
@@ -77,6 +96,11 @@ export async function saveRecoveryConfig(config: RecoveryConfig): Promise<Recove
       where: { key: CALENDAR_ENABLED_KEY },
       create: { key: CALENDAR_ENABLED_KEY, value: config.calendarEnabled ? "true" : "false" },
       update: { value: config.calendarEnabled ? "true" : "false" },
+    }),
+    prisma.systemSetting.upsert({
+      where: { key: AUTO_TASKS_ENABLED_KEY },
+      create: { key: AUTO_TASKS_ENABLED_KEY, value: config.autoTasksEnabled ? "true" : "false" },
+      update: { value: config.autoTasksEnabled ? "true" : "false" },
     }),
   ]);
   calendarCacheGeneration += 1;

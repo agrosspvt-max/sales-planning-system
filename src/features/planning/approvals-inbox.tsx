@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/table";
 import { StatusBadge } from "./status-badge";
 import type { InboxItem, PlanStatus } from "./types";
+import { useLabel } from "@/features/labels/label-ui";
 
 interface MonthlyInboxItem {
   id: string;
@@ -274,21 +275,23 @@ function MonthExtensionReview() {
 interface CnInboxItem {
   id: string; officerId: string; partyName: string; cnType: string; amount: number | null; employeeName: string; state: string | null; territory: string | null; status: string; createdAt: string;
 }
-/** CN Requests awaiting the current reviewer. RM acts on SUBMITTED (Accept/Reject); Super Admin acts on
- *  SUBMITTED or ACCEPTED (Approve/Reject) — no RM acceptance required. Sales Officers see nothing here. */
+/** CN Requests awaiting a decision. Posting accepted requests remains on the dedicated CN Requests page. */
 function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery<CnInboxItem[]>({ queryKey: ["cn-requests"], queryFn: () => api.get<CnInboxItem[]>("/api/cn-requests") });
+  const acceptLabel = useLabel("cn_requests.action.accept");
+  const rejectLabel = useLabel("cn_requests.action.reject");
+  const submittedLabel = useLabel("cn_requests.view.submitted");
+  const { data, isLoading } = useQuery<CnInboxItem[]>({ queryKey: ["cn-requests", "submitted"], queryFn: () => api.get<CnInboxItem[]>("/api/cn-requests?view=submitted") });
   const actMut = useMutation({
-    mutationFn: (v: { id: string; action: "accept" | "reject" | "approve" }) => api.post(`/api/cn-requests/${v.id}/act`, { action: v.action }),
+    mutationFn: (v: { id: string; action: "accept" | "reject" }) => api.post(`/api/cn-requests/${v.id}/act`, { action: v.action }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["cn-requests"] }),
     onError: (e) => alert((e as Error).message),
   });
   const isAdmin = role === Role.SUPER_ADMIN;
   const isManager = role === Role.REGIONAL_MANAGER;
-  // RM sees team members' SUBMITTED requests only (never their own); Admin sees any pending.
+  // Server returns SUBMITTED only; RM still cannot act on a request they raised themselves.
   const rows = useMemo(
-    () => (data ?? []).filter((r) => (isAdmin ? r.status === "SUBMITTED" || r.status === "ACCEPTED" : isManager ? r.status === "SUBMITTED" && r.officerId !== userId : false)),
+    () => (data ?? []).filter((r) => (isAdmin ? true : isManager ? r.officerId !== userId : false)),
     [data, isAdmin, isManager, userId],
   );
   if (!isAdmin && !isManager) return null;
@@ -316,11 +319,11 @@ function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
                 <TableCell>{r.cnType}</TableCell>
                 <TableCell>{r.employeeName}</TableCell>
                 <TableCell>{r.state ? <Badge variant="secondary">{r.state}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
-                <TableCell><Badge variant={r.status === "ACCEPTED" ? "default" : "secondary"}>{r.status}</Badge></TableCell>
+                <TableCell><Badge variant="secondary">{submittedLabel}</Badge></TableCell>
                 <TableCell className="text-right">
                   <div className="flex justify-end gap-1">
-                    <Button size="sm" variant="outline" disabled={actMut.isPending} onClick={() => actMut.mutate({ id: r.id, action: isAdmin ? "approve" : "accept" })}>{isAdmin ? "Approve" : "Accept"}</Button>
-                    <Button size="sm" variant="ghost" className="text-destructive" disabled={actMut.isPending} onClick={() => actMut.mutate({ id: r.id, action: "reject" })}>Reject</Button>
+                    <Button size="sm" variant="outline" disabled={actMut.isPending} onClick={() => actMut.mutate({ id: r.id, action: "accept" })}>{acceptLabel}</Button>
+                    <Button size="sm" variant="ghost" className="text-destructive" disabled={actMut.isPending} onClick={() => actMut.mutate({ id: r.id, action: "reject" })}>{rejectLabel}</Button>
                     <Button asChild size="sm" variant="ghost"><Link href="/requests/cn">Open</Link></Button>
                   </div>
                 </TableCell>

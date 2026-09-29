@@ -16,7 +16,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { PageHeader } from "@/components/layout/page-header";
 import { useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
-import { dateKey, groupEventsByOfficer, type ConversionEvent, type ConversionStatus } from "@/lib/calendar";
+import { dateKey, groupEventsByOfficer, type ConversionEvent, type ConversionStatus, type PartyAppointmentEvent } from "@/lib/calendar";
 import type { CalendarPayload, CalendarNoteDto } from "@/features/calendar/calendar.server";
 
 const STATUS_META: Record<ConversionStatus, { key: LabelKey; variant: "muted" | "secondary" | "default" | "success" | "warning" | "destructive" }> = {
@@ -75,6 +75,8 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
     noEvents: useLabel("calendar.no_events"),
     scheme: useLabel("calendar.scheme"),
     schemes: useLabel("calendar.schemes"),
+    partyAppointment: useLabel("calendar.party_appointment"),
+    market: useLabel("calendar.market"),
   };
 
   const params = new URLSearchParams({ year: String(cursor.year), month: String(cursor.month) });
@@ -92,6 +94,11 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
   const notesByDate = useMemo(() => {
     const m = new Map<string, CalendarNoteDto[]>();
     for (const n of data?.notes ?? []) { const a = m.get(n.dateKey) ?? []; a.push(n); m.set(n.dateKey, a); }
+    return m;
+  }, [data]);
+  const partyEventsByDate = useMemo(() => {
+    const m = new Map<string, PartyAppointmentEvent[]>();
+    for (const e of data?.partyEvents ?? []) { const a = m.get(e.dateKey) ?? []; a.push(e); m.set(e.dateKey, a); }
     return m;
   }, [data]);
 
@@ -152,7 +159,10 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
             {cells.map((dk, i) => {
               if (!dk) return <div key={i} className="min-h-[5.5rem] border-b border-r bg-muted/10 last:border-r-0" />;
               const evs = eventsByDate.get(dk) ?? [];
+              const partyEvs = partyEventsByDate.get(dk) ?? [];
               const notes = notesByDate.get(dk) ?? [];
+              const totalEvs = evs.length + partyEvs.length;
+              const shownParty = partyEvs.slice(0, Math.max(0, 2 - evs.length));
               const isToday = dk === todayKey;
               return (
                 <button
@@ -175,7 +185,13 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
                         <span className="truncate">{groupByOfficer ? e.salesOfficerName : e.dealerName}</span>
                       </div>
                     ))}
-                    {evs.length > 2 && <div className="px-1 text-[11px] text-muted-foreground">+{evs.length - 2} more</div>}
+                    {shownParty.map((e) => (
+                      <div key={e.planId} className="flex items-center gap-1 truncate rounded bg-accent px-1 py-0.5 text-[11px] leading-tight">
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" />
+                        <span className="truncate">{groupByOfficer ? e.salesOfficerName : e.partyName}</span>
+                      </div>
+                    ))}
+                    {totalEvs > 2 && <div className="px-1 text-[11px] text-muted-foreground">+{totalEvs - 2} more</div>}
                   </div>
                 </button>
               );
@@ -189,6 +205,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
           dateKey={openDate}
           title={longDate(openDate)}
           events={eventsByDate.get(openDate) ?? []}
+          partyEvents={partyEventsByDate.get(openDate) ?? []}
           notes={notesByDate.get(openDate) ?? []}
           groupByOfficer={groupByOfficer}
           labels={L}
@@ -202,17 +219,18 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
 
 type Labels = Record<string, string>;
 
-function DateDetailDialog({ dateKey: dk, title, events, notes, groupByOfficer, labels: L, onClose, onChanged }: {
-  dateKey: string; title: string; events: ConversionEvent[]; notes: CalendarNoteDto[];
+function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, groupByOfficer, labels: L, onClose, onChanged }: {
+  dateKey: string; title: string; events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[];
   groupByOfficer: boolean; labels: Labels; onClose: () => void; onChanged: () => void;
 }) {
   const groups = groupByOfficer ? groupEventsByOfficer(events) : null;
+  const partyGroups = groupByOfficer ? groupEventsByOfficer(partyEvents) : null;
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <div className="space-y-4">
-          {events.length === 0 && notes.length === 0 && <p className="text-sm text-muted-foreground">{L.noEvents}</p>}
+          {events.length === 0 && partyEvents.length === 0 && notes.length === 0 && <p className="text-sm text-muted-foreground">{L.noEvents}</p>}
 
           {groups
             ? groups.map((g) => (
@@ -223,11 +241,34 @@ function DateDetailDialog({ dateKey: dk, title, events, notes, groupByOfficer, l
               ))
             : events.map((e) => <ConversionCard key={e.planId} e={e} labels={L} />)}
 
+          {/* Party Appointment events — grouped by officer for the Admin/RM global view, flat otherwise. */}
+          {partyGroups
+            ? partyGroups.map((g) => (
+                <div key={`party-${g.salesOfficerId}`} className="space-y-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.salesOfficerName}</div>
+                  {g.events.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} />)}
+                </div>
+              ))
+            : partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} />)}
+
           <NotesSection dateKey={dk} notes={notes} labels={L} onChanged={onChanged} />
         </div>
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.cancel}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Party Appointment detail card — Party Name + Market. Links to Party Planning → View (read-only here). */
+function PartyAppointmentCard({ e, labels: L }: { e: PartyAppointmentEvent; labels: Labels }) {
+  return (
+    <div className="rounded-md border bg-card p-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.partyAppointment}</span>
+      </div>
+      <Link href="/planning/party/view" className="font-medium text-primary hover:underline">{e.partyName}</Link>
+      {e.marketName && <div className="text-sm text-muted-foreground">{L.market}: {e.marketName}</div>}
+    </div>
   );
 }
 

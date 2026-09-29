@@ -10,50 +10,57 @@ datasource db {
 
 /// Application user. Login identity is `username`. Never hard-deleted — use isActive.
 model User {
-  id                     String                   @id @default(cuid())
-  name                   String
-  username               String                   @unique
-  passwordHash           String
-  role                   Role
-  phone                  String?
-  email                  String?                  @unique
+  id                       String                      @id @default(cuid())
+  name                     String
+  username                 String                      @unique
+  passwordHash             String
+  role                     Role
+  phone                    String?
+  email                    String?                     @unique
   // Sales Officer's assigned territory (distinct from `name` and from the group/region). Admin-editable.
-  territory              String?
-  isActive               Boolean                  @default(true)
-  createdAt              DateTime                 @default(now())
-  updatedAt              DateTime                 @updatedAt
-  deletedAt              DateTime?
-  sessionValidAfter      DateTime?
-  groupId                String?
-  recoveryUploads        AgingSnapshot[]          @relation("RecoveryUploads")
-  targetedAnnouncements  Announcement[]           @relation("AnnouncementTargetUser")
-  announcementReads      AnnouncementReadStatus[]
-  approvalActions        ApprovalAction[]
-  auditLogs              AuditLog[]
-  dealerAssignments      DealerAssignment[]       @relation("OfficerDealers")
-  importRecords          DealerImportRecord[]
-  decidedExtensions      MonthExtensionRequest[]  @relation("ExtensionDecidedBy")
-  requestedExtensions    MonthExtensionRequest[]  @relation("ExtensionRequestedBy")
-  monthlyPlans           MonthlyPlan[]            @relation("OfficerMonthlyPlans")
-  notifications          Notification[]
-  onboardingRuns         OnboardingRecord[]       @relation("OnboardingRuns")
-  recoveryPlans          RecoveryPlan[]           @relation("OfficerRecoveryPlans")
-  asManagerRmAssignments RmAssignment[]           @relation("ManagerRm")
-  asOfficerRmAssignments RmAssignment[]           @relation("OfficerRm")
-  salesUploads           SalesUploadRun[]         @relation("SalesUploads")
-  seasonPlans            SeasonPlan[]             @relation("OfficerPlans")
-  planImportRecords      SeasonPlanImportRecord[] @relation("PlanImports")
-  cnRequests             CnRequest[]              @relation("OfficerCnRequests")
-  createdSchemes         Scheme[]                 @relation("SchemeCreatedBy")
-  schemePlans            DealerSchemePlan[]       @relation("OfficerSchemePlans")
-  rmActedSchemePlans     DealerSchemePlan[]       @relation("RmActedSchemePlans")
-  enrolledSchemePlans    DealerSchemePlan[]       @relation("EnrolledSchemePlans")
-  schemePayments         SchemePayment[]          @relation("SchemePaymentCreatedBy")
-  conversionExtensions   SchemeConversionExtension[] @relation("ConversionExtendedBy")
-  schemePlanQuantitySplits SchemePlanQuantitySplit[] @relation("SchemePlanQuantitySplitCreatedBy")
-  schemeUploadBatches    SchemeUploadBatch[]      @relation("SchemeUploadBatches")
-  calendarNotes          CalendarNote[]           @relation("CalendarNoteOwner")
-  group                  UserGroup?               @relation(fields: [groupId], references: [id])
+  territory                String?
+  isActive                 Boolean                     @default(true)
+  createdAt                DateTime                    @default(now())
+  updatedAt                DateTime                    @updatedAt
+  deletedAt                DateTime?
+  sessionValidAfter        DateTime?
+  groupId                  String?
+  recoveryUploads          AgingSnapshot[]             @relation("RecoveryUploads")
+  targetedAnnouncements    Announcement[]              @relation("AnnouncementTargetUser")
+  announcementReads        AnnouncementReadStatus[]
+  approvalActions          ApprovalAction[]
+  auditLogs                AuditLog[]
+  dealerAssignments        DealerAssignment[]          @relation("OfficerDealers")
+  importRecords            DealerImportRecord[]
+  decidedExtensions        MonthExtensionRequest[]     @relation("ExtensionDecidedBy")
+  requestedExtensions      MonthExtensionRequest[]     @relation("ExtensionRequestedBy")
+  monthlyPlans             MonthlyPlan[]               @relation("OfficerMonthlyPlans")
+  notifications            Notification[]
+  onboardingRuns           OnboardingRecord[]          @relation("OnboardingRuns")
+  recoveryPlans            RecoveryPlan[]              @relation("OfficerRecoveryPlans")
+  asManagerRmAssignments   RmAssignment[]              @relation("ManagerRm")
+  asOfficerRmAssignments   RmAssignment[]              @relation("OfficerRm")
+  salesUploads             SalesUploadRun[]            @relation("SalesUploads")
+  seasonPlans              SeasonPlan[]                @relation("OfficerPlans")
+  planImportRecords        SeasonPlanImportRecord[]    @relation("PlanImports")
+  cnRequests               CnRequest[]                 @relation("OfficerCnRequests")
+  createdSchemes           Scheme[]                    @relation("SchemeCreatedBy")
+  schemePlans              DealerSchemePlan[]          @relation("OfficerSchemePlans")
+  rmActedSchemePlans       DealerSchemePlan[]          @relation("RmActedSchemePlans")
+  enrolledSchemePlans      DealerSchemePlan[]          @relation("EnrolledSchemePlans")
+  schemePayments           SchemePayment[]             @relation("SchemePaymentCreatedBy")
+  conversionExtensions     SchemeConversionExtension[] @relation("ConversionExtendedBy")
+  schemePlanQuantitySplits SchemePlanQuantitySplit[]   @relation("SchemePlanQuantitySplitCreatedBy")
+  schemeUploadBatches      SchemeUploadBatch[]         @relation("SchemeUploadBatches")
+  calendarNotes            CalendarNote[]              @relation("CalendarNoteOwner")
+  partyPlans               PartyPlan[]                 @relation("PartyPlanOfficer")
+  dailyWorkEntries         DailyWorkEntry[]            @relation("DailyWorkOfficer")
+  dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
+  dailyWorkReviews         DailyWorkReview[]           @relation("DailyWorkReviewOfficer")
+  dailyWorkReviewsGiven    DailyWorkReview[]           @relation("DailyWorkReviewReviewer")
+  dailyWorkAttendance      DailyWorkAttendance[]       @relation("DailyWorkAttendanceOfficer")
+  cnPaymentEvents          CnPaymentEvent[]            @relation("CnPaymentEventRecordedBy")
+  group                    UserGroup?                  @relation(fields: [groupId], references: [id])
 
   @@index([role])
   @@index([isActive])
@@ -76,56 +83,57 @@ model UserGroup {
 /// Commercial Scheme Master. This is intentionally independent of sales planning in Phase 1;
 /// later Scheme Planning will consume these definitions without changing their history.
 model Scheme {
-  id                   String          @id @default(cuid())
-  schemeName           String
-  isPerpetual          Boolean         @default(false)
-  startDate            DateTime?
-  endDate              DateTime?
-  bookingLastDate      DateTime?
+  id                    String                       @id @default(cuid())
+  schemeName            String
+  isPerpetual           Boolean                      @default(false)
+  startDate             DateTime?
+  endDate               DateTime?
+  bookingLastDate       DateTime?
   // FIXED schemes: required (app-validated). MULTIPLE_OPTIONS schemes: NULL — the real commercial values
   // live on each SchemeOption (a Multiple-Options scheme has no single scheme-level value). Never 0.
-  schemeValueWithoutGST Decimal?       @db.Decimal(14, 2)
-  schemeValueWithGST   Decimal?        @db.Decimal(14, 2)
-  bookingAmount        Decimal?        @db.Decimal(14, 2)
-  installmentBalance   Boolean         @default(false) // final rule balances per value; enables Options Amount without changing legacy masters
-  schemeBenefit        SchemeBenefit
-  benefitDetails       String?
-  otherBenefitDetails  String?
-  allowMultipleSchemes Boolean         @default(false)
+  schemeValueWithoutGST Decimal?                     @db.Decimal(14, 2)
+  schemeValueWithGST    Decimal?                     @db.Decimal(14, 2)
+  bookingAmount         Decimal?                     @db.Decimal(14, 2)
+  installmentBalance    Boolean                      @default(false) // final rule balances per value; enables Options Amount without changing legacy masters
+  schemeBenefit         SchemeBenefit
+  benefitDetails        String?
+  otherBenefitDetails   String?
+  allowMultipleSchemes  Boolean                      @default(false)
   // Maximum combined bills the SO may declare during conversion. Existing schemes default to the legacy
   // limit of 5; Create/Edit requires an explicit 1–5 selection at the application boundary.
-  numberOfBills        Int             @default(5)
+  numberOfBills         Int                          @default(5)
   // Conversion Date Extension config. Days 0 disables extensions. Attempts: 0 = disabled,
   // -1 = unlimited attempts, positive value = maximum attempts.
-  maxExtensionDays     Int             @default(0) // total calendar days a dealer may push the ORIGINAL conversion date
-  maxExtensionAttempts Int             @default(0)
+  maxExtensionDays      Int                          @default(0) // total calendar days a dealer may push the ORIGINAL conversion date
+  maxExtensionAttempts  Int                          @default(0)
   // Pre-placement MASTER config (Phase 11). Max calendar days a dealer may be allowed to pre-place before the
   // installment schedule starts. 0 ⇒ pre-placement not available for this scheme. The actual per-dealer value
   // is chosen during planning (DealerSchemePlan.prePlacementDays) and confirmed by Admin; the installment
   // schedule then starts from Billing Date + confirmed pre-placement days. This is a ceiling, never applied automatically.
-  prePlacementMaxDays  Int             @default(0)
-  documentUrl          String?
+  prePlacementMaxDays   Int                          @default(0)
+  documentUrl           String?
   // --- Achievement Requirement (independent of installment tracking; NONE ⇒ installment-only scheme). ---
   // Existing schemes default to NONE and keep working exactly as before — requirements are never inferred.
-  requirementType       SchemeRequirementType @default(NONE)
-  valueMode             SchemeValueMode?      // only for requirementType = VALUE_BASED
-  combinedRequiredValue Decimal?              @db.Decimal(14, 2) // only for VALUE_BASED + COMBINED (one target across products)
+  requirementType       SchemeRequirementType        @default(NONE)
+  valueMode             SchemeValueMode? // only for requirementType = VALUE_BASED
+  combinedRequiredValue Decimal?                     @db.Decimal(14, 2) // only for VALUE_BASED + COMBINED (one target across products)
   // --- Scheme Structure (Phase 10). FIXED keeps the requirement* fields above; MULTIPLE_OPTIONS uses
   // optionAchievementType + eligibleProducts + options and leaves requirement* / scheme-level value NULL. ---
-  structure            SchemeStructure @default(FIXED)
+  structure             SchemeStructure              @default(FIXED)
   optionAchievementType SchemeOptionAchievementType? // required for MULTIPLE_OPTIONS; null for FIXED
-  status               SchemeStatus    @default(OPEN)
-  createdById          String
-  createdAt            DateTime        @default(now())
-  updatedAt            DateTime        @updatedAt
-  createdBy            User            @relation("SchemeCreatedBy", fields: [createdById], references: [id])
-  states               SchemeState[]
-  installmentRules     SchemeInstallmentRule[]
-  dealerPlans          DealerSchemePlan[]
-  requirementProducts  SchemeRequirementProduct[]
-  uploadScopes         SchemeUploadBatchScheme[]
-  options              SchemeOption[]
-  eligibleProducts     SchemeEligibleProduct[]
+  status                SchemeStatus                 @default(OPEN)
+  createdById           String
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  createdBy             User                         @relation("SchemeCreatedBy", fields: [createdById], references: [id])
+  states                SchemeState[]
+  installmentRules      SchemeInstallmentRule[]
+  dealerPlans           DealerSchemePlan[]
+  requirementProducts   SchemeRequirementProduct[]
+  uploadScopes          SchemeUploadBatchScheme[]
+  options               SchemeOption[]
+  eligibleProducts      SchemeEligibleProduct[]
+  dailyWorkEntries      DailyWorkEntry[]
 
   @@index([status])
   @@index([isPerpetual, endDate])
@@ -135,13 +143,13 @@ model Scheme {
 /// How the Scheme Value (With GST) is paid out — one row per installment. Percentage rules sum to 100%;
 /// fixed-amount rules sum to the Scheme Value (With GST). Validated when saved with the scheme.
 model SchemeInstallmentRule {
-  id                 String         @id @default(cuid())
-  schemeId           String
-  installmentNumber  Int
-  calculationType    SchemeCalcType
-  value              Decimal        @db.Decimal(14, 2)
+  id                   String         @id @default(cuid())
+  schemeId             String
+  installmentNumber    Int
+  calculationType      SchemeCalcType
+  value                Decimal        @db.Decimal(14, 2)
   daysAfterBillingDate Int
-  scheme             Scheme         @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  scheme               Scheme         @relation(fields: [schemeId], references: [id], onDelete: Cascade)
 
   @@unique([schemeId, installmentNumber])
   @@index([schemeId])
@@ -151,94 +159,94 @@ model SchemeInstallmentRule {
 /// planningStatus (SO submit → RM approve/reject/return) and enrollmentStatus (Admin document
 /// verification → ENROLLED). RM approval is planning approval only; it does NOT enroll the dealer.
 model DealerSchemePlan {
-  id               String                 @id @default(cuid())
-  schemeId         String
-  dealerId         String
-  salesOfficerId   String
-  planningStatus   SchemePlanStatus       @default(DRAFT)
-  enrollmentStatus SchemeEnrollmentStatus @default(PENDING_DOCUMENT)
-  expectedBillingDate DateTime? // the CURRENT planned conversion date (moves when extended)
-  originalConversionDate DateTime? // baseline planned conversion date — never changes once set (extension ceiling anchor)
-  conversionExtensionCount Int   @default(0) // denormalized count for the list badge; history is the source of truth
-  submittedAt      DateTime?
-  rmActedById      String?
-  rmActedAt        DateTime?
-  rmRemarks        String?
-  documentCompleted Boolean               @default(false)
-  documentType     SchemeDocType?
-  verificationRemarks String?
-  enrolledById     String?
-  enrolledAt       DateTime?
+  id                       String                      @id @default(cuid())
+  schemeId                 String
+  dealerId                 String
+  salesOfficerId           String
+  planningStatus           SchemePlanStatus            @default(DRAFT)
+  enrollmentStatus         SchemeEnrollmentStatus      @default(PENDING_DOCUMENT)
+  expectedBillingDate      DateTime? // the CURRENT planned conversion date (moves when extended)
+  originalConversionDate   DateTime? // baseline planned conversion date — never changes once set (extension ceiling anchor)
+  conversionExtensionCount Int                         @default(0) // denormalized count for the list badge; history is the source of truth
+  submittedAt              DateTime?
+  rmActedById              String?
+  rmActedAt                DateTime?
+  rmRemarks                String?
+  documentCompleted        Boolean                     @default(false)
+  documentType             SchemeDocType?
+  verificationRemarks      String?
+  enrolledById             String?
+  enrolledAt               DateTime?
   // --- Part E: new Plan Status / Scheme Status model (old planningStatus/enrollmentStatus kept during migration) ---
-  planStatus       SchemePlanState        @default(DRAFT) // Draft → Pending for RM → Pending Approval → Approved (+ Returned/Rejected)
-  schemeStatus     SchemeConversionStatus @default(PENDING) // appears only after Approved; SO-controlled
-  segmentNumber    Int                    @default(1) // 1 for existing/root plans; later values are split remainders only
-  numberOfSchemes  Int                    @default(1) // dealer takes the same scheme N times (Allow Multi Schemes = Yes)
-  totalSchemeAmount Decimal?              @db.Decimal(14, 2) // effective value (With GST) × numberOfSchemes
-  soNote           String?                // optional per-dealer note written by the Sales Officer in Create Plan
+  planStatus               SchemePlanState             @default(DRAFT) // Draft → Pending for RM → Pending Approval → Approved (+ Returned/Rejected)
+  schemeStatus             SchemeConversionStatus      @default(PENDING) // appears only after Approved; SO-controlled
+  segmentNumber            Int                         @default(1) // 1 for existing/root plans; later values are split remainders only
+  numberOfSchemes          Int                         @default(1) // dealer takes the same scheme N times (Allow Multi Schemes = Yes)
+  totalSchemeAmount        Decimal?                    @db.Decimal(14, 2) // effective value (With GST) × numberOfSchemes
+  soNote                   String? // optional per-dealer note written by the Sales Officer in Create Plan
   // --- Multiple Options (Phase 10). NULL for FIXED plans. While Draft/Returned, selectedOptionId points at
   // the live SchemeOption. On SUBMIT the option config is FROZEN into the snapshot columns below and all
   // downstream reads (installments, achievement target, follow-up) use the snapshot — never the live option.
-  selectedOptionId      String?
-  optionBookingAmount   Decimal?          @db.Decimal(14, 2) // frozen on submission; null uses legacy Scheme.bookingAmount
-  installmentBalance    Boolean           @default(false) // frozen final-balance behavior, including Options Amount; never upgrades on master edit
-  optionLabel           String?
-  optionTargetQty       Decimal?          @db.Decimal(14, 3) // QUANTITY_BASED snapshot target
-  optionTargetValue     Decimal?          @db.Decimal(14, 2) // VALUE_BASED snapshot target
-  optionValueWithoutGST Decimal?          @db.Decimal(14, 2) // snapshot commercial value
-  optionValueWithGST    Decimal?          @db.Decimal(14, 2) // snapshot commercial value (feeds installments)
+  selectedOptionId         String?
+  optionBookingAmount      Decimal?                    @db.Decimal(14, 2) // frozen on submission; null uses legacy Scheme.bookingAmount
+  installmentBalance       Boolean                     @default(false) // frozen final-balance behavior, including Options Amount; never upgrades on master edit
+  optionLabel              String?
+  optionTargetQty          Decimal?                    @db.Decimal(14, 3) // QUANTITY_BASED snapshot target
+  optionTargetValue        Decimal?                    @db.Decimal(14, 2) // VALUE_BASED snapshot target
+  optionValueWithoutGST    Decimal?                    @db.Decimal(14, 2) // snapshot commercial value
+  optionValueWithGST       Decimal?                    @db.Decimal(14, 2) // snapshot commercial value (feeds installments)
   // SO conversion entry (after Approved)
-  conversionDate   DateTime?
-  soBookingStatus  SchemeBookingStatus?
-  soBookingAmount  Decimal?               @db.Decimal(14, 2)
-  soDocumentStatus SchemeSoDocStatus?
-  billingDate      DateTime?
+  conversionDate           DateTime?
+  soBookingStatus          SchemeBookingStatus?
+  soBookingAmount          Decimal?                    @db.Decimal(14, 2)
+  soDocumentStatus         SchemeSoDocStatus?
+  billingDate              DateTime?
   // Admin verification (final source of truth; overrides SO values). SO originals stay in the so* fields.
-  adminConversionDate DateTime?
-  adminBookingStatus  SchemeBookingStatus?
-  adminBookingAmount  Decimal?            @db.Decimal(14, 2)
+  adminConversionDate      DateTime?
+  adminBookingStatus       SchemeBookingStatus?
+  adminBookingAmount       Decimal?                    @db.Decimal(14, 2)
   // Booking-amount coverage (additive, nullable → historical-safe): how many of this plan's proceeding scheme
   // instances the Admin's Paid booking is verified to cover. Coverage/validation/reporting only — it does NOT
   // move schemes forward (the SO conversion split remains the structural boundary). NULL for plans verified
   // before this feature (treated as covering all schemes when Paid). Consumed by Conversion Follow-up.
-  adminBookingSchemeCount Int?
-  adminDocumentStatus SchemeAdminDocStatus?
-  adminBillingDate    DateTime?
+  adminBookingSchemeCount  Int?
+  adminDocumentStatus      SchemeAdminDocStatus?
+  adminBillingDate         DateTime?
   // Pre-placement (Phase 11). prePlacementDays = SO/dealer requested days (within Scheme.prePlacementMaxDays);
   // adminPrePlacementDays = Admin confirmed/override. Confirmed = adminPrePlacementDays ?? prePlacementDays ?? 0.
   // The installment schedule starts from (billing date + confirmed pre-placement days). NULL ⇒ 0 days.
-  prePlacementDays      Int?
-  adminPrePlacementDays Int?
-  adminVerifiedById   String?
-  adminVerifiedAt     DateTime?
+  prePlacementDays         Int?
+  adminPrePlacementDays    Int?
+  adminVerifiedById        String?
+  adminVerifiedAt          DateTime?
   // Multi-scheme billing mode: whether ONE billing date applies to all instances (SO / Admin sides).
-  soBillingSameForAll    Boolean            @default(true)
-  adminBillingSameForAll Boolean            @default(true)
-  createdAt        DateTime               @default(now())
-  updatedAt        DateTime               @updatedAt
-  scheme           Scheme                 @relation(fields: [schemeId], references: [id], onDelete: Cascade)
-  dealer           Dealer                 @relation(fields: [dealerId], references: [id])
-  salesOfficer     User                   @relation("OfficerSchemePlans", fields: [salesOfficerId], references: [id])
-  selectedOption   SchemeOption?          @relation(fields: [selectedOptionId], references: [id], onDelete: Restrict)
-  rmActedBy        User?                  @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
-  enrolledBy       User?                  @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
+  soBillingSameForAll      Boolean                     @default(true)
+  adminBillingSameForAll   Boolean                     @default(true)
+  createdAt                DateTime                    @default(now())
+  updatedAt                DateTime                    @updatedAt
+  scheme                   Scheme                      @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  dealer                   Dealer                      @relation(fields: [dealerId], references: [id])
+  salesOfficer             User                        @relation("OfficerSchemePlans", fields: [salesOfficerId], references: [id])
+  selectedOption           SchemeOption?               @relation(fields: [selectedOptionId], references: [id], onDelete: Restrict)
+  rmActedBy                User?                       @relation("RmActedSchemePlans", fields: [rmActedById], references: [id])
+  enrolledBy               User?                       @relation("EnrolledSchemePlans", fields: [enrolledById], references: [id])
   // Combined-plan billing. Instance billing columns remain for historical records only.
-  billMode Boolean @default(false)
-  soBillCount Int?
-  adminBillCount Int?
-  soAmountWithoutGST Decimal? @db.Decimal(14, 2)
-  soAmountWithGST Decimal? @db.Decimal(14, 2)
-  adminAmountWithoutGST Decimal? @db.Decimal(14, 2)
-  adminAmountWithGST Decimal? @db.Decimal(14, 2)
-  bookingAmount Decimal? @db.Decimal(14, 2)
-  bookingBillNumber Int?
-  billsLockedAt DateTime?
-  bills DealerSchemeBill[]
-  instances        DealerSchemeInstance[]
-  payments         SchemePayment[]
-  conversionExtensions SchemeConversionExtension[]
-  quantitySplitAsSource SchemePlanQuantitySplit? @relation("SchemePlanQuantitySplitSource")
-  quantitySplitAsFuture SchemePlanQuantitySplit? @relation("SchemePlanQuantitySplitFuture")
+  billMode                 Boolean                     @default(false)
+  soBillCount              Int?
+  adminBillCount           Int?
+  soAmountWithoutGST       Decimal?                    @db.Decimal(14, 2)
+  soAmountWithGST          Decimal?                    @db.Decimal(14, 2)
+  adminAmountWithoutGST    Decimal?                    @db.Decimal(14, 2)
+  adminAmountWithGST       Decimal?                    @db.Decimal(14, 2)
+  bookingAmount            Decimal?                    @db.Decimal(14, 2)
+  bookingBillNumber        Int?
+  billsLockedAt            DateTime?
+  bills                    DealerSchemeBill[]
+  instances                DealerSchemeInstance[]
+  payments                 SchemePayment[]
+  conversionExtensions     SchemeConversionExtension[]
+  quantitySplitAsSource    SchemePlanQuantitySplit?    @relation("SchemePlanQuantitySplitSource")
+  quantitySplitAsFuture    SchemePlanQuantitySplit?    @relation("SchemePlanQuantitySplitFuture")
 
   @@unique([schemeId, dealerId, segmentNumber])
   @@index([schemeId, dealerId])
@@ -255,18 +263,18 @@ model DealerSchemePlan {
 /// Immutable audit record for reducing an approved plan at conversion. The source plan keeps the quantity
 /// proceeding now; a FUTURE_DRAFT split links the remaining quantity to another ordinary DealerSchemePlan.
 model SchemePlanQuantitySplit {
-  id                  String                         @id @default(cuid())
-  sourcePlanId        String                         @unique
-  futurePlanId        String?                        @unique
-  originalQuantity    Int
-  proceedingQuantity  Int
-  remainingQuantity   Int
-  disposition         SchemePlanRemainderDisposition
-  createdById         String
-  createdAt           DateTime                       @default(now())
-  sourcePlan          DealerSchemePlan               @relation("SchemePlanQuantitySplitSource", fields: [sourcePlanId], references: [id], onDelete: Cascade)
-  futurePlan          DealerSchemePlan?              @relation("SchemePlanQuantitySplitFuture", fields: [futurePlanId], references: [id], onDelete: SetNull)
-  createdBy           User                           @relation("SchemePlanQuantitySplitCreatedBy", fields: [createdById], references: [id])
+  id                 String                         @id @default(cuid())
+  sourcePlanId       String                         @unique
+  futurePlanId       String?                        @unique
+  originalQuantity   Int
+  proceedingQuantity Int
+  remainingQuantity  Int
+  disposition        SchemePlanRemainderDisposition
+  createdById        String
+  createdAt          DateTime                       @default(now())
+  sourcePlan         DealerSchemePlan               @relation("SchemePlanQuantitySplitSource", fields: [sourcePlanId], references: [id], onDelete: Cascade)
+  futurePlan         DealerSchemePlan?              @relation("SchemePlanQuantitySplitFuture", fields: [futurePlanId], references: [id], onDelete: SetNull)
+  createdBy          User                           @relation("SchemePlanQuantitySplitCreatedBy", fields: [createdById], references: [id])
 
   @@index([createdById])
   @@index([disposition])
@@ -277,11 +285,11 @@ model SchemePlanQuantitySplit {
 model SchemeConversionExtension {
   id                     String           @id @default(cuid())
   planId                 String
-  extensionNumber        Int              // 1, 2, 3 … within this plan
-  originalConversionDate DateTime         // baseline (same across all of a plan's extensions)
-  previousConversionDate DateTime         // the current date before this extension
-  newConversionDate      DateTime         // the date after this extension
-  daysAdded              Int              // newConversionDate − previousConversionDate, in calendar days
+  extensionNumber        Int // 1, 2, 3 … within this plan
+  originalConversionDate DateTime // baseline (same across all of a plan's extensions)
+  previousConversionDate DateTime // the current date before this extension
+  newConversionDate      DateTime // the date after this extension
+  daysAdded              Int // newConversionDate − previousConversionDate, in calendar days
   extendedById           String
   createdAt              DateTime         @default(now())
   plan                   DealerSchemePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
@@ -295,24 +303,24 @@ model SchemeConversionExtension {
 /// instance is one occurrence of the scheme and owns its OWN billing dates + installment schedule. This
 /// makes multi-scheme dealers first-class without duplicating DealerSchemePlan rows.
 model DealerSchemeInstance {
-  id                 String                    @id @default(cuid())
-  dealerSchemePlanId String
-  instanceNumber     Int
-  soBillingDate      DateTime?
-  adminBillingDate   DateTime? // authoritative billing date for this instance's installment schedule
-  billMode           Boolean @default(false)
-  soBillCount        Int?
-  adminBillCount     Int?
-  adminAmountWithoutGST Decimal? @db.Decimal(14, 2)
-  adminAmountWithGST  Decimal? @db.Decimal(14, 2)
-  bookingAmount      Decimal? @db.Decimal(14, 2) // frozen instance booking reservation
-  bookingBillNumber  Int?
-  billsLockedAt      DateTime?
-  bills              DealerSchemeBill[]
-  createdAt          DateTime                  @default(now())
-  updatedAt          DateTime                  @updatedAt
-  dealerSchemePlan   DealerSchemePlan          @relation(fields: [dealerSchemePlanId], references: [id], onDelete: Cascade)
-  installments       DealerSchemeInstallment[]
+  id                    String                    @id @default(cuid())
+  dealerSchemePlanId    String
+  instanceNumber        Int
+  soBillingDate         DateTime?
+  adminBillingDate      DateTime? // authoritative billing date for this instance's installment schedule
+  billMode              Boolean                   @default(false)
+  soBillCount           Int?
+  adminBillCount        Int?
+  adminAmountWithoutGST Decimal?                  @db.Decimal(14, 2)
+  adminAmountWithGST    Decimal?                  @db.Decimal(14, 2)
+  bookingAmount         Decimal?                  @db.Decimal(14, 2) // frozen instance booking reservation
+  bookingBillNumber     Int?
+  billsLockedAt         DateTime?
+  bills                 DealerSchemeBill[]
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  dealerSchemePlan      DealerSchemePlan          @relation(fields: [dealerSchemePlanId], references: [id], onDelete: Cascade)
+  installments          DealerSchemeInstallment[]
 
   @@unique([dealerSchemePlanId, instanceNumber])
   @@index([dealerSchemePlanId])
@@ -320,24 +328,25 @@ model DealerSchemeInstance {
 
 /// One declared bill of a scheme instance. SO dates are references; Admin data drives its locked schedule.
 model DealerSchemeBill {
-  id String @id @default(cuid())
-  instanceId String? // historical instance-owned bills; never reparented
-  planId String? // new combined-plan bills
-  plan DealerSchemePlan? @relation(fields: [planId], references: [id], onDelete: Cascade)
-  partNumber Int
-  soBillDate DateTime?
-  soAmountWithoutGST Decimal? @db.Decimal(14, 2)
-  soAmountWithGST Decimal? @db.Decimal(14, 2)
-  adminBillDate DateTime?
-  amountWithoutGST Decimal? @db.Decimal(14, 2)
-  amountWithGST Decimal? @db.Decimal(14, 2)
-  verifiedAt DateTime?
-  verifiedById String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  instance DealerSchemeInstance? @relation(fields: [instanceId], references: [id], onDelete: Cascade)
-  installments DealerSchemeInstallment[]
-  billProducts DealerSchemeBillProduct[]
+  id                 String                    @id @default(cuid())
+  instanceId         String? // historical instance-owned bills; never reparented
+  planId             String? // new combined-plan bills
+  plan               DealerSchemePlan?         @relation(fields: [planId], references: [id], onDelete: Cascade)
+  partNumber         Int
+  soBillDate         DateTime?
+  soAmountWithoutGST Decimal?                  @db.Decimal(14, 2)
+  soAmountWithGST    Decimal?                  @db.Decimal(14, 2)
+  adminBillDate      DateTime?
+  amountWithoutGST   Decimal?                  @db.Decimal(14, 2)
+  amountWithGST      Decimal?                  @db.Decimal(14, 2)
+  verifiedAt         DateTime?
+  verifiedById       String?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  instance           DealerSchemeInstance?     @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  installments       DealerSchemeInstallment[]
+  billProducts       DealerSchemeBillProduct[]
+
   @@unique([planId, partNumber])
   @@unique([instanceId, partNumber])
   @@unique([id, instanceId])
@@ -352,16 +361,16 @@ model DealerSchemeBill {
 /// `productId` is stored plain (no FK relation) to avoid touching the Product model; integrity is enforced
 /// at the application layer. Cascades with its bill.
 model DealerSchemeBillProduct {
-  id             String   @id @default(cuid())
+  id             String           @id @default(cuid())
   billId         String
   bill           DealerSchemeBill @relation(fields: [billId], references: [id], onDelete: Cascade)
   productId      String
-  soQty          Decimal? @db.Decimal(14, 3) // SO planned/proposed quantity for this product on this bill
-  adminQty       Decimal? @db.Decimal(14, 3) // Admin actual/verified quantity (authoritative)
-  rateWithoutGST Decimal  @db.Decimal(14, 2) // snapshotted at conversion
-  rateWithGST    Decimal  @db.Decimal(14, 2)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  soQty          Decimal?         @db.Decimal(14, 3) // SO planned/proposed quantity for this product on this bill
+  adminQty       Decimal?         @db.Decimal(14, 3) // Admin actual/verified quantity (authoritative)
+  rateWithoutGST Decimal          @db.Decimal(14, 2) // snapshotted at conversion
+  rateWithGST    Decimal          @db.Decimal(14, 2)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
 
   @@unique([billId, productId])
   @@index([billId])
@@ -371,21 +380,21 @@ model DealerSchemeBillProduct {
 /// Bill-linked schedules are immutable after creation. A null billId preserves legacy instance schedules.
 /// Received amounts remain rollups of SchemePaymentAllocation records.
 model DealerSchemeInstallment {
-  id                 String               @id @default(cuid())
+  id                 String                    @id @default(cuid())
   billId             String?
-  bill               DealerSchemeBill? @relation(fields: [billId], references: [id], onDelete: Restrict)
+  bill               DealerSchemeBill?         @relation(fields: [billId], references: [id], onDelete: Restrict)
   instanceId         String? // NULL for new plan-owned bill schedules
   installmentNumber  Int
-  plannedAmount      Decimal              @db.Decimal(14, 2)
+  plannedAmount      Decimal                   @db.Decimal(14, 2)
   plannedDate        DateTime?
-  receivedAmount     Decimal?             @db.Decimal(14, 2)
+  receivedAmount     Decimal?                  @db.Decimal(14, 2)
   receivedDate       DateTime?
-  status             String               @default("PENDING") // PENDING | RECEIVED (OVERDUE derived on read)
+  status             String                    @default("PENDING") // PENDING | RECEIVED (OVERDUE derived on read)
   createdById        String?
   updatedById        String?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  instance           DealerSchemeInstance? @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  instance           DealerSchemeInstance?     @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   paymentAllocations SchemePaymentAllocation[]
 
   // Legacy (billId IS NULL) uniqueness remains a partial index in SQL.
@@ -451,19 +460,19 @@ model SchemeState {
 /// VALUE_BASED + INDIVIDUAL uses `requiredValue`; VALUE_BASED + COMBINED lists the participating products
 /// here (both null) with the single target on Scheme.combinedRequiredValue.
 model SchemeRequirementProduct {
-  id            String   @id @default(cuid())
-  schemeId      String
-  productId     String
-  requiredQty   Decimal? @db.Decimal(14, 3)
-  requiredValue Decimal? @db.Decimal(14, 2)
+  id             String   @id @default(cuid())
+  schemeId       String
+  productId      String
+  requiredQty    Decimal? @db.Decimal(14, 3)
+  requiredValue  Decimal? @db.Decimal(14, 2)
   // FIXED Product Quantity and Value Based schemes: per-product billing rates. Additive + nullable keeps
   // legacy rows historical-safe; new/edited schemes require them. Snapshotted at conversion.
   rateWithoutGST Decimal? @db.Decimal(14, 2)
   rateWithGST    Decimal? @db.Decimal(14, 2)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  scheme        Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
-  product       Product  @relation(fields: [productId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  scheme         Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  product        Product  @relation(fields: [productId], references: [id])
 
   @@unique([schemeId, productId])
   @@index([schemeId])
@@ -475,20 +484,20 @@ model SchemeRequirementProduct {
 /// optionAchievementType). Each option carries its OWN commercial value pair. Options are never hard-deleted
 /// once selected by a dealer — they are discontinued (isActive=false) to preserve historical integrity.
 model SchemeOption {
-  id              String   @id @default(cuid())
+  id              String             @id @default(cuid())
   schemeId        String
-  label           String?  // optional usability name ("Basic"/"Standard"/"Premium"); NOT the identity
-  targetQty       Decimal? @db.Decimal(14, 3) // set when scheme.optionAchievementType = QUANTITY_BASED
-  targetValue     Decimal? @db.Decimal(14, 2) // set when scheme.optionAchievementType = VALUE_BASED
-  valueWithoutGST Decimal  @db.Decimal(14, 2)
-  valueWithGST    Decimal  @db.Decimal(14, 2)
-  bookingAmount   Decimal? @db.Decimal(14, 2) // null: legacy global Scheme.bookingAmount
-  sortOrder       Int      @default(0)
-  isActive        Boolean  @default(true) // false = discontinued: hidden from new selections, kept for history
+  label           String? // optional usability name ("Basic"/"Standard"/"Premium"); NOT the identity
+  targetQty       Decimal?           @db.Decimal(14, 3) // set when scheme.optionAchievementType = QUANTITY_BASED
+  targetValue     Decimal?           @db.Decimal(14, 2) // set when scheme.optionAchievementType = VALUE_BASED
+  valueWithoutGST Decimal            @db.Decimal(14, 2)
+  valueWithGST    Decimal            @db.Decimal(14, 2)
+  bookingAmount   Decimal?           @db.Decimal(14, 2) // null: legacy global Scheme.bookingAmount
+  sortOrder       Int                @default(0)
+  isActive        Boolean            @default(true) // false = discontinued: hidden from new selections, kept for history
   discontinuedAt  DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  scheme          Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  scheme          Scheme             @relation(fields: [schemeId], references: [id], onDelete: Cascade)
   dealerPlans     DealerSchemePlan[]
 
   @@index([schemeId])
@@ -498,16 +507,16 @@ model SchemeOption {
 /// selected option's single total target — they carry NO per-product requirement (contrast
 /// SchemeRequirementProduct, used only by FIXED schemes). Kept in a separate table for clear semantics.
 model SchemeEligibleProduct {
-  id        String   @id @default(cuid())
-  schemeId  String
-  productId String
+  id             String   @id @default(cuid())
+  schemeId       String
+  productId      String
   // OPTIONS schemes: per-product billing rates for Quantity Based and Value Based billing.
   // Additive + nullable → historical-safe. Snapshotted onto the plan at conversion.
   rateWithoutGST Decimal? @db.Decimal(14, 2)
   rateWithGST    Decimal? @db.Decimal(14, 2)
-  createdAt DateTime @default(now())
-  scheme    Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
-  product   Product  @relation(fields: [productId], references: [id])
+  createdAt      DateTime @default(now())
+  scheme         Scheme   @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  product        Product  @relation(fields: [productId], references: [id])
 
   @@unique([schemeId, productId])
   @@index([schemeId])
@@ -518,15 +527,15 @@ model SchemeEligibleProduct {
 /// uploaded file. Purely a scheme-tracking layer — it never writes MonthlyEntry or any normal Sales
 /// Planning actual. Superseded (not deleted) when a covered scheme+range is re-uploaded, for auditability.
 model SchemeUploadBatch {
-  id           String                  @id @default(cuid())
+  id           String                    @id @default(cuid())
   uploadedById String
   fileName     String
-  startDate    DateTime                // authoritative tracking-period start (no fake per-row dates)
-  endDate      DateTime                // authoritative tracking-period end
+  startDate    DateTime // authoritative tracking-period start (no fake per-row dates)
+  endDate      DateTime // authoritative tracking-period end
   summary      String?
-  createdAt    DateTime                @default(now())
-  updatedAt    DateTime                @updatedAt
-  uploadedBy   User                    @relation("SchemeUploadBatches", fields: [uploadedById], references: [id])
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+  uploadedBy   User                      @relation("SchemeUploadBatches", fields: [uploadedById], references: [id])
   scopes       SchemeUploadBatchScheme[]
 
   @@index([createdAt])
@@ -536,20 +545,20 @@ model SchemeUploadBatch {
 /// a scheme+range supersedes ONLY its own scope row + SchemeSale rows; other schemes in the same range or
 /// the same file are never affected. Also carries the analysis summary counts for history.
 model SchemeUploadBatchScheme {
-  id                 String                  @id @default(cuid())
-  batchId            String
-  schemeId           String
-  startDate          DateTime
-  endDate            DateTime
-  status             SchemeUploadStatus      @default(ACTIVE)
-  enrolledChecked    Int                     @default(0) // enrolled dealers considered
-  matchedQty         Decimal?                @db.Decimal(14, 3)
-  matchedValue       Decimal?                @db.Decimal(14, 2)
-  supersededAt       DateTime?
-  createdAt          DateTime                @default(now())
-  batch              SchemeUploadBatch       @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  scheme             Scheme                  @relation(fields: [schemeId], references: [id], onDelete: Cascade)
-  sales              SchemeSale[]
+  id              String             @id @default(cuid())
+  batchId         String
+  schemeId        String
+  startDate       DateTime
+  endDate         DateTime
+  status          SchemeUploadStatus @default(ACTIVE)
+  enrolledChecked Int                @default(0) // enrolled dealers considered
+  matchedQty      Decimal?           @db.Decimal(14, 3)
+  matchedValue    Decimal?           @db.Decimal(14, 2)
+  supersededAt    DateTime?
+  createdAt       DateTime           @default(now())
+  batch           SchemeUploadBatch  @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  scheme          Scheme             @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  sales           SchemeSale[]
 
   @@index([schemeId, startDate, endDate, status])
   @@index([batchId])
@@ -570,8 +579,8 @@ model SchemeSale {
   productId      String
   qty            Decimal                 @db.Decimal(14, 3)
   value          Decimal                 @db.Decimal(14, 2)
-  rawDealerName  String                  // original Tally spelling (audit)
-  rawProductName String                  // original Tally spelling (audit)
+  rawDealerName  String // original Tally spelling (audit)
+  rawProductName String // original Tally spelling (audit)
   createdAt      DateTime                @default(now())
   scope          SchemeUploadBatchScheme @relation(fields: [scopeId], references: [id], onDelete: Cascade)
   dealer         Dealer                  @relation(fields: [dealerId], references: [id])
@@ -588,18 +597,18 @@ model SchemeSale {
 /// identity (no product duplication); this is a per-(group, product) overlay. Plans SNAPSHOT the price
 /// they use (PlanLine.rateSnapshot) at creation, so changing a group price never alters historical plans.
 model GroupProductCatalogue {
-  id            String    @id @default(cuid())
-  groupId       String
-  productId     String
-  price         Decimal   @db.Decimal(12, 2) // group price (initially copied from Master, then editable)
-  isActive      Boolean   @default(true) // available for THIS group's planning/product selection
-  priceIsInitial Boolean  @default(true) // still the copied Master price (not yet edited for the group)
-  isClearance   Boolean   @default(false) // group-specific clearance flag (display-only; never affects calc)
-  clearanceQty  Int? // clearance quantity to move (nullable)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  group         UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  product       Product   @relation(fields: [productId], references: [id])
+  id             String    @id @default(cuid())
+  groupId        String
+  productId      String
+  price          Decimal   @db.Decimal(12, 2) // group price (initially copied from Master, then editable)
+  isActive       Boolean   @default(true) // available for THIS group's planning/product selection
+  priceIsInitial Boolean   @default(true) // still the copied Master price (not yet edited for the group)
+  isClearance    Boolean   @default(false) // group-specific clearance flag (display-only; never affects calc)
+  clearanceQty   Int? // clearance quantity to move (nullable)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  group          UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  product        Product   @relation(fields: [productId], references: [id])
 
   @@unique([groupId, productId])
   @@index([groupId])
@@ -633,35 +642,35 @@ model Brand {
 /// Product master (replaces the Excel PRICELIST). Rate & NBV% are read-only to
 /// SO/RM and flow into planning by product identity — never by row position.
 model Product {
-  id            String     @id @default(cuid())
-  name          String     @unique
+  id                     String                     @id @default(cuid())
+  name                   String                     @unique
   // Optional canonical/Tally spelling used ONLY for Sales Upload matching. When set, a Tally product whose
   // name resolves to this canonicalName is matched to the product whose own name equals the canonicalName
   // (the master/canonical row), so alternate-spelling duplicates never win. Not unique; does not affect name.
-  canonicalName String?
-  technicalName String?
-  rate          Decimal    @db.Decimal(12, 2)
-  nbvPercent    Decimal    @db.Decimal(6, 4)
-  categoryId    String?
-  brandId       String?
-  isActive      Boolean    @default(true)
+  canonicalName          String?
+  technicalName          String?
+  rate                   Decimal                    @db.Decimal(12, 2)
+  nbvPercent             Decimal                    @db.Decimal(6, 4)
+  categoryId             String?
+  brandId                String?
+  isActive               Boolean                    @default(true)
   // Product Merge / Consolidation (Phase 12). When set, this product has been consolidated INTO mergedInto:
   // it is deactivated + hidden from operational selectors, but the row is retained so history/audit survive
   // and name/id resolution can map this (source) product to the surviving product. NULL = normal product.
-  mergedIntoId  String?
-  mergedAt      DateTime?
-  mergedById    String?
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
-  planLines     PlanLine[]
-  brand         Brand?     @relation(fields: [brandId], references: [id])
-  category      Category?  @relation(fields: [categoryId], references: [id])
-  groupCatalogues GroupProductCatalogue[]
-  schemeRequirements SchemeRequirementProduct[]
-  schemeSales        SchemeSale[]
+  mergedIntoId           String?
+  mergedAt               DateTime?
+  mergedById             String?
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  planLines              PlanLine[]
+  brand                  Brand?                     @relation(fields: [brandId], references: [id])
+  category               Category?                  @relation(fields: [categoryId], references: [id])
+  groupCatalogues        GroupProductCatalogue[]
+  schemeRequirements     SchemeRequirementProduct[]
+  schemeSales            SchemeSale[]
   schemeEligibleProducts SchemeEligibleProduct[]
-  mergedInto    Product?   @relation("ProductMerge", fields: [mergedIntoId], references: [id])
-  mergedFrom    Product[]  @relation("ProductMerge")
+  mergedInto             Product?                   @relation("ProductMerge", fields: [mergedIntoId], references: [id])
+  mergedFrom             Product[]                  @relation("ProductMerge")
 
   @@index([categoryId])
   @@index([brandId])
@@ -673,10 +682,10 @@ model Product {
 /// never affects planning/catalogue data directly; it records the operation and enables safe reversal.
 model ProductMerge {
   id                 String    @id @default(cuid())
-  sourceProductId    String    // the non-surviving product (e.g. ADAM PLUS)
-  survivingProductId String    // the surviving product (e.g. ADAM)
+  sourceProductId    String // the non-surviving product (e.g. ADAM PLUS)
+  survivingProductId String // the surviving product (e.g. ADAM)
   performedById      String
-  catalogueImpact    String?   // JSON summary of per-group action taken (for audit + safe reversal)
+  catalogueImpact    String? // JSON summary of per-group action taken (for audit + safe reversal)
   note               String?
   reversedAt         DateTime?
   reversedById       String?
@@ -711,33 +720,250 @@ model Dealer {
   cnRequests          CnRequest[]
   schemePlans         DealerSchemePlan[]
   schemeSales         SchemeSale[]
+  dailyWorkEntries    DailyWorkEntry[]
 
   @@index([isActive])
   @@index([status])
 }
 
 /// Credit Note (CN) Request raised by a Sales Officer for one of their dealers. Workflow:
-/// SUBMITTED → ACCEPTED (RM) → APPROVED (Admin); SUBMITTED → REJECTED; ACCEPTED → APPROVED.
-/// The Admin has final authority and may APPROVE directly without an RM acceptance.
+/// SUBMITTED → ACCEPTED_NOT_POSTED → POSTED_IN_LEDGER, or SUBMITTED → REJECTED.
+/// Legacy ACCEPTED / APPROVED rows remain unchanged and are treated as already posted by the application.
 model CnRequest {
-  id             String   @id @default(cuid())
-  officerId      String // the Sales Officer who raised it
-  dealerId       String // the "Party"
-  cnType         String // CD | FRAT | Scheme
-  amount         Decimal? @db.Decimal(14, 2) // optional approx amount
-  paymentStatus  String // Bill unpaid | Bill Paid
-  details        String? // optional free-text details from the raiser
-  status         String   @default("SUBMITTED") // SUBMITTED | ACCEPTED | APPROVED | REJECTED
-  remarks        String? // optional note captured on reject
-  actedByRmId    String? // RM who accepted/rejected
-  actedByAdminId String? // Admin who approved/rejected
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  officer        User     @relation("OfficerCnRequests", fields: [officerId], references: [id])
-  dealer         Dealer   @relation(fields: [dealerId], references: [id])
+  id                          String           @id @default(cuid())
+  officerId                   String // the Sales Officer who raised it
+  dealerId                    String // the "Party"
+  cnType                      String // CD | Freight | Scheme | Demo | Damage
+  amount                      Decimal?         @db.Decimal(14, 2) // optional approx amount
+  paymentStatus               String? // historical/future use; not collected for new requests
+  postedAmount                Decimal?         @db.Decimal(14, 2) // actual amount entered by Admin when posted in ledger
+  paymentOriginalAmount       Decimal?         @db.Decimal(14, 2) // immutable Admin-entered starting amount for new Payment Pending workflows
+  paymentOutstandingAmount    Decimal?         @db.Decimal(14, 2) // current amount still requiring payment follow-up
+  paymentTrackingMode         String? // PAYMENT_V1 | NONE; NULL preserves the legacy taskDate behavior
+  // Admin verification of the current payment status. SO reports are provisional (unverified → gray pill);
+  // Admin verification is authoritative (verified → green pill). An SO report resets this to false.
+  paymentVerified             Boolean          @default(false)
+  details                     String? // required for new requests by the service; nullable for historical compatibility
+  rejectionReason             String? // BILLING_CONDITION_NOT_MET | PAYMENT_CONDITION_NOT_MET | OTHER; nullable for historical rows
+  rejectionReasonDetails      String? // required only for new OTHER rejections
+  acceptanceReason            String? // PAYMENT_PENDING | OTHER; used only for ACCEPTED_NOT_POSTED
+  acceptanceReasonDetails     String? // required only for new OTHER acceptances
+  cnExpiryDays                Int? // required for new ACCEPTED_NOT_POSTED actions; nullable for historical compatibility
+  cnWorkingDocument           String? // database-backed base64 data URL; required for new acceptance actions
+  cnWorkingFileName           String?
+  cnWorkingMimeType           String?
+  cnWorkingFileSize           Int?
+  cnWorkingUploadedById       String?
+  cnWorkingUploadedAt         DateTime?
+  status                      String           @default("SUBMITTED") // SUBMITTED | REJECTED | ACCEPTED_NOT_POSTED | POSTED_IN_LEDGER; legacy ACCEPTED/APPROVED
+  remarks                     String? // legacy free-text rejection note; retained for historical rows
+  actedByRmId                 String? // RM who accepted/rejected
+  actedByAdminId              String? // Admin who accepted/rejected/posted
+  acceptedAt                  DateTime? // authoritative transition time into ACCEPTED_NOT_POSTED
+  rejectedAt                  DateTime? // authoritative transition time into REJECTED
+  postedAt                    DateTime? // authoritative transition time into POSTED_IN_LEDGER
+  // CN follow-up task: when ACCEPTED_NOT_POSTED, the request itself is the SO's follow-up task. The SO
+  // chooses the Daily Work date it should appear on. NULL = pending/unscheduled (not in any Daily Work day).
+  // A pure business date (@db.Date) — no timezone shift. Changing it MOVES the same task (never duplicates).
+  taskDate                    DateTime?        @db.Date
+  legacyDailyWorkEntryId      String? // current editable Recovery row containing this legacy task's contribution
+  legacyDailyWorkContribution Decimal?         @db.Decimal(14, 2) // frozen amount added to that row; cleared on reschedule
+  // Explicit "confirmed for today's Daily Work" acknowledgement, SEPARATE from payment/taskStatus. Set true only
+  // by the SO's explicit Confirm action; reset to false on reschedule (task returns to a future date). Never
+  // implies the payment task is COMPLETED.
+  legacyDailyWorkConfirmed    Boolean          @default(false)
+  createdAt                   DateTime         @default(now())
+  updatedAt                   DateTime         @updatedAt
+  officer                     User             @relation("OfficerCnRequests", fields: [officerId], references: [id])
+  dealer                      Dealer           @relation(fields: [dealerId], references: [id])
+  paymentEvents               CnPaymentEvent[]
+  legacyDailyWorkEntry        DailyWorkEntry?  @relation("LegacyCnTaskDailyWorkEntry", fields: [legacyDailyWorkEntryId], references: [id], onDelete: SetNull)
 
   @@index([officerId])
   @@index([status])
+  @@index([officerId, taskDate]) // Daily Work lookup: this officer's CN tasks scheduled on a given date
+  @@index([legacyDailyWorkEntryId])
+}
+
+/// Immutable CN payment decisions. A row may also own the one Recovery follow-up task produced by that
+/// decision. This keeps repeated CN follow-ups in the existing Daily Work Recovery UI while giving every
+/// task a stable id, amount, date and lifecycle. Historical CnRequest.taskDate rows remain untouched.
+model CnPaymentEvent {
+  id                    String          @id @default(cuid())
+  cnRequestId           String
+  status                String // PENDING | NOT_PAID | PARTIAL_PAID | PAID
+  amountPaid            Decimal?        @db.Decimal(14, 2)
+  eventDate             DateTime        @db.Date
+  outstandingBefore     Decimal         @db.Decimal(14, 2)
+  outstandingAfter      Decimal         @db.Decimal(14, 2)
+  taskAmount            Decimal?        @db.Decimal(14, 2)
+  taskDate              DateTime?       @db.Date
+  taskStatus            String? // UNSCHEDULED | SCHEDULED | COMPLETED; NULL when the event creates no task
+  taskRescheduled       Boolean         @default(false) // false = system-assigned next working day; true once the SO changes the date
+  taskCompletedAt       DateTime?
+  dailyWorkEntryId      String? // current editable Recovery row containing this task's contribution
+  dailyWorkContribution Decimal?        @db.Decimal(14, 2) // frozen amount added to that row; cleared on reschedule
+  // Explicit "confirmed for today's Daily Work" acknowledgement, SEPARATE from payment status and taskStatus.
+  // Set true only by the SO's explicit Confirm action; reset to false on reschedule. Never marks the task COMPLETED.
+  dailyWorkConfirmed    Boolean         @default(false)
+  source                String // ACCEPTANCE | SO_UPDATE | ADMIN_UPDATE | ADMIN_CORRECTION
+  requestKey            String          @unique // client/server idempotency key; one status change creates at most one event/task
+  recordedById          String
+  createdAt             DateTime        @default(now())
+  cnRequest             CnRequest       @relation(fields: [cnRequestId], references: [id], onDelete: Restrict)
+  recordedBy            User            @relation("CnPaymentEventRecordedBy", fields: [recordedById], references: [id])
+  dailyWorkEntry        DailyWorkEntry? @relation("CnPaymentEventDailyWorkEntry", fields: [dailyWorkEntryId], references: [id], onDelete: SetNull)
+
+  @@index([cnRequestId, createdAt])
+  @@index([cnRequestId, taskStatus])
+  @@index([taskDate])
+  @@index([dailyWorkEntryId])
+}
+
+/// Party Planning (Phase 1) — a minimal Sales Officer planning record with a Draft → Submit → Admin
+/// Approval workflow. One row per planned party appointment; there is intentionally NO Party Master, no
+/// contacts/visit-report/follow-up. `status` mirrors the app's plain-string convention (see CnRequest):
+/// DRAFT → PENDING_APPROVAL → APPROVED / REJECTED. Rejected plans become owner-editable again (the app's
+/// Returned/Rejected → editable convention). partyName/marketName/appointmentDate are nullable so a Draft
+/// may be incomplete; Submit enforces all three (server-side). appointmentDate is a pure business date
+/// (@db.Date) to avoid any timezone shift. Phase 2 will connect approved plans to the calendar.
+model PartyPlan {
+  id              String    @id @default(cuid())
+  salesOfficerId  String // the owner Sales Officer who created it
+  partyName       String?
+  marketName      String?
+  appointmentDate DateTime? @db.Date
+  status          String    @default("DRAFT") // DRAFT | PENDING_APPROVAL | APPROVED | REJECTED
+  remarks         String? // optional note captured on Admin reject
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  salesOfficer    User      @relation("PartyPlanOfficer", fields: [salesOfficerId], references: [id])
+
+  @@index([salesOfficerId])
+  @@index([status])
+}
+
+/// Daily Work Template — a Sales Officer's daily execution entry for ONE row in ONE section
+/// (SALES | RECOVERY | APPOINTMENT | SCHEME_CONVERSION) on ONE business date. Stores ONLY daily-execution
+/// data that does not already exist anywhere else: the officer-entered Today's Plan, the manual actual/result
+/// entered after submission, the Sales type, and (for Scheme Conversion) a reference to an existing planned
+/// Scheme. It deliberately does NOT duplicate any source of truth — Monthly Sales Plan / actual sales come
+/// live from MonthlyEntry, Monthly Recovery from RecoveryPlanDealer, planned scheme units + converted units
+/// from DealerSchemePlan. Pending and the combined-summary row are always DERIVED at read time — never stored.
+///
+/// Row identity: `rowKey` is the per-section natural key (SALES/RECOVERY → the dealerId; SCHEME_CONVERSION →
+/// "dealerId:schemeId" so a dealer may appear once per planned scheme; APPOINTMENT → a client row id, since
+/// its dealer/market are free text). The unique (officerId, workDate, batchId, section, rowKey) enforces
+/// "no duplicate rows" inside one batch while allowing the same row identity in later batches.
+///
+/// Lifecycle: DRAFT → PLAN_SUBMITTED → FINALIZED. Legacy SUBMITTED rows are retained for compatibility.
+/// Post-submit fields (Today's Sales/Recovery `todaysActual`; Appointment/Achievability `resultStatus`) are
+/// entered only on the exact frozen entry. `workDate` is a pure business date (@db.Date) — no timezone shift.
+model DailyWorkEntry {
+  id                   String           @id @default(cuid())
+  officerId            String // the owner Sales Officer
+  dealerId             String? // real scoped Dealer (SALES/RECOVERY/SCHEME_CONVERSION); NULL for typed APPOINTMENT rows
+  rowKey               String           @default("") // per-section natural key (see model doc); makes uniqueness section-correct
+  workDate             DateTime         @db.Date
+  batchId              String           @default("") // immutable planning-batch identity; current batch comes from DailyWorkDay
+  section              String // SALES | RECOVERY | APPOINTMENT | SCHEME_CONVERSION | SUMMARY (Visits + Others; one row/batch)
+  // Appointment-only: the SO types the dealer + market (no Dealer master lookup for this section).
+  typedDealerName      String?
+  marketName           String?
+  todaysPlan           Decimal?         @db.Decimal(14, 2) // officer-entered plan for the day (₹ for Sales/Recovery; units for Conversion)
+  todaysActual         Decimal?         @db.Decimal(14, 2) // manual actual (Today's Sales / Today's Recovery); post-submit
+  // Post-submit result for the non-numeric sections: APPOINTED | NOT_APPOINTED (Appointment) or YES | NO
+  // (Scheme Conversion achievability). Never auto-derived.
+  resultStatus         String?
+  entryType            String           @default("REGULAR") // REGULAR | SCHEME (Sales only)
+  schemeId             String? // planned Scheme reference for SCHEME_CONVERSION (and SCHEME-type Sales); never free text
+  // SUMMARY section (one row per batch): planned Visits plus a free-text note. Never dealer/row-scoped.
+  dealerVisits         Int? // Visits section — planned dealer visits for the day (NULL until the Visits section is saved)
+  newPartyVisits       Int? // Visits section — planned new-party visits for the day (NULL until saved; 0 is explicit data)
+  actualDealerVisits   Int? // Daily Report actual for this submitted batch's Dealer Visits plan
+  actualNewPartyVisits Int? // Daily Report actual for this submitted batch's New Party Visits plan
+  others               String? // Others section — free-form daily note (optional)
+  // Section completion: the ONLY persisted piece of the FILLED/NO_PLAN/REMAINING model. A CSV set of the
+  // mandatory section names the SO explicitly marked "No Plan" for this day (e.g. "RECOVERY,SCHEME_CONVERSION").
+  // FILLED/REMAINING are always DERIVED from real section data — never stored. Lives on the SUMMARY row.
+  noPlanSections       String?
+  // Legacy location for the prior day-level Self Rating. New final ratings live on DailyWorkDay; this remains
+  // nullable and untouched so historical records keep their original value.
+  selfRating           Int?
+  status               String           @default("DRAFT") // DRAFT | PLAN_SUBMITTED | FINALIZED | legacy SUBMITTED
+  planSubmittedAt      DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  officer              User             @relation("DailyWorkOfficer", fields: [officerId], references: [id])
+  dealer               Dealer?          @relation(fields: [dealerId], references: [id])
+  scheme               Scheme?          @relation(fields: [schemeId], references: [id])
+  cnPaymentTasks       CnPaymentEvent[] @relation("CnPaymentEventDailyWorkEntry")
+  legacyCnTasks        CnRequest[]      @relation("LegacyCnTaskDailyWorkEntry")
+
+  // A row key is unique only inside one planning batch. The same dealer may appear in later immutable batches.
+  @@unique([officerId, workDate, batchId, section, rowKey])
+  @@index([officerId])
+  @@index([dealerId])
+  @@index([schemeId])
+  @@index([workDate])
+  @@index([batchId])
+}
+
+/// One authoritative lifecycle record per officer and business date. Planning batches remain in DailyWorkEntry;
+/// this row identifies the current editable batch and owns final Daily Report submission + Self Rating.
+model DailyWorkDay {
+  id             String    @id @default(cuid())
+  officerId      String
+  workDate       DateTime  @db.Date
+  currentBatchId String
+  status         String    @default("OPEN") // OPEN | FINALIZED
+  selfRating     Int?
+  finalizedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  officer        User      @relation("DailyWorkDayOfficer", fields: [officerId], references: [id])
+
+  @@unique([officerId, workDate])
+  @@index([officerId])
+  @@index([workDate])
+  @@index([status])
+}
+
+/// A Regional Manager's IMMUTABLE daily review of a Sales Officer's submitted Daily Work (Phase 2). A Daily Work
+/// "submission" is identified by (officerId, workDate) — the row-based model has no single submission id — so the
+/// review is keyed the same way. Exactly ONE review may exist per (officerId, workDate): the @@unique both blocks
+/// duplicate/concurrent creation at the DB level and makes the review immutable (the service only ever inserts,
+/// never updates or deletes). `rating` is an integer 1–10, validated server-side.
+model DailyWorkReview {
+  id         String   @id @default(cuid())
+  officerId  String // the reviewed Sales Officer (Daily Work owner)
+  workDate   DateTime @db.Date // the reviewed business date (pure date; no timezone shift)
+  reviewerId String // the Regional Manager who reviewed
+  rating     Int // 1..10 (enforced by the service)
+  reviewedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  officer    User     @relation("DailyWorkReviewOfficer", fields: [officerId], references: [id])
+  reviewer   User     @relation("DailyWorkReviewReviewer", fields: [reviewerId], references: [id])
+
+  @@unique([officerId, workDate])
+  @@index([reviewerId])
+  @@index([workDate])
+}
+
+/// Performance attendance for one Sales Officer on one business date (Phase 4). Attendance is INDEPENDENT of
+/// Daily Work submission (Present + Not Submitted is valid). The absence of a row means Present (the default), so
+/// historical dates need no back-fill and only explicit Admin overrides are persisted. Only a Super Admin writes.
+model DailyWorkAttendance {
+  id        String   @id @default(cuid())
+  officerId String
+  workDate  DateTime @db.Date
+  status    String // PRESENT | ABSENT | LEAVE | HOLIDAY
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  officer   User     @relation("DailyWorkAttendanceOfficer", fields: [officerId], references: [id])
+
+  @@unique([officerId, workDate])
+  @@index([workDate])
 }
 
 /// A season (e.g. Kharif 2026) with up to six ordered, named months.

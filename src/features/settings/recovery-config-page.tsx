@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 interface RecoveryConfig {
   dueValidation: boolean;
   calendarEnabled: boolean;
+  autoTasksEnabled: boolean;
 }
 
 /** Accessible ON/OFF switch (no external dependency — a styled button with role=switch). */
@@ -46,17 +47,19 @@ export function RecoveryConfigPage() {
 
   const [dueValidation, setDueValidation] = useState(true);
   const [calendarEnabled, setCalendarEnabled] = useState(true);
+  const [autoTasksEnabled, setAutoTasksEnabled] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     if (data) {
       setDueValidation(data.dueValidation);
       setCalendarEnabled(data.calendarEnabled);
+      setAutoTasksEnabled(data.autoTasksEnabled);
     }
   }, [data]);
 
   const saveMut = useMutation({
-    mutationFn: () => api.put<RecoveryConfig>("/api/settings/recovery-config", { dueValidation, calendarEnabled }),
+    mutationFn: () => api.put<RecoveryConfig>("/api/settings/recovery-config", { dueValidation, calendarEnabled, autoTasksEnabled }),
     onSuccess: (c) => {
       qc.setQueryData(["recovery-config"], c);
       qc.invalidateQueries({ queryKey: ["calendar"] });
@@ -67,7 +70,7 @@ export function RecoveryConfigPage() {
     },
   });
 
-  const dirty = !!data && (data.dueValidation !== dueValidation || data.calendarEnabled !== calendarEnabled);
+  const dirty = !!data && (data.dueValidation !== dueValidation || data.calendarEnabled !== calendarEnabled || data.autoTasksEnabled !== autoTasksEnabled);
 
   return (
     <div className="max-w-2xl space-y-5">
@@ -109,6 +112,25 @@ export function RecoveryConfigPage() {
                   <span className="font-medium">{calendarEnabled ? "ON" : "OFF"}</span>
                   <span className="block text-xs text-muted-foreground">
                     Enable the Calendar feature and Calendar-related reminders across the system.
+                  </span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Enable Auto Tasks</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-start gap-3">
+                <Toggle checked={autoTasksEnabled} onChange={setAutoTasksEnabled} label="Enable Auto Tasks" />
+                <div className="text-sm">
+                  <span className="font-medium">{autoTasksEnabled ? "ON" : "OFF"}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Show the &ldquo;Today&rsquo;s Auto Tasks&rdquo; block in Daily Work. This only controls
+                    visibility of that block — Auto Tasks continue to schedule, materialize, reschedule and flow
+                    into the Daily Plan and Daily Report exactly as before whether this is ON or OFF.
                   </span>
                 </div>
               </div>

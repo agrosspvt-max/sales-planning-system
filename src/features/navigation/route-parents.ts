@@ -21,7 +21,8 @@ const PARENTS: Record<string, string> = {
   "/planning/scheme/plans": "/planning/view", // …and browsed from View Plans
   "/planning/scheme/follow-up": "/planning/view", // Follow-up Plans — recovery follow-up over enrolled schemes
   "/planning/scheme/follow-up-monitor": "/planning/view", // Follow Up — conversion/billing/payment monitoring hub
-  "/planning/party": "/planning/create",
+  "/planning/party": "/planning/create", // Party Planning — Create Plan
+  "/planning/party/view": "/planning/party", // …and its View sub-page returns to Create Plan
   // Onboarding.
   "/onboarding/history": "/onboarding",
 };

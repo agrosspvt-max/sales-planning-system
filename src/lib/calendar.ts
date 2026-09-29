@@ -10,7 +10,7 @@
  * Kept generic (CalendarEventType) so a future INSTALLMENT event type can be added without changing consumers.
  */
 
-export type CalendarEventType = "CONVERSION"; // future: | "INSTALLMENT"
+export type CalendarEventType = "CONVERSION" | "PARTY_APPOINTMENT"; // future: | "RECOVERY" | "INSTALLMENT"
 
 /** Current lifecycle status of a conversion event, DERIVED from the plan's existing planStatus + schemeStatus
  *  (+ enrollment). Presentation only — no new business state is introduced or stored. */
@@ -130,6 +130,59 @@ export function projectConversionEvents(rows: ConversionEventInput[]): Conversio
       status: conversionEventStatus(r),
       dateChanged: (r.conversionExtensionCount ?? 0) > 0,
       originalDateKey: dateKey(r.originalConversionDate),
+    });
+  }
+  return out;
+}
+
+/* =====================================================================================
+ * PARTY APPOINTMENT events (Phase 2) — a SECOND projected event source over the SAME calendar.
+ *
+ * A Party Appointment is PROJECTED from an APPROVED PartyPlan at read time (never stored), exactly like a
+ * conversion is projected from a DealerSchemePlan. The scoping/range query lives in calendar.server.ts; only
+ * APPROVED plans are passed here (a Draft / Pending / Rejected plan is never queried, so it never appears).
+ * `appointmentDate` is a pure business date, so `dateKey` preserves it with no timezone shift. Because the
+ * event is derived per query, refreshing or reopening the calendar can never create a duplicate.
+ * ===================================================================================== */
+
+/** The fields the Party projection needs from an (already APPROVED) PartyPlan row (a superset is fine). */
+export interface PartyAppointmentInput {
+  id: string;
+  partyName: string | null;
+  marketName: string | null;
+  appointmentDate: Date | string | null;
+  salesOfficerId: string;
+  salesOfficerName: string;
+}
+
+export interface PartyAppointmentEvent {
+  type: "PARTY_APPOINTMENT";
+  planId: string;
+  dateKey: string;
+  partyName: string;
+  marketName: string | null;
+  salesOfficerId: string;
+  salesOfficerName: string;
+}
+
+/**
+ * Project APPROVED PartyPlan rows → Party Appointment calendar events. One event per plan that HAS an
+ * appointment date, on that exact date. A plan without a date (should not occur for an approved plan, since
+ * Submit requires it) produces no event — mirroring the conversion projection's "no date → no event" rule.
+ */
+export function projectPartyAppointmentEvents(rows: PartyAppointmentInput[]): PartyAppointmentEvent[] {
+  const out: PartyAppointmentEvent[] = [];
+  for (const r of rows) {
+    const dk = dateKey(r.appointmentDate);
+    if (!dk) continue;
+    out.push({
+      type: "PARTY_APPOINTMENT",
+      planId: r.id,
+      dateKey: dk,
+      partyName: r.partyName ?? "",
+      marketName: r.marketName,
+      salesOfficerId: r.salesOfficerId,
+      salesOfficerName: r.salesOfficerName,
     });
   }
   return out;

@@ -24,6 +24,7 @@ import {
   canonicalCnType,
   cnRequestAgeDays,
   cnRequestBusinessDateKey,
+  cnRequestCurrentDisplayStatus,
   cnRequestDisplayStatus,
   cnRequestExpiryDateKey,
   cnTaskKindForReason,
@@ -34,6 +35,7 @@ import {
   nextCnWorkingDateKey,
   paymentStatusLabel,
   type CnRequestView,
+  type CnRequestCurrentDisplayStatus,
   type CnAcceptanceReason,
   type CnTaskDto,
 } from "@/lib/cn-request";
@@ -275,6 +277,30 @@ export async function myTeamOfficers(ctx: AuthContext): Promise<{ id: string; na
     select: { id: true, name: true },
   })) as { id: string; name: string }[];
   return officers;
+}
+
+/**
+ * Dealer-level latest/current CN state for read-only integrations such as Recovery Planning.
+ * One batched query serves every displayed dealer. Ordering is deterministic and the status itself is resolved
+ * through the same current-display helper used by the CN Requests screen, including returned-from-ledger rows.
+ */
+export async function latestCnRequestStatusByDealer(
+  dealerIds: string[],
+): Promise<Map<string, CnRequestCurrentDisplayStatus>> {
+  const uniqueDealerIds = [...new Set(dealerIds.filter(Boolean))];
+  if (uniqueDealerIds.length === 0) return new Map();
+  const rows = await prisma.cnRequest.findMany({
+    where: { dealerId: { in: uniqueDealerIds } },
+    select: { id: true, dealerId: true, status: true, paymentStatus: true, createdAt: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const latest = new Map<string, CnRequestCurrentDisplayStatus>();
+  for (const row of rows) {
+    if (!latest.has(row.dealerId)) {
+      latest.set(row.dealerId, cnRequestCurrentDisplayStatus(row.status, row.paymentStatus));
+    }
+  }
+  return latest;
 }
 
 /** Scoped list: SO → own; RM → their team (own + group officers); Admin → all. Newest first. */

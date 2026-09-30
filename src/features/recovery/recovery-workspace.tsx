@@ -19,7 +19,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { SectionColgroup } from "@/components/ui/table-group";
-import { Th, LabelSectionHeaderRow, type LabelSection } from "@/features/labels/label-ui";
+import { Th, LabelSectionHeaderRow, useLabel, type LabelSection } from "@/features/labels/label-ui";
 import { StatusBadge } from "@/features/planning/status-badge";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "@/features/planning/dealer-completion";
 import { DealerPlanningStatus } from "@/features/planning/dealer-status";
@@ -29,10 +29,13 @@ import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "@/features/pla
 import { RecoveryActions } from "./recovery-actions";
 import { RecoveryHistory } from "./recovery-history";
 import type { PlanStatus } from "@/features/planning/types";
+import type { CnRequestCurrentDisplayStatus } from "@/lib/cn-request";
+import { CreateRequestDialog } from "@/features/cn-requests/cn-requests-page";
 
 interface RecoveryDealer {
   dealerId: string;
   dealerName: string;
+  cnRequestStatus: CnRequestCurrentDisplayStatus | null;
   outstanding: number;
   overdue: number;
   due: number;
@@ -141,6 +144,23 @@ const monthFirstDdMm = (cutoff: Date | string) => {
 /** Second header line showing a dynamic date under a (still label-editable) column title. */
 function DateSuffix({ date }: { date: string }) {
   return <span className="block text-[10px] font-normal normal-case text-muted-foreground">{date}</span>;
+}
+
+/** Dealer-level latest Receipt display shared by Month and Week View. Both views receive the same fields from
+ * the Recovery detail response, so changing the selected week can never change this value. */
+function LastPaymentCell({ date, amount }: { date: string | null; amount: number | null }) {
+  return (
+    <TableCell className="text-right">
+      {date ? (
+        <div className="flex flex-col items-end leading-tight">
+          <span className="tabular-nums">{ddmmyyyy(date)}</span>
+          <span className="text-[10px] font-medium tabular-nums text-success">{money(amount ?? 0)}</span>
+        </div>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      )}
+    </TableCell>
+  );
 }
 
 /**
@@ -316,7 +336,7 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
         </div>
       </div>
 
-      {tab === "month" && <MonthView key={data.id + data.status} detail={data} />}
+      {tab === "month" && <MonthView key={data.id + data.status} detail={data} role={role} userId={userId} />}
       {tab === "week" && <WeekView key={data.id + data.status} detail={data} isAdmin={role === Role.SUPER_ADMIN} />}
       {tab === "history" && <RecoveryHistory id={id} role={role} />}
     </div>
@@ -325,9 +345,28 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
 
 /* ------------------------------- Month View ------------------------------- */
 
-function MonthView({ detail }: { detail: RecoveryDetail }) {
+function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Role; userId: string }) {
   const qc = useQueryClient();
   const editable = detail.monthEditable;
+  const [cnRequestDealer, setCnRequestDealer] = useState<RecoveryDealer | null>(null);
+  const canRequestCn = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
+  const cnLabels = {
+    request: useLabel("recovery.requestCn"),
+    lastCn: useLabel("recovery.cnStatus.lastCn"),
+    requestRaised: useLabel("recovery.cnStatus.requestRaised"),
+    rejected: useLabel("recovery.cnStatus.rejected"),
+    cnWorkingSent: useLabel("recovery.cnStatus.cnWorkingSent"),
+    postedInLedger: useLabel("recovery.cnStatus.postedInLedger"),
+    returnedFromLedger: useLabel("recovery.cnStatus.returnedFromLedger"),
+  };
+  const cnStatusPresentation = (status: CnRequestCurrentDisplayStatus | null) => {
+    if (status === "SUBMITTED") return { label: cnLabels.requestRaised, color: "text-blue-600 dark:text-blue-400" };
+    if (status === "REJECTED") return { label: cnLabels.rejected, color: "text-destructive" };
+    if (status === "ACCEPTED_NOT_POSTED") return { label: cnLabels.cnWorkingSent, color: "text-warning" };
+    if (status === "POSTED_IN_LEDGER") return { label: cnLabels.postedInLedger, color: "text-success" };
+    if (status === "RETURNED_FROM_LEDGER") return { label: cnLabels.returnedFromLedger, color: "text-destructive" };
+    return null;
+  };
   // Dynamic column dates: Current Outstanding is as of the aging cutoff; Outstanding Till is the month's
   // opening (first calendar day of the cutoff's month). Both derived from the plan cutoff — no calc change.
   const cutoffDdMm = ddmm(detail.cutoffDate);
@@ -478,12 +517,14 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <Th labelKey="recovery.srCr" className="text-right text-muted-foreground" />
               <Th labelKey="recovery.liveRecovery" className="text-right text-muted-foreground" />
               <Th labelKey="recovery.actualRunningRecovery" className="text-right" />
+              <Th labelKey="recovery.cnRequest" className="text-center" />
               {editable && <Th labelKey="col.noPlan" className="text-right" />}
             </TableRow>
           </TableHeader>
           <TableBody>
             {detail.dealers.map((d) => {
               const v = valFor(d.dealerId);
+              const cnStatus = cnStatusPresentation(d.cnRequestStatus);
               const monthTotal = v.plan + v.running;
               const recPct = d.running > 0 ? v.running / d.running : 0;
               const status = d.noPlan ? DealerPlanningStatus.NO_PLAN : monthTotal > 0 ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING;
@@ -503,16 +544,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
                   {/* Last Payment — latest Day Book Receipt: date on top, that same Receipt's Credit Amount
                       below in the existing small green delta style. "—" when the dealer has no Receipt. */}
-                  <TableCell className="text-right">
-                    {d.lastPaymentDate ? (
-                      <div className="flex flex-col items-end leading-tight">
-                        <span className="tabular-nums">{ddmmyyyy(d.lastPaymentDate)}</span>
-                        <span className="text-[10px] font-medium tabular-nums text-success">{money(d.lastPaymentAmount ?? 0)}</span>
-                      </div>
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
+                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} />
                   {/* Section 2 — Recovery Planning. Delta indicators removed (kept only on Current Outstanding
                       and Actual Running Recovery). */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
@@ -541,6 +573,24 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                     <div className="text-right tabular-nums">
                       <div className={cn("font-medium", d.actualRunningRecovery < 0 && "text-warning")}>{money(d.actualRunningRecovery)}</div>
                       <PctDelta value={d.actualRunningRecovery} base={d.monthRunningRecovery} />
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <div className="flex min-w-24 flex-col items-center">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!canRequestCn}
+                        title={!canRequestCn ? "CN Requests can be raised by a Sales Officer or Regional Manager" : undefined}
+                        onClick={() => setCnRequestDealer(d)}
+                      >
+                        {cnLabels.request}
+                      </Button>
+                      {cnStatus && (
+                        <span className={cn("mt-1 text-[10px] font-medium leading-tight", cnStatus.color)}>
+                          {cnLabels.lastCn} - {cnStatus.label}
+                        </span>
+                      )}
                     </div>
                   </TableCell>
                   {editable && (
@@ -576,6 +626,7 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <TableCell className="text-right tabular-nums">{money(totals.srCr)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.liveRecovery)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.actualRunningRecovery)}</TableCell>
+              <TableCell />
               {editable && <TableCell />}
             </TableRow>
           </tfoot>
@@ -590,6 +641,19 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
           reasons={RECOVERY_NO_PLAN_REASONS}
           captureDetail
           onConfirm={(reason, detail) => { void flush().then(() => noPlanMut.mutate({ dealerId: noPlanFor.dealerId, noPlan: true, reason, reasonDetail: detail })); }}
+        />
+      )}
+      {cnRequestDealer && (
+        <CreateRequestDialog
+          role={role}
+          initialDealerId={cnRequestDealer.dealerId}
+          initialOfficerId={role === Role.REGIONAL_MANAGER && detail.officerId !== userId ? detail.officerId : undefined}
+          onClose={() => setCnRequestDealer(null)}
+          onCreated={() => {
+            setCnRequestDealer(null);
+            void qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] });
+            void qc.invalidateQueries({ queryKey: ["cn-requests"] });
+          }}
         />
       )}
     </div>
@@ -758,9 +822,9 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
 
   // Excel-style column sections — follows the handwritten business workflow EXACTLY (visual only).
   // The Reference section keeps informational balances out of the primary planning flow.
-  // Dealer & Closing now spans 2 (Current Outstanding + Outstanding Till Date, matching Month View).
+  // Dealer & Closing spans 3: Current Outstanding + Outstanding Till Date + dealer-level Last Payment.
   const weekSections: LabelSection[] = [
-    { labelKey: "recovery.section.dealerClosing", span: 2, tone: "blue" },
+    { labelKey: "recovery.section.dealerClosing", span: 3, tone: "blue" },
     { labelKey: "recovery.section.weeklyPlanning", span: 3, tone: "amber" },
     { labelKey: "recovery.section.recoveryProgress", span: 3, tone: "green" },
     { labelKey: "recovery.section.results", span: 2, tone: "purple" },
@@ -802,6 +866,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               <Th labelKey="col.dealer" className="min-w-[160px]" />
               <Th labelKey="recovery.currentOutstanding" className="text-right" suffix={<DateSuffix date={cutoffDdMm} />} />
               <Th labelKey="recovery.outstandingTillDate" className="text-right text-muted-foreground" suffix={<DateSuffix date={tillDdMm} />} />
+              <Th labelKey="recovery.lastPayment" className="text-right text-muted-foreground" />
               <Th labelKey="recovery.overdue" className="text-right" />
               <Th labelKey="recovery.thisWeeksDue" className="text-right" />
               <Th labelKey="recovery.weekRecovery" className="text-center" />
@@ -828,6 +893,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                       Till Date (same calc as Month View) added beside it. */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
+                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} />
                   {/* Section 2 — Weekly Planning. "This Week's Due" = only invoices due in the
                       SELECTED business week (not the whole month's Due). Delta removed from Overdue. */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
@@ -856,6 +922,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               <TableCell>Total</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.outstanding)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totalOutstandingTillDate)}</TableCell>
+              <TableCell />
               <TableCell className="text-right tabular-nums">{money(totals.overdue)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.due)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.recoveryPlan)}</TableCell>

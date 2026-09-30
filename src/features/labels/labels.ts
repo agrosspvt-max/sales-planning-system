@@ -71,6 +71,14 @@ export const DEFAULT_LABELS = {
   "recovery.liveRecovery": "Live Recovery",
   "recovery.actualRunningRecovery": "Actual Running Recovery",
   "recovery.monthTotal": "Month Total",
+  "recovery.cnRequest": "CN Request",
+  "recovery.requestCn": "Request CN",
+  "recovery.cnStatus.lastCn": "Last CN",
+  "recovery.cnStatus.requestRaised": "Request Raised",
+  "recovery.cnStatus.rejected": "Rejected",
+  "recovery.cnStatus.cnWorkingSent": "CN Working Sent",
+  "recovery.cnStatus.postedInLedger": "Posted in Ledger",
+  "recovery.cnStatus.returnedFromLedger": "Rejected",
 
   // ---- Recovery: Week View columns ----
   "recovery.thisWeeksDue": "This Week's Due",

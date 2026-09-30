@@ -6,6 +6,7 @@ import { figuresForMode, nbv as calcNbv, isQuantityMode, type PlanningMode } fro
 import { clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { loadEffectiveProduct } from "@/features/products/merge.server";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+import { deriveTerritoryPlanMetrics } from "./group-plan-metrics";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -90,9 +91,9 @@ export interface GroupProductRow {
   // the selected buckets when seasonMetrics="filters"). NEVER changes with the period selector.
   seasonQty: number; // total seasonal plan qty
   plannedAllMonths: number; // qty distributed into monthly plans across ALL months (gated per month)
-  remaining: number; // seasonQty − plannedAllMonths
+  remaining: number; // plannedAllMonths − seasonQty (Territory Plan business rule)
   seasonSales: number; // all-months sold qty for the season
-  pendingSales: number; // seasonQty − seasonSales
+  pendingSales: number; // seasonSales − seasonQty (Territory Plan business rule)
   // Season Baseline amounts (for the "Show Amounts" toggle) — same source, amount instead of qty.
   seasonAmount: number;
   plannedAllMonthsAmount: number;
@@ -477,12 +478,14 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     }
   }
 
-  // Derived Season Baseline columns (qty + amount) — reuse the app's conceptual definitions.
+  // Derived Territory Plan comparison columns. Source aggregates above remain unchanged; only the
+  // signed Territory Plan direction is applied here (operational monthly/sales position minus season baseline).
   for (const row of productRows.values()) {
-    row.remaining = row.seasonQty - row.plannedAllMonths;
-    row.pendingSales = row.seasonQty - row.seasonSales;
-    row.remainingAmount = row.seasonAmount - row.plannedAllMonthsAmount;
-    row.pendingAmount = row.seasonAmount - row.seasonSalesAmount;
+    const metrics = deriveTerritoryPlanMetrics(row);
+    row.remaining = metrics.remaining;
+    row.pendingSales = metrics.pendingSales;
+    row.remainingAmount = metrics.remainingAmount;
+    row.pendingAmount = metrics.pendingAmount;
   }
 
   // Officer breakdown — derived from the SAME contributions (no separate logic).

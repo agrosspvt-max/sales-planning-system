@@ -11,6 +11,7 @@ import { getOfficerScope, assertOfficerInScope, isPlanOwner } from "@/lib/scope"
 import { writeAudit } from "@/lib/audit";
 import { getRecoveryConfig } from "@/lib/recovery-config";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+import { latestCnRequestStatusByDealer } from "@/features/cn-requests/service.server";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
@@ -724,7 +725,11 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     : [];
   const prevByDealer = new Map(prevDealers.map((d) => [d.dealerId, { outstanding: num(d.outstanding), overdue: num(d.overdue), due: num(d.due), running: num(d.running) }]));
   // DISPLAY-only: alias-preferred dealer names for the Recovery Month/Week rows (identity stays the dealer id).
-  const recoveryAliasNames = await loadDealerAliasNameMap(plan.dealers.map((d) => d.dealerId));
+  const recoveryDealerIds = plan.dealers.map((d) => d.dealerId);
+  const [recoveryAliasNames, latestCnStatusByDealer] = await Promise.all([
+    loadDealerAliasNameMap(recoveryDealerIds),
+    latestCnRequestStatusByDealer(recoveryDealerIds),
+  ]);
 
   // "Last Payment" (informational): the latest Day Book Receipt per dealer, persisted by the Day Book upload
   // on RecoveryPlanDealer. Read in ONE batched raw query for the whole plan (new columns → raw SQL); never an
@@ -792,6 +797,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
       return {
         dealerId: d.dealerId,
         dealerName: recoveryAliasNames.get(d.dealerId) ?? d.dealer.name,
+        cnRequestStatus: latestCnStatusByDealer.get(d.dealerId) ?? null,
         outstanding: cur.outstanding,
         overdue: cur.overdue,
         due: cur.due,

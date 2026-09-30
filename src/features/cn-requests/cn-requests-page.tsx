@@ -398,7 +398,19 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   );
 }
 
-function CreateRequestDialog({ role, onClose, onCreated }: { role: Role; onClose: () => void; onCreated: () => void }) {
+export function CreateRequestDialog({
+  role,
+  onClose,
+  onCreated,
+  initialDealerId,
+  initialOfficerId,
+}: {
+  role: Role;
+  onClose: () => void;
+  onCreated: () => void;
+  initialDealerId?: string;
+  initialOfficerId?: string;
+}) {
   const isManager = role === Role.REGIONAL_MANAGER;
   const L = {
     title: useLabel("cn_requests.create.title"), requestFor: useLabel("cn_requests.create.request_for"),
@@ -417,8 +429,8 @@ function CreateRequestDialog({ role, onClose, onCreated }: { role: Role; onClose
     },
   };
   // RM only: "My Dealer" (raise for self) vs "Team" (raise on behalf of a team Sales Officer).
-  const [requestFor, setRequestFor] = useState<"self" | "team">("self");
-  const [officerId, setOfficerId] = useState("");
+  const [requestFor, setRequestFor] = useState<"self" | "team">(isManager && initialOfficerId ? "team" : "self");
+  const [officerId, setOfficerId] = useState(initialOfficerId ?? "");
   const teamMode = isManager && requestFor === "team";
 
   // Team Sales Officers (RM only), and the assigned dealers for the effective officer (self, or the picked SO).
@@ -430,7 +442,7 @@ function CreateRequestDialog({ role, onClose, onCreated }: { role: Role; onClose
     enabled: !teamMode || !!officerId, // wait for an officer before loading team dealers
   });
 
-  const [dealerId, setDealerId] = useState("");
+  const [dealerId, setDealerId] = useState(initialDealerId ?? "");
   // No business option is auto-selected: CN Type starts neutral and the user must explicitly choose one.
   const [cnType, setCnType] = useState<CnType | "">("");
   const [details, setDetails] = useState("");

@@ -16,6 +16,7 @@ import { CategoryFilter } from "@/components/ui/category-filter";
 import { useCategories } from "@/lib/use-categories";
 import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
 import { GroupRecovery } from "./group-recovery-page";
+import { isNegativeTerritoryPlanMetric } from "./group-plan-metrics";
 
 /* ------------------------------- Shared types ----------------------------- */
 
@@ -298,12 +299,12 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
                 {showAmounts && <TableHead className="text-right" title="Amount for Season Qty">Season Amt</TableHead>}
                 <TableHead className="text-right" title="Quantity distributed into monthly plans across ALL months">Planned (All Mo.)</TableHead>
                 {showAmounts && <TableHead className="text-right" title="Amount for Planned (All Months)">Planned Amt</TableHead>}
-                <TableHead className="text-right" title="Season Qty − Planned (All Months)">Remaining</TableHead>
-                {showAmounts && <TableHead className="text-right" title="Season Amount − Planned Amount">Remaining Amt</TableHead>}
+                <TableHead className="text-right" title="Planned (All Months) − Season Qty">Remaining</TableHead>
+                {showAmounts && <TableHead className="text-right" title="Planned Amount − Season Amount">Remaining Amt</TableHead>}
                 <TableHead className="text-right" title="Actual sales quantity for the complete season">Season Sales</TableHead>
                 {showAmounts && <TableHead className="text-right" title="Amount for Season Sales">Sales Amt</TableHead>}
-                <TableHead className="text-right" title="Pending Sales = Season Qty − Season Sales">Pending</TableHead>
-                {showAmounts && <TableHead className="text-right" title="Season Amount − Sales Amount">Pending Amt</TableHead>}
+                <TableHead className="text-right" title="Pending = Season Sales − Season Qty">Pending</TableHead>
+                {showAmounts && <TableHead className="text-right" title="Sales Amount − Season Amount">Pending Amt</TableHead>}
                 <TableHead className="border-l text-right" title="Plan for the selected period (season / month / range)">Period Plan</TableHead>
                 <TableHead className="text-right" title="Sold in the selected period">Period Sold</TableHead>
                 <TableHead className="border-l text-right" title="Planned Amount for This Period Plan">Plan Amt</TableHead>
@@ -325,12 +326,12 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
                   {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.seasonAmount)}</TableCell>}
                   <TableCell className="text-right tabular-nums">{qtyFmt(r.plannedAllMonths)}</TableCell>
                   {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.plannedAllMonthsAmount)}</TableCell>}
-                  <TableCell className={cn("text-right tabular-nums", r.remaining < 0 && "text-destructive")}>{qtyFmt(r.remaining)}</TableCell>
-                  {showAmounts && <TableCell className={cn("text-right tabular-nums", r.remainingAmount < 0 && "text-destructive")}>{formatCurrency(r.remainingAmount)}</TableCell>}
+                  <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.remaining) && "text-destructive")}>{qtyFmt(r.remaining)}</TableCell>
+                  {showAmounts && <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.remainingAmount) && "text-destructive")}>{formatCurrency(r.remainingAmount)}</TableCell>}
                   <TableCell className="text-right tabular-nums">{qtyFmt(r.seasonSales)}</TableCell>
                   {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.seasonSalesAmount)}</TableCell>}
-                  <TableCell className={cn("text-right tabular-nums", r.pendingSales < 0 && "text-destructive")}>{qtyFmt(r.pendingSales)}</TableCell>
-                  {showAmounts && <TableCell className={cn("text-right tabular-nums", r.pendingAmount < 0 && "text-destructive")}>{formatCurrency(r.pendingAmount)}</TableCell>}
+                  <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.pendingSales) && "text-destructive")}>{qtyFmt(r.pendingSales)}</TableCell>
+                  {showAmounts && <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.pendingAmount) && "text-destructive")}>{formatCurrency(r.pendingAmount)}</TableCell>}
                   <TableCell className="border-l text-right tabular-nums">{qtyFmt(r.total.qty)}</TableCell>
                   <TableCell className="text-right tabular-nums">{qtyFmt(r.actual.qty)}</TableCell>
                   <TableCell className="border-l text-right tabular-nums">{formatCurrency(r.total.amount)}</TableCell>

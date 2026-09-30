@@ -882,6 +882,8 @@ Each report below is specified with **Purpose · Who can access · Columns · Fi
 - **Export:** spreadsheet/PDF.
 - **Business Use:** identify which products are driving or missing the plan across the territory.
 
+**Territory Plan signed comparison columns — current business rule.** In *Users → Group → Territory Plan*, the four signed comparison columns use the operational position minus the seasonal baseline: **Remaining = Planned (All Months) − Season Qty**, **Remaining Amount = Planned Amount − Season Amount**, **Pending = Season Sales − Season Qty**, and **Pending Amount = Sales Amount − Season Amount**. Negative values are highlighted; zero and positive values remain neutral. This Territory Plan calculation rule supersedes the opposite-direction remaining/pending definitions elsewhere in this specification only for these four columns; it does not change their source aggregates or calculations on Monthly Planning and other screens.
+
 **Dealer Summary** (replaces `Dealer Summary`)
 - **Purpose:** per-dealer plan, actuals and achievement.
 - **Who can access:** SO (own), RM (assigned), Super Admin (all).

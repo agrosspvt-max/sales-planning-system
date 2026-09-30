@@ -259,7 +259,8 @@ function makeStore() {
         rows.push(row);
         return { id: row.id };
       },
-      findMany: async ({ where }: { where: { officerId?: { in: string[] }; status?: { in: string[] }; paymentStatus?: string; paymentVerified?: boolean; OR?: Array<{ paymentStatus?: null | { not: string }; paymentVerified?: boolean }> } }) => rows
+      findMany: async ({ where, orderBy }: { where: { dealerId?: { in: string[] }; officerId?: { in: string[] }; status?: { in: string[] }; paymentStatus?: string; paymentVerified?: boolean; OR?: Array<{ paymentStatus?: null | { not: string }; paymentVerified?: boolean }> }; orderBy?: { createdAt?: "asc" | "desc" } | Array<{ createdAt?: "asc" | "desc" } | { id?: "asc" | "desc" }> }) => rows
+        .filter((row) => !where.dealerId || where.dealerId.in.includes(row.dealerId))
         .filter((row) => !where.officerId || where.officerId.in.includes(row.officerId))
         .filter((row) => !where.status || where.status.in.includes(row.status))
         .filter((row) => where.paymentStatus === undefined || row.paymentStatus === where.paymentStatus)
@@ -269,6 +270,15 @@ function makeStore() {
           : condition.paymentStatus === null
             ? row.paymentStatus == null
             : row.paymentStatus !== condition.paymentStatus?.not))
+        .sort((a, b) => {
+          if (!orderBy) return 0;
+          const orders = Array.isArray(orderBy) ? orderBy : [orderBy];
+          const dateOrder = (orders.find((entry) => "createdAt" in entry) as { createdAt?: "asc" | "desc" } | undefined)?.createdAt;
+          const dateDiff = (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0);
+          if (dateDiff !== 0) return dateOrder === "desc" ? -dateDiff : dateDiff;
+          const idOrder = (orders.find((entry) => "id" in entry) as { id?: "asc" | "desc" } | undefined)?.id;
+          return idOrder === "desc" ? b.id.localeCompare(a.id) : a.id.localeCompare(b.id);
+        })
         .map(related),
       findUnique: async ({ where, select }: { where: { id: string }; select?: { paymentEvents?: { where?: { taskStatus?: { in: string[] } }; take?: number } } }) => {
         const row = rows.find((item) => item.id === where.id);
@@ -457,6 +467,7 @@ function loadService(
       canonicalCnType,
       cnRequestAgeDays,
       cnRequestBusinessDateKey,
+      cnRequestCurrentDisplayStatus,
       cnRequestDisplayStatus,
       cnRequestExpiryDateKey,
       cnTaskKindForReason: (reason: string | null | undefined) => (reason === "PAYMENT_PENDING" ? "CN_RECOVERY" : "CN_TASK"),
@@ -573,12 +584,35 @@ async function main() {
   assert.equal(validateCnRequestDetails("   \n\t"), CN_REQUEST_DETAILS_REQUIRED_MESSAGE);
   assert.equal(validateCnRequestDetails("Valid request details"), null);
   const createPageSource = readFileSync(resolve("src/features/cn-requests/cn-requests-page.tsx"), "utf8");
+  const recoveryWorkspaceSource = readFileSync(resolve("src/features/recovery/recovery-workspace.tsx"), "utf8");
+  const recoveryServiceSource = readFileSync(resolve("src/features/recovery/service.server.ts"), "utf8");
   assert.match(createPageSource, /<Label>\{L\.details\} \*<\/Label>/);
   assert.match(createPageSource, /validateCnRequestDetails\(details, L\.detailsRequired\)/);
   assert.match(createPageSource, /<Textarea\s+required/);
   assert.doesNotMatch(createPageSource, /<Label>Approx Amount<\/Label>/);
   assert.doesNotMatch(createPageSource, /<Label>Payment Status \*<\/Label>/);
   assert.match(createPageSource, /<TableHead>\{labels\.paymentStatus\}<\/TableHead>/, "Payment Status remains visible and label-driven in the table");
+  assert.ok(createPageSource.includes("export function CreateRequestDialog"), "Recovery reuses the existing Create CN Request dialog");
+  assert.ok(createPageSource.includes("initialDealerId?: string"), "the shared dialog accepts an optional dealer identity");
+  assert.ok(createPageSource.includes('useState(initialDealerId ?? "")'), "the clicked Dealer.id pre-fills the shared dialog");
+  assert.ok(createPageSource.includes('useState<CnType | "">("")'), "CN Type remains empty in the pre-filled dialog");
+  assert.ok(createPageSource.includes('const [details, setDetails] = useState("")'), "Details remains empty in the pre-filled dialog");
+  const cnColumn = recoveryWorkspaceSource.indexOf('labelKey="recovery.cnRequest"');
+  const noPlanColumn = recoveryWorkspaceSource.indexOf('labelKey="col.noPlan"');
+  assert.ok(cnColumn >= 0 && noPlanColumn > cnColumn, "Recovery Month View renders CN Request immediately before No Plan");
+  assert.ok(recoveryWorkspaceSource.includes("<CreateRequestDialog"), "Request CN opens the shared existing modal");
+  assert.ok(recoveryWorkspaceSource.includes("initialDealerId={cnRequestDealer.dealerId}"), "the row passes Dealer.id, not its display name");
+  assert.ok(recoveryWorkspaceSource.includes("{cnLabels.request}"), "every Month View row renders the Request CN control");
+  assert.ok(recoveryWorkspaceSource.includes("{cnLabels.lastCn} - {cnStatus.label}"), "the subtle status text is prefixed with Last CN");
+  assert.ok(recoveryWorkspaceSource.includes('"text-blue-600 dark:text-blue-400"'), "Request Raised is blue");
+  assert.ok(recoveryWorkspaceSource.includes('label: cnLabels.cnWorkingSent, color: "text-warning"'), "CN Working is amber");
+  assert.ok(recoveryWorkspaceSource.includes('label: cnLabels.postedInLedger, color: "text-success"'), "Posted in Ledger is green");
+  assert.ok(recoveryWorkspaceSource.includes('label: cnLabels.returnedFromLedger, color: "text-destructive"'), "Returned from Ledger is red");
+  assert.equal(DEFAULT_LABELS["recovery.cnStatus.lastCn"], "Last CN");
+  assert.equal(DEFAULT_LABELS["recovery.cnStatus.returnedFromLedger"], "Rejected");
+  assert.ok(!recoveryWorkspaceSource.slice(recoveryWorkspaceSource.indexOf("function WeekView")).includes('labelKey="recovery.cnRequest"'), "Week View is unchanged");
+  assert.ok(recoveryServiceSource.includes("latestCnRequestStatusByDealer(recoveryDealerIds)"), "Recovery loads current CN status in one batched dealer query");
+  assert.ok(recoveryServiceSource.includes("recoveryAliasNames.get(d.dealerId) ?? d.dealer.name"), "dealer alias remains display-only while Dealer.id remains identity");
 
   assert.deepEqual([...CN_REJECTION_REASON_VALUES], [
     "BILLING_CONDITION_NOT_MET",
@@ -684,6 +718,26 @@ async function main() {
   const customLabelService = loadService(store.prisma, [], {
     "cn_requests.validation.details_required": "Explain the CN request.",
   });
+
+  // Recovery Planning reads the same dealer-level CN records regardless of which UI created them. The newest
+  // request wins deterministically and current payment state still uses the shared CN display-status logic.
+  {
+    const latestStore = makeStore();
+    const older = latestStore.seed("REJECTED", "cn-old", "so-1", { createdAt: new Date("2026-09-20T06:00:00.000Z") });
+    const newest = latestStore.seed("POSTED_IN_LEDGER", "cn-new", "so-1", { createdAt: new Date("2026-09-25T06:00:00.000Z") });
+    const otherDealer = latestStore.seed("ACCEPTED_NOT_POSTED", "cn-other", "so-1", { createdAt: new Date("2026-09-24T06:00:00.000Z") });
+    assert.ok(older && newest && otherDealer);
+    latestStore.rows.find((row) => row.id === newest)!.paymentStatus = "Paid";
+    latestStore.rows.find((row) => row.id === otherDealer)!.dealerId = "dealer-2";
+    const latestService = loadService(latestStore.prisma);
+    const statuses = await latestService.latestCnRequestStatusByDealer(["dealer-1", "dealer-2", "dealer-without-history", "dealer-1"]);
+    assert.equal(statuses.get("dealer-1"), "POSTED_IN_LEDGER", "newest dealer request is the displayed current status");
+    assert.equal(statuses.get("dealer-2"), "ACCEPTED_NOT_POSTED", "direct and Recovery-created requests share the same source");
+    assert.equal(statuses.has("dealer-without-history"), false, "no CN history produces no displayed status");
+    latestStore.rows.find((row) => row.id === newest)!.paymentStatus = "Partial Paid";
+    const returned = await latestService.latestCnRequestStatusByDealer(["dealer-1"]);
+    assert.equal(returned.get("dealer-1"), "RETURNED_FROM_LEDGER", "current authoritative payment state remains part of CN status resolution");
+  }
   await expect422(
     () => customLabelService.createCnRequest(SO, { dealerId: "dealer-1", cnType: "CD", details: "   " }),
     "Explain the CN request.",

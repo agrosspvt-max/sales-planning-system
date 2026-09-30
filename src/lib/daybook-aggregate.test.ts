@@ -124,6 +124,20 @@ test("9) Month View header order: Last Payment immediately after Outstanding Til
   assert.ok(till < last && last < overdue, "order is Outstanding Till → Last Payment → Overdue");
 });
 
+test("10) Week View reuses the same dealer-level Last Payment immediately after Outstanding Till", () => {
+  const src = readFileSync(resolve("src/features/recovery/recovery-workspace.tsx"), "utf8");
+  const weekView = src.slice(src.indexOf("function WeekView"));
+  const till = weekView.indexOf('labelKey="recovery.outstandingTillDate"');
+  const last = weekView.indexOf('labelKey="recovery.lastPayment"');
+  const overdue = weekView.indexOf('labelKey="recovery.overdue"');
+  assert.ok(till >= 0 && last >= 0 && overdue >= 0, "all three Week View headers are present");
+  assert.ok(till < last && last < overdue, "Week View order is Outstanding Till → Last Payment → Overdue");
+  assert.equal((src.match(/<LastPaymentCell date=\{d\.lastPaymentDate\} amount=\{d\.lastPaymentAmount\} \/>/g) ?? []).length, 2,
+    "Month and Week View render the exact same dealer-level Last Payment fields through one shared cell");
+  assert.ok(!weekView.slice(weekView.indexOf("<LastPaymentCell"), weekView.indexOf("<LastPaymentCell") + 100).includes("weekNo"),
+    "Last Payment is independent of the selected week");
+});
+
 // 8) Last Payment is informational: the aggregate exposes it as a SEPARATE field and never feeds receipt/srCr
 // math (the recovery figures Overdue/Due/Running/etc. are computed elsewhere and are untouched here).
 test("8) Last Payment does not alter the receipt/srCr aggregation used by recovery figures", () => {

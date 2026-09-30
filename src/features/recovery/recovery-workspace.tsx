@@ -42,6 +42,9 @@ interface RecoveryDealer {
   runningTillDate: number;
   srCr: number;
   liveRecovery: number;
+  // "Last Payment" (informational): latest Day Book Receipt date ("YYYY-MM-DD") + that row's Credit Amount.
+  lastPaymentDate: string | null;
+  lastPaymentAmount: number | null;
   // DERIVED: Live Recovery + SR/CR − (Due + Overdue). Auto-refreshes from Daybook or Aging changes.
   actualRunningRecovery: number;
   monthRecoveryPlan: number;
@@ -123,6 +126,12 @@ const ddmm = (d: Date | string) => {
   const x = new Date(d);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(x.getDate())}/${p(x.getMonth() + 1)}`;
+};
+/** dd/mm/yyyy for the Last Payment date. Formats the "YYYY-MM-DD" string directly (no Date parsing → no
+ *  timezone shift), so the shown day always matches the stored Receipt date. */
+const ddmmyyyy = (isoDate: string) => {
+  const [y, m, d] = isoDate.slice(0, 10).split("-");
+  return y && m && d ? `${d}/${m}/${y}` : isoDate;
 };
 /** First calendar day of the aging cutoff's month — the "Outstanding Till" opening date. */
 const monthFirstDdMm = (cutoff: Date | string) => {
@@ -409,7 +418,8 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
   // green Recovery Progress block — instead of at the far right. The trailing No-Plan action column (when
   // editable) is intentionally left outside any coloured section band.
   const monthSections: LabelSection[] = [
-    { labelKey: "recovery.section.dealerClosing", span: 2, tone: "blue" },
+    // Dealer & Closing spans 3: Current Outstanding + Outstanding Till + Last Payment (informational).
+    { labelKey: "recovery.section.dealerClosing", span: 3, tone: "blue" },
     // "Recovery Planning" now spans 4 (Overdue, Due, Due + Overdue, Recovery Plan) and uses the requested
     // header colour #FF3445.
     { labelKey: "recovery.section.recoveryPlanning", span: 4, tone: "amber", color: "#FF3445" },
@@ -453,6 +463,8 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <Th labelKey="col.dealer" className="min-w-[160px]" />
               <Th labelKey="recovery.currentOutstanding" className="text-right" suffix={<DateSuffix date={cutoffDdMm} />} />
               <Th labelKey="recovery.outstandingTillDate" className="text-right text-muted-foreground" suffix={<DateSuffix date={tillDdMm} />} />
+              {/* Last Payment — informational; immediately after Outstanding Till (Month View only). */}
+              <Th labelKey="recovery.lastPayment" className="text-right text-muted-foreground" />
               <Th labelKey="recovery.overdue" className="text-right" />
               <Th labelKey="recovery.due" className="text-right" />
               <Th labelKey="recovery.dueOverdue" className="text-right" />
@@ -489,6 +501,18 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
                       delta; Outstanding Till Date is the month's opening balance (frozen after first import). */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
+                  {/* Last Payment — latest Day Book Receipt: date on top, that same Receipt's Credit Amount
+                      below in the existing small green delta style. "—" when the dealer has no Receipt. */}
+                  <TableCell className="text-right">
+                    {d.lastPaymentDate ? (
+                      <div className="flex flex-col items-end leading-tight">
+                        <span className="tabular-nums">{ddmmyyyy(d.lastPaymentDate)}</span>
+                        <span className="text-[10px] font-medium tabular-nums text-success">{money(d.lastPaymentAmount ?? 0)}</span>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
                   {/* Section 2 — Recovery Planning. Delta indicators removed (kept only on Current Outstanding
                       and Actual Running Recovery). */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
@@ -537,6 +561,8 @@ function MonthView({ detail }: { detail: RecoveryDetail }) {
               <TableCell>Total</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.outstanding)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.outstandingTillDate)}</TableCell>
+              {/* Last Payment has no meaningful column total (it's a per-dealer latest Receipt). */}
+              <TableCell />
               <TableCell className="text-right tabular-nums">{money(totals.overdue)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.due)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(totals.due + totals.overdue)}</TableCell>

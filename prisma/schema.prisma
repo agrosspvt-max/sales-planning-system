@@ -1491,6 +1491,11 @@ model RecoveryPlanDealer {
   outstandingStatic    Boolean            @default(false)
   srCr                 Decimal            @default(0) @db.Decimal(14, 2)
   liveRecovery         Decimal            @default(0) @db.Decimal(14, 2)
+  // "Last Payment" (informational, Recovery Planning Month View): the LATEST Day Book RECEIPT voucher for this
+  // dealer — its date and that same row's Credit Amount. Populated by the existing Day Book upload (Receipt
+  // vouchers only); reset on each re-upload. Never affects any recovery calculation.
+  lastReceiptDate      DateTime?          @db.Date
+  lastReceiptAmount    Decimal?           @db.Decimal(14, 2)
   dealer               Dealer             @relation(fields: [dealerId], references: [id])
   recoveryPlan         RecoveryPlan       @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
   weekPlans            RecoveryWeekPlan[]

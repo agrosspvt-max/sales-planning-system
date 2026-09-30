@@ -58,6 +58,7 @@ export const DEFAULT_LABELS = {
   // The trailing dd/mm date is appended dynamically in the view (aging cutoff / month opening),
   // so the base label omits the word "Date".
   "recovery.outstandingTillDate": "Outstanding Till",
+  "recovery.lastPayment": "Last Payment",
   "recovery.overdue": "Overdue",
   "recovery.due": "Due",
   "recovery.dueOverdue": "Due + Overdue",

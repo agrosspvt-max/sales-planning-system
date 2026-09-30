@@ -14,6 +14,7 @@ import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
+import { aggregateDaybookByDealer, type ClassifiedDaybookRow } from "@/lib/daybook-aggregate";
 import { zeroPopulationDealers } from "@/lib/recovery-population";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -725,6 +726,17 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   // DISPLAY-only: alias-preferred dealer names for the Recovery Month/Week rows (identity stays the dealer id).
   const recoveryAliasNames = await loadDealerAliasNameMap(plan.dealers.map((d) => d.dealerId));
 
+  // "Last Payment" (informational): the latest Day Book Receipt per dealer, persisted by the Day Book upload
+  // on RecoveryPlanDealer. Read in ONE batched raw query for the whole plan (new columns → raw SQL); never an
+  // N+1 and never part of any recovery calculation.
+  const lastPaymentRows = (await prisma.$queryRaw<{ dealerId: string; lastReceiptDate: string | null; lastReceiptAmount: string | null }[]>`
+    SELECT "dealerId", "lastReceiptDate"::text AS "lastReceiptDate", "lastReceiptAmount"::text AS "lastReceiptAmount"
+    FROM "RecoveryPlanDealer" WHERE "recoveryPlanId" = ${plan.id}`);
+  const lastPaymentByDealer = new Map(lastPaymentRows.map((r) => [r.dealerId, {
+    date: r.lastReceiptDate ? r.lastReceiptDate.slice(0, 10) : null,
+    amount: r.lastReceiptAmount == null ? null : Number(r.lastReceiptAmount),
+  }]));
+
   // "Missing in Latest Aging" (derived, Option C): a dealer kept in the plan but absent from the newest
   // snapshot shows its last-known aging with a stale badge — no value is zeroed, no row is removed.
   const latestDealerIds = latestSnapshot
@@ -793,6 +805,9 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         // Day Book-derived business values (populated by the Daybook upload; default 0).
         srCr: num(d.srCr ?? 0),
         liveRecovery: num(d.liveRecovery ?? 0),
+        // "Last Payment" (informational): latest Day Book Receipt date + THAT row's Credit Amount, or null → "—".
+        lastPaymentDate: lastPaymentByDealer.get(d.dealerId)?.date ?? null,
+        lastPaymentAmount: lastPaymentByDealer.get(d.dealerId)?.amount ?? null,
         // DERIVED (Part 5): Actual Running Recovery = Live Recovery + SR/CR − (Due + Overdue). Computed
         // at read time so it auto-refreshes from EITHER a Daybook or an Aging change; never stored.
         actualRunningRecovery: num(d.liveRecovery ?? 0) + num(d.srCr ?? 0) - (cur.due + cur.overdue),
@@ -1861,7 +1876,7 @@ interface DaybookResolution {
   totalRows: number;
   // dealerId → aggregated Day Book totals + the plan it belongs to. rpdId is null when the dealer is a
   // valid (assigned) recovery dealer that does not yet have a RecoveryPlanDealer row — commit creates it.
-  matched: Map<string, { planId: string; rpdId: string | null; dealerName: string; officerName: string; receipt: number; srCr: number }>;
+  matched: Map<string, { planId: string; rpdId: string | null; dealerName: string; officerName: string; receipt: number; srCr: number; lastReceiptDate: Date | null; lastReceiptAmount: number | null }>;
   skippedUnknown: string[]; // raw names with no Dealer Alias / master match
   skippedNoPlan: { dealerName: string }[]; // resolved, but not assigned to any officer planned this month
   monthRpdIds: string[]; // EXISTING RecoveryPlanDealer ids in the month (for the reupload reset)
@@ -1915,25 +1930,25 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
     }
   }
 
-  // Aggregate Day Book totals per resolved dealerId; collect unresolved raw names once.
-  const byDealer = new Map<string, { receipt: number; srCr: number }>();
+  // Classify each voucher with the EXISTING classifiers (parser unchanged), resolve its dealer with the
+  // EXISTING resolver (no new matching), then aggregate per dealer with the shared pure helper — which also
+  // computes the latest Receipt (date + that row's amount) for the "Last Payment" column.
   const unknownSet = new Set<string>();
+  const classified: ClassifiedDaybookRow[] = [];
   for (const row of parsed.rows) {
     const isSr = isSrCrVoucher(row.vchType);
     const isRcpt = isReceiptVoucher(row.vchType);
-    if (!isSr && !isRcpt) continue; // other voucher types don't contribute to SR/CR or Live Recovery
+    if (!isSr && !isRcpt) continue; // other voucher types don't contribute to SR/CR, Live Recovery or Receipts
     const match = resolver.resolveWithReason(row.particulars);
     if (!match) {
       unknownSet.add(row.particulars);
       continue;
     }
-    const acc = byDealer.get(match.dealer.id) ?? { receipt: 0, srCr: 0 };
-    if (isSr) acc.srCr += row.creditAmount;
-    if (isRcpt) acc.receipt += row.creditAmount;
-    byDealer.set(match.dealer.id, acc);
+    classified.push({ dealerId: match.dealer.id, isReceipt: isRcpt, isSrCr: isSr, date: row.date, creditAmount: row.creditAmount });
   }
+  const byDealer = aggregateDaybookByDealer(classified);
 
-  const matched = new Map<string, { planId: string; rpdId: string | null; dealerName: string; officerName: string; receipt: number; srCr: number }>();
+  const matched = new Map<string, { planId: string; rpdId: string | null; dealerName: string; officerName: string; receipt: number; srCr: number; lastReceiptDate: Date | null; lastReceiptAmount: number | null }>();
   const skippedNoPlan: { dealerName: string }[] = [];
   for (const [dealerId, totals] of byDealer) {
     const rpd = rpdByDealer.get(dealerId);
@@ -2001,6 +2016,8 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
       // Reset the two Daybook-owned columns for the WHOLE month first (clears any prior upload).
       if (res.monthRpdIds.length > 0) {
         await tx.recoveryPlanDealer.updateMany({ where: { id: { in: res.monthRpdIds } }, data: { srCr: 0, liveRecovery: 0 } });
+        // Also reset the informational "Last Payment" columns (new, accessed via raw SQL) for the whole month.
+        await tx.$executeRaw`UPDATE "RecoveryPlanDealer" SET "lastReceiptDate" = NULL, "lastReceiptAmount" = NULL WHERE "id" = ANY(${res.monthRpdIds})`;
       }
       // Then set the matched dealers' totals (ONLY srCr + liveRecovery). UPSERT by (plan, dealer) so a
       // valid assigned dealer that had NO Recovery row yet (no Aging record) is CREATED with zero aging
@@ -2011,6 +2028,11 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
           update: { srCr: m.srCr, liveRecovery: m.receipt },
           create: { recoveryPlanId: m.planId, dealerId: m.dealerId, srCr: m.srCr, liveRecovery: m.receipt, outstanding: 0, overdue: 0, due: 0, running: 0, runningTillDate: 0 },
         });
+        // "Last Payment" = latest Receipt (date + that row's credit). Only set when a dated Receipt exists;
+        // dealers with no Receipt keep the reset NULL. Written via raw SQL (new columns). Never a calculation.
+        if (m.lastReceiptDate != null) {
+          await tx.$executeRaw`UPDATE "RecoveryPlanDealer" SET "lastReceiptDate" = ${m.lastReceiptDate}::date, "lastReceiptAmount" = ${m.lastReceiptAmount} WHERE "recoveryPlanId" = ${m.planId} AND "dealerId" = ${m.dealerId}`;
+        }
       }
     },
     { timeout: 60000, maxWait: 10000 },

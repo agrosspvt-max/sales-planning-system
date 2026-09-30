@@ -892,6 +892,7 @@ export const DEFAULT_LABELS = {
   "daily_work.performance.filter.submission": "Submission",
   "daily_work.performance.filter.all": "All",
   "daily_work.performance.filter.all_rms": "All RMs",
+  "daily_work.performance.filter.all_sales_officers": "All Sales Officers",
   "daily_work.performance.filter.all_groups": "All Groups",
   "daily_work.performance.empty": "No Sales Officers match these filters.",
   "daily_work.performance.no_rm": "No RM",

@@ -1747,15 +1747,15 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   if (dates.length > MAX_PERFORMANCE_RANGE_DAYS) throw new ApiError(422, L["daily_work.performance.range_too_large"]);
 
   let population = await performancePopulation(ctx);
-  const populationIds = new Set(population.map((p) => p.id));
 
-  // Server-side filters (validated against the authoritative population — a browser cannot widen scope).
-  if (ctx.role !== Role.SALES_OFFICER && filters.officerId) {
-    if (!populationIds.has(filters.officerId)) throw new ApiError(403, L["daily_work.performance.forbidden"]);
-    population = population.filter((p) => p.id === filters.officerId);
-  }
+  // State establishes the Admin's authoritative SO scope first. The officer filter is then validated against
+  // that narrowed population, so State=MP + an UP officer cannot bypass the State filter.
   if (ctx.role === Role.SUPER_ADMIN && filters.groupId) {
     population = population.filter((p) => p.groupId === filters.groupId);
+  }
+  if (ctx.role !== Role.SALES_OFFICER && filters.officerId) {
+    if (!population.some((p) => p.id === filters.officerId)) throw new ApiError(403, L["daily_work.performance.forbidden"]);
+    population = population.filter((p) => p.id === filters.officerId);
   }
 
   const ids = population.map((p) => p.id);
@@ -1827,9 +1827,13 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
     averageRmRating: average(rows.map((r) => r.rmRating).filter((v): v is number => v != null)),
   };
 
-  // Filter options come from the FULL population (before the officer/state filter) so the caller can always switch.
+  // State options always span the full authoritative population. Admin officer options follow the selected State;
+  // with All States they span the company. RM options retain their existing team scope.
   const fullPopulation = await performancePopulation(ctx);
-  const officers = fullPopulation.map((p) => ({ id: p.id, name: p.name }));
+  const officerOptions = ctx.role === Role.SUPER_ADMIN && filters.groupId
+    ? fullPopulation.filter((p) => p.groupId === filters.groupId)
+    : fullPopulation;
+  const officers = officerOptions.map((p) => ({ id: p.id, name: p.name }));
   const states = ctx.role === Role.SUPER_ADMIN
     ? [...new Map(fullPopulation.filter((p) => p.groupId).map((p) => [p.groupId!, { id: p.groupId!, name: p.groupName ?? p.groupId! }])).values()].sort((a, b) => a.name.localeCompare(b.name))
     : [];

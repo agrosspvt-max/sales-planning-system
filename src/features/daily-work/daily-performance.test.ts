@@ -22,8 +22,10 @@ const USERS: { id: string; name: string; role: Role; groupId: string | null }[] 
   { id: "so2", name: "Amit", role: Role.SALES_OFFICER, groupId: "g1" },
   { id: "rm2", name: "RM Two", role: Role.REGIONAL_MANAGER, groupId: "g2" },
   { id: "so3", name: "Ravi", role: Role.SALES_OFFICER, groupId: "g2" },
+  { id: "so4", name: "Bina", role: Role.SALES_OFFICER, groupId: "g3" },
+  { id: "so5", name: "Chetan", role: Role.SALES_OFFICER, groupId: "g4" },
 ];
-const GROUP_NAMES: Record<string, string> = { g1: "MP", g2: "UP" };
+const GROUP_NAMES: Record<string, string> = { g1: "MP", g2: "UP", g3: "WB", g4: "CG" };
 const D = (s: string) => new Date(`${s}T00:00:00.000Z`); // date-only key → Date
 const TS = (s: string) => new Date(s); // full ISO timestamp
 
@@ -194,8 +196,8 @@ async function main() {
     const f = makeFake();
     const svc = loadService(f.prisma);
     const p = await svc.getDailyPerformance(ADMIN, RANGE);
-    assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["so1", "so2", "so3"]);
-    assert.equal(p.rows.length, 9, "3 officers × 3 days");
+    assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["so1", "so2", "so3", "so4", "so5"]);
+    assert.equal(p.rows.length, 15, "5 officers × 3 days");
     assert.equal(f.store.rawCount, 4, "fixed 4 batched range queries — no N+1");
   }
 
@@ -282,17 +284,56 @@ async function main() {
     assert.equal(p.summary.averageRmRating, null);
   }
 
-  // 9) Filters: Admin SO filter, Admin State (group) filter, RM SO filter.
+  // 9) Admin State and SO filters are dependent, while RM's existing SO filter remains unchanged.
   {
     const svc = loadService(makeFake().prisma);
+    const company = await svc.getDailyPerformance(ADMIN, RANGE);
+    assert.deepEqual(company.officers.map((o) => o.id).sort(), ["so1", "so2", "so3", "so4", "so5"], "All States offers all SOs");
+
     const byOfficer = await svc.getDailyPerformance(ADMIN, { ...RANGE, officerId: "so3" });
     assert.deepEqual([...new Set(byOfficer.rows.map((r) => r.officerId))], ["so3"]);
+    assert.deepEqual(byOfficer.officers.map((o) => o.id).sort(), ["so1", "so2", "so3", "so4", "so5"], "All States + specific SO keeps the company-wide option set");
+
+    const mp = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g1" });
+    assert.deepEqual([...new Set(mp.rows.map((r) => r.officerId))].sort(), ["so1", "so2"], "MP + All Sales Officers returns MP only");
+    assert.deepEqual(mp.officers.map((o) => o.id).sort(), ["so1", "so2"], "MP dropdown contains MP SOs only");
+
     const byState = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g2" });
     assert.deepEqual([...new Set(byState.rows.map((r) => r.officerId))], ["so3"], "State filter → g2 only");
     assert.equal(byState.summary.salesOfficers, 1);
-    assert.equal(byState.states.map((s) => s.name).sort().join("|"), "MP|UP", "state options span the whole company");
+    assert.deepEqual(byState.officers.map((o) => o.id), ["so3"], "UP dropdown contains UP SOs only");
+
+    const wb = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g3" });
+    assert.deepEqual(wb.officers.map((o) => o.id), ["so4"], "WB dropdown contains WB SOs only");
+    assert.deepEqual([...new Set(wb.rows.map((r) => r.officerId))], ["so4"], "WB + All Sales Officers returns WB only");
+
+    const cg = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g4" });
+    assert.deepEqual(cg.officers.map((o) => o.id), ["so5"], "CG dropdown contains CG SOs only");
+    assert.deepEqual([...new Set(cg.rows.map((r) => r.officerId))], ["so5"], "CG + All Sales Officers returns CG only");
+
+    const oneMpOfficer = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g1", officerId: "so1" });
+    assert.deepEqual([...new Set(oneMpOfficer.rows.map((r) => r.officerId))], ["so1"], "MP + MP SO returns that SO only");
+    await expectStatus(() => svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g1", officerId: "so3" }), 403, "MP + UP SO is rejected server-side");
+
+    assert.equal(byState.states.map((s) => s.name).sort().join("|"), "CG|MP|UP|WB", "state options span the whole company");
     const rmFilter = await svc.getDailyPerformance(RM1, { ...RANGE, officerId: "so2" });
     assert.deepEqual([...new Set(rmFilter.rows.map((r) => r.officerId))], ["so2"]);
+  }
+
+  // 9b) Admin UI order and dependent-state behavior: Date From, Date To, State, then Sales Officer.
+  {
+    const page = readFileSync(resolve("src/features/daily-work/performance-page.tsx"), "utf8");
+    const fromAt = page.indexOf("<Label>{L.dateFrom}</Label>");
+    const toAt = page.indexOf("<Label>{L.dateTo}</Label>");
+    const stateAt = page.indexOf("<Label>{L.fState}</Label>");
+    const officerAt = page.indexOf("<Label>{L.officerLabel}</Label>");
+    assert.ok(fromAt < toAt && toAt < stateAt && stateAt < officerAt, "Admin filters render Date From → Date To → State → Sales Officer");
+    assert.ok(page.includes('useLabel("daily_work.performance.filter.all_sales_officers")'), "SO default uses All Sales Officers label");
+    assert.ok(page.includes("isAdmin ? L.allSalesOfficers : L.allRms"), "the terminology change is limited to Admin; RM behavior stays unchanged");
+    assert.ok(page.includes('setGroupId(value);') && page.includes('setOfficerId("");'), "State change resets the selected SO");
+    assert.ok(page.includes("disabled={isAdmin && isFetching}"), "stale SO options are unavailable while the new State scope loads");
+    const labels = localRequire(resolve("src/features/labels", "labels.ts")).DEFAULT_LABELS as Record<string, string>;
+    assert.equal(labels["daily_work.performance.filter.all_sales_officers"], "All Sales Officers");
   }
 
   // 10) Detail authorization (403). Success paths are covered by the existing review-detail tests.

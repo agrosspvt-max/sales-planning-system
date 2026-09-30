@@ -68,8 +68,8 @@ export function PerformancePage({ role }: { role: Role }) {
     colAction: useLabel("daily_work.team.col.action"),
     view: useLabel("daily_work.team.action.view"),
     empty: useLabel("daily_work.performance.empty"),
-    fRm: useLabel("daily_work.performance.filter.rm"),
-    allOfficers: useLabel("daily_work.performance.filter.all_rms"),
+    allRms: useLabel("daily_work.performance.filter.all_rms"),
+    allSalesOfficers: useLabel("daily_work.performance.filter.all_sales_officers"),
     fState: useLabel("daily_work.performance.col.state"),
     allStates: useLabel("daily_work.performance.filter.all_states"),
     officerLabel: useLabel("daily_work.team.col.sales_officer"),
@@ -91,7 +91,7 @@ export function PerformancePage({ role }: { role: Role }) {
   const query = new URLSearchParams({ from, to });
   if (!isSO && officerId) query.set("officerId", officerId);
   if (isAdmin && groupId) query.set("groupId", groupId);
-  const { data, isLoading } = useQuery<Payload>({
+  const { data, isLoading, isFetching } = useQuery<Payload>({
     queryKey: ["performance", role, from, to, officerId, groupId],
     queryFn: () => api.get<Payload>(`/api/daily-work/performance?${query.toString()}`),
   });
@@ -104,6 +104,12 @@ export function PerformancePage({ role }: { role: Role }) {
   const showOfficer = !isSO;
   const showState = isAdmin;
   const colCount = 1 + (showOfficer ? 1 : 0) + (showState ? 1 : 0) + 6; // date + officer? + state? + attendance/plan/report/self/rm/action
+  const changeState = (value: string) => {
+    setGroupId(value);
+    // A State change establishes a new authoritative SO scope. Resetting is predictable and prevents a
+    // previously selected officer from being sent with an incompatible State while the options refresh.
+    setOfficerId("");
+  };
 
   return (
     <div className="space-y-5">
@@ -112,16 +118,16 @@ export function PerformancePage({ role }: { role: Role }) {
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5"><Label>{L.dateFrom}</Label><Input type="date" value={from} onChange={(e) => setFrom(e.target.value || currentBusinessDate())} className="w-44" /></div>
         <div className="space-y-1.5"><Label>{L.dateTo}</Label><Input type="date" value={to} onChange={(e) => setTo(e.target.value || currentBusinessDate())} className="w-44" /></div>
-        {showOfficer && (
-          <div className="space-y-1.5"><Label>{L.officerLabel}</Label>
-            <NativeSelect className="w-52" value={officerId} onChange={(e) => setOfficerId(e.target.value)}
-              options={[{ value: "", label: L.allOfficers }, ...(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))]} />
-          </div>
-        )}
         {showState && (
           <div className="space-y-1.5"><Label>{L.fState}</Label>
-            <NativeSelect className="w-48" value={groupId} onChange={(e) => setGroupId(e.target.value)}
+            <NativeSelect className="w-48" value={groupId} onChange={(e) => changeState(e.target.value)}
               options={[{ value: "", label: L.allStates }, ...(data?.states ?? []).map((s) => ({ value: s.id, label: s.name }))]} />
+          </div>
+        )}
+        {showOfficer && (
+          <div className="space-y-1.5"><Label>{L.officerLabel}</Label>
+            <NativeSelect className="w-52" value={officerId} disabled={isAdmin && isFetching} onChange={(e) => setOfficerId(e.target.value)}
+              options={[{ value: "", label: isAdmin ? L.allSalesOfficers : L.allRms }, ...(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))]} />
           </div>
         )}
       </div>

@@ -91,7 +91,7 @@ function loadCalendarServer(prisma: object, scope: Scope) {
   }).outputText;
   const exports = {};
   const mocks: Record<string, unknown> = {
-    "server-only": {}, "@/lib/prisma": { prisma },
+    "server-only": {}, "@/lib/prisma": { prisma }, "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (rows: unknown[]) => rows, dealerDisplayName: (n: string) => n },
     "@/lib/http": { ApiError: class extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } } },
     "@/lib/scope": {
       getOfficerScope: async () => scope,

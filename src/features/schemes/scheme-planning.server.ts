@@ -8,6 +8,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope, assertOfficerInScope, getCurrentManagerId } from "@/lib/scope";
+import { loadDealerAliasNameMap, decorateDealerNames } from "@/lib/dealer-display-name.server";
 import { writeAudit } from "@/lib/audit";
 import { refreshSchemeStatuses } from "./scheme-master.server";
 import { extensionAttemptsEnabled, hasExtensionAttemptsRemaining, isConversionExtensionStatusEligible, isWithinConversionExtensionDayLimit } from "@/lib/scheme-conversion-extension";
@@ -373,7 +374,8 @@ export async function listSchemePlans(ctx: AuthContext, schemeId?: string, offic
   })) as unknown as RawPlan[];
   const out = await enrichBookingSchemeCount(rows.map(toPlanRow));
   await enrichProductBilling(out, rows);
-  return out;
+  // DISPLAY-only: alias-preferred dealer names on the Scheme Planning rows (identity stays the dealer id).
+  return decorateDealerNames(out, (row) => row.dealerId);
 }
 
 /* --------------------------------- Scheme-wise summary --------------------------------- */
@@ -1090,7 +1092,9 @@ async function assignedPlanningDealers(officerId: string): Promise<PlanningDeale
     orderBy: { name: "asc" },
     select: { id: true, name: true, town: true, district: true },
   })) as { id: string; name: string; town: string | null; district: string | null }[];
-  return dealers.map((dealer) => ({ id: dealer.id, name: dealer.name, territory: dealer.town ?? dealer.district ?? null }));
+  // DISPLAY-only: alias-preferred names for the scheme dealer picker (option value stays the dealer id).
+  const aliasNames = await loadDealerAliasNameMap(ids);
+  return dealers.map((dealer) => ({ id: dealer.id, name: aliasNames.get(dealer.id) ?? dealer.name, territory: dealer.town ?? dealer.district ?? null }));
 }
 
 /**

@@ -30,6 +30,7 @@ function loadService<T>(name: string, prisma: object): T {
     "./scheme-bill-product.server": { productBillingForPlans: async () => new Map() },
     "./scheme-master.server": { refreshSchemeStatuses: async () => {} },
     "@/lib/prisma": { prisma },
+    "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (rows: unknown[]) => rows, dealerDisplayName: (n: string) => n },
     "@/lib/audit": { writeAudit: async () => {} },
     "@/lib/http": { ApiError: class extends Error { constructor(public status: number, message: string) { super(message); } } },
     "@/lib/scope": { getOfficerScope: async () => ({ all: true, ids: [] }), assertOfficerInScope: async () => {} },

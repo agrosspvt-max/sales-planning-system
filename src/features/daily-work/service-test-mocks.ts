@@ -45,5 +45,12 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
     "@/lib/recovery-config": {
       getAutoTasksEnabled: async () => false,
     },
+    // Dealer DISPLAY-name layer — stubbed to "no aliases" so tests keep asserting the real dealer names.
+    "@/lib/dealer-display-name.server": {
+      loadDealerAliasNameMap: async () => new Map(),
+      resolveDealerDisplayNames: async () => new Map(),
+      decorateDealerNames: async (rows: unknown[]) => rows.map((r) => ({ ...(r as object) })),
+      dealerDisplayName: (name: string) => name,
+    },
   };
 }

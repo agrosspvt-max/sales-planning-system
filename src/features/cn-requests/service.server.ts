@@ -37,6 +37,19 @@ import {
   type CnAcceptanceReason,
   type CnTaskDto,
 } from "@/lib/cn-request";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+
+/**
+ * DISPLAY-only: replace each row's shown party name with the dealer's alias name when one exists. The dealer id
+ * (r.dealerId) — the business identity — is never changed; only the human-facing `partyName` string is swapped.
+ * Shared by every CN list that shows a dealer (CN Requests, pending/active tasks, Auto Tasks in Daily Work).
+ */
+async function withDealerDisplayNames<T extends { dealerId: string; partyName: string }>(rows: T[]): Promise<T[]> {
+  if (rows.length === 0) return rows;
+  const aliasMap = await loadDealerAliasNameMap(rows.map((r) => r.dealerId));
+  if (aliasMap.size === 0) return rows;
+  return rows.map((r) => { const alias = aliasMap.get(r.dealerId); return alias ? { ...r, partyName: alias } : r; });
+}
 
 /**
  * CN (Credit Note) Requests. A Sales Officer raises a request for one of their assigned dealers; an RM
@@ -245,7 +258,9 @@ export async function myAssignedDealers(ctx: AuthContext, officerId?: string): P
   const ids = assignments.map((a) => a.dealerId);
   if (ids.length === 0) return [];
   const dealers = (await prisma.dealer.findMany({ where: { id: { in: ids }, isActive: true, deletedAt: null }, orderBy: { name: "asc" }, select: { id: true, name: true } })) as { id: string; name: string }[];
-  return dealers;
+  // DISPLAY-only: alias-preferred label for the Party dropdown; the option VALUE (id) is the dealer identity.
+  const aliasNames = await loadDealerAliasNameMap(ids);
+  return dealers.map((d) => ({ id: d.id, name: aliasNames.get(d.id) ?? d.name }));
 }
 
 /**
@@ -295,7 +310,7 @@ export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Pr
     orderBy: { createdAt: "desc" },
   })) as unknown as RawRow[];
   const verified = await paymentVerifiedMap(rows.map((r) => r.id));
-  return rows.map((r) => toRow({ ...r, paymentVerified: verified.get(r.id) ?? false }));
+  return withDealerDisplayNames(rows.map((r) => toRow({ ...r, paymentVerified: verified.get(r.id) ?? false })));
 }
 
 export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequestRow> {
@@ -304,7 +319,8 @@ export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequ
   if (!r) throw new ApiError(404, L["cn_requests.error.not_found"]);
   const scope = await getOfficerScope(ctx);
   if (!scope.all && !scope.ids.includes(r.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_view"]);
-  return toRow({ ...r, paymentVerified: (await paymentVerifiedMap([id])).get(id) ?? false });
+  const row = toRow({ ...r, paymentVerified: (await paymentVerifiedMap([id])).get(id) ?? false });
+  return (await withDealerDisplayNames([row]))[0];
 }
 
 /**
@@ -1020,7 +1036,7 @@ export async function listPendingCnTasks(ctx: AuthContext): Promise<CnTaskDto[]>
     AND c."status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED} AND c."taskDate" IS NULL
     AND c."legacyDailyWorkEntryId" IS NULL ${scopeClause}
     ORDER BY c."acceptedAt" DESC NULLS LAST`);
-  return [...events.map((event) => toNewTaskDto(event)), ...legacy.map(toLegacyTaskDto)];
+  return withDealerDisplayNames([...events.map((event) => toNewTaskDto(event)), ...legacy.map(toLegacyTaskDto)]);
 }
 
 /** All active CN Working tasks, irrespective of their actual scheduled date, for the compact Daily Work table. */
@@ -1038,7 +1054,7 @@ export async function listActiveCnTasks(ctx: AuthContext): Promise<CnTaskDto[]> 
     AND c."status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED}
     AND c."legacyDailyWorkEntryId" IS NULL ${scopeClause}
     ORDER BY c."taskDate" ASC NULLS LAST, c."acceptedAt" DESC NULLS LAST`);
-  return [...events.map((event) => toNewTaskDto(event)), ...legacy.map(toLegacyTaskDto)];
+  return withDealerDisplayNames([...events.map((event) => toNewTaskDto(event)), ...legacy.map(toLegacyTaskDto)]);
 }
 
 /** Active tasks already consumed by the current editable Recovery rows, used only by their reschedule action. */
@@ -1068,7 +1084,7 @@ export async function materializedCnTasksForEntries(officerId: string, entryIds:
       AND c."status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED}
       AND c."legacyDailyWorkEntryId" IN (${Prisma.join(entryIds)})
     ORDER BY c."taskDate", c."acceptedAt" NULLS LAST`);
-  return [...events.map((event) => toNewTaskDto(event, confirmedByEventId.get(event.id) ?? false)), ...legacy.map(toLegacyTaskDto)];
+  return withDealerDisplayNames([...events.map((event) => toNewTaskDto(event, confirmedByEventId.get(event.id) ?? false)), ...legacy.map(toLegacyTaskDto)]);
 }
 
 export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown): Promise<CnTaskDto> {
@@ -1265,5 +1281,5 @@ export async function cnTasksForOfficerDate(officerId: string, workDate: string)
     AND c."status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED} AND c."taskDate" = ${workDate}::date
     AND c."legacyDailyWorkEntryId" IS NULL
     ORDER BY c."acceptedAt" DESC NULLS LAST`);
-  return [...events.map((event) => toNewTaskDto(event)), ...legacy.map(toLegacyTaskDto)];
+  return withDealerDisplayNames([...events.map((event) => toNewTaskDto(event)), ...legacy.map(toLegacyTaskDto)]);
 }

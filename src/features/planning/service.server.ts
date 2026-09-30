@@ -11,6 +11,7 @@ import {
 } from "@/lib/scope";
 import { planningProductsForOfficer, clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { loadEffectiveProduct } from "@/features/products/merge.server";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { saveLinesSchema, remarksSchema, revisionRequestSchema } from "@/lib/validations/planning";
 import { NotificationType } from "@prisma/client";
 import { findOrCreateSeason } from "@/features/seasons/service.server";
@@ -375,6 +376,8 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
   // planLineId are kept untouched (editing + cell keys), but read/aggregation views group by the effective
   // identity so a merged source (e.g. TAANDAB) rolls up under the survivor (TANDAB) with no double counting.
   const eff = await loadEffectiveProduct();
+  // DISPLAY-only: alias-preferred dealer names for the Seasonal plan grid (identity stays the dealer id).
+  const seasonalAliasNames = await loadDealerAliasNameMap(plan.dealers.map((pd) => pd.dealerId));
 
   const isOwner = isPlanOwner(ctx, plan.officerId);
   const canEdit = isOwner && EDITABLE.includes(plan.status) && plan.season.status === SeasonStatus.OPEN;
@@ -413,7 +416,7 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
       .map((pd) => ({
         planDealerId: pd.id,
         dealerId: pd.dealerId,
-        dealerName: pd.dealer.name,
+        dealerName: seasonalAliasNames.get(pd.dealerId) ?? pd.dealer.name,
         dealerActive: pd.dealer.isActive,
         noPlan: pd.noPlan,
         noPlanReason: pd.noPlanReason,
@@ -497,8 +500,10 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
     select: { id: true, name: true, order: true },
   });
 
+  // DISPLAY-only: alias-preferred dealer names in the Seasonal dealer selector (identity stays the dealer id).
+  const dealerListAliasNames = await loadDealerAliasNameMap(plan.dealers.map((pd) => pd.dealerId));
   const dealerList = plan.dealers
-    .map((pd) => ({ dealerId: pd.dealerId, dealerName: pd.dealer.name }))
+    .map((pd) => ({ dealerId: pd.dealerId, dealerName: dealerListAliasNames.get(pd.dealerId) ?? pd.dealer.name }))
     .sort((a, b) => a.dealerName.localeCompare(b.dealerName));
   const selectedDealerId = dealerId && dealerList.some((d) => d.dealerId === dealerId)
     ? dealerId

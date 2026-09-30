@@ -408,6 +408,7 @@ function loadService(
   const mocks: Record<string, unknown> = {
     "server-only": {},
     "@/lib/prisma": { prisma },
+    "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (rows: unknown[]) => rows, dealerDisplayName: (n: string) => n },
     "@/lib/http": { ApiError: TestApiError },
     "@/lib/scope": { getOfficerScope: async (ctx: AuthContext) => ctx.role === Role.SUPER_ADMIN ? ({ all: true, ids: [] }) : ctx.role === Role.REGIONAL_MANAGER ? ({ all: false, ids: [ctx.userId, "so-1", "so-2"] }) : ({ all: false, ids: [ctx.userId] }) },
     "@/lib/audit": { writeAudit: async (entry: { summary?: string | null }) => { audits.push(entry); } },

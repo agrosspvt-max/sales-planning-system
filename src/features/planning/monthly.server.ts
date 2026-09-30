@@ -5,6 +5,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope, isPlanOwner } from "@/lib/scope";
 import { clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { loadEffectiveProduct, type EffectiveProductResolver } from "@/features/products/merge.server";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { saveMonthlySchema } from "@/lib/validations/planning";
 import { figuresForMode, isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { getEditableMonthMap, assertMonthOpen } from "./planning-state.server";
@@ -67,6 +68,8 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
   const clearance = await clearanceMapForGroup(officer?.groupId ?? null);
   // Product Merge (Phase 12): operational identity per line (survivor after a merge) for read/aggregation grouping.
   const eff = await loadEffectiveProduct();
+  // DISPLAY-only: alias-preferred dealer names (identity stays the dealer id on every row/line).
+  const aliasNames = await loadDealerAliasNameMap(planDealers.map((pd) => pd.dealerId));
 
   return {
     planId: plan.id,
@@ -77,7 +80,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
       const status = ((m as { status?: string }).status as MonthStatus) ?? "OPEN";
       return { id: m.id, name: m.name, order: m.order, status, editable: isMonthEditable(status) };
     }),
-    dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance),
+    dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance, aliasNames),
   };
 }
 
@@ -93,6 +96,7 @@ export function buildMonthlyDealers(
   monthlyMode: PlanningMode,
   eff: EffectiveProductResolver, // Product Merge (Phase 12): operational identity per line, for read/aggregation grouping
   clearance?: Map<string, { clearanceQty: number | null }>, // group-specific clearance (by productId), display-only
+  aliasNames?: Map<string, string>, // DISPLAY-only alias-preferred dealer names (by dealer id); identity unchanged
 ) {
   const valueMode = !isQuantityMode(monthlyMode);
   return planDealers
@@ -100,7 +104,7 @@ export function buildMonthlyDealers(
     .sort((a, b) => a.dealer.name.localeCompare(b.dealer.name))
     .map((pd) => ({
       dealerId: pd.dealerId,
-      dealerName: pd.dealer.name,
+      dealerName: aliasNames?.get(pd.dealerId) ?? pd.dealer.name,
       // A dealer added to this plan from Monthly Planning (new dealer).
       isNewDealer: pd.fromMonthlyPlan ?? false,
       products: pd.lines

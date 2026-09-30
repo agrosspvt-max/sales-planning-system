@@ -5,6 +5,7 @@ import { SchemeEnrollmentStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope, assertOfficerInScope } from "@/lib/scope";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { BUSINESS_WEEK_COUNT, businessWeekDayRange } from "@/features/recovery/service.server";
 import { derivedInstallmentSchedule, installmentBaseDate, type InstallmentRuleRow } from "./scheme-enrolled.server";
 // Phase 6: Product/Value achievement follow-up REUSES the Phase 4 authoritative engine (pure calculations)
@@ -267,6 +268,10 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
     instances: { id: string; billMode: boolean; adminAmountWithGST: unknown; instanceNumber: number; adminBillingDate: Date | null; installments: { bill: { partNumber: number } | null; installmentNumber: number; plannedAmount: unknown; plannedDate: Date | null; receivedAmount: unknown; receivedDate: Date | null }[] }[];
   }[];
 
+  // DISPLAY-only: alias-preferred dealer names for every Follow-up view derived from these base rows (they all
+  // read dealerName from here). The dealer id remains the identity used for grouping/aggregation.
+  const followUpAliasNames = await loadDealerAliasNameMap(plans.map((p) => p.dealerId));
+
   return plans.map((p) => {
     // Effective With-GST value: MULTIPLE_OPTIONS uses the plan's option snapshot; FIXED uses the scheme value.
     const gst = effectiveValueWithGST({ structure: p.scheme.structure, schemeValueWithGST: p.scheme.schemeValueWithGST == null ? null : money(p.scheme.schemeValueWithGST), optionValueWithGST: p.optionValueWithGST == null ? null : money(p.optionValueWithGST) });
@@ -300,7 +305,7 @@ async function loadPlans(ctx: AuthContext, opts: { dealerId?: string; schemeId?:
     rows.sort((a, b) => (a.instanceNumber ?? 0) - (b.instanceNumber ?? 0) || (a.billPartNumber ?? 0) - (b.billPartNumber ?? 0) || a.installmentNumber - b.installmentNumber);
     return {
       planId: p.id, dealerId: p.dealerId,
-      dealerName: p.dealer.name, town: p.dealer.town, village: p.dealer.village, tehsil: p.dealer.tehsil, district: p.dealer.district, mobile: p.dealer.mobile,
+      dealerName: followUpAliasNames.get(p.dealerId) ?? p.dealer.name, town: p.dealer.town, village: p.dealer.village, tehsil: p.dealer.tehsil, district: p.dealer.district, mobile: p.dealer.mobile,
       salesOfficerName: p.salesOfficer.name, state: p.salesOfficer.group?.name ?? null,
       schemeId: p.schemeId, schemeName: p.scheme.schemeName, schemeValueWithGST: gst, confirmedSchemeAmount: p.billMode ? money(p.adminAmountWithGST) : p.instances.reduce((sum, i) => sum + (i.billMode && i.adminAmountWithGST != null ? money(i.adminAmountWithGST) : gst), 0),
       instanceCount: p.instances.length, numberOfSchemes: p.numberOfSchemes || 1,

@@ -5,6 +5,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { BUSINESS_WEEK_COUNT, businessWeekOfMonth } from "@/features/recovery/service.server";
 import { bucketOfStatus, type StatusBucket, type OfficerRef, type GroupOfficerBreakdown } from "@/features/planning/group-plan.server";
 import type { RecoveryCalcDealer } from "@/features/recovery/recovery-calc";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -197,6 +198,14 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
       dealers,
     };
   }).sort((a, b) => a.officerName.localeCompare(b.officerName));
+
+  // DISPLAY-only: alias-preferred dealer names for the Territory Recovery dealer rows (identity stays the id).
+  const recoveryDealerIds = new Set<string>();
+  for (const r of rows) for (const d of r.dealers) recoveryDealerIds.add(d.dealerId);
+  const recoveryAliasNames = await loadDealerAliasNameMap([...recoveryDealerIds]);
+  if (recoveryAliasNames.size > 0) {
+    for (const r of rows) for (const d of r.dealers) { const a = recoveryAliasNames.get(d.dealerId); if (a) d.dealerName = a; }
+  }
 
   // Officer breakdown — same shape/logic as Territory Product Plan (buckets from the included rows).
   const byBucketSets: Record<StatusBucket, Set<string>> = { approved: new Set(), submitted: new Set(), draft: new Set() };

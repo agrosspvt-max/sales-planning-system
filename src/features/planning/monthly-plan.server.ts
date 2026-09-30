@@ -15,6 +15,7 @@ import { writeAudit } from "@/lib/audit";
 import { applyDealerAssignment } from "@/features/assignments/service.server";
 import { buildMonthlyDealers } from "./monthly.server";
 import { loadEffectiveProduct } from "@/features/products/merge.server";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "./lifecycle.server";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -312,7 +313,8 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
 
   // Attach per-dealer completion (≥1 monthly plan value entered — the SAME "has a value" concept
   // Seasonal Planning uses) and the stored monthly No Plan state.
-  const dealers = buildMonthlyDealers(planDealers, months, monthlyMode, effMp, clearance).map((d) => ({
+  const mpAliasNames = await loadDealerAliasNameMap(planDealers.map((pd) => pd.dealerId));
+  const dealers = buildMonthlyDealers(planDealers, months, monthlyMode, effMp, clearance, mpAliasNames).map((d) => ({
     ...d,
     noPlan: noPlanByDealer.has(d.dealerId),
     noPlanReason: noPlanByDealer.get(d.dealerId) ?? null,
@@ -412,7 +414,8 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
   const clearance = await clearanceMapForGroup(clOfficer?.groupId ?? null);
   // Product Merge (Phase 12): operational identity per line so merged sources fold into the survivor.
   const eff = await loadEffectiveProduct();
-  return { monthlyMode, months, dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance) };
+  const aliasNames = await loadDealerAliasNameMap(planDealers.map((pd) => pd.dealerId));
+  return { monthlyMode, months, dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance, aliasNames) };
 }
 
 /* -------------------------------- Saving ---------------------------------- */

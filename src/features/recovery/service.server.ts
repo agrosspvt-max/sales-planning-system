@@ -10,6 +10,7 @@ import { createAndAssignDealer } from "@/features/assignments/service.server";
 import { getOfficerScope, assertOfficerInScope, isPlanOwner } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { getRecoveryConfig } from "@/lib/recovery-config";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, isHiddenByArchivedParent } from "@/features/planning/lifecycle.server";
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
@@ -721,6 +722,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
       }[])
     : [];
   const prevByDealer = new Map(prevDealers.map((d) => [d.dealerId, { outstanding: num(d.outstanding), overdue: num(d.overdue), due: num(d.due), running: num(d.running) }]));
+  // DISPLAY-only: alias-preferred dealer names for the Recovery Month/Week rows (identity stays the dealer id).
+  const recoveryAliasNames = await loadDealerAliasNameMap(plan.dealers.map((d) => d.dealerId));
 
   // "Missing in Latest Aging" (derived, Option C): a dealer kept in the plan but absent from the newest
   // snapshot shows its last-known aging with a stale badge — no value is zeroed, no row is removed.
@@ -776,7 +779,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
       const changed = prev ? prev.outstanding !== cur.outstanding || prev.overdue !== cur.overdue || prev.due !== cur.due || prev.running !== cur.running : false;
       return {
         dealerId: d.dealerId,
-        dealerName: d.dealer.name,
+        dealerName: recoveryAliasNames.get(d.dealerId) ?? d.dealer.name,
         outstanding: cur.outstanding,
         overdue: cur.overdue,
         due: cur.due,
@@ -1335,8 +1338,12 @@ export async function compareSnapshots(ctx: AuthContext, id: string, fromId: str
   const [from, to] = await Promise.all([load(fromId), load(toId)]);
 
   const dealerIds = [...new Set([...from, ...to].map((d) => d.dealerId))];
-  const dealerRows = await prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } });
-  const nameById = new Map(dealerRows.map((d) => [d.id, d.name]));
+  // DISPLAY-only: alias-preferred names for Recovery History (identity stays the dealer id).
+  const [dealerRows, historyAliasNames] = await Promise.all([
+    prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } }),
+    loadDealerAliasNameMap(dealerIds),
+  ]);
+  const nameById = new Map(dealerRows.map((d) => [d.id, historyAliasNames.get(d.id) ?? d.name]));
   const nameOf = (dealerId: string) => nameById.get(dealerId) ?? "—";
 
   const asMetrics = (d: { outstanding: unknown; overdue: unknown; due: unknown; running: unknown }) => ({

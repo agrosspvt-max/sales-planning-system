@@ -62,6 +62,7 @@ function loadScheme(managerFor: (officerId: string) => string | null, rows: {
     "./scheme-bill-product.server": { productBillingForPlans: async () => new Map() },
     "./scheme-master.server": { refreshSchemeStatuses: async () => {} },
     "@/lib/prisma": { prisma },
+    "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (rows: unknown[]) => rows, dealerDisplayName: (n: string) => n },
     "@/lib/audit": { writeAudit: async () => {} },
     "@/lib/http": { ApiError: class extends Error { constructor(public status: number, message: string) { super(message); } } },
     "@/lib/scope": {

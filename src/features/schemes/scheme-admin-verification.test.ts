@@ -15,7 +15,7 @@ function loadService<T>(name: string, prisma: object, overrides: Record<string, 
   }).outputText;
   const exports = {};
   const mocks: Record<string, unknown> = {
-    "server-only": {}, "@/lib/prisma": { prisma },
+    "server-only": {}, "@/lib/prisma": { prisma }, "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (rows: unknown[]) => rows, dealerDisplayName: (n: string) => n },
     "@/lib/http": { ApiError: class extends Error { constructor(public status: number, message: string) { super(message); } } },
     "@/lib/scope": { getOfficerScope: async () => ({ all: true, ids: [] }) },
     "@/lib/audit": { writeAudit: async (data: Record<string, unknown>, tx: { auditLog: { create(args: { data: Record<string, unknown> }): Promise<unknown> } }) => tx.auditLog.create({ data }) },

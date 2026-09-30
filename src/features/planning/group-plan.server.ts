@@ -5,6 +5,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { figuresForMode, nbv as calcNbv, isQuantityMode, type PlanningMode } from "@/lib/calc";
 import { clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { loadEffectiveProduct } from "@/features/products/merge.server";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -509,6 +510,21 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   for (const row of productRows.values()) {
     const c = clearance.get(row.productId);
     if (c) { row.isClearance = true; row.clearanceQty = c.clearanceQty; }
+  }
+
+  // DISPLAY-only: alias-preferred dealer names in the Product Detail drawer + contributions (Territory Plan
+  // → click a product → dealer rows). The dealer id is untouched — only the shown label changes.
+  const drawerDealerIds = new Set<string>();
+  for (const row of productRows.values()) {
+    for (const d of row.drawer) drawerDealerIds.add(d.dealerId);
+    for (const c of row.contributions) drawerDealerIds.add(c.dealerId);
+  }
+  const drawerAliasNames = await loadDealerAliasNameMap([...drawerDealerIds]);
+  if (drawerAliasNames.size > 0) {
+    for (const row of productRows.values()) {
+      for (const d of row.drawer) { const a = drawerAliasNames.get(d.dealerId); if (a) d.dealerName = a; }
+      for (const c of row.contributions) { const a = drawerAliasNames.get(c.dealerId); if (a) c.dealerName = a; }
+    }
   }
 
   // Season-stable ordering so products don't disappear/reorder when only the period selection changes.

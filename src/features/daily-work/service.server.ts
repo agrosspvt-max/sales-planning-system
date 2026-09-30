@@ -15,6 +15,7 @@ import { effectiveProceedingSchemeUnits } from "@/lib/scheme-plan-quantity";
 import { getResolvedLabels } from "@/features/labels/service.server";
 import { cnTasksForOfficerDate, materializedCnTasksForEntries, countUnconfirmedMaterializedTasks } from "@/features/cn-requests/service.server";
 import { getAutoTasksEnabled } from "@/lib/recovery-config";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction } from "./auto-task-materialization.server";
@@ -467,10 +468,15 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     section === "RECOVERY" ? cnTasksForOfficerDate(officerId, workDate) : Promise.resolve([] as CnTaskDto[]),
   ]);
 
-  // Names for every dealer we may show (assigned + any already-saved row).
+  // Names for every dealer we may show (assigned + any already-saved row). DISPLAY-only: prefer the dealer's
+  // alias name when one exists (identity stays the dealer id everywhere below).
   const dealerIds = [...new Set([...assignedIds, ...dailyRows.map((row) => row.dealerId).filter((id): id is string => !!id)])];
+  const [dealerRowsForNames, aliasNameMap] = await Promise.all([
+    prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } }),
+    loadDealerAliasNameMap(dealerIds),
+  ]);
   const dealerNames = new Map(
-    (await prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } })).map((d) => [d.id, d.name]),
+    dealerRowsForNames.map((d) => [d.id, aliasNameMap.get(d.id) ?? d.name]),
   );
 
   const dealers: DailyWorkDealerDto[] = dailyRows
@@ -765,9 +771,12 @@ export async function getDailyConversion(ctx: AuthContext, rawDate?: string, tar
     getCurrentDealerIds(officerId),
   ]);
   const dealerIds = [...new Set([...plannedByDealer.keys(), ...entries.map((r) => r.dealerId).filter((x): x is string => !!x)])];
-  const dealerNames = new Map(
-    (await prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } })).map((d) => [d.id, d.name]),
-  );
+  // DISPLAY-only: alias-preferred dealer names; the dealer id remains the identity for every row/option.
+  const [convDealerRows, convAliasNames] = await Promise.all([
+    prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } }),
+    loadDealerAliasNameMap(dealerIds),
+  ]);
+  const dealerNames = new Map(convDealerRows.map((d) => [d.id, convAliasNames.get(d.id) ?? d.name]));
   const schemeInfo = (dealerId: string, schemeId: string): PlannedSchemeOption | undefined =>
     (plannedByDealer.get(dealerId) ?? []).find((s) => s.schemeId === schemeId);
 

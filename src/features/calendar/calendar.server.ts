@@ -10,6 +10,7 @@ import {
   projectPartyAppointmentEvents, type PartyAppointmentEvent, type PartyAppointmentInput,
 } from "@/lib/calendar";
 import { getCalendarEnabled } from "@/lib/recovery-config";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 
 /**
  * Operational Calendar server loader.
@@ -23,13 +24,13 @@ import { getCalendarEnabled } from "@/lib/recovery-config";
  */
 
 const PLAN_SELECT = {
-  id: true, schemeId: true, expectedBillingDate: true, originalConversionDate: true, conversionExtensionCount: true,
+  id: true, schemeId: true, dealerId: true, expectedBillingDate: true, originalConversionDate: true, conversionExtensionCount: true,
   numberOfSchemes: true, totalSchemeAmount: true, salesOfficerId: true, planStatus: true, schemeStatus: true, enrollmentStatus: true,
   dealer: { select: { name: true } }, scheme: { select: { schemeName: true } }, salesOfficer: { select: { name: true } },
 } as const;
 
 type PlanRow = {
-  id: string; schemeId: string; expectedBillingDate: Date | null; originalConversionDate: Date | null; conversionExtensionCount: number;
+  id: string; schemeId: string; dealerId: string; expectedBillingDate: Date | null; originalConversionDate: Date | null; conversionExtensionCount: number;
   numberOfSchemes: number; totalSchemeAmount: unknown; salesOfficerId: string; planStatus: string; schemeStatus: string; enrollmentStatus: string;
   dealer: { name: string }; scheme: { schemeName: string }; salesOfficer: { name: string };
 };
@@ -41,10 +42,11 @@ async function assertCalendarEnabled(): Promise<void> {
   if (!(await getCalendarEnabled())) throw new ApiError(403, "Calendar is disabled");
 }
 
-function toInput(r: PlanRow): ConversionEventInput {
+function toInput(r: PlanRow, aliasNames?: Map<string, string>): ConversionEventInput {
   return {
     id: r.id, schemeId: r.schemeId, expectedBillingDate: r.expectedBillingDate, originalConversionDate: r.originalConversionDate,
-    dealerName: r.dealer.name, schemeName: r.scheme.schemeName, numberOfSchemes: r.numberOfSchemes || 1, totalSchemeAmount: asNum(r.totalSchemeAmount),
+    // DISPLAY-only: alias-preferred dealer name; the event still belongs to the same dealer id.
+    dealerName: aliasNames?.get(r.dealerId) ?? r.dealer.name, schemeName: r.scheme.schemeName, numberOfSchemes: r.numberOfSchemes || 1, totalSchemeAmount: asNum(r.totalSchemeAmount),
     salesOfficerId: r.salesOfficerId, salesOfficerName: r.salesOfficer.name, planStatus: r.planStatus, schemeStatus: r.schemeStatus,
     enrollmentStatus: r.enrollmentStatus, conversionExtensionCount: r.conversionExtensionCount,
   };
@@ -130,7 +132,8 @@ export async function calendarMonth(ctx: AuthContext, opts: { year: number; mont
     where: { expectedBillingDate: { gte, lt }, ...(await officerPlanWhere(ctx, officerId)) },
     select: PLAN_SELECT,
   })) as unknown as PlanRow[];
-  const events = projectConversionEvents(rows.map(toInput));
+  const calAliasNames = await loadDealerAliasNameMap(rows.map((r) => r.dealerId));
+  const events = projectConversionEvents(rows.map((r) => toInput(r, calAliasNames)));
   const partyEvents = projectPartyAppointmentEvents(await loadPartyAppointments(ctx, gte, lt, officerId));
   const notes = await loadNotes(ctx, gte, lt, officerId);
   const scope = await getOfficerScope(ctx);
@@ -166,7 +169,8 @@ export async function calendarUpcoming(ctx: AuthContext, days = 5): Promise<Upco
     where: { expectedBillingDate: { gte, lt }, ...(await officerPlanWhere(ctx)) },
     select: PLAN_SELECT,
   })) as unknown as PlanRow[];
-  const events = projectConversionEvents(rows.map(toInput));
+  const upcomingAliasNames = await loadDealerAliasNameMap(rows.map((r) => r.dealerId));
+  const events = projectConversionEvents(rows.map((r) => toInput(r, upcomingAliasNames)));
   const partyEvents = projectPartyAppointmentEvents(await loadPartyAppointments(ctx, gte, lt));
   const notes = await loadNotes(ctx, gte, lt);
   const items: UpcomingItem[] = [

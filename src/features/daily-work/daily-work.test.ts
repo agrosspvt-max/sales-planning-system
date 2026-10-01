@@ -137,7 +137,7 @@ function makeFake(opts: FakeOpts) {
   // getMonthly mock — the AUTHORITATIVE Monthly Dealer Summary source. Model BOTH months so month-from-date
   // selection is exercised: the per-dealer `monthlyByDealer` maps each month name → product lines. A dealer
   // with data in September but none in October must return ₹0 for October (proves date-driven month).
-  const months = [{ id: "m9", name: "September", order: 9, status: "OPEN" }, { id: "m10", name: "October", order: 10, status: "OPEN" }];
+  const months = [{ id: "m9", name: "September", calendarMonth: 9, calendarYear: 2026, order: 9, status: "OPEN" }, { id: "m10", name: "October", calendarMonth: 10, calendarYear: 2026, order: 10, status: "OPEN" }];
   const nameToId: Record<string, string> = { September: "m9", October: "m10" };
   const getMonthly = async () => ({
     planId: "sp1",

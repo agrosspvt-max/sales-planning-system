@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { PlanStatus, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -57,7 +58,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
         },
       },
     }),
-    prisma.seasonMonth.findMany({ where: { seasonId: plan.seasonId }, orderBy: { order: "asc" } }),
+    prisma.seasonMonth.findMany({ where: { seasonId: plan.seasonId }, orderBy: SEASON_MONTH_ORDER }),
   ]);
 
   const isOwner = isPlanOwner(ctx, plan.officerId);
@@ -76,9 +77,9 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
     seasonName: season ? `${season.name} ${season.year}` : "",
     canEdit: isOwner || ctx.role === Role.SUPER_ADMIN, // manual actuals: owner SO or admin
     monthlyMode,
-    months: months.map((m) => {
+    months: calendarRows(months).map((m) => {
       const status = ((m as { status?: string }).status as MonthStatus) ?? "OPEN";
-      return { id: m.id, name: m.name, order: m.order, status, editable: isMonthEditable(status) };
+      return { id: m.id, name: m.name, calendarMonth: m.calendarMonth, calendarYear: m.calendarYear, order: m.order, status, editable: isMonthEditable(status) };
     }),
     dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance, aliasNames),
   };

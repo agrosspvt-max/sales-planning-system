@@ -33,6 +33,7 @@ interface ParsedRow {
   packs: ParsedPack[];
   totalQty: number;
   monthlyPlan: number[];
+  monthlyMonths: { month: number | null; year: number | null }[];
 }
 type ImportDealerStatus = "EXISTING" | "NEW" | "INVALID";
 interface ParsedDealer {
@@ -147,6 +148,7 @@ export function SeasonalImportWizard() {
               .filter((p) => p.packSizeId && p.quantity > 0)
               .map((p) => ({ packSizeId: p.packSizeId as string, quantity: p.quantity })),
             monthlyPlan: mode === "COMPLETE" ? r.monthlyPlan : [],
+            monthlyMonths: mode === "COMPLETE" ? r.monthlyMonths : [],
           }))
           .filter((r) => r.packs.length > 0 || r.monthlyPlan.some((q) => q > 0)),
       }))

@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Search, Lock, CalendarClock } from "lucide-react";
+import { AddMonthsDialog } from "./add-months-dialog";
 import { SeasonMonthsDialog } from "./season-months-dialog";
 import { api } from "@/lib/api-client";
 import { PLANNING_MODES, PLANNING_MODE_LABELS, type PlanningMode } from "@/lib/calc";
@@ -48,6 +49,7 @@ interface Season {
   monthlyMode: PlanningMode;
   months: string[];
   locked: boolean;
+  effectivePeriod: { startMonth: number; startYear: number; endMonth: number; endYear: number } | null;
 }
 
 interface DefaultConfig {
@@ -71,6 +73,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
   const [endYear, setEndYear] = useState(thisYear);
   const [seasonalMode, setSeasonalMode] = useState<PlanningMode>("PACK_SIZE");
   const [monthlyMode, setMonthlyMode] = useState<PlanningMode>("PACK_SIZE");
+  const [addingFor, setAddingFor] = useState<{ id: string; name: string } | null>(null);
   const [monthsFor, setMonthsFor] = useState<{ id: string; name: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -230,7 +233,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
             ) : (
               data!.map((s) => {
                 const period =
-                  formatPeriod(s.startMonth, s.startYear, s.endMonth, s.endYear) ||
+                  formatPeriod(s.effectivePeriod?.startMonth ?? s.startMonth, s.effectivePeriod?.startYear ?? s.startYear, s.effectivePeriod?.endMonth ?? s.endMonth, s.effectivePeriod?.endYear ?? s.endYear) ||
                   s.months.join(", ");
                 return (
                   <TableRow key={s.id}>
@@ -249,6 +252,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
                     {canManage && (
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
+                          <Button variant="outline" size="sm" disabled={s.status !== "OPEN"} title={s.status !== "OPEN" ? "Reopen this Season before adding months" : undefined} onClick={() => setAddingFor({ id: s.id, name: `${s.name} ${s.year}` })}>Add Months</Button>
                           <Button variant="ghost" size="sm" title="Manage months" onClick={() => setMonthsFor({ id: s.id, name: `${s.name} ${s.year}` })}>
                             <CalendarClock className="h-4 w-4" />
                           </Button>
@@ -288,7 +292,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
             <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">
               <Lock className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
               <span>
-                This season already contains planning data. Season period and planning modes can no
+                This season contains planning data or added months. Season period and planning modes can no
                 longer be changed. You can still rename it.
               </span>
             </div>
@@ -405,6 +409,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
         </DialogContent>
       </Dialog>
 
+      {addingFor && <AddMonthsDialog season={addingFor} onClose={() => setAddingFor(null)} />}
       <SeasonMonthsDialog
         seasonId={monthsFor?.id ?? null}
         seasonName={monthsFor?.name ?? ""}

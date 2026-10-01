@@ -10,6 +10,7 @@ import { finalizeApprovalTx } from "@/features/planning/service.server";
 import { looseKey, tightKey, decorate, matchByName, type Keyed } from "@/lib/match-key";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { createAndAssignDealer } from "@/features/assignments/service.server";
+import { workbookMonthColumns, resolveWorkbookMonths, type WorkbookMonth } from "@/lib/season-workbook-months";
 import { writeAudit } from "@/lib/audit";
 
 /** How a workbook dealer resolved during Seasonal Import (Existing / New-to-onboard / Invalid). */
@@ -76,8 +77,9 @@ export interface ParsedRow {
   productId: string | null;
   packs: ParsedPack[];
   totalQty: number;
-  /** Per-month PLAN quantities (Complete Workbook mode), in month order. Never actuals. */
+  /** Per-column PLAN quantities; monthlyMonths identifies each calendar column. Never actuals. */
   monthlyPlan: number[];
+  monthlyMonths: WorkbookMonth[];
 }
 export interface ParsedDealer {
   sheetName: string;
@@ -146,7 +148,8 @@ function parseDealerSheet(rows: (string | number | null)[][], packs: Master["pac
     }
   }
 
-  const parsed: { productName: string; packs: ParsedPack[]; monthlyPlan: number[] }[] = [];
+  const parsed: { productName: string; packs: ParsedPack[]; monthlyPlan: number[]; monthlyMonths: WorkbookMonth[] }[] = [];
+  const monthlyMonths = headerIdx >= 0 ? workbookMonthColumns(rows, headerIdx, monthPlanCols) : [];
   if (headerIdx >= 0 && packCols.length > 0) {
     for (let r = headerIdx + 1; r < rows.length; r++) {
       const row = rows[r] ?? [];
@@ -161,7 +164,7 @@ function parseDealerSheet(rows: (string | number | null)[][], packs: Master["pac
       }));
       const monthlyPlan = monthPlanCols.map((c) => Math.max(0, Math.floor(toNum(row[c]))));
       if (packVals.every((p) => p.quantity === 0) && monthlyPlan.every((q) => q === 0)) continue;
-      parsed.push({ productName, packs: packVals, monthlyPlan });
+      parsed.push({ productName, packs: packVals, monthlyPlan, monthlyMonths });
     }
   }
   return parsed;
@@ -246,6 +249,7 @@ export async function parseSeasonalWorkbook(
         packs: pr.packs,
         totalQty: pr.packs.reduce((s, p) => s + p.quantity, 0),
         monthlyPlan: pr.monthlyPlan,
+        monthlyMonths: pr.monthlyMonths,
       };
     });
 
@@ -298,6 +302,7 @@ const commitSchema = z.object({
             z.object({ packSizeId: z.string().min(1), quantity: z.coerce.number().int().min(0) }),
           ),
           monthlyPlan: z.array(z.coerce.number().int().min(0)).optional().default([]),
+          monthlyMonths: z.array(z.object({ month: z.number().int().min(1).max(12).nullable(), year: z.number().int().min(2000).max(2100).nullable(), issue: z.string().optional() })).optional().default([]),
         }),
       ),
     }),
@@ -432,29 +437,29 @@ export async function commitSeasonalImport(
     }
   }
 
-  // Complete Workbook mode: prepare monthly plan-qty rows. The month lookup is a READ, so it
-  // runs OUTSIDE the transaction; the mapping/filtering below is byte-for-byte the original
-  // logic (per-month plan qty, in month order, only q > 0, bounded by the season's months).
-
-  //let to const
+  // Complete Workbook: resolve labeled calendar months to stable IDs, never list positions.
   const monthlyEntryRows: { planLineId: string; seasonMonthId: string; planQty: number }[] = [];
   let monthIdsWithData: string[] = [];
   if (payload.mode === "COMPLETE") {
     const months = await prisma.seasonMonth.findMany({
       where: { seasonId: payload.seasonId },
-      orderBy: { order: "asc" },
-      select: { id: true },
+      select: { id: true, calendarMonth: true, calendarYear: true },
     });
-    if (months.length > 0) {
+    if (months.length === 0) throw new ApiError(422, "Season has no calendar months for Complete Workbook import.");
+    {
       for (const d of toImport) {
         for (const r of d.rows) {
           const lineId = lineIdByKey.get(`${d.dealerId}|${r.productId}`);
           if (!lineId) continue;
+          if (r.monthlyPlan.length !== r.monthlyMonths.length) throw new ApiError(422, "Re-parse this workbook: every monthly quantity needs a calendar month label.");
+          let mappedIds: string[];
+          try { mappedIds = resolveWorkbookMonths(months, r.monthlyMonths); }
+          catch (error) { throw new ApiError(422, (error as Error).message); }
           r.monthlyPlan.forEach((q, i) => {
-            if (i < months.length && q > 0) {
+            if (q > 0) {
               monthlyEntryRows.push({
                 planLineId: lineId,
-                seasonMonthId: months[i].id,
+                seasonMonthId: mappedIds[i],
                 planQty: q,
               });
             }

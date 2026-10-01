@@ -218,7 +218,7 @@ function MonthlyApprovals({ role }: { role: Role }) {
   );
 }
 
-/** Admin review of Month Extension Requests — approving appends the month to the season. */
+/** Legacy requests remain visible and declinable; canonical Add Months replaces free-text approval. */
 function MonthExtensionReview() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<ExtensionRequest[]>({
@@ -234,7 +234,8 @@ function MonthExtensionReview() {
   if ((data?.length ?? 0) === 0) return null;
   return (
     <div className="space-y-2">
-      <h3 className="text-sm font-semibold">Month extension requests</h3>
+      <h3 className="text-sm font-semibold">Legacy month extension requests</h3>
+      <p className="text-xs text-muted-foreground">Use Seasons → Add Months for calendar additions. These requests lack a reliable year and remain available for review/decline.</p>
       <div className="rounded-lg border bg-background">
         <Table>
           <TableHeader>
@@ -255,7 +256,7 @@ function MonthExtensionReview() {
                 <TableCell className="text-muted-foreground">{formatDate(r.createdAt)}</TableCell>
                 <TableCell className="text-right">
                   <div className="flex justify-end gap-2">
-                    <Button size="sm" onClick={() => decide.mutate({ id: r.id, approve: true })} disabled={decide.isPending}>
+                    <Button size="sm" title="Use Seasons → Add Months" disabled>
                       Approve & add
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => decide.mutate({ id: r.id, approve: false })} disabled={decide.isPending}>

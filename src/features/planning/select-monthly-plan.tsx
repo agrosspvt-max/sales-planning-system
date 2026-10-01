@@ -1,5 +1,7 @@
 "use client";
 
+import { monthLabel, type MonthIdentity } from "@/lib/season-calendar";
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -15,7 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import type { PlanStatus } from "./types";
 
-interface MonthInfo {
+interface MonthInfo extends MonthIdentity {
   id: string;
   name: string;
   order: number;
@@ -110,7 +112,7 @@ export function SelectMonthlyPlanDialog({
                   disabled={createMut.isPending}
                   onClick={() => openMonth(m)}
                 >
-                  {m.name}
+                  {monthLabel(m)}
                   {m.monthlyPlan ? ` · ${m.monthlyPlan.status}` : " · New"}
                 </Button>
               ))}

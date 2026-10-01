@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -137,7 +138,7 @@ export interface GroupProductPlan {
   seasonalMode: PlanningMode;
   filter: GroupPlanFilter;
   officers: GroupOfficerBreakdown;
-  months: { id: string; name: string; order: number }[];
+  months: { id: string; name: string; order: number; calendarMonth?: number | null; calendarYear?: number | null }[];
   packSizes: { id: string; name: string }[];
   products: GroupProductRow[];
 }
@@ -165,12 +166,12 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     prisma.userGroup.findUnique({ where: { id: groupId }, select: { name: true } }),
     prisma.season.findUnique({
       where: { id: seasonId },
-      select: { name: true, year: true, seasonalMode: true, monthlyMode: true, months: { orderBy: { order: "asc" }, select: { id: true, name: true, order: true } } },
+      select: { name: true, year: true, seasonalMode: true, monthlyMode: true, months: { orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } },
     }),
     prisma.packSize.findMany({ where: { isActive: true, isPlanning: true }, orderBy: { displayOrder: "asc" }, select: { id: true, name: true } }),
   ])) as [
     { name: string } | null,
-    { name: string; year: number; seasonalMode: string | null; monthlyMode: string | null; months: { id: string; name: string; order: number }[] } | null,
+    { name: string; year: number; seasonalMode: string | null; monthlyMode: string | null; months: { id: string; name: string; order: number; calendarMonth?: number | null; calendarYear?: number | null }[] } | null,
     { id: string; name: string }[],
   ];
   if (!group) throw new ApiError(404, "Group not found");
@@ -179,7 +180,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   const monthlyMode = (season.monthlyMode ?? "PACK_SIZE") as PlanningMode;
   const seasonalMode = (season.seasonalMode ?? "PACK_SIZE") as PlanningMode;
   const monthNameById = new Map(season.months.map((m) => [m.id, m.name] as const));
-  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthlyMode, seasonalMode, months: season.months, packSizes, filter: { ...filter, buckets } };
+  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthlyMode, seasonalMode, months: calendarRows(season.months), packSizes, filter: { ...filter, buckets } };
 
   // Contributors to a state's Territory Plan = every Sales Officer in the group PLUS the group's own
   // Regional Manager (the RM also plans their own dealers). The groupId constraint stays, so an officerId

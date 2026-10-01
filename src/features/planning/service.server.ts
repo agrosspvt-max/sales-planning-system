@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { PlanStatus, ApprovalActionType, Role, SeasonStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -496,8 +497,8 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
 
   const months = await prisma.seasonMonth.findMany({
     where: { seasonId: plan.seasonId },
-    orderBy: { order: "asc" },
-    select: { id: true, name: true, order: true },
+    orderBy: SEASON_MONTH_ORDER,
+    select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true },
   });
 
   // DISPLAY-only: alias-preferred dealer names in the Seasonal dealer selector (identity stays the dealer id).
@@ -556,7 +557,7 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
     officerName: plan.officer.name,
     planningType: plan.planningType,
     seasonalMode: plan.season.seasonalMode as PlanningMode,
-    months,
+    months: calendarRows(months),
     dealers: dealerList,
     selectedDealerId,
     rows,

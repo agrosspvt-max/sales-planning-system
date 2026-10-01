@@ -140,12 +140,12 @@ async function main() {
         status: SeasonStatus.OPEN,
         months: {
           create: [
-            { name: "June", order: 1 },
-            { name: "July", order: 2 },
-            { name: "August", order: 3 },
-            { name: "September", order: 4 },
-            { name: "October", order: 5 },
-            { name: "November", order: 6 },
+            { name: "June", calendarMonth: 6, calendarYear: 2026, order: 1 },
+            { name: "July", calendarMonth: 7, calendarYear: 2026, order: 2 },
+            { name: "August", calendarMonth: 8, calendarYear: 2026, order: 3 },
+            { name: "September", calendarMonth: 9, calendarYear: 2026, order: 4 },
+            { name: "October", calendarMonth: 10, calendarYear: 2026, order: 5 },
+            { name: "November", calendarMonth: 11, calendarYear: 2026, order: 6 },
           ],
         },
       },

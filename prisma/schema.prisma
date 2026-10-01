@@ -989,6 +989,9 @@ model Season {
 }
 
 model SeasonMonth {
+  // Explicit identity; null pairs flag legacy rows that could not be safely backfilled.
+  calendarMonth  Int?
+  calendarYear   Int?
   id             String         @id @default(cuid())
   seasonId       String
   name           String
@@ -1000,6 +1003,7 @@ model SeasonMonth {
   season         Season         @relation(fields: [seasonId], references: [id], onDelete: Cascade)
 
   @@unique([seasonId, order])
+  @@unique([seasonId, calendarYear, calendarMonth])
   @@index([seasonId])
 }
 

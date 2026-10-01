@@ -1,4 +1,6 @@
 import "server-only";
+import { Prisma } from "@prisma/client";
+import { SEASON_MONTH_ORDER, calendarPeriod, identity } from "@/lib/season-calendar";
 import { SeasonStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { seasonSchema } from "@/lib/validations/assignments";
@@ -18,8 +20,8 @@ import type { PlanningMode } from "@/lib/calc";
  * more than one variant matches, the EXACT canonical spelling is preferred (then the oldest), so a
  * variant like "kharif" deterministically resolves to the canonical "Kharif" rather than a stray dup.
  */
-async function findSeasonByName(name: string, year: number, excludeId?: string): Promise<{ id: string; name: string } | null> {
-  const matches = (await prisma.season.findMany({
+async function findSeasonByName(name: string, year: number, excludeId?: string, client: Prisma.TransactionClient = prisma): Promise<{ id: string; name: string } | null> {
+  const matches = (await client.season.findMany({
     where: {
       year,
       name: { equals: name, mode: "insensitive" },
@@ -38,9 +40,12 @@ async function findSeasonByName(name: string, year: number, excludeId?: string):
  * SeasonPlan implies all of those live underneath it, so the presence of a plan is
  * the lock. When locked, the period and planning modes can no longer be changed.
  */
-async function seasonHasPlans(seasonId: string): Promise<boolean> {
-  const count = await prisma.seasonPlan.count({ where: { seasonId } });
-  return count > 0;
+async function seasonHasPlans(seasonId: string, client: Prisma.TransactionClient = prisma): Promise<boolean> {
+  const [count, extension] = await Promise.all([
+    client.seasonPlan.count({ where: { seasonId } }),
+    client.auditLog.findFirst({ where: { entity: "seasonMonths", entityId: seasonId }, select: { id: true } }),
+  ]);
+  return count > 0 || !!extension;
 }
 
 /**
@@ -54,9 +59,11 @@ export async function listSeasons(search: string, activeOnly = false) {
       ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
       ...(activeOnly ? { status: SeasonStatus.OPEN } : {}),
     },
-    include: { months: { orderBy: { order: "asc" } }, _count: { select: { plans: true } } },
+    include: { months: { orderBy: SEASON_MONTH_ORDER }, _count: { select: { plans: true } } },
     orderBy: [{ year: "desc" }, { name: "asc" }],
   });
+  const extended = await prisma.auditLog.findMany({ where: { entity: "seasonMonths", entityId: { in: seasons.map(s => s.id) } }, select: { entityId: true } });
+  const extendedIds = new Set(extended.map(a => a.entityId));
   return seasons.map((s) => ({
     id: s.id,
     name: s.name,
@@ -65,12 +72,13 @@ export async function listSeasons(search: string, activeOnly = false) {
     startYear: s.startYear,
     endMonth: s.endMonth,
     endYear: s.endYear,
+    effectivePeriod: s.months.length && s.months.every(m => identity(m)) ? calendarPeriod(s.months.map(m => identity(m)!)) : null,
     status: s.status,
     seasonalMode: s.seasonalMode as PlanningMode,
     monthlyMode: s.monthlyMode as PlanningMode,
     months: s.months.map((m) => m.name),
-    // Locked once any operational data (a Season Plan) exists.
-    locked: s._count.plans > 0,
+    // Preserve additions even before planning exists: Edit must never regenerate an extended Season.
+    locked: s._count.plans > 0 || extendedIds.has(s.id),
   }));
 }
 
@@ -107,7 +115,7 @@ export async function createSeason(raw: unknown) {
       monthlyMode: parsed.monthlyMode ?? defaults.monthlyMode,
       // Open-Month (Section 42): the first month (order 1, derived from the period) starts OPEN;
       // the rest LOCKED — so a new season is immediately workable without manual setup.
-      months: { create: months.map((m) => ({ name: m.name, order: m.order, status: m.order === 1 ? "OPEN" : "LOCKED" })) },
+      months: { create: months.map((m) => ({ name: m.name, calendarMonth: m.month, calendarYear: m.year, order: m.order, status: m.order === 1 ? "OPEN" : "LOCKED" })) },
     },
   });
 }
@@ -154,7 +162,7 @@ export async function findOrCreateSeason(input: SeasonPeriodInput): Promise<{ id
       seasonalMode: defaults.seasonalMode,
       monthlyMode: defaults.monthlyMode,
       // Open-Month (Section 42): first month OPEN, rest LOCKED (derived from the period).
-      months: { create: gen.months.map((m) => ({ name: m.name, order: m.order, status: m.order === 1 ? "OPEN" : "LOCKED" })) },
+      months: { create: gen.months.map((m) => ({ name: m.name, calendarMonth: m.month, calendarYear: m.year, order: m.order, status: m.order === 1 ? "OPEN" : "LOCKED" })) },
     },
   });
   return { id: s.id, created: true };
@@ -167,37 +175,38 @@ export async function setSeasonStatus(id: string, status: SeasonStatus) {
 }
 
 export async function updateSeason(id: string, raw: unknown) {
-  const season = await prisma.season.findUnique({ where: { id } });
-  if (!season) throw new ApiError(404, "Season not found");
-
-  const locked = await seasonHasPlans(id);
-  const { parsed, months } = periodFrom(raw);
-
-  // Reject a rename that would collide (case-insensitively) with a different season in the same year.
-  const clash = await findSeasonByName(parsed.name, parsed.startYear, id);
-  if (clash) throw new ApiError(409, `A season "${parsed.name} ${parsed.startYear}" already exists.`);
-
-  if (locked) {
-    // Period and planning modes are frozen once operational data exists; allow only a
-    // name correction, never a change that would invalidate existing plans/reports.
-    if (
-      parsed.startMonth !== season.startMonth ||
-      parsed.startYear !== season.startYear ||
-      parsed.endMonth !== season.endMonth ||
-      parsed.endYear !== season.endYear ||
-      (parsed.seasonalMode && parsed.seasonalMode !== season.seasonalMode) ||
-      (parsed.monthlyMode && parsed.monthlyMode !== season.monthlyMode)
-    ) {
-      throw new ApiError(
-        409,
-        "This season already contains planning data; its period and planning modes can no longer be changed.",
-      );
-    }
-    return prisma.season.update({ where: { id }, data: { name: parsed.name } });
-  }
-
-  // Unlocked: fully editable — regenerate the SeasonMonth rows from the new period.
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Season" WHERE "id" = ${id} FOR UPDATE`);
+    const season = await tx.season.findUnique({ where: { id } });
+    if (!season) throw new ApiError(404, "Season not found");
+
+    const locked = await seasonHasPlans(id, tx);
+    const { parsed, months } = periodFrom(raw);
+
+    // Reject a rename that would collide (case-insensitively) with a different season in the same year.
+    const clash = await findSeasonByName(parsed.name, locked ? season.year : parsed.startYear, id, tx);
+    if (clash) throw new ApiError(409, `A season "${parsed.name} ${parsed.startYear}" already exists.`);
+
+    if (locked) {
+      // Period and planning modes are frozen once operational data exists; allow only a
+      // name correction, never a change that would invalidate existing plans/reports.
+      if (
+        parsed.startMonth !== season.startMonth ||
+        parsed.startYear !== season.startYear ||
+        parsed.endMonth !== season.endMonth ||
+        parsed.endYear !== season.endYear ||
+        (parsed.seasonalMode && parsed.seasonalMode !== season.seasonalMode) ||
+        (parsed.monthlyMode && parsed.monthlyMode !== season.monthlyMode)
+      ) {
+        throw new ApiError(
+          409,
+          "This season contains planning data or added months; its period and planning modes can no longer be changed.",
+        );
+      }
+      return tx.season.update({ where: { id }, data: { name: parsed.name } });
+    }
+
+    // Unlocked: fully editable — regenerate the SeasonMonth rows from the new period.
     await tx.seasonMonth.deleteMany({ where: { seasonId: id } });
     return tx.season.update({
       where: { id },
@@ -210,8 +219,8 @@ export async function updateSeason(id: string, raw: unknown) {
         endYear: parsed.endYear,
         seasonalMode: parsed.seasonalMode ?? season.seasonalMode,
         monthlyMode: parsed.monthlyMode ?? season.monthlyMode,
-        months: { create: months.map((m) => ({ name: m.name, order: m.order })) },
+        months: { create: months.map((m) => ({ name: m.name, calendarMonth: m.month, calendarYear: m.year, order: m.order })) },
       },
     });
-  });
+  }, { timeout: 15000 });
 }

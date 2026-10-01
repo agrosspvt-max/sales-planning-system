@@ -48,6 +48,7 @@ export interface SeasonPeriod {
 
 export interface GeneratedMonth {
   name: string;
+  month: number;
   year: number;
   order: number; // 1-based
 }
@@ -104,7 +105,7 @@ export function generateSeasonMonths(period: SeasonPeriod): SeasonMonthsResult {
   for (let i = start; i <= end; i++) {
     const monthIdx = ((i % 12) + 12) % 12;
     const year = Math.floor(i / 12);
-    months.push({ name: MONTH_NAMES[monthIdx], year, order: i - start + 1 });
+    months.push({ name: MONTH_NAMES[monthIdx], month: monthIdx + 1, year, order: i - start + 1 });
   }
   return { ok: true, months };
 }

@@ -1,16 +1,17 @@
 "use client";
 
+import { monthLabel, type MonthIdentity } from "@/lib/season-calendar";
+
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Plus, CalendarPlus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -36,7 +37,7 @@ import { CREATE_STATUSES, SUBMITTED_STATUSES, roleSections, yearOf, seasonIndexO
 
 export type MonthlySubView = "CREATE" | "SUBMITTED" | "APPROVED" | "HISTORY";
 
-interface MonthlyPlanRow {
+interface MonthlyPlanRow extends MonthIdentity {
   id: string;
   seasonPlanId: string;
   seasonMonthId: string;
@@ -52,7 +53,7 @@ interface MonthlyPlanRow {
   lastSavedAt: string;
   updatedAt: string;
 }
-interface MonthInfo {
+interface MonthInfo extends MonthIdentity {
   id: string;
   name: string;
   order: number;
@@ -78,6 +79,10 @@ function byMonthlyNewestFirst(a: MonthlyPlanRow, b: MonthlyPlanRow): number {
   if (ya !== yb) return yb - ya;
   const sa = seasonIndexOf(a.seasonName), sb = seasonIndexOf(b.seasonName);
   if (sa !== sb) return sb - sa;
+  if (a.calendarYear && b.calendarYear && a.calendarMonth && b.calendarMonth) {
+    const delta = b.calendarYear * 12 + b.calendarMonth - a.calendarYear * 12 - a.calendarMonth;
+    if (delta) return delta;
+  }
   if (a.monthOrder !== b.monthOrder) return b.monthOrder - a.monthOrder;
   return (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "");
 }
@@ -145,8 +150,6 @@ export function MonthlyPlansPanel({
   const [open, setOpen] = useState(false);
   const [seasonPlanId, setSeasonPlanId] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [addMonthOpen, setAddMonthOpen] = useState(false);
-  const [newMonth, setNewMonth] = useState("");
 
   // Approved seasonal plans are the only valid parents (Step 1).
   const { data: seasonPlans } = useQuery<PlanListItem[]>({
@@ -179,17 +182,6 @@ export function MonthlyPlansPanel({
     onSuccess: (res) => {
       setOpen(false);
       router.push(`/planning/monthly/${res.id}`);
-    },
-    onError: (e) => setError((e as Error).message),
-  });
-
-  const addMonthMut = useMutation({
-    mutationFn: () =>
-      api.post("/api/planning/month-extensions", { seasonId: monthsData?.seasonId, monthName: newMonth.trim() }),
-    onSuccess: () => {
-      setAddMonthOpen(false);
-      setNewMonth("");
-      setError("Extension requested. An admin must approve it before the month becomes available.");
     },
     onError: (e) => setError((e as Error).message),
   });
@@ -302,14 +294,12 @@ export function MonthlyPlansPanel({
                           title={occupied ? "A submitted/approved monthly plan already exists for this month." : undefined}
                           onClick={() => createMut.mutate(m.id)}
                         >
-                          {m.name}
+                          {monthLabel(m)}
                           {m.monthlyPlan ? ` · ${m.monthlyPlan.status}` : ""}
                         </Button>
                       );
                     })}
-                    <Button variant="ghost" size="sm" onClick={() => { setAddMonthOpen(true); setError(null); }}>
-                      <CalendarPlus className="h-4 w-4" /> Add Month
-                    </Button>
+
                   </div>
                 )}
                 <p className="text-xs text-muted-foreground">
@@ -326,30 +316,7 @@ export function MonthlyPlansPanel({
         </DialogContent>
       </Dialog>
 
-      {/* + Add Month → Month Extension Request (admin must approve). */}
-      <Dialog open={addMonthOpen} onOpenChange={setAddMonthOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Request a new month</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            <p className="text-sm text-muted-foreground">
-              This sends a request to an administrator. The season is not changed until it is approved.
-            </p>
-            <div className="space-y-1.5">
-              <Label>Month name</Label>
-              <Input placeholder="e.g. December" value={newMonth} onChange={(e) => setNewMonth(e.target.value)} />
-            </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAddMonthOpen(false)}>Cancel</Button>
-            <Button onClick={() => addMonthMut.mutate()} disabled={!newMonth.trim() || addMonthMut.isPending}>
-              {addMonthMut.isPending ? "Requesting…" : "Request month"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+
     </div>
   );
 }

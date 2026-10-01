@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER } from "@/lib/season-calendar";
 import { PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -444,7 +445,7 @@ export async function getReport(
   if (type === "monthly") {
     // Use the mode saved on THIS season, never the current global default.
     const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
-    const months = await prisma.seasonMonth.findMany({ where: { seasonId }, orderBy: { order: "asc" } });
+    const months = await prisma.seasonMonth.findMany({ where: { seasonId }, orderBy: SEASON_MONTH_ORDER });
     let rows: ReportRow[] = monthlyRowsFromFacts(facts, months, monthlyMode);
     const sort = opts.sort ?? { key: "label", dir: "asc" };
     if (opts.sort) rows = sortRows(rows, sort);

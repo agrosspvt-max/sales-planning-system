@@ -1,4 +1,5 @@
 import "server-only";
+import { resolveWorkDateMonth } from "@/lib/season-calendar";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
@@ -20,7 +21,7 @@ import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction } from "./auto-task-materialization.server";
 import {
-  currentBusinessDate, monthNameForDate, resolveSeasonMonthByName, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
+  currentBusinessDate, monthNameForDate, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
   MANDATORY_SECTIONS, SectionStatus,
   type DailyWorkSection, type DailyWorkType, type DailyWorkDealerRow,
@@ -310,10 +311,12 @@ async function salesFiguresByDealer(ctx: AuthContext, officerId: string, workDat
     throw e;
   }
 
-  // Month is derived from the DAILY WORK DATE (21 Sep → September; 01 Oct → October), never the server clock.
+  // Explicit year/month follows the Daily Work date, never the server clock or a name-only match.
   // This mirrors Monthly Dealer Summary's Aggregate = "Selected Months" with exactly ONE selected month.
   const monthName = monthNameForDate(workDate);
-  const selected = resolveSeasonMonthByName(monthly.months, monthName);
+  let selected;
+  try { selected = resolveWorkDateMonth(monthly.months, workDate); }
+  catch (error) { throw new ApiError(422, (error as Error).message); }
   if (!selected) return { map, monthName };
 
   const mode = monthly.monthlyMode as PlanningMode;

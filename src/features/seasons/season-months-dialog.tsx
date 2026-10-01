@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
+import { monthLabel, type MonthIdentity } from "@/lib/season-calendar";
 import { api } from "@/lib/api-client";
 import { MONTH_STATUS_LABELS, MONTH_TRANSITIONS, type MonthStatus } from "@/features/planning/planning-state";
 import { Badge } from "@/components/ui/badge";
@@ -9,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
-interface MonthState {
+interface MonthState extends MonthIdentity {
   id: string;
   name: string;
   order: number;
@@ -69,7 +70,7 @@ export function SeasonMonthsDialog({
                 <div key={m.id} className="flex items-center justify-between rounded-md border p-2">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">
-                      {m.order}. {m.name}
+                      {m.order}. {monthLabel(m)}
                     </span>
                     <Badge variant={m.status === "OPEN" ? "success" : "muted"}>{MONTH_STATUS_LABELS[m.status]}</Badge>
                   </div>

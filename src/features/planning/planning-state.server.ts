@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -19,18 +20,20 @@ export interface MonthState {
   order: number;
   status: MonthStatus;
   editable: boolean;
+  calendarMonth: number | null;
+  calendarYear: number | null;
 }
 
 /** All months of a season with their lifecycle status (ordered). */
 export async function getSeasonMonthStates(seasonId: string): Promise<MonthState[]> {
   const rows = (await prisma.seasonMonth.findMany({
     where: { seasonId },
-    orderBy: { order: "asc" },
-    select: { id: true, name: true, order: true, status: true },
-  })) as { id: string; name: string; order: number; status: string }[];
-  return rows.map((m) => {
+    orderBy: SEASON_MONTH_ORDER,
+    select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true, status: true },
+  })) as { id: string; name: string; order: number; status: string; calendarMonth: number | null; calendarYear: number | null }[];
+  return calendarRows(rows).map((m) => {
     const status = (m.status as MonthStatus) ?? "OPEN";
-    return { id: m.id, name: m.name, order: m.order, status, editable: isMonthEditable(status) };
+    return { id: m.id, name: m.name, calendarMonth: m.calendarMonth, calendarYear: m.calendarYear, order: m.order, status, editable: isMonthEditable(status) };
   });
 }
 

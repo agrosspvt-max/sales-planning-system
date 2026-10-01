@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -44,7 +45,7 @@ export interface GroupRecovery {
   monthName: string;
   seasonMonthId: string;
   weekCount: number;
-  months: { id: string; name: string; order: number }[];
+  months: { id: string; name: string; order: number; calendarMonth?: number | null; calendarYear?: number | null }[];
   filter: { buckets: StatusBucket[]; seasonMonthId: string };
   officers: GroupOfficerBreakdown;
   rows: RecoveryOfficerRow[];
@@ -79,13 +80,13 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
 
   const [group, season] = (await Promise.all([
     prisma.userGroup.findUnique({ where: { id: groupId }, select: { name: true } }),
-    prisma.season.findUnique({ where: { id: seasonId }, select: { name: true, year: true, months: { orderBy: { order: "asc" }, select: { id: true, name: true, order: true } } } }),
-  ])) as [{ name: string } | null, { name: string; year: number; months: { id: string; name: string; order: number }[] } | null];
+    prisma.season.findUnique({ where: { id: seasonId }, select: { name: true, year: true, months: { orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } } }),
+  ])) as [{ name: string } | null, { name: string; year: number; months: { id: string; name: string; order: number; calendarMonth?: number | null; calendarYear?: number | null }[] } | null];
   if (!group) throw new ApiError(404, "Group not found");
   if (!season) throw new ApiError(404, "Season not found");
   const month = season.months.find((m) => m.id === seasonMonthId) ?? season.months[0];
   const monthId = month?.id ?? "";
-  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthName: month?.name ?? "", seasonMonthId: monthId, weekCount: BUSINESS_WEEK_COUNT, months: season.months, filter: { buckets, seasonMonthId: monthId } };
+  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthName: month?.name ?? "", seasonMonthId: monthId, weekCount: BUSINESS_WEEK_COUNT, months: calendarRows(season.months), filter: { buckets, seasonMonthId: monthId } };
 
   // Contributors = the group's Sales Officers PLUS its Regional Manager (a contributor to the state's
   // territory). The groupId constraint prevents any cross-group access.

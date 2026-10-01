@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER, monthLabel } from "@/lib/season-calendar";
 import { z } from "zod";
 import { Role, ImportStatus, PlanStatus, SeasonStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -349,7 +350,7 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
   }
 
   return {
-    targetMonth: { id: month.id, name: month.name, seasonId: month.season.id, seasonName: `${month.season.name} ${month.season.year}` },
+    targetMonth: { id: month.id, name: monthLabel(month), seasonId: month.season.id, seasonName: `${month.season.name} ${month.season.year}` },
     rows,
     unplannedPairs: [...unplannedByKey.values()],
     unknownDealers,
@@ -693,11 +694,11 @@ export async function listTargetMonths(ctx: AuthContext) {
   const seasons = await prisma.season.findMany({
     where: { status: SeasonStatus.OPEN }, // CLOSED seasons disappear from Sales Upload / Aging import selectors
     orderBy: [{ year: "desc" }, { name: "asc" }],
-    select: { name: true, year: true, months: { orderBy: { order: "asc" }, select: { id: true, name: true, order: true } } },
+    select: { name: true, year: true, months: { orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } },
   });
   const out: { id: string; label: string }[] = [];
-  for (const s of seasons as { name: string; year: number; months: { id: string; name: string; order: number }[] }[]) {
-    for (const m of s.months) out.push({ id: m.id, label: `${s.name} ${s.year} · ${m.name}` });
+  for (const s of seasons as { name: string; year: number; months: { id: string; name: string; order: number; calendarMonth: number | null; calendarYear: number | null }[] }[]) {
+    for (const m of s.months) out.push({ id: m.id, label: `${s.name} ${s.year} · ${monthLabel(m)}` });
   }
   return out;
 }

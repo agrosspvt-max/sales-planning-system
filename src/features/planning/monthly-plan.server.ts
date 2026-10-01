@@ -1,4 +1,5 @@
 import "server-only";
+import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { z } from "zod";
 import { PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -53,7 +54,7 @@ async function loadMonthlyPlanOr404(id: string): Promise<MonthlyPlanRow> {
     where: { id },
     include: {
       seasonPlan: { select: { seasonId: true, officerId: true, lifecycleState: true } },
-      seasonMonth: { select: { name: true, order: true } },
+      seasonMonth: { select: { name: true, order: true, calendarMonth: true, calendarYear: true } },
     },
   });
   if (!mp) throw new ApiError(404, "Monthly plan not found");
@@ -153,7 +154,7 @@ export async function listMonthlyPlans(
     },
     include: {
       seasonPlan: { select: { seasonId: true, season: { select: { name: true, year: true } } } },
-      seasonMonth: { select: { name: true, order: true } },
+      seasonMonth: { select: { name: true, order: true, calendarMonth: true, calendarYear: true } },
       officer: { select: { name: true, territory: true, group: { select: { name: true } } } },
     },
     orderBy: [{ updatedAt: "desc" }],
@@ -183,6 +184,8 @@ export async function listMonthlyPlans(
     seasonName: `${mp.seasonPlan.season.name} ${mp.seasonPlan.season.year}`,
     monthName: mp.seasonMonth.name,
     monthOrder: mp.seasonMonth.order,
+    calendarMonth: mp.seasonMonth.calendarMonth,
+    calendarYear: mp.seasonMonth.calendarYear,
     officerId: mp.officerId,
     officerName: mp.officer.name,
     territory: (mp.officer as { territory?: string | null }).territory ?? null,
@@ -209,7 +212,7 @@ export async function getSeasonalPlanMonths(ctx: AuthContext, seasonPlanId: stri
   await assertOfficerInScope(ctx, seasonPlan.officerId);
 
   const [months, monthlyPlans] = await Promise.all([
-    prisma.seasonMonth.findMany({ where: { seasonId: seasonPlan.seasonId }, orderBy: { order: "asc" } }),
+    prisma.seasonMonth.findMany({ where: { seasonId: seasonPlan.seasonId }, orderBy: SEASON_MONTH_ORDER }),
     prisma.monthlyPlan.findMany({ where: { seasonPlanId }, select: { id: true, seasonMonthId: true, status: true } }),
   ]);
   const byMonth = new Map<string, { id: string; status: PlanStatus }>(
@@ -221,11 +224,13 @@ export async function getSeasonalPlanMonths(ctx: AuthContext, seasonPlanId: stri
     seasonName: `${seasonPlan.season.name} ${seasonPlan.season.year}`,
     seasonId: seasonPlan.seasonId,
     approved: seasonPlan.status === PlanStatus.APPROVED && seasonPlan.isActiveVersion,
-    months: months.map((m) => {
+    months: calendarRows(months).map((m) => {
       const mp = byMonth.get(m.id);
       return {
         id: m.id,
         name: m.name,
+        calendarMonth: m.calendarMonth,
+        calendarYear: m.calendarYear,
         order: m.order,
         status: (m as { status?: string }).status ?? "OPEN",
         monthlyPlan: mp ? { id: mp.id, status: mp.status as PlanStatus } : null,
@@ -263,7 +268,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
         },
       },
     }),
-    prisma.seasonMonth.findUnique({ where: { id: mp.seasonMonthId }, select: { id: true, name: true, order: true } }),
+    prisma.seasonMonth.findUnique({ where: { id: mp.seasonMonthId }, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } }),
     prisma.monthlyPlanDealer.findMany({ where: { monthlyPlanId: mp.id, noPlan: true }, select: { dealerId: true, noPlanReason: true } }),
   ]);
 
@@ -277,7 +282,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   // Exactly ONE month — shaped as MonthlyData so the existing provider/planner consume it
   // unchanged (no in-page month selector). Editability comes from the monthly plan lifecycle.
   const months = month
-    ? [{ id: month.id, name: month.name, order: month.order, status: "OPEN", editable: canEdit }]
+    ? [{ id: month.id, name: month.name, calendarMonth: month.calendarMonth, calendarYear: month.calendarYear, order: 1, status: "OPEN", editable: canEdit }]
     : [];
 
   const noPlanByDealer = new Map<string, string | null>(
@@ -394,7 +399,7 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
   if (approvedIds.length === 0) return { monthlyMode, months: [], dealers: [] };
 
   const [months, planDealers] = await Promise.all([
-    prisma.seasonMonth.findMany({ where: { id: { in: approvedIds } }, orderBy: { order: "asc" }, select: { id: true, name: true, order: true } }),
+    prisma.seasonMonth.findMany({ where: { id: { in: approvedIds } }, orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } }),
     prisma.planDealer.findMany({
       where: { seasonPlanId },
       include: {
@@ -415,7 +420,7 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
   // Product Merge (Phase 12): operational identity per line so merged sources fold into the survivor.
   const eff = await loadEffectiveProduct();
   const aliasNames = await loadDealerAliasNameMap(planDealers.map((pd) => pd.dealerId));
-  return { monthlyMode, months, dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance, aliasNames) };
+  return { monthlyMode, months: calendarRows(months), dealers: buildMonthlyDealers(planDealers, months, monthlyMode, eff, clearance, aliasNames) };
 }
 
 /* -------------------------------- Saving ---------------------------------- */

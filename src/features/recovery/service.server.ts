@@ -1,4 +1,5 @@
 import "server-only";
+import { recoveryCalendar, type MonthIdentity } from "@/lib/season-calendar";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Role, PlanStatus } from "@prisma/client";
@@ -110,18 +111,6 @@ export function businessWeekDayRange(weekNo: number, year: number, month0: numbe
   return { startDay: WEEK_START_DAY[weekNo] ?? 1, endDay: weekEndDay(weekNo, year, month0) };
 }
 
-/**
- * The plan's CALENDAR month as { year, month0 }. Derived from the season start month + the month's order
- * (Season 1st month + order−1), falling back to the cutoff date's month when the season has no start set.
- */
-function planCalendar(season: { startMonth: number | null; startYear: number | null }, order: number, cutoff: Date): { year: number; month0: number } {
-  if (season.startMonth != null && season.startYear != null) {
-    const idx = season.startMonth - 1 + (order - 1); // 0-based month index from Jan of startYear
-    return { year: season.startYear + Math.floor(idx / 12), month0: ((idx % 12) + 12) % 12 };
-  }
-  return { year: cutoff.getFullYear(), month0: cutoff.getMonth() };
-}
-
 /** A week is AUTO-locked once it has COMPLETELY ended (today is past its last day). Current + future weeks stay editable. */
 function weekAutoLocked(weekNo: number, year: number, month0: number, now: Date): boolean {
   const end = new Date(year, month0, weekEndDay(weekNo, year, month0), 23, 59, 59, 999);
@@ -211,10 +200,10 @@ async function effectiveWeekLocked(planId: string, weekNo: number): Promise<bool
   if (override) return override.locked;
   const meta = (await prisma.recoveryPlan.findUnique({
     where: { id: planId },
-    select: { cutoffDate: true, seasonMonth: { select: { order: true } }, season: { select: { startMonth: true, startYear: true } } },
-  })) as { cutoffDate: Date; seasonMonth: { order: number }; season: { startMonth: number | null; startYear: number | null } } | null;
+    select: { cutoffDate: true, seasonMonth: { select: { order: true, calendarMonth: true, calendarYear: true } }, season: { select: { startMonth: true, startYear: true } } },
+  })) as { cutoffDate: Date; seasonMonth: MonthIdentity & { order: number }; season: { startMonth: number | null; startYear: number | null } } | null;
   if (!meta) return false;
-  const cal = planCalendar(meta.season, meta.seasonMonth.order, meta.cutoffDate);
+  const cal = recoveryCalendar(meta.season, meta.seasonMonth, meta.cutoffDate);
   return weekAutoLocked(weekNo, cal.year, cal.month0, new Date());
 }
 
@@ -682,7 +671,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     where: { id },
     include: {
       season: { select: { name: true, year: true, startMonth: true, startYear: true } },
-      seasonMonth: { select: { name: true, order: true } },
+      seasonMonth: { select: { name: true, order: true, calendarMonth: true, calendarYear: true } },
       officer: { select: { name: true } },
       seasonPlan: { select: { lifecycleState: true } },
       weekLocks: { select: { weekNo: true, locked: true } },
@@ -777,9 +766,9 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   // Week locking is DATE-BASED: a week is locked once it has completely ended; the current + future weeks
   // stay editable. An admin manual override (RecoveryWeekLock) takes priority over the date rule. Values
   // are always preserved — locking only disables editing.
-  const cal = planCalendar(
+  const cal = recoveryCalendar(
     { startMonth: (plan.season as { startMonth: number | null }).startMonth, startYear: (plan.season as { startYear: number | null }).startYear },
-    (plan.seasonMonth as { order: number }).order,
+    plan.seasonMonth as MonthIdentity & { order: number },
     plan.cutoffDate,
   );
   const overrides = new Map<number, boolean>(

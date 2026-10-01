@@ -242,6 +242,7 @@ export async function commitOnboarding(
             .filter((p) => p.packSizeId && p.quantity > 0)
             .map((p) => ({ packSizeId: p.packSizeId as string, quantity: p.quantity })),
           monthlyPlan: r.monthlyPlan,
+          monthlyMonths: r.monthlyMonths,
         }))
         .filter((r) => r.packs.length > 0 || r.monthlyPlan.some((q) => q > 0)),
     }))

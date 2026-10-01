@@ -61,7 +61,8 @@ export async function listDealersForAlias(ctx: AuthContext, filter: DealerAliasF
   assertAdmin(ctx);
   const [dealers, aliases, assignments] = await Promise.all([
     prisma.dealer.findMany({
-      where: { isActive: true, ...assignmentScope(groupId, officerId) },
+      // Dealer Alias lists the full dealer master, including inactive dealers; deleted records stay hidden.
+      where: { deletedAt: null, ...assignmentScope(groupId, officerId) },
       orderBy: { name: "asc" },
       // createdByUserId = the ORIGINAL creator (immutable; never changes on reassignment). town = Territory.
       select: { id: true, name: true, status: true, createdFrom: true, createdByUserId: true, town: true, isActive: true },

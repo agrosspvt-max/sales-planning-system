@@ -6,6 +6,8 @@ import { BUSINESS_WEEK_COUNT, businessWeekOfMonth } from "@/features/recovery/se
 import { bucketOfStatus, type StatusBucket, type OfficerRef, type GroupOfficerBreakdown } from "@/features/planning/group-plan.server";
 import type { RecoveryCalcDealer } from "@/features/recovery/recovery-calc";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+import { getCurrentOwnerByDealer } from "@/lib/scope";
+import { isCurrentlyOwnedBy } from "@/lib/dealer-ownership";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -131,6 +133,15 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
     const b = bucketOfStatus(p.status);
     return b !== null && selected.has(b);
   });
+
+  // CURRENT-OWNERSHIP filter: a plan's dealer rows are historical membership, so a dealer reassigned to a
+  // different officer still has a RecoveryPlanDealer row under its OLD officer's plan. Territory Recovery is a
+  // current-ownership view, so each plan only shows dealers whose CURRENT owner (open DealerAssignment) is that
+  // plan's officer. Historical rows are preserved in the database — they are merely not displayed here.
+  const currentOwnerByDealer = await getCurrentOwnerByDealer(included.flatMap((p) => p.dealers.map((d) => d.dealerId)));
+  for (const p of included) {
+    p.dealers = p.dealers.filter((d) => isCurrentlyOwnedBy(currentOwnerByDealer.get(d.dealerId), p.officerId));
+  }
 
   // dueByWeek per (planId, dealerId): from each included plan's LATEST aging snapshot's DUE bills.
   const dueByWeek = new Map<string, Record<number, number>>(); // key `${planId}:${dealerId}`

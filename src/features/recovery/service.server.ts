@@ -16,6 +16,7 @@ import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, i
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
 import { aggregateDaybookByDealer, type ClassifiedDaybookRow } from "@/lib/daybook-aggregate";
+import { latestReceiptAsOf, type ReceiptPoint } from "@/lib/last-payment";
 import { zeroPopulationDealers } from "@/lib/recovery-population";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -646,6 +647,34 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
   }));
 }
 
+/**
+ * CARRY-FORWARD "Last Payment" per dealer: the latest persisted Day Book Receipt (date + that row's amount)
+ * with Receipt date ON OR BEFORE `cutoff`, across ALL of each dealer's RecoveryPlanDealer snapshots. ONE
+ * batched query (no N+1); the selection reuses the pure, tested `latestReceiptAsOf`. Receipts after the cutoff
+ * are excluded so historical months stay stable when a later Day Book is uploaded.
+ */
+async function latestReceiptAsOfByDealer(dealerIds: string[], cutoff: Date): Promise<Map<string, { date: string | null; amount: number | null }>> {
+  const out = new Map<string, { date: string | null; amount: number | null }>();
+  if (dealerIds.length === 0) return out;
+  const cutoffKey = cutoff.toISOString().slice(0, 10); // "YYYY-MM-DD" (lexicographically comparable)
+  const rows = (await prisma.$queryRaw<{ dealerId: string; date: string | null; amount: string | null }[]>`
+    SELECT "dealerId", "lastReceiptDate"::text AS "date", "lastReceiptAmount"::text AS "amount"
+    FROM "RecoveryPlanDealer"
+    WHERE "dealerId" = ANY(${dealerIds}) AND "lastReceiptDate" IS NOT NULL`);
+  const byDealer = new Map<string, ReceiptPoint[]>();
+  for (const r of rows) {
+    if (!r.date) continue;
+    const list = byDealer.get(r.dealerId) ?? [];
+    list.push({ date: r.date.slice(0, 10), amount: r.amount == null ? 0 : Number(r.amount) });
+    byDealer.set(r.dealerId, list);
+  }
+  for (const [dealerId, points] of byDealer) {
+    const best = latestReceiptAsOf(points, cutoffKey);
+    if (best) out.set(dealerId, { date: best.date, amount: best.amount });
+  }
+  return out;
+}
+
 /* ------------------------------- Detail ----------------------------------- */
 
 export async function getRecoveryPlan(ctx: AuthContext, id: string) {
@@ -731,16 +760,13 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     latestCnRequestStatusByDealer(recoveryDealerIds),
   ]);
 
-  // "Last Payment" (informational): the latest Day Book Receipt per dealer, persisted by the Day Book upload
-  // on RecoveryPlanDealer. Read in ONE batched raw query for the whole plan (new columns → raw SQL); never an
-  // N+1 and never part of any recovery calculation.
-  const lastPaymentRows = (await prisma.$queryRaw<{ dealerId: string; lastReceiptDate: string | null; lastReceiptAmount: string | null }[]>`
-    SELECT "dealerId", "lastReceiptDate"::text AS "lastReceiptDate", "lastReceiptAmount"::text AS "lastReceiptAmount"
-    FROM "RecoveryPlanDealer" WHERE "recoveryPlanId" = ${plan.id}`);
-  const lastPaymentByDealer = new Map(lastPaymentRows.map((r) => [r.dealerId, {
-    date: r.lastReceiptDate ? r.lastReceiptDate.slice(0, 10) : null,
-    amount: r.lastReceiptAmount == null ? null : Number(r.lastReceiptAmount),
-  }]));
+  // "Last Payment" (informational, CARRY-FORWARD): the latest Day Book Receipt for each dealer whose Receipt
+  // date is ON OR BEFORE this plan's cutoff — carried across months until a newer Receipt supersedes it. The
+  // Day Book upload persists each month's latest Receipt (date + that row's amount) on its RecoveryPlanDealer
+  // rows; here we read ALL of the dealer's such snapshots (across every recovery plan) in ONE batched query and
+  // pick the latest with date ≤ cutoff. Receipts after the cutoff are excluded, so a later Day Book upload never
+  // changes an earlier month. Never part of any recovery calculation.
+  const lastPaymentByDealer = await latestReceiptAsOfByDealer(recoveryDealerIds, plan.cutoffDate);
 
   // "Missing in Latest Aging" (derived, Option C): a dealer kept in the plan but absent from the newest
   // snapshot shows its last-known aging with a stale badge — no value is zeroed, no row is removed.

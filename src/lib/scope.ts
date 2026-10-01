@@ -2,6 +2,7 @@ import "server-only";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { resolveCurrentOwner } from "@/lib/dealer-ownership";
 
 export interface OfficerScope {
   all: boolean; // true for Super Admin (no restriction)
@@ -76,11 +77,46 @@ export async function getCurrentManagerId(officerId: string): Promise<string | n
   return rm?.id ?? null;
 }
 
-/** Dealers currently assigned to an officer (open-ended assignment). */
+/** Dealers currently assigned to an officer (open-ended assignment). If a dealer has more than one open
+ *  assignment (a prior reassignment that failed to close an older row), it belongs ONLY to its most-recent
+ *  owner — so a dealer never counts as "currently assigned" to two officers at once. */
 export async function getCurrentDealerIds(officerId: string): Promise<string[]> {
-  const rows = await prisma.dealerAssignment.findMany({
+  const mine = await prisma.dealerAssignment.findMany({
     where: { officerId, effectiveTo: null },
     select: { dealerId: true },
   });
-  return rows.map((r) => r.dealerId);
+  const ids = [...new Set(mine.map((r) => r.dealerId))];
+  if (ids.length === 0) return [];
+  const ownerByDealer = await getCurrentOwnerByDealer(ids);
+  return ids.filter((id) => ownerByDealer.get(id) === officerId);
+}
+
+/**
+ * Batched CURRENT owner per dealer (dealerId → current officerId), from the authoritative open-ended
+ * DealerAssignment. One query for all the given dealers (no N+1). A dealer absent from the map has no current
+ * assignment. Used by current-ownership views (Territory Plan/Recovery) so a reassigned dealer resolves to its
+ * CURRENT officer only — never to the officer recorded on a historical plan row.
+ */
+export async function getCurrentOwnerByDealer(dealerIds: readonly string[]): Promise<Map<string, string>> {
+  const ids = [...new Set(dealerIds)];
+  if (ids.length === 0) return new Map();
+  // Select effectiveFrom/createdAt too: if a dealer has more than one OPEN assignment (e.g. an older row that a
+  // reassignment failed to close), resolveCurrentOwner deterministically keeps the MOST RECENT one, so the
+  // current owner is never an older lingering officer.
+  const rows = await prisma.dealerAssignment.findMany({
+    where: { dealerId: { in: ids }, effectiveTo: null },
+    select: { dealerId: true, officerId: true, effectiveFrom: true, createdAt: true },
+  });
+  const byDealer = new Map<string, { officerId: string; effectiveFrom: Date; createdAt: Date }[]>();
+  for (const r of rows as { dealerId: string; officerId: string; effectiveFrom: Date; createdAt: Date }[]) {
+    const list = byDealer.get(r.dealerId) ?? [];
+    list.push({ officerId: r.officerId, effectiveFrom: r.effectiveFrom, createdAt: r.createdAt });
+    byDealer.set(r.dealerId, list);
+  }
+  const out = new Map<string, string>();
+  for (const [dealerId, list] of byDealer) {
+    const owner = resolveCurrentOwner(list);
+    if (owner) out.set(dealerId, owner);
+  }
+  return out;
 }

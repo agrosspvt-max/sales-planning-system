@@ -6,6 +6,8 @@ import { figuresForMode, nbv as calcNbv, isQuantityMode, type PlanningMode } fro
 import { clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { loadEffectiveProduct } from "@/features/products/merge.server";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+import { getCurrentOwnerByDealer } from "@/lib/scope";
+import { isCurrentlyOwnedBy } from "@/lib/dealer-ownership";
 import { deriveTerritoryPlanMetrics } from "./group-plan-metrics";
 
 function num(d: unknown): number {
@@ -340,9 +342,14 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       }[];
     }[];
 
+    // CURRENT-OWNERSHIP filter: skip a plan's dealer that no longer belongs to that plan's officer (reassigned
+    // away). This prevents a reassigned dealer from appearing — and being counted — under its OLD officer.
+    // Historical PlanDealer rows are preserved; they are just excluded from this current-ownership aggregation.
+    const seasonalOwnerByDealer = await getCurrentOwnerByDealer(planDealers.map((pd) => pd.dealer.id));
     for (const pd of planDealers) {
       const plan = planById.get(pd.seasonPlanId);
       if (!plan) continue;
+      if (!isCurrentlyOwnedBy(seasonalOwnerByDealer.get(pd.dealer.id), plan.officerId)) continue;
       const isBaseline = baselineRepIds.has(pd.seasonPlanId);
       const periodBucket = repPlanBucket.get(pd.seasonPlanId); // set only for period (selected) reps
       for (const l of pd.lines) {
@@ -439,9 +446,13 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         }[];
       }[];
 
+      // CURRENT-OWNERSHIP filter (same rule as the seasonal pass): a reassigned dealer is excluded from its OLD
+      // officer's aggregation. Historical MonthlyEntry/PlanDealer rows are preserved, just not shown/counted here.
+      const monthlyOwnerByDealer = await getCurrentOwnerByDealer(planDealers.map((pd) => pd.dealer.id));
       for (const pd of planDealers) {
         const plan = planById.get(pd.seasonPlanId);
         if (!plan) continue;
+        if (!isCurrentlyOwnedBy(monthlyOwnerByDealer.get(pd.dealer.id), plan.officerId)) continue;
         for (const l of pd.lines) {
           const row = ensureRow(l);
           // Snapshot-first pricing (frozen on the line) with live-Master fallback.

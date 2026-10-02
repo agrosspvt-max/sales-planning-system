@@ -1,5 +1,7 @@
 "use client";
 
+import { useTaggedDealersFirst } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -47,6 +49,7 @@ function StatusBadge({ status, label }: { status: ConversionStatus; label: strin
 }
 
 export function CalendarView({ role }: { role: Role; userId: string }) {
+  const taggedFirst = useTaggedDealersFirst();
   const qc = useQueryClient();
   const today = new Date();
   const todayKey = dateKey(today)!;
@@ -158,7 +161,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
           <div className="grid grid-cols-7">
             {cells.map((dk, i) => {
               if (!dk) return <div key={i} className="min-h-[5.5rem] border-b border-r bg-muted/10 last:border-r-0" />;
-              const evs = eventsByDate.get(dk) ?? [];
+              const evs = taggedFirst(eventsByDate.get(dk) ?? [], (e) => e.dealerId);
               const partyEvs = partyEventsByDate.get(dk) ?? [];
               const notes = notesByDate.get(dk) ?? [];
               const totalEvs = evs.length + partyEvs.length;
@@ -182,7 +185,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
                     {evs.slice(0, 2).map((e) => (
                       <div key={e.planId} className="flex items-center gap-1 truncate rounded bg-primary/10 px-1 py-0.5 text-[11px] leading-tight">
                         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", DOT_CLASS[e.status])} />
-                        <span className="truncate">{groupByOfficer ? e.salesOfficerName : e.dealerName}</span>
+                        <span className="truncate">{groupByOfficer ? e.salesOfficerName : <DealerName id={e.dealerId} name={e.dealerName} />}</span>
                       </div>
                     ))}
                     {shownParty.map((e) => (
@@ -204,7 +207,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
         <DateDetailDialog
           dateKey={openDate}
           title={longDate(openDate)}
-          events={eventsByDate.get(openDate) ?? []}
+          events={taggedFirst(eventsByDate.get(openDate) ?? [], (e) => e.dealerId)}
           partyEvents={partyEventsByDate.get(openDate) ?? []}
           notes={notesByDate.get(openDate) ?? []}
           groupByOfficer={groupByOfficer}
@@ -281,7 +284,7 @@ function ConversionCard({ e, labels: L }: { e: ConversionEvent; labels: Labels }
         <StatusBadge status={e.status} label={L[STATUS_META[e.status].key] ?? e.status} />
       </div>
       {/* The authoritative edit lives in Scheme Planning; the card links there, it is not editable here. */}
-      <Link href="/planning/scheme/plans" className="font-medium text-primary hover:underline">{e.dealerName}</Link>
+      <Link href="/planning/scheme/plans" className="font-medium text-primary hover:underline"><DealerName id={e.dealerId} name={e.dealerName} /></Link>
       <div className="text-sm text-muted-foreground">{e.schemeName}</div>
       <div className="mt-1 text-sm">{e.numberOfSchemes} {schemesLabel} · {formatCurrency(e.totalSchemeAmount)}</div>
       {e.dateChanged && (

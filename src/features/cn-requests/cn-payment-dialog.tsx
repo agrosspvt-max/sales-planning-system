@@ -1,4 +1,5 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -16,7 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useLabel } from "@/features/labels/label-ui";
 
 interface PaymentDetail {
-  cnRequestId: string; partyName: string; cnType: string; details: string | null; cnStatus: string;
+  cnRequestId: string; partyName: string; dealerId?: string; cnType: string; details: string | null; cnStatus: string;
   paymentStatus: string | null; originalOutstandingAmount: number | null; currentOutstandingAmount: number | null;
   expiryDate: string | null; canUpdate: boolean; canVerify: boolean; paymentVerified: boolean; isAdmin: boolean; activeTaskId: string | null;
   events: Array<{ id: string; status: string; amountPaid: number | null; eventDate: string; outstandingBefore: number; outstandingAfter: number; source: string; recordedBy: string; createdAt: string }>;
@@ -66,7 +67,7 @@ export function CnPaymentDialog({ requestId, onClose, onChanged }: { requestId: 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
-        <DialogHeader><DialogTitle>{L.title}{data ? ` — ${data.partyName}` : ""}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{L.title}{data ? <> — <DealerName id={data.dealerId} name={data.partyName} /></> : ""}</DialogTitle></DialogHeader>
         {isLoading ? <Skeleton className="h-64 w-full" /> : error || !data ? (
           <p className="text-sm text-destructive">{(error as Error | null)?.message ?? L.unavailable}</p>
         ) : (

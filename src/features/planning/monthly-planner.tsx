@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerOptionName } from "@/features/dealers/dealer-name-ui";
 import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Save, Ban, Plus } from "lucide-react";
@@ -170,16 +172,16 @@ export function MonthlyPlanner() {
               value={dealerId}
               onChange={(e) => setDealerId(e.target.value)}
             >
-              <option value="">Choose Dealer…</option>
+              <DealerOrder><option value="">Choose Dealer…</option>
               {data.dealers.map((d) => (
-                <option key={d.dealerId} value={d.dealerId} style={{ color: OPTION_COLOR[statusByDealer.get(d.dealerId) ?? DealerPlanningStatus.REMAINING] }}>
-                  {d.dealerName}
+                <option data-dealer-id={d.dealerId} key={d.dealerId} value={d.dealerId} style={{ color: OPTION_COLOR[statusByDealer.get(d.dealerId) ?? DealerPlanningStatus.REMAINING] }}>
+                  <DealerOptionName id={d.dealerId} name={d.dealerName} />
                   {statusByDealer.get(d.dealerId) === DealerPlanningStatus.COMPLETED ? " ✓" : statusByDealer.get(d.dealerId) === DealerPlanningStatus.NO_PLAN ? " ⦸" : ""}
                 </option>
               ))}
-            </select>
+            </DealerOrder></select>
           ) : (
-            <NativeSelect
+            <NativeSelect dealerOptions
               className="w-56"
               options={data.dealers.map((d) => ({ value: d.dealerId, label: d.dealerName }))}
               value={dealerId}

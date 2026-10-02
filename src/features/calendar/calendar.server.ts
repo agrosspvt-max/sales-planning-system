@@ -44,6 +44,7 @@ async function assertCalendarEnabled(): Promise<void> {
 
 function toInput(r: PlanRow, aliasNames?: Map<string, string>): ConversionEventInput {
   return {
+    dealerId: r.dealerId,
     id: r.id, schemeId: r.schemeId, expectedBillingDate: r.expectedBillingDate, originalConversionDate: r.originalConversionDate,
     // DISPLAY-only: alias-preferred dealer name; the event still belongs to the same dealer id.
     dealerName: aliasNames?.get(r.dealerId) ?? r.dealer.name, schemeName: r.scheme.schemeName, numberOfSchemes: r.numberOfSchemes || 1, totalSchemeAmount: asNum(r.totalSchemeAmount),

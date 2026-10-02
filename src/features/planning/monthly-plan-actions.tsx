@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useMutation } from "@tanstack/react-query";
@@ -135,14 +137,14 @@ export function MonthlyPlanActions({
           </DialogHeader>
           <div className="space-y-2 text-sm">
             <p className="text-muted-foreground">The following dealers are marked as No Plan for this month and will be submitted as skipped:</p>
-            <ul className="list-disc pl-5">
+            <ul className="list-disc pl-5"><DealerOrder>
               {noPlanDealers.map((d) => (
-                <li key={d.dealerId}>
-                  {d.dealerName}
+                <li data-dealer-id={d.dealerId} key={d.dealerId}>
+                  <DealerName id={d.dealerId} name={d.dealerName} />
                   {d.noPlanReason ? ` — ${d.noPlanReason}` : ""}
                 </li>
               ))}
-            </ul>
+            </DealerOrder></ul>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmNoPlan(false)}>Cancel</Button>

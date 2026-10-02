@@ -1,4 +1,7 @@
 "use client";
+
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { useEffect, useMemo, useState } from "react";
@@ -143,20 +146,20 @@ export function SchemePaymentsPage() {
           {/* Dealer list */}
           <div className="overflow-hidden rounded-lg border bg-background">
             <div className="border-b bg-muted/30 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Dealers</div>
-            <div className="max-h-[70vh] overflow-auto">
+            <div className="max-h-[70vh] overflow-auto"><DealerOrder>
               {rows.map((r) => (
-                <button
+                <button data-dealer-id={r.dealerId}
                   key={r.planId}
                   type="button"
                   onClick={() => setSelected(r.planId)}
                   className={cn("flex w-full flex-col items-start gap-0.5 border-b px-3 py-2 text-left text-sm hover:bg-muted/40", selected === r.planId && "bg-primary/10")}
                 >
-                  <span className="font-medium">{r.dealerName}</span>
+                  <span className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></span>
                   <span className="text-xs text-muted-foreground">{r.schemeName} · {r.salesOfficerName}{r.state ? ` · ${r.state}` : ""}</span>
                   <span className="text-xs text-muted-foreground">{r.paymentCount} payment{r.paymentCount === 1 ? "" : "s"} · {formatCurrency(r.totalPaid)}{r.lastRecordedAt ? ` · recorded ${formatDate(r.lastRecordedAt)}` : ""}</span>
                 </button>
               ))}
-            </div>
+            </DealerOrder></div>
           </div>
 
           {/* Timeline */}
@@ -181,7 +184,7 @@ function DealerTimeline({ t }: { t: Timeline }) {
       <div className="rounded-lg border bg-background p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold">{t.plan.dealerName}</h2>
+            <h2 className="text-lg font-semibold"><DealerName id={t.plan.dealerId} name={t.plan.dealerName} /></h2>
             <p className="text-sm text-muted-foreground">{t.plan.schemeName} · {t.plan.salesOfficerName}{t.plan.state ? ` · ${t.plan.state}` : ""}</p>
           </div>
           <div className="flex gap-4 text-sm">

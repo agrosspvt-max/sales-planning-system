@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -12,7 +14,6 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
-  TableBody,
   TableCell,
   TableHead,
   TableHeader,
@@ -155,9 +156,9 @@ export function DealerCoveragePanel() {
               <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground">{search.trim() ? "No dealers match your search." : "No dealers in this filter."}</TableCell></TableRow>
             ) : (
               dealers.map((d) => (
-                <TableRow key={d.id}>
+                <TableRow key={d.id} data-dealer-id={d.id}>
                   <TableCell className="font-medium">
-                    {d.name}
+                    <DealerName id={d.id} name={d.name} />
                     {/* Owning Sales Officer for EVERY dealer (from the stored assignment). */}
                     {d.officerName && <span className="ml-2 text-xs font-normal text-muted-foreground">— {d.officerName}</span>}
                     {d.soCreated && <Badge variant="secondary" className="ml-2 text-[10px]">SO CREATED{d.createdByName ? ` • ${d.createdByName}` : ""}</Badge>}

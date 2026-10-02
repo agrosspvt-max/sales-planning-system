@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiRequestError } from "@/lib/api-client";
@@ -14,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DailyWorkFieldset } from "./daily-work-fieldset";
 
 type Section = "SALES" | "RECOVERY" | "APPOINTMENT" | "SCHEME_CONVERSION" | "VISITS" | "OTHERS";
@@ -181,7 +183,7 @@ function AdminDealerReport({ section, data }: { section: "SALES" | "RECOVERY"; d
     <TableHead className="w-60">{L.dealer}</TableHead><TableHead className="w-32">{L.task}</TableHead><TableHead className="w-44 text-right">{L.plan}</TableHead><TableHead className="w-32 text-right">{L.pending}</TableHead><TableHead className="w-36 text-right">{L.today}</TableHead><TableHead className="w-44">{L.type}</TableHead><TableHead className="w-36 text-right">{L.actual}</TableHead>
   </TableRow></TableHeader><TableBody>
     <TableRow className="border-b-2 bg-muted/40 font-semibold"><TableCell>{combined.dealerLabel}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.pending)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysPlan)}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysActual)}</TableCell></TableRow>
-    {data.dealers.map((row) => <TableRow key={row.entryId}><TableCell className="font-medium">{row.dealerName}</TableCell><TableCell>{task(row)}</TableCell><TableCell className="text-right tabular-nums">{money(row.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(row.pending)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan == null ? dash : money(row.todaysPlan)}</TableCell><TableCell>{type(row.entryType)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysActual == null ? dash : money(row.todaysActual)}</TableCell></TableRow>)}
+    {data.dealers.map((row) => <TableRow data-dealer-id={row.dealerId} key={row.entryId}><TableCell className="font-medium"><DealerName id={row.dealerId} name={row.dealerName} /></TableCell><TableCell>{task(row)}</TableCell><TableCell className="text-right tabular-nums">{money(row.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(row.pending)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan == null ? dash : money(row.todaysPlan)}</TableCell><TableCell>{type(row.entryType)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysActual == null ? dash : money(row.todaysActual)}</TableCell></TableRow>)}
   </TableBody></Table></div>;
 }
 
@@ -199,7 +201,7 @@ function AdminConversionReport({ data }: { data: ConversionPayload }) {
   const combined = combineConversionRows(data.rows.map((row): ConversionRow => ({ schemeId: row.schemeId, plannedUnits: row.plannedUnits, pending: row.pending, todaysPlan: row.todaysPlan ?? 0, achievability: row.achievability })), { dealer: L.dealer, dealers: L.dealers });
   return <div className="overflow-auto rounded-lg border bg-background"><Table className="min-w-[960px] table-fixed"><TableHeader><TableRow><TableHead className="w-52">{L.dealer}</TableHead><TableHead className="w-32">{L.task}</TableHead><TableHead className="w-56">{L.scheme}</TableHead><TableHead className="w-44 text-right">{L.planned}</TableHead><TableHead className="w-32 text-right">{L.pending}</TableHead><TableHead className="w-36 text-right">{L.today}</TableHead><TableHead className="w-36">{L.result}</TableHead></TableRow></TableHeader><TableBody>
     <TableRow className="border-b-2 bg-muted/40 font-semibold"><TableCell>{combined.dealerLabel}</TableCell><TableCell>{L.none}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{combined.plannedUnits}</TableCell><TableCell className="text-right tabular-nums">{combined.pending}</TableCell><TableCell className="text-right tabular-nums">{combined.todaysPlan}</TableCell><TableCell>{L.none}</TableCell></TableRow>
-    {data.rows.map((row) => <TableRow key={row.entryId}><TableCell className="font-medium">{row.dealerName}</TableCell><TableCell>{L.manual}</TableCell><TableCell>{row.schemeName}</TableCell><TableCell className="text-right tabular-nums">{row.plannedUnits}</TableCell><TableCell className="text-right tabular-nums">{row.pending}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan ?? dash}</TableCell><TableCell>{row.achievability === "YES" ? L.yes : row.achievability === "NO" ? L.no : dash}</TableCell></TableRow>)}
+    {data.rows.map((row) => <TableRow key={row.entryId} data-dealer-id={row.dealerId}><TableCell className="font-medium"><DealerName id={row.dealerId} name={row.dealerName} /></TableCell><TableCell>{L.manual}</TableCell><TableCell>{row.schemeName}</TableCell><TableCell className="text-right tabular-nums">{row.plannedUnits}</TableCell><TableCell className="text-right tabular-nums">{row.pending}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan ?? dash}</TableCell><TableCell>{row.achievability === "YES" ? L.yes : row.achievability === "NO" ? L.no : dash}</TableCell></TableRow>)}
   </TableBody></Table></div>;
 }
 

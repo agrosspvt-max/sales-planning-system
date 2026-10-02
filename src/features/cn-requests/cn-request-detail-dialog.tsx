@@ -1,4 +1,5 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 
 import { useQuery } from "@tanstack/react-query";
 import { Download, Eye } from "lucide-react";
@@ -17,7 +18,7 @@ import {
 } from "@/lib/cn-request";
 
 export interface CnRequestDetailData {
-  id: string; partyName: string; cnType: string; amount: number | null; postedAmount: number | null;
+  id: string; partyName: string; dealerId?: string; cnType: string; amount: number | null; postedAmount: number | null;
   paymentStatus: string | null; employeeName: string; state: string | null; territory: string | null;
   status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null;
   acceptanceReason: string | null; acceptanceReasonDetails: string | null; remarks: string | null; createdAt: string;
@@ -86,12 +87,12 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
-        <DialogHeader><DialogTitle>{L.title}{request ? ` — ${request.partyName}` : ""}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{L.title}{request ? <> — <DealerName id={request.dealerId} name={request.partyName} /></> : ""}</DialogTitle></DialogHeader>
         {isLoading ? <Skeleton className="h-64 w-full" /> : error || !request ? (
           <p className="text-sm text-destructive">{(error as Error | null)?.message ?? L.unavailable}</p>
         ) : (
           <div className="space-y-0.5">
-            <Row label={L.party} value={request.partyName} />
+            <Row label={L.party} value={<DealerName id={request.dealerId} name={request.partyName} />} />
             <Row label={L.cnType} value={cnTypeLabel(request.cnType, L.cnTypes)} />
             <Row label={request.postedAmount != null ? L.postedAmount : L.approxAmount} value={money(request.amount)} />
             <Row label={L.paymentStatus} value={paymentStatusLabel(request.paymentStatus, L.paymentStatuses)} />

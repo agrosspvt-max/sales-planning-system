@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -41,14 +43,14 @@ export function UpcomingCard() {
         ) : (data?.length ?? 0) === 0 ? (
           <p className="text-sm text-muted-foreground">{L.none}</p>
         ) : (
-          <ul className="space-y-2">
+          <ul className="space-y-2"><DealerOrder>
             {data!.map((it, i) => (
-              <li key={i} className="flex items-start gap-3 border-b pb-2 text-sm last:border-0 last:pb-0">
+              <li data-dealer-id={it.event?.dealerId} key={i} className="flex items-start gap-3 border-b pb-2 text-sm last:border-0 last:pb-0">
                 <span className="w-12 shrink-0 pt-0.5 text-xs font-medium text-muted-foreground tabular-nums">{shortDate(it.dateKey)}</span>
                 {it.kind === "CONVERSION" && it.event ? (
                   <Link href="/planning/scheme/plans" className="min-w-0 flex-1 hover:underline">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.conversion}</div>
-                    <div className="truncate font-medium">{it.event.dealerName}</div>
+                    <div className="truncate font-medium"><DealerName id={it.event.dealerId} name={it.event.dealerName} /></div>
                     <div className="text-xs text-muted-foreground">{it.event.numberOfSchemes} {it.event.numberOfSchemes === 1 ? L.scheme : L.schemes} · {formatCurrency(it.event.totalSchemeAmount)}</div>
                   </Link>
                 ) : it.kind === "PARTY_APPOINTMENT" && it.partyEvent ? (
@@ -65,7 +67,7 @@ export function UpcomingCard() {
                 ) : null}
               </li>
             ))}
-          </ul>
+          </DealerOrder></ul>
         )}
       </CardContent>
     </Card>

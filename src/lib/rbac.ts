@@ -11,6 +11,7 @@ export type Resource =
   | "brands"
   | "packSizes"
   | "dealers"
+  | "dealerTags"
   | "seasons"
   | "announcements"
   | "settings"
@@ -42,6 +43,7 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
     brands: ["read", "create", "update", "delete"],
     packSizes: ["read", "create", "update", "delete"],
     dealers: ["read", "create", "update", "delete"],
+    dealerTags: ["read", "create", "update"],
     seasons: ["read", "create", "update", "delete"],
     announcements: ["read", "create", "update", "delete"],
     settings: ["read", "create", "update", "delete"],
@@ -65,6 +67,7 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
     brands: ["read"],
     packSizes: ["read"],
     dealers: ["read"],
+    dealerTags: ["read"],
     seasons: ["read"],
     announcements: ["read"],
     dealerAssignments: ["read"],
@@ -80,6 +83,7 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
     brands: ["read"],
     packSizes: ["read"],
     dealers: ["read"],
+    dealerTags: ["read"],
     seasons: ["read"],
     announcements: ["read"],
     dealerAssignments: ["read"],

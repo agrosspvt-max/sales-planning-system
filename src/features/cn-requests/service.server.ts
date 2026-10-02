@@ -599,6 +599,7 @@ export async function getCnWorkingDocument(ctx: AuthContext, id: string): Promis
 
 export interface CnPaymentDetailDto {
   cnRequestId: string;
+  dealerId: string;
   partyName: string;
   cnType: string;
   details: string | null;
@@ -631,7 +632,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
   const request = await prisma.cnRequest.findUnique({
     where: { id },
     select: {
-      id: true, officerId: true, status: true, cnType: true, details: true, paymentStatus: true,
+      id: true, dealerId: true, officerId: true, status: true, cnType: true, details: true, paymentStatus: true,
       paymentOriginalAmount: true, paymentOutstandingAmount: true, paymentTrackingMode: true,
       acceptedAt: true, cnExpiryDays: true, dealer: { select: { name: true } },
       paymentEvents: { orderBy: [{ eventDate: "asc" }, { createdAt: "asc" }], include: { recordedBy: { select: { name: true } } } },
@@ -667,6 +668,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
   );
   return {
     cnRequestId: request.id,
+    dealerId: request.dealerId,
     partyName: request.dealer.name,
     cnType: canonicalCnType(request.cnType),
     details: request.details,

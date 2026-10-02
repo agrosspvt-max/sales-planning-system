@@ -75,6 +75,7 @@ export interface ReportProduct {
   groupUnavailable?: boolean;
 }
 export interface ReportDealer {
+  dealerId: string;
   dealerName: string;
   matchedBy: MatchedBy;
   originalTallyName: string | null; // shown when alias/fuzzy was used
@@ -90,6 +91,7 @@ export interface ReportNotMatched {
   reason: string;
 }
 export interface ReportPlannedNoSales {
+  dealerId: string;
   officerName: string;
   dealerName: string;
   productName: string;
@@ -278,7 +280,7 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
       let dealerMap = officersMap.get(officerName);
       if (!dealerMap) { dealerMap = new Map(); officersMap.set(officerName, dealerMap); }
       repDealer = dealerMap.get(dealer.id);
-      if (!repDealer) { repDealer = { dealerName: dealer.name, matchedBy, originalTallyName: matchedBy === "Exact" ? null : d.rawName, products: [] }; dealerMap.set(dealer.id, repDealer); }
+      if (!repDealer) { repDealer = { dealerId: dealer.id, dealerName: dealer.name, matchedBy, originalTallyName: matchedBy === "Exact" ? null : d.rawName, products: [] }; dealerMap.set(dealer.id, repDealer); }
     }
 
     for (const p of d.products) {
@@ -323,7 +325,7 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
       const plannedQty = plannedQtyByLine.get(pl.planLineId) ?? 0;
       if (plannedQty <= 0) continue;
       if (salesPairs.has(`${pl.dealerId}|${pl.productId}`)) continue;
-      plannedNoSales.push({ officerName: officerByDealer.get(pl.dealerId)?.officerName ?? NO_PLAN_OFFICER, dealerName: dealerNameById.get(pl.dealerId) ?? pl.dealerId, productName: productNameById.get(pl.productId) ?? pl.productId, plannedQty });
+      plannedNoSales.push({ dealerId: pl.dealerId, officerName: officerByDealer.get(pl.dealerId)?.officerName ?? NO_PLAN_OFFICER, dealerName: dealerNameById.get(pl.dealerId) ?? pl.dealerId, productName: productNameById.get(pl.productId) ?? pl.productId, plannedQty });
     }
     const officers: ReportOfficer[] = [...officersMap.entries()]
       .map(([officerName, dealerMap]) => ({ officerName, dealers: [...dealerMap.values()].sort((a, b) => a.dealerName.localeCompare(b.dealerName)) }))

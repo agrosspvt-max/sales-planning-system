@@ -29,6 +29,7 @@ model User {
   targetedAnnouncements    Announcement[]              @relation("AnnouncementTargetUser")
   announcementReads        AnnouncementReadStatus[]
   approvalActions          ApprovalAction[]
+  dealerTagRequests        DealerTagRequest[]
   auditLogs                AuditLog[]
   dealerAssignments        DealerAssignment[]          @relation("OfficerDealers")
   importRecords            DealerImportRecord[]
@@ -698,22 +699,24 @@ model ProductMerge {
 
 /// Dealer master. Ownership over time is expressed via DealerAssignment.
 model Dealer {
-  id                  String               @id @default(cuid())
+  id                  String                @id @default(cuid())
   name                String
   town                String?
-  isActive            Boolean              @default(true)
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
+  isActive            Boolean               @default(true)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
   mobile              String?
   village             String?
   tehsil              String?
   district            String?
   address             String?
-  status              String               @default("ACTIVE")
+  status              String                @default("ACTIVE")
   createdByUserId     String?
   createdFrom         String?
   deletedAt           DateTime?
   aliases             DealerAlias[]
+  tagAssignments      DealerTagAssignment[]
+  tagRequests         DealerTagRequest[]
   assignments         DealerAssignment[]
   planDealers         PlanDealer[]
   recoveryPlanDealers RecoveryPlanDealer[]
@@ -1283,24 +1286,27 @@ model MonthlyEntry {
 
 /// Immutable log of every workflow action on a Season Plan (status timeline).
 model ApprovalAction {
-  id             String             @id @default(cuid())
-  seasonPlanId   String?
-  actorId        String
-  action         ApprovalActionType
-  fromStatus     PlanStatus?
-  toStatus       PlanStatus?
-  remarks        String?
-  createdAt      DateTime           @default(now())
-  monthlyPlanId  String?
-  recoveryPlanId String?
-  actor          User               @relation(fields: [actorId], references: [id])
-  monthlyPlan    MonthlyPlan?       @relation(fields: [monthlyPlanId], references: [id], onDelete: Cascade)
-  recoveryPlan   RecoveryPlan?      @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
-  seasonPlan     SeasonPlan?        @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
+  id                 String             @id @default(cuid())
+  seasonPlanId       String?
+  actorId            String
+  action             ApprovalActionType
+  fromStatus         PlanStatus?
+  toStatus           PlanStatus?
+  remarks            String?
+  createdAt          DateTime           @default(now())
+  monthlyPlanId      String?
+  recoveryPlanId     String?
+  dealerTagRequestId String?
+  dealerTagRequest   DealerTagRequest?  @relation(fields: [dealerTagRequestId], references: [id], onDelete: Restrict)
+  actor              User               @relation(fields: [actorId], references: [id])
+  monthlyPlan        MonthlyPlan?       @relation(fields: [monthlyPlanId], references: [id], onDelete: Cascade)
+  recoveryPlan       RecoveryPlan?      @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
+  seasonPlan         SeasonPlan?        @relation(fields: [seasonPlanId], references: [id], onDelete: Cascade)
 
   @@index([seasonPlanId])
   @@index([monthlyPlanId])
   @@index([recoveryPlanId])
+  @@index([dealerTagRequestId])
   @@index([actorId])
 }
 
@@ -1391,6 +1397,54 @@ model DealerAlias {
   systemDealer   Dealer   @relation(fields: [systemDealerId], references: [id], onDelete: Cascade)
 
   @@index([systemDealerId])
+}
+
+/// Global marker definitions. Deactivation hides markers without deleting assignments or history.
+model DealerTag {
+  id          String                @id @default(cuid())
+  name        String
+  nameKey     String                @unique
+  markerType  String // TEXT | SYMBOL
+  marker      String
+  isActive    Boolean               @default(true)
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  assignments DealerTagAssignment[]
+  requests    DealerTagRequest[]
+}
+
+/// Only final approval/direct Admin actions change this state; pending revoke leaves it active.
+model DealerTagAssignment {
+  id        String    @id @default(cuid())
+  dealerId  String
+  tagId     String
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  dealer    Dealer    @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+  tag       DealerTag @relation(fields: [tagId], references: [id], onDelete: Restrict)
+
+  @@unique([dealerId, tagId])
+  @@index([tagId, isActive])
+}
+
+/// Shares PlanStatus, ApprovalAction, the existing Approvals page, hierarchy and audit infrastructure.
+model DealerTagRequest {
+  id            String           @id @default(cuid())
+  dealerId      String
+  tagId         String
+  requestedById String
+  operation     String // ADD | REVOKE
+  status        PlanStatus
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  dealer        Dealer           @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+  tag           DealerTag        @relation(fields: [tagId], references: [id], onDelete: Restrict)
+  requestedBy   User             @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+  actions       ApprovalAction[]
+
+  @@index([requestedById, status])
+  @@index([dealerId, tagId])
 }
 
 /// Audit/history record for a Sales Upload (Tally actual-sales import). Metadata only — the

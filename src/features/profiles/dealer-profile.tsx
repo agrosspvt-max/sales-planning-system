@@ -1,4 +1,5 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -44,7 +45,7 @@ export function DealerProfileView({ dealerId }: { dealerId: string }) {
     <div className="space-y-6">
       <PageHeader
         crumbs={[{ label: "Masters" }, { label: "Dealers", href: "/masters/dealers" }, { label: h.name }]}
-        title={h.name}
+        title={<DealerName id={dealerId} name={h.name} />}
         subtitle={
           <span className="flex items-center gap-2">
             {h.salesOfficer} · {h.seasonName}

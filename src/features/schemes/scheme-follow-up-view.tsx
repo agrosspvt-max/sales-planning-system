@@ -1,5 +1,8 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerTableBody as TableBody, DealerRowGroup } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { Fragment, useMemo, useState } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
@@ -15,7 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PillNav } from "@/features/planning/plan-list-ui";
 import { L, useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
@@ -616,10 +619,10 @@ function DealerCollapsibleView({ data, period, isLoading, onOpen, onShare }: {
             data.rows.map((r) => {
               const open = expanded.has(r.dealerId);
               return (
-                <Fragment key={r.dealerId}>
-                  <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
+                <DealerRowGroup data-dealer-id={r.dealerId} key={r.dealerId}>
+                  <TableRow data-dealer-id={r.dealerId} className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
                     <TableCell>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
-                    <TableCell className="font-semibold">{r.dealerName}{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
+                    <TableCell className="font-semibold"><DealerName id={r.dealerId} name={r.dealerName} />{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
                     <TableCell>{r.salesOfficerName}</TableCell>
                     <TableCell className="text-right">{r.schemeCount}</TableCell>
                     <MoneyCells f={r} />
@@ -659,7 +662,7 @@ function DealerCollapsibleView({ data, period, isLoading, onOpen, onShare }: {
                       </TableCell>
                     </TableRow>
                   )}
-                </Fragment>
+                </DealerRowGroup>
               );
             })
           )}
@@ -726,9 +729,9 @@ function SchemeCollapsibleView({ data, period, isLoading, onOpen, onShare }: {
                               </TableHeader>
                               <TableBody>
                                 {r.dealers.map((d) => (
-                                  <TableRow key={d.planId}>
+                                  <TableRow data-dealer-id={d.dealerId} key={d.planId}>
                                     <TableCell className="font-medium">
-                                      <button type="button" className="text-left text-primary hover:underline" onClick={() => onOpen(d.dealerId)}>{d.dealerName}</button>
+                                      <button type="button" className="text-left text-primary hover:underline" onClick={() => onOpen(d.dealerId)}><DealerName id={d.dealerId} name={d.dealerName} /></button>
                                     </TableCell>
                                     <TableCell>{d.town ?? "—"}</TableCell>
                                     <TableCell>{d.salesOfficerName}</TableCell>
@@ -873,17 +876,17 @@ function SchemeProductView({ data, isLoading, hideEmpty }: { data: SchemeProduct
                   <TableRow>
                     <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
                       <div className={schemeTable.nestedInset}>
-                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}>
+                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}><DealerOrder>
                           {r.dealers.map((d) => (
-                            <div key={d.dealerId} className="rounded-md border bg-background p-2">
+                            <div data-dealer-id={d.dealerId} key={d.dealerId} className="rounded-md border bg-background p-2">
                               <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
-                                <span className="font-semibold">{d.dealerName}{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
+                                <span className="font-semibold"><DealerName id={d.dealerId} name={d.dealerName} />{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
                                 <span className="text-xs text-muted-foreground">{d.salesOfficerName} · Products Completed {completionCell(d.productsCompleted, d.productsTotal)} · Required {formatQty(d.requiredQty)} · Sale {formatQty(d.achievedQty)} · Remaining {formatQty(d.remainingQty)} · {progressCell(d.progress)}</span>
                               </div>
                               <ProductLines products={d.products} />
                             </div>
                           ))}
-                        </div>
+                        </DealerOrder></div>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -923,10 +926,10 @@ function DealerProductView({ data, isLoading, hideEmpty }: { data: DealerProduct
           {isLoading || !data ? <SkeletonRow cols={COLS} /> : data.rows.length === 0 ? <EmptyRow cols={COLS} text="No dealers with Product Based schemes." /> : data.rows.map((r) => {
             const open = expanded.has(r.dealerId);
             return (
-              <Fragment key={r.dealerId}>
-                <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
+              <DealerRowGroup data-dealer-id={r.dealerId} key={r.dealerId}>
+                <TableRow data-dealer-id={r.dealerId} className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
                   <TableCell><Chevron open={open} /></TableCell>
-                  <TableCell className="font-semibold">{r.dealerName}{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
+                  <TableCell className="font-semibold"><DealerName id={r.dealerId} name={r.dealerName} />{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
                   <TableCell>{r.salesOfficerName}</TableCell>
                   <TableCell className="text-right">{r.schemeCount}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatQty(r.requiredQty)}</TableCell>
@@ -954,7 +957,7 @@ function DealerProductView({ data, isLoading, hideEmpty }: { data: DealerProduct
                     </TableCell>
                   </TableRow>
                 )}
-              </Fragment>
+              </DealerRowGroup>
             );
           })}
         </TableBody>
@@ -1007,17 +1010,17 @@ function SchemeValueView({ data, isLoading, hideEmpty }: { data: SchemeValueList
                   <TableRow>
                     <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
                       <div className={schemeTable.nestedInset}>
-                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}>
+                        <div className={cn(schemeTable.nestedShell, "space-y-3 p-3")}><DealerOrder>
                           {r.dealers.map((d) => (
-                            <div key={d.dealerId} className="rounded-md border bg-background p-2">
+                            <div data-dealer-id={d.dealerId} key={d.dealerId} className="rounded-md border bg-background p-2">
                               <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
-                                <span className="font-semibold">{d.dealerName}{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
+                                <span className="font-semibold"><DealerName id={d.dealerId} name={d.dealerName} />{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
                                 <span className="text-xs text-muted-foreground">{d.salesOfficerName} · Required {formatCurrency(d.requiredValue)} · Achieved {formatCurrency(d.achievedValue)} · Remaining {formatCurrency(d.remainingValue)} · {progressCell(d.progress)}</span>
                               </div>
                               <ValueLines products={d.products} combined={d.mode === "COMBINED"} />
                             </div>
                           ))}
-                        </div>
+                        </DealerOrder></div>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1056,10 +1059,10 @@ function DealerValueView({ data, isLoading, hideEmpty }: { data: DealerValueList
           {isLoading || !data ? <SkeletonRow cols={COLS} /> : data.rows.length === 0 ? <EmptyRow cols={COLS} text="No dealers with Value Based schemes." /> : data.rows.map((r) => {
             const open = expanded.has(r.dealerId);
             return (
-              <Fragment key={r.dealerId}>
-                <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
+              <DealerRowGroup data-dealer-id={r.dealerId} key={r.dealerId}>
+                <TableRow data-dealer-id={r.dealerId} className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
                   <TableCell><Chevron open={open} /></TableCell>
-                  <TableCell className="font-semibold">{r.dealerName}{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
+                  <TableCell className="font-semibold"><DealerName id={r.dealerId} name={r.dealerName} />{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
                   <TableCell>{r.salesOfficerName}</TableCell>
                   <TableCell className="text-right">{r.schemeCount}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.requiredValue)}</TableCell>
@@ -1086,7 +1089,7 @@ function DealerValueView({ data, isLoading, hideEmpty }: { data: DealerValueList
                     </TableCell>
                   </TableRow>
                 )}
-              </Fragment>
+              </DealerRowGroup>
             );
           })}
         </TableBody>
@@ -1228,17 +1231,17 @@ function SchemeOptionView({ data, type }: { data: SchemeOptionList | undefined; 
                     <TableRow>
                       <TableCell colSpan={COLS} className={schemeTable.nestedCell}>
                         <div className={schemeTable.nestedInset}>
-                          <div className={cn(schemeTable.nestedShell, "space-y-2 p-3")}>
+                          <div className={cn(schemeTable.nestedShell, "space-y-2 p-3")}><DealerOrder>
                             {g.dealers.map((d) => (
-                              <div key={d.dealerId} className="rounded-md border bg-background p-2">
+                              <div data-dealer-id={d.dealerId} key={d.dealerId} className="rounded-md border bg-background p-2">
                                 <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2 text-sm">
-                                  <span className="font-semibold">{d.dealerName}{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
+                                  <span className="font-semibold"><DealerName id={d.dealerId} name={d.dealerName} />{d.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{d.town}</span>}</span>
                                   <span className="text-xs text-muted-foreground">{d.salesOfficerName} · Target {optAmount(type, d.target)} · Achieved {optAmount(type, d.achieved)} · Remaining {optAmount(type, d.remaining)} · {progressCell(d.progress)} {d.completed && <Badge variant="success" className="ml-1">Complete</Badge>}</span>
                                 </div>
                                 <OptionContribLines type={type} contributions={d.contributions} target={d.target} achieved={d.achieved} remaining={d.remaining} progress={d.progress} completed={d.completed} />
                               </div>
                             ))}
-                          </div>
+                          </DealerOrder></div>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -1281,10 +1284,10 @@ function DealerOptionView({ data, type }: { data: DealerOptionList | undefined; 
               const open = expanded.has(r.dealerId);
               const completed = r.schemes.filter((s) => s.completed).length;
               return (
-                <Fragment key={r.dealerId}>
-                  <TableRow className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
+                <DealerRowGroup data-dealer-id={r.dealerId} key={r.dealerId}>
+                  <TableRow data-dealer-id={r.dealerId} className={cn("cursor-pointer", schemeTable.parentRow, open && schemeTable.parentRowOpen)} onClick={() => toggle(r.dealerId)}>
                     <TableCell><Chevron open={open} /></TableCell>
-                    <TableCell className="font-semibold">{r.dealerName}{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
+                    <TableCell className="font-semibold"><DealerName id={r.dealerId} name={r.dealerName} />{r.town && <span className="ml-2 text-xs font-normal text-muted-foreground">{r.town}</span>}</TableCell>
                     <TableCell>{r.salesOfficerName}</TableCell>
                     <TableCell className="text-right">{r.schemes.length}</TableCell>
                     <TableCell className="text-right tabular-nums">{completionCell(completed, r.schemes.length)}</TableCell>
@@ -1308,7 +1311,7 @@ function DealerOptionView({ data, type }: { data: DealerOptionList | undefined; 
                       </TableCell>
                     </TableRow>
                   )}
-                </Fragment>
+                </DealerRowGroup>
               );
             })}
           </TableBody>

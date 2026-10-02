@@ -305,6 +305,7 @@ async function resolveAging(parsed: ParsedAgingReport, cutoff: Date): Promise<Re
 // each skipped dealer carrying an exact reason. No caller recomputes parsing, matching or totals.
 
 export interface DealerLine {
+  dealerId: string | null;
   name: string;
   outstanding: number;
   overdue: number;
@@ -399,7 +400,7 @@ function buildRecoveryImportPreview(
       sec.duplicates.push({ name: r.dealerName ?? r.rawName, reason: "Duplicate row (merged into one dealer)" });
       continue;
     }
-    sec.accepted.push({ name: r.dealerName ?? r.rawName, outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running, matchType: r.matchType, score: r.score });
+    sec.accepted.push({ dealerId: r.dealerId, name: r.dealerName ?? r.rawName, outstanding: r.aging.outstanding, overdue: r.aging.overdue, due: r.aging.due, running: r.aging.running, matchType: r.matchType, score: r.score });
     acceptedDealerIds.get(r.officerId)?.add(r.dealerId);
     sec.totals.outstanding += r.aging.outstanding;
     sec.totals.overdue += r.aging.overdue;
@@ -1879,7 +1880,7 @@ const daybookSchema = z.object({
   toDate: z.string().optional(),
 });
 
-export interface DaybookMatchedLine { dealerName: string; officerName: string; receipt: number; srCr: number }
+export interface DaybookMatchedLine { dealerId: string; dealerName: string; officerName: string; receipt: number; srCr: number }
 export interface DaybookSkippedLine { dealerName: string; reason: string }
 export interface DaybookAnalysis {
   workbookName: string;
@@ -2001,7 +2002,7 @@ export async function analyzeDaybook(ctx: AuthContext, buffer: Buffer, filename:
   if (parsed.rows.length === 0) throw new ApiError(422, "No voucher rows were found — is this a Tally Day Book export?");
   const res = await resolveDaybook(parsed, input.seasonMonthId);
 
-  const matched = [...res.matched.values()].map((m) => ({ dealerName: m.dealerName, officerName: m.officerName, receipt: m.receipt, srCr: m.srCr }));
+  const matched = [...res.matched.entries()].map(([dealerId, m]) => ({ dealerId, dealerName: m.dealerName, officerName: m.officerName, receipt: m.receipt, srCr: m.srCr }));
   const skipped: DaybookSkippedLine[] = [
     ...res.skippedUnknown.map((name) => ({ dealerName: name, reason: "Unknown Alias — no Dealer Master match" })),
     ...res.skippedNoPlan.map((s) => ({ dealerName: s.dealerName, reason: "Not in a Recovery Plan for this month" })),

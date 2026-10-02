@@ -5,6 +5,9 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
 import { loadProductMergeMap, terminalSurvivor } from "@/features/products/merge.server";
+import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+import { loadDealerMarkerMap } from "@/lib/dealer-tags.server";
+import { taggedDealersFirst } from "@/lib/dealer-tags";
 import { achievement, nbv, figuresForMode, isQuantityMode, pendingQty, type PlanningMode } from "@/lib/calc";
 import type {
   ReportColumn,
@@ -504,6 +507,12 @@ export async function getReport(
   };
   totals.achievementAmount = achievement(totals.actualAmount, totals.planAmount);
   totals.achievementNbv = achievement(totals.actualNbv, totals.planNbv);
+
+  // Decorate/group the final display rows after totals; preserve the existing aggregation order.
+  if (type === "dealer") {
+    const [aliases, tags] = await Promise.all([loadDealerAliasNameMap(rows.map((r) => r.id)), loadDealerMarkerMap(rows.map((r) => r.id))]);
+    rows = taggedDealersFirst(sortRows(rows.map((r) => ({ ...r, label: aliases.get(r.id) ?? r.label })), sort), (r) => r.id, tags);
+  }
 
   return {
     type,

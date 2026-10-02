@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { ChevronRight, X } from "lucide-react";
@@ -233,14 +235,14 @@ function OfficerRecoveryDrawer({ row, view, weekNo, weekCount, filterLabel, onCl
         </div>
 
         {/* Dealer breakdown — each dealer collapsible; values are the same-view per-dealer figures. */}
-        <div className="flex-1 overflow-auto p-3">
+        <div className="flex-1 overflow-auto p-3"><DealerOrder>
           <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Dealer Breakdown ({row.dealers.length})</div>
           {row.dealers.map((d) => (
-            <div key={d.dealerId} className="mb-2 rounded-md border">
+            <div data-dealer-id={d.dealerId} key={d.dealerId} className="mb-2 rounded-md border">
               <button className="flex w-full items-center justify-between gap-2 p-2.5 text-left" onClick={() => setOpenDealer((x) => (x === d.dealerId ? null : d.dealerId))}>
                 <span className="flex items-center gap-1.5 font-medium">
                   <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", openDealer === d.dealerId && "rotate-90")} />
-                  {d.dealerName}
+                  <DealerName id={d.dealerId} name={d.dealerName} />
                 </span>
                 <span className="text-xs tabular-nums text-muted-foreground">O/S {money(d.outstanding)}</span>
               </button>
@@ -256,7 +258,7 @@ function OfficerRecoveryDrawer({ row, view, weekNo, weekCount, filterLabel, onCl
               )}
             </div>
           ))}
-        </div>
+        </DealerOrder></div>
       </div>
     </div>
   );

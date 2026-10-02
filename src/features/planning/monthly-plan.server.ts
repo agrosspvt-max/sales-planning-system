@@ -867,7 +867,12 @@ export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
   // must be Completed (≥1 monthly plan value entered) or explicitly marked "No Plan".
   const [gatePlanDealers, gateNoPlan, gateSeason] = await Promise.all([
     prisma.planDealer.findMany({
-      where: { seasonPlanId: mp.seasonPlanId },
+      // Use the SAME eligibility rule as the monthly view/draft (getMonthlyPlan): only dealers that are
+      // currently plannable (Active, non-Defaulter) must be accounted for. An Inactive/Defaulter dealer
+      // is hidden from the planning UI, so it must not count as a "required" dealer here — otherwise a
+      // deactivated dealer that still has a historical PlanDealer row would block submission with no way
+      // to plan or mark it "No Plan". Historical rows are preserved; they are only excluded from the gate.
+      where: { seasonPlanId: mp.seasonPlanId, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
       include: {
         dealer: { select: { name: true } },
         lines: {

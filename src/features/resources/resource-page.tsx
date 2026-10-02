@@ -1,4 +1,5 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 
 import { useState } from "react";
 import Link from "next/link";
@@ -140,7 +141,7 @@ export function ResourcePage({
               items.map((row) => {
                 const active = row.isActive !== false;
                 return (
-                  <TableRow key={row.id} className={active ? "" : "opacity-60"}>
+                  <TableRow key={row.id} data-dealer-id={config.key === "dealers" ? row.id : undefined} className={active ? "" : "opacity-60"}>
                     {config.columns.map((c) => {
                       const p = config.profile;
                       const isProfileCell =
@@ -154,7 +155,7 @@ export function ResourcePage({
                             </Badge>
                           ) : isProfileCell ? (
                             <Link href={`${p!.base}/${row.id}`} className="font-medium text-primary hover:underline">
-                              {formatCell(row[c.key], c.format)}
+                              {config.key === "dealers" ? <DealerName id={row.id} name={String(row[c.key])} /> : formatCell(row[c.key], c.format)}
                             </Link>
                           ) : (
                             formatCell(row[c.key], c.format)

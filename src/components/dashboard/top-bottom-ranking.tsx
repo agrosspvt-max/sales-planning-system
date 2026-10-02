@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 import Link from "next/link";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,9 +20,11 @@ export function TopBottomRanking({
   title,
   rows,
   metric = "actual",
+  dealerRows = false,
 }: {
   title: string;
   rows: RankItem[];
+  dealerRows?: boolean;
   /** Which figure to show on the right. */
   metric?: "actual" | "plan" | "achievement";
 }) {
@@ -39,21 +43,21 @@ export function TopBottomRanking({
           <p className="px-4 pb-4 text-sm text-muted-foreground">No data.</p>
         ) : (
           <ul className="divide-y">
-            {rows.map((r, i) => (
-              <li key={r.id} className="flex items-center justify-between gap-2 px-4 py-2 text-sm">
+            <DealerOrder>{rows.map((r, i) => (
+              <li key={r.id} data-dealer-id={dealerRows ? r.id : undefined} className="flex items-center justify-between gap-2 px-4 py-2 text-sm">
                 <span className="flex min-w-0 items-center gap-2">
                   <span className="w-4 shrink-0 text-muted-foreground">{i + 1}</span>
                   {r.href ? (
                     <Link href={r.href} className="truncate text-primary hover:underline">
-                      {r.label}
+                      {dealerRows ? <DealerName id={r.id} name={r.label} /> : r.label}
                     </Link>
                   ) : (
-                    <span className="truncate">{r.label}</span>
+                    <span className="truncate">{dealerRows ? <DealerName id={r.id} name={r.label} /> : r.label}</span>
                   )}
                 </span>
                 <span className="shrink-0 tabular-nums text-muted-foreground">{show(r)}</span>
               </li>
-            ))}
+            ))}</DealerOrder>
           </ul>
         )}
       </CardContent>

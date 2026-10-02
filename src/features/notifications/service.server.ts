@@ -1,5 +1,5 @@
 import "server-only";
-import { NotificationType, Role } from "@prisma/client";
+import { NotificationType, Role, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { AuthContext } from "@/lib/http";
 
@@ -18,10 +18,10 @@ export async function createNotification(input: NotifyInput): Promise<void> {
 }
 
 /** Create the same notification for many users (skips empty lists). */
-export async function notifyMany(userIds: string[], input: Omit<NotifyInput, "userId">): Promise<void> {
+export async function notifyMany(userIds: string[], input: Omit<NotifyInput, "userId">, client: Pick<Prisma.TransactionClient, "notification"> = prisma): Promise<void> {
   const unique = Array.from(new Set(userIds));
   if (unique.length === 0) return;
-  await prisma.notification.createMany({
+  await client.notification.createMany({
     data: unique.map((userId) => ({ ...input, userId })),
   });
 }

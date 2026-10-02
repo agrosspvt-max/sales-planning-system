@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -11,13 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { MobileContextBar } from "@/components/layout/mobile-context-bar";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Table, TableCell, TableHeader, TableRow } from "@/components/ui/table";
 import { SectionColgroup } from "@/components/ui/table-group";
 import { Th, LabelSectionHeaderRow, useLabel, type LabelSection } from "@/features/labels/label-ui";
 import { StatusBadge } from "@/features/planning/status-badge";
@@ -532,9 +528,9 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
               // Running has a value. Skipped in admin-edit mode so a Super Admin can freely correct.
               const rowLock = rowLockState(v.plan, v.running, d.overdue + d.due, adminMode, detail.dueValidation);
               return (
-                <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
+                <TableRow data-dealer-id={d.dealerId} key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium" style={{ color: status === DealerPlanningStatus.COMPLETED ? "hsl(var(--success))" : status === DealerPlanningStatus.NO_PLAN ? "hsl(var(--noplan))" : undefined }}>
-                    {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}{d.dealerName}
+                    {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}<DealerName id={d.dealerId} name={d.dealerName} />
                     {d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}
                     {d.missingInLatestAging && <span className="ml-1.5 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning" title="This dealer is not in the latest Aging Report; the figures shown are the last known values.">Missing in latest aging</span>}
                   </TableCell>
@@ -887,8 +883,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
               // Row-level Due↔Running lock — threshold = Overdue + THIS WEEK'S Due (same figures shown here).
               const rowLock = rowLockState(v.plan, v.running, d.overdue + (d.dueByWeek?.[weekNo] ?? 0), adminMode, detail.dueValidation);
               return (
-                <TableRow key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
-                  <TableCell className="font-medium">{d.dealerName}{d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}</TableCell>
+                <TableRow data-dealer-id={d.dealerId} key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
+                  <TableCell className="font-medium"><DealerName id={d.dealerId} name={d.dealerName} />{d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}</TableCell>
                   {/* Section 1 — Dealer & Closing Balance. Current Outstanding keeps its delta; Outstanding
                       Till Date (same calc as Month View) added beside it. */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>

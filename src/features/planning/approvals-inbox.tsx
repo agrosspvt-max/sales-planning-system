@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import Link from "next/link";
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,17 +12,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "./status-badge";
 import type { InboxItem, PlanStatus } from "./types";
 import { useLabel } from "@/features/labels/label-ui";
+import { DealerTagRequests } from "@/features/dealer-tags/dealer-tag-requests";
 
 interface MonthlyInboxItem {
   id: string;
@@ -103,6 +99,7 @@ export function ApprovalsInbox({ role, userId }: { role: Role; userId: string })
       <MonthlyApprovals role={role} />
       <RecoveryApprovals role={role} />
       <CnRequestApprovals role={role} userId={userId} />
+      <DealerTagRequests pendingOnly />
       {role === Role.SUPER_ADMIN && <MonthExtensionReview />}
     </div>
   );
@@ -274,6 +271,7 @@ function MonthExtensionReview() {
 }
 
 interface CnInboxItem {
+  dealerId: string;
   id: string; officerId: string; partyName: string; cnType: string; amount: number | null; employeeName: string; state: string | null; territory: string | null; status: string; createdAt: string;
 }
 /** CN Requests awaiting a decision. Posting accepted requests remains on the dedicated CN Requests page. */
@@ -315,8 +313,8 @@ function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
           </TableHeader>
           <TableBody>
             {rows.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell className="font-medium">{r.partyName}</TableCell>
+              <TableRow data-dealer-id={r.dealerId} key={r.id}>
+                <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.partyName} /></TableCell>
                 <TableCell>{r.cnType}</TableCell>
                 <TableCell>{r.employeeName}</TableCell>
                 <TableCell>{r.state ? <Badge variant="secondary">{r.state}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>

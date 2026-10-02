@@ -85,6 +85,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Payments", href: "/payments", icon: Wallet, roles: ADMIN_ONLY, group: "Planning" },
   // Requests — Sales Officers raise them; RM/Admin act on them. CN Requests is the first type.
   { label: "CN Requests", href: "/requests/cn", icon: FileText, roles: ALL_ROLES, group: "Requests" },
+  { label: "Dealer Tags", href: "/dealer-tags", icon: Tags, roles: ALL_ROLES, group: "Requests" },
   { label: "My Account", href: "/account", icon: Users, roles: ALL_ROLES, group: "Insights" },
   { label: "Reports", href: "/reports", icon: BarChart3, roles: ALL_ROLES, group: "Insights" },
   { label: "Announcements", href: "/announcements", icon: Megaphone, roles: ALL_ROLES, group: "Insights" },
@@ -110,6 +111,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Categories", href: "/masters/categories", icon: Tags, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Pack Sizes", href: "/masters/packSizes", icon: Ruler, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Dealers", href: "/masters/dealers", icon: Store, roles: ADMIN_ONLY, group: "Master Data" },
+  { label: "Tag Master", href: "/masters/dealer-tags", icon: Tags, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Users", href: "/masters/users", icon: Users, roles: [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER], group: "Master Data" },
   { label: "Seasons", href: "/seasons", icon: CalendarRange, roles: ADMIN_ONLY, group: "Master Data" },
   { label: "Announcements", href: "/masters/announcements", icon: Megaphone, roles: ADMIN_ONLY, group: "Master Data" },

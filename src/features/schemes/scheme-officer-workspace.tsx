@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { useEffect, useMemo, useState } from "react";
@@ -14,7 +16,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { L, useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
 import { UnderlineTabs } from "@/features/planning/plan-list-ui";
@@ -354,9 +356,9 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
                         const ex = existingByDealer.get(d.id);
                         const locked = isLocked(d.id);
                         return (
-                          <TableRow key={d.id} className={cn(!locked && "cursor-pointer hover:bg-accent/40")} onClick={() => toggle(d.id)}>
+                          <TableRow key={d.id} data-dealer-id={d.id} className={cn(!locked && "cursor-pointer hover:bg-accent/40")} onClick={() => toggle(d.id)}>
                             <TableCell><input type="checkbox" checked={selected.has(d.id)} disabled={locked} onChange={() => toggle(d.id)} onClick={(e) => e.stopPropagation()} /></TableCell>
-                            <TableCell className="font-medium">{d.name}</TableCell>
+                            <TableCell className="font-medium"><DealerName id={d.id} name={d.name} /></TableCell>
                             <TableCell>{d.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                             <TableCell>{ex ? <PlanStateBadge status={ex.planStatus} /> : <span className="text-muted-foreground">—</span>}</TableCell>
                           </TableRow>
@@ -382,8 +384,8 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
                         const ex = existingByDealer.get(d.id);
                         const n = allowMulti ? (counts[d.id] || 1) : 1;
                         return (
-                          <TableRow key={d.id}>
-                            <TableCell className="font-medium">{d.name}</TableCell>
+                          <TableRow key={d.id} data-dealer-id={d.id}>
+                            <TableCell className="font-medium"><DealerName id={d.id} name={d.name} /></TableCell>
                             <TableCell>
                               <SchemeDateInput className="w-44" min={minDate} max={maxDate} disabled={locked} value={dates[d.id] ?? ""} onValueChange={(v) => setDates((prev) => ({ ...prev, [d.id]: v }))} />
                             </TableCell>

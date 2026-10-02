@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
@@ -448,7 +450,7 @@ export function OfficersBadge({ officers }: { officers: GroupOfficerBreakdown })
 
 /* ------------------------------ Product drawer ---------------------------- */
 
-interface OfficerGroup { officerId: string; officerName: string; qty: number; amount: number; nbv: number; dealers: Map<string, { name: string; qty: number; amount: number; nbv: number }> }
+interface OfficerGroup { officerId: string; officerName: string; qty: number; amount: number; nbv: number; dealers: Map<string, { dealerId: string; name: string; qty: number; amount: number; nbv: number }> }
 
 const METRIC_MODES: { id: MetricMode; label: string }[] = [
   { id: "seasonPlan", label: "Season Plan" },
@@ -477,7 +479,7 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
         let og = officers.get(c.officerId);
         if (!og) { og = { officerId: c.officerId, officerName: c.officerName, qty: 0, amount: 0, nbv: 0, dealers: new Map() }; officers.set(c.officerId, og); }
         og.qty += m.qty; og.amount += m.amount; og.nbv += m.nbv;
-        const d = og.dealers.get(c.dealerId) ?? { name: c.dealerName, qty: 0, amount: 0, nbv: 0 };
+        const d = og.dealers.get(c.dealerId) ?? { dealerId: c.dealerId, name: c.dealerName, qty: 0, amount: 0, nbv: 0 };
         d.qty += m.qty; d.amount += m.amount; d.nbv += m.nbv;
         og.dealers.set(c.dealerId, d);
         totals[b].qty += m.qty; totals[b].amount += m.amount; totals[b].nbv += m.nbv;
@@ -544,12 +546,12 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
                           </button>
                           {openOfficer === key && (
                             <ul className="space-y-1 bg-muted/20 px-3 pb-2 pt-1 text-xs">
-                              {[...og.dealers.values()].sort((a, z) => z.amount - a.amount).map((d) => (
-                                <li key={d.name} className="flex items-center justify-between gap-2">
-                                  <span className="truncate text-foreground">{d.name}</span>
+                              <DealerOrder>{[...og.dealers.values()].sort((a, z) => z.amount - a.amount).map((d) => (
+                                <li key={d.dealerId} data-dealer-id={d.dealerId} className="flex items-center justify-between gap-2">
+                                  <span className="truncate text-foreground"><DealerName id={d.dealerId} name={d.name} /></span>
                                   <span className="tabular-nums text-muted-foreground">{qtyFmt(d.qty)} · {formatCurrency(d.amount)} · {formatCurrency(d.nbv)}</span>
                                 </li>
-                              ))}
+                              ))}</DealerOrder>
                             </ul>
                           )}
                         </div>

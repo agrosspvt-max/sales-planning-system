@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Loader2, Trash2, AlertTriangle, Plus } from "lucide-react";
@@ -9,18 +11,12 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DealerCoveragePanel } from "./dealer-coverage-panel";
 import { DealerDialog } from "./create-dealer-dialog";
 
 interface AliasRow {
+  systemDealerId: string;
   id: string;
   tallyName: string;
   systemDealerName: string;
@@ -152,8 +148,8 @@ export function DealerAliasPage() {
               <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">No dealer aliases yet.</TableCell></TableRow>
             ) : (
               data!.map((a) => (
-                <TableRow key={a.id}>
-                  <TableCell className="font-medium">{a.systemDealerName}</TableCell>
+                <TableRow data-dealer-id={a.systemDealerId} key={a.id}>
+                  <TableCell className="font-medium"><DealerName id={a.systemDealerId} name={a.systemDealerName} /></TableCell>
                   <TableCell>{a.tallyName}</TableCell>
                   <TableCell className="text-muted-foreground">{formatDate(a.updatedAt)}</TableCell>
                   <TableCell className="text-right">

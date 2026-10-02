@@ -27,20 +27,21 @@ interface ResourceFormProps {
   onOpenChange: (open: boolean) => void;
   initial?: Row | null;
   onSubmit: (values: Record<string, string>) => Promise<void>;
+  optionOverrides?: OptionMap;
 }
 
 function visibleFields(fields: FieldDef[], isEdit: boolean): FieldDef[] {
   return fields.filter((f) => !(isEdit && f.createOnly));
 }
 
-export function ResourceForm({ config, open, onOpenChange, initial, onSubmit }: ResourceFormProps) {
+export function ResourceForm({ config, open, onOpenChange, initial, onSubmit, optionOverrides }: ResourceFormProps) {
   const isEdit = Boolean(initial);
   const fields = visibleFields(config.fields, isEdit);
   const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const needsOptions = fields.some((f) => f.type === "select");
+  const needsOptions = fields.some((f) => f.type === "select" && !optionOverrides?.[f.optionsKey ?? ""]);
   const { data: options } = useQuery<OptionMap>({
     queryKey: ["resource-options"],
     queryFn: () => api.get<OptionMap>("/api/resources/options"),
@@ -52,7 +53,7 @@ export function ResourceForm({ config, open, onOpenChange, initial, onSubmit }: 
     const next: Record<string, string> = {};
     for (const f of fields) {
       const v = initial?.[f.name];
-      next[f.name] = v === null || v === undefined ? "" : String(v);
+      next[f.name] = v === null || v === undefined ? (f.defaultValue ?? "") : String(v);
     }
     setValues(next);
     setError(null);
@@ -101,7 +102,7 @@ export function ResourceForm({ config, open, onOpenChange, initial, onSubmit }: 
               ) : f.type === "select" ? (
                 <NativeSelect
                   id={f.name}
-                  options={options?.[f.optionsKey ?? ""] ?? []}
+                  options={optionOverrides?.[f.optionsKey ?? ""] ?? options?.[f.optionsKey ?? ""] ?? []}
                   placeholder={f.required ? "Select…" : "— None —"}
                   value={values[f.name] ?? ""}
                   onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}

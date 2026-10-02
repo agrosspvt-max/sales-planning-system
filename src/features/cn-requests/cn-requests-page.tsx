@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -14,7 +16,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { PillNav, UnderlineTabs } from "@/features/planning/plan-list-ui";
 import { useLabel } from "@/features/labels/label-ui";
@@ -313,8 +315,8 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
               <TableRow><TableCell colSpan={columnCount} className="py-10 text-center text-muted-foreground">{labels.noRequests}</TableCell></TableRow>
             ) : (
               rows!.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="font-medium">{r.partyName}</TableCell>
+                <TableRow data-dealer-id={r.dealerId} key={r.id}>
+                  <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.partyName} /></TableCell>
                   <TableCell>{cnTypeLabel(r.cnType, labels.cnTypeLabels)}</TableCell>
                   {showAmountPayment && <TableCell className="text-right tabular-nums">{money(r.amount)}</TableCell>}
                   {showAmountPayment && <TableCell>{r.paymentTrackingMode === "PAYMENT_V1" ? (
@@ -501,7 +503,7 @@ export function CreateRequestDialog({
           )}
           <div className="space-y-1.5">
             <Label>{L.party} *</Label>
-            <NativeSelect placeholder={L.selectPartyPlaceholder} disabled={teamMode && !officerId} options={(dealers ?? []).map((d) => ({ value: d.id, label: d.name }))} value={dealerId} onChange={(e) => setDealerId(e.target.value)} />
+            <NativeSelect dealerOptions placeholder={L.selectPartyPlaceholder} disabled={teamMode && !officerId} options={(dealers ?? []).map((d) => ({ value: d.id, label: d.name }))} value={dealerId} onChange={(e) => setDealerId(e.target.value)} />
             {teamMode && !officerId ? (
               <p className="text-xs text-muted-foreground">{L.selectOfficerHelp}</p>
             ) : (dealers?.length ?? 0) === 0 ? (

@@ -138,13 +138,13 @@ export function SalesOfficerProfile({ officerId }: { officerId: string }) {
       <KpiCards items={data.kpis} />
 
       <Section title="Dealer Performance">
-        <PerformanceTable rows={data.dealers} labelHeader="Dealer" showStatus emptyText="No dealers planned this season." />
+        <PerformanceTable dealerRows rows={data.dealers} labelHeader="Dealer" showStatus emptyText="No dealers planned this season." />
       </Section>
 
       <Section title="Top Performers">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <TopBottomRanking title="Top Dealers" rows={data.topDealers} metric="actual" />
-          <TopBottomRanking title="Lowest Dealers" rows={data.lowestDealers} metric="achievement" />
+          <TopBottomRanking dealerRows title="Top Dealers" rows={data.topDealers} metric="actual" />
+          <TopBottomRanking dealerRows title="Lowest Dealers" rows={data.lowestDealers} metric="achievement" />
           <TopBottomRanking title="Top Products" rows={data.topProducts} metric="actual" />
           <TopBottomRanking title="Lowest Products" rows={data.lowestProducts} metric="achievement" />
         </div>

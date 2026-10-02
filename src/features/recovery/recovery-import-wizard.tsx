@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
@@ -15,7 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 /* ------------------------------- Types ---------------------------------- */
 
 type MatchType = "ALIAS" | "EXACT" | "LOOSE" | "FUZZY";
-interface DealerLine { name: string; outstanding: number; overdue: number; due: number; running: number; matchType: MatchType | null; score: number | null }
+interface DealerLine { dealerId: string | null; name: string; outstanding: number; overdue: number; due: number; running: number; matchType: MatchType | null; score: number | null }
 interface SkipLine { name: string; reason: string }
 interface OfficerSection {
   officerId: string;
@@ -279,12 +281,12 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
                   </div>
                   <div className="space-y-1 p-2">
                     <Section title={`Accepted Dealers (${o.accepted.length})`}>
-                      {o.accepted.length === 0 ? <Empty /> : o.accepted.map((d, i) => (
-                        <div key={i} className="flex items-center justify-between gap-2 py-0.5 text-xs">
-                          <span className="flex items-center gap-1.5">{d.name}{d.matchType && <MatchTag type={d.matchType} score={d.score} />}</span>
+                      <DealerOrder>{o.accepted.length === 0 ? <Empty /> : o.accepted.map((d, i) => (
+                        <div key={i} data-dealer-id={d.dealerId ?? undefined} className="flex items-center justify-between gap-2 py-0.5 text-xs">
+                          <span className="flex items-center gap-1.5"><DealerName id={d.dealerId} name={d.name} />{d.matchType && <MatchTag type={d.matchType} score={d.score} />}</span>
                           <span className="tabular-nums text-muted-foreground">O/S {fmt(d.outstanding)}</span>
                         </div>
-                      ))}
+                      ))}</DealerOrder>
                     </Section>
                     {o.duplicates.length > 0 && (
                       <Section title={`Duplicate Dealers (${o.duplicates.length})`}>

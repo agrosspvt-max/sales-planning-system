@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
@@ -14,7 +16,6 @@ import { NativeSelect } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
-  TableBody,
   TableCell,
   TableHead,
   TableHeader,
@@ -372,10 +373,10 @@ export function SeasonalImportWizard() {
                           ? { label: "No matched rows", variant: "muted" as const }
                           : { label: "✓ Existing Dealer", variant: "success" as const };
                   return (
-                    <TableRow key={d.sheetName}>
+                    <TableRow key={d.sheetName} data-dealer-id={d.status === "EXISTING" ? d.dealerId ?? undefined : undefined}>
                       <TableCell className="font-medium">{d.sheetName}</TableCell>
                       <TableCell className="text-muted-foreground">
-                        {d.status === "EXISTING" ? d.dealerName : d.status === "NEW" ? <span className="italic">New: {d.dealerName}</span> : "—"}
+                        {d.status === "EXISTING" ? <DealerName id={d.dealerId} name={d.dealerName} /> : d.status === "NEW" ? <span className="italic">New: {d.dealerName}</span> : "—"}
                       </TableCell>
                       <TableCell className="text-right">{d.rows.length}</TableCell>
                       <TableCell className="text-right">{matched}</TableCell>

@@ -1,8 +1,12 @@
 import "server-only";
-import { Role } from "@prisma/client";
+import { Role, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { resolveCurrentOwner } from "@/lib/dealer-ownership";
+
+/** Read-only client injection keeps tag authorization reads on the same transaction connection.
+ * Defaults preserve every existing caller and all current ownership/hierarchy rules. */
+export type ScopeReadClient = Pick<Prisma.TransactionClient, "user" | "dealerAssignment">;
 
 export interface OfficerScope {
   all: boolean; // true for Super Admin (no restriction)
@@ -28,13 +32,13 @@ export function isDealerOwnerRole(role: Role): boolean {
  *   is derived from `User.groupId` (one RM per group); the legacy RmAssignment table no longer drives it.
  * - Sales Officer: only themselves.
  */
-export async function getOfficerScope(ctx: AuthContext): Promise<OfficerScope> {
+export async function getOfficerScope(ctx: AuthContext, db: ScopeReadClient = prisma): Promise<OfficerScope> {
   if (ctx.role === Role.SUPER_ADMIN) return { all: true, ids: [] };
   if (ctx.role === Role.SALES_OFFICER) return { all: false, ids: [ctx.userId] };
 
   // Regional Manager — group-scoped. An RM with no group sees only their own data.
   if (!ctx.groupId) return { all: false, ids: [ctx.userId] };
-  const officers = await prisma.user.findMany({
+  const officers = await db.user.findMany({
     where: { role: Role.SALES_OFFICER, groupId: ctx.groupId, isActive: true, deletedAt: null },
     select: { id: true },
   });
@@ -67,10 +71,10 @@ export async function assertOfficerInScope(ctx: AuthContext, officerId: string):
  * group (group-based, one RM per group). An RM's OWN submission has no manager above them in the group
  * (the `id != officerId` guard) → returns null → routed to PENDING_ADMIN via the existing branch.
  */
-export async function getCurrentManagerId(officerId: string): Promise<string | null> {
-  const officer = await prisma.user.findUnique({ where: { id: officerId }, select: { groupId: true } });
+export async function getCurrentManagerId(officerId: string, db: ScopeReadClient = prisma): Promise<string | null> {
+  const officer = await db.user.findUnique({ where: { id: officerId }, select: { groupId: true } });
   if (!officer?.groupId) return null;
-  const rm = await prisma.user.findFirst({
+  const rm = await db.user.findFirst({
     where: { role: Role.REGIONAL_MANAGER, groupId: officer.groupId, isActive: true, deletedAt: null, id: { not: officerId } },
     select: { id: true },
   });
@@ -97,13 +101,13 @@ export async function getCurrentDealerIds(officerId: string): Promise<string[]> 
  * assignment. Used by current-ownership views (Territory Plan/Recovery) so a reassigned dealer resolves to its
  * CURRENT officer only — never to the officer recorded on a historical plan row.
  */
-export async function getCurrentOwnerByDealer(dealerIds: readonly string[]): Promise<Map<string, string>> {
+export async function getCurrentOwnerByDealer(dealerIds: readonly string[], db: ScopeReadClient = prisma): Promise<Map<string, string>> {
   const ids = [...new Set(dealerIds)];
   if (ids.length === 0) return new Map();
   // Select effectiveFrom/createdAt too: if a dealer has more than one OPEN assignment (e.g. an older row that a
   // reassignment failed to close), resolveCurrentOwner deterministically keeps the MOST RECENT one, so the
   // current owner is never an older lingering officer.
-  const rows = await prisma.dealerAssignment.findMany({
+  const rows = await db.dealerAssignment.findMany({
     where: { dealerId: { in: ids }, effectiveTo: null },
     select: { dealerId: true, officerId: true, effectiveFrom: true, createdAt: true },
   });

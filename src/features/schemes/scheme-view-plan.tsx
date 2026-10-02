@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeBillFields, initialBillEditor, initialProductBillEditor, billEditorPayload, rebalanceBills, productBillingForProceedingUnits, recomputeProductBillEditor } from "./scheme-bill-fields";
 import { combinedPresetValueErrors } from "@/lib/scheme-bills";
 import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
@@ -15,7 +17,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PillNav, UnderlineTabs } from "@/features/planning/plan-list-ui";
 import { planLifecycle, type SchemePlanLifecycle } from "@/lib/scheme-lifecycle";
 import { L, useLabel } from "@/features/labels/label-ui";
@@ -364,10 +366,10 @@ export function SchemeWiseCollapsibleView({ officerId, groupByOfficer = false, o
                               </TableHeader>
                               <TableBody>
                                 {g.plans.map((p) => (
-                                  <TableRow key={p.id}>
+                                  <TableRow data-dealer-id={p.dealerId} key={p.id}>
                                     <TableCell className="font-medium">
                                       <div className="flex items-center gap-1.5">
-                                        <span>{p.dealerName}</span>
+                                        <span><DealerName id={p.dealerId} name={p.dealerName} /></span>
                                         {/* Info: plan details + any Sales Officer note. Green when a note exists. */}
                                         <button type="button" title={p.soNote ? "Info · note added" : "Info"} onClick={() => setInfoPlan(p)}>
                                           <Info className={cn("h-3.5 w-3.5", p.soNote ? "text-success" : "text-muted-foreground")} />
@@ -520,7 +522,7 @@ export function ConversionModal({ plan, onClose, onSaved, salesOfficerView = fal
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
-        <DialogHeader><DialogTitle>{plan.schemeName} — {plan.dealerName}{multi ? ` · ${count} Schemes` : ""}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{plan.schemeName} — <DealerName id={plan.dealerId} name={plan.dealerName} />{multi ? ` · ${count} Schemes` : ""}</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
             <Label>Scheme Status *</Label>

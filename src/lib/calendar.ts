@@ -73,6 +73,7 @@ export function conversionEventStatus(p: { planStatus: string; schemeStatus: str
 /** The fields the projection needs from a DealerSchemePlan (a superset row is fine). */
 export interface ConversionEventInput {
   id: string;
+  dealerId?: string;
   schemeId: string;
   expectedBillingDate: Date | string | null;
   originalConversionDate?: Date | string | null;
@@ -90,6 +91,7 @@ export interface ConversionEventInput {
 
 export interface ConversionEvent {
   type: "CONVERSION";
+  dealerId?: string;
   planId: string;
   schemeId: string;
   dateKey: string;
@@ -118,6 +120,7 @@ export function projectConversionEvents(rows: ConversionEventInput[]): Conversio
     if (!dk) continue;
     out.push({
       type: "CONVERSION",
+      ...(r.dealerId ? { dealerId: r.dealerId } : {}),
       planId: r.id,
       schemeId: r.schemeId,
       dateKey: dk,

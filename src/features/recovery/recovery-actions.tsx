@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -103,7 +105,7 @@ export function RecoveryActions({
           <DialogHeader><DialogTitle>Submit with No-Plan dealers?</DialogTitle></DialogHeader>
           <div className="space-y-2 text-sm">
             <p className="text-muted-foreground">These dealers are marked No Plan and will be submitted as skipped:</p>
-            <ul className="list-disc pl-5">{noPlanDealers.map((d) => <li key={d.dealerId}>{d.dealerName}{d.noPlanReason ? ` — ${d.noPlanReason}${d.noPlanReason === "Other" && d.noPlanReasonDetail ? ` (${d.noPlanReasonDetail})` : ""}` : ""}</li>)}</ul>
+            <ul className="list-disc pl-5"><DealerOrder>{noPlanDealers.map((d) => <li data-dealer-id={d.dealerId} key={d.dealerId}><DealerName id={d.dealerId} name={d.dealerName} />{d.noPlanReason ? ` — ${d.noPlanReason}${d.noPlanReason === "Other" && d.noPlanReasonDetail ? ` (${d.noPlanReasonDetail})` : ""}` : ""}</li>)}</DealerOrder></ul>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmNoPlan(false)}>Cancel</Button>

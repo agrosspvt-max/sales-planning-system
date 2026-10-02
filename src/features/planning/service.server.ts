@@ -649,8 +649,13 @@ export async function submitPlan(ctx: AuthContext, planId: string) {
 
   // V31 — every dealer in the plan must currently be assigned to the officer.
   const currentDealers = new Set(await getCurrentDealerIds(plan.officerId));
+  // Use the SAME eligibility rule as the seasonal view/draft (loadPlan): only currently plannable dealers
+  // (Active, non-Defaulter) must be accounted for. An Inactive/Defaulter dealer is hidden from the planning
+  // UI, so it must not count as "required" here — otherwise a deactivated dealer that still has a historical
+  // PlanDealer row would block submission with no way to plan it. Historical rows are preserved; they are
+  // only excluded from the gate (and from the stray/ownership check below, which must not trip on them).
   const planDealers = await prisma.planDealer.findMany({
-    where: { seasonPlanId: planId },
+    where: { seasonPlanId: planId, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
     include: { dealer: { select: { name: true } }, lines: { include: { packs: { select: { quantity: true } } } } },
   });
   const stray = planDealers.filter((pd) => !currentDealers.has(pd.dealerId));

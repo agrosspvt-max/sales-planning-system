@@ -1,4 +1,8 @@
 "use client";
+
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
@@ -16,7 +20,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PlanStateBadge, type SchemePlan } from "./scheme-detail-dialog";
 import { L } from "@/features/labels/label-ui";
 import { schemeTable } from "./scheme-table-theme";
@@ -457,8 +461,8 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                                       <TableRow><TableCell colSpan={6} className="py-8 text-center text-muted-foreground">{readOnly ? "No dealers planned into this scheme yet." : "No dealers planned into this scheme yet — use Add Dealer to start."}</TableCell></TableRow>
                                     ) : (
                                       rows.map((r) => (
-                                        <TableRow key={r.dealerId}>
-                                          <TableCell className="font-medium">{r.dealerName}</TableCell>
+                                        <TableRow data-dealer-id={r.dealerId} key={r.dealerId}>
+                                          <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
                                           {readOnly && <TableCell>{r.officerName ?? "—"}</TableCell>}
                                           {s.structure === "MULTIPLE_OPTIONS" && (
                                             <TableCell>
@@ -663,7 +667,7 @@ export function CreateSchemePlanDialog({ onClose, onSaved }: { onClose: () => vo
           <div className="space-y-1.5">
             <Label>Choose Dealer *</Label>
             {dealersLoading ? <Skeleton className="h-9 w-full" /> : (
-              <NativeSelect
+              <NativeSelect dealerOptions
                 placeholder="Select a dealer…"
                 value={dealerId}
                 onChange={(event) => {
@@ -797,7 +801,7 @@ function ChooseDealerDialog({ scheme, officerId, taken, onAdd, onClose }: {
               placeholder="Select a dealer…"
               value={dealerId}
               onChange={(e) => setDealerId(e.target.value)}
-              options={options.map((d) => ({ value: d.id, label: d.territory ? `${d.name} · ${d.territory}` : d.name }))}
+              dealerOptions options={options.map((d) => ({ value: d.id, label: d.territory ? `${d.name} · ${d.territory}` : d.name }))}
             />
           )}
           {!isLoading && options.length === 0 && (
@@ -1074,22 +1078,22 @@ function IncompleteSubmitDialog({ scheme, complete, incomplete, pending, onCance
           <p className="text-muted-foreground">{scheme.schemeName}</p>
           <div className="space-y-1.5 rounded-md border p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Incomplete — will stay in Draft</p>
-            <ul className="space-y-1">
+            <ul className="space-y-1"><DealerOrder>
               {incomplete.map((r) => (
-                <li key={r.dealerId} className="flex justify-between gap-4"><span className="font-medium">{r.dealerName}</span><span className="text-muted-foreground">Conversion Date missing</span></li>
+                <li data-dealer-id={r.dealerId} key={r.dealerId} className="flex justify-between gap-4"><span className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></span><span className="text-muted-foreground">Conversion Date missing</span></li>
               ))}
-            </ul>
+            </DealerOrder></ul>
           </div>
           <div className="space-y-1.5 rounded-md border p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Complete — will be submitted ({complete.length})</p>
             {complete.length === 0 ? (
               <p className="text-muted-foreground">No dealer is ready to submit yet.</p>
             ) : (
-              <ul className="space-y-1">
+              <ul className="space-y-1"><DealerOrder>
                 {complete.map((r) => (
-                  <li key={r.dealerId} className="flex justify-between gap-4"><span className="font-medium">{r.dealerName}</span><span className="text-muted-foreground">{formatDateShort(r.date)}</span></li>
+                  <li data-dealer-id={r.dealerId} key={r.dealerId} className="flex justify-between gap-4"><span className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></span><span className="text-muted-foreground">{formatDateShort(r.date)}</span></li>
                 ))}
-              </ul>
+              </DealerOrder></ul>
             )}
           </div>
           <p>Do you want to submit the completed dealers and keep the incomplete dealers in Draft?</p>

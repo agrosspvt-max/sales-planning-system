@@ -1,4 +1,7 @@
 "use client";
+
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeDateInput } from "./scheme-form-inputs";
 
 import { useState } from "react";
@@ -11,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { UNLIMITED_EXTENSION_ATTEMPTS, extensionAttemptsEnabled, hasExtensionAttemptsRemaining, isConversionExtensionStatusEligible } from "@/lib/scheme-conversion-extension";
 
 export interface SchemePlan {
@@ -116,8 +119,8 @@ export function SchemeDetailDialog({ schemeId, schemeName, onClose }: { schemeId
                     <TableRow><TableCell colSpan={5} className="py-10 text-center text-muted-foreground">No dealer plans for this scheme yet.</TableCell></TableRow>
                   ) : (
                     data!.map((p) => (
-                      <TableRow key={p.id} className="cursor-pointer hover:bg-accent/40" onClick={() => setSelected(p)}>
-                        <TableCell className="font-medium">{p.dealerName}</TableCell>
+                      <TableRow data-dealer-id={p.dealerId} key={p.id} className="cursor-pointer hover:bg-accent/40" onClick={() => setSelected(p)}>
+                        <TableCell className="font-medium"><DealerName id={p.dealerId} name={p.dealerName} /></TableCell>
                         <TableCell>{p.salesOfficerName}</TableCell>
                         <TableCell><PlanStateBadge status={p.planStatus} /></TableCell>
                         <TableCell>{p.planStatus === "APPROVED" ? <SchemeStatusBadge plan={p} /> : <span className="text-muted-foreground">—</span>}</TableCell>
@@ -309,7 +312,7 @@ function PlanDrawer({ plan, onBack, canExtend = false, onExtended }: { plan: Sch
       <DialogHeader>
         <DialogTitle className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={onBack}><ArrowLeft className="h-4 w-4" /></Button>
-          {plan.dealerName}
+          <DealerName id={plan.dealerId} name={plan.dealerName} />
         </DialogTitle>
       </DialogHeader>
       <div className="space-y-4">

@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerOptionName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Save, Ban } from "lucide-react";
@@ -184,14 +186,14 @@ export function PlanGrid() {
             value={dealerId}
             onChange={(e) => setDealerId(e.target.value)}
           >
-            <option value="">Choose Dealer…</option>
+            <DealerOrder><option value="">Choose Dealer…</option>
             {detail.dealers.map((d) => (
-              <option key={d.dealerId} value={d.dealerId} style={{ color: OPTION_COLOR[statusByDealer.get(d.dealerId) ?? DealerPlanningStatus.REMAINING] }}>
-                {d.dealerName}
+              <option data-dealer-id={d.dealerId} key={d.dealerId} value={d.dealerId} style={{ color: OPTION_COLOR[statusByDealer.get(d.dealerId) ?? DealerPlanningStatus.REMAINING] }}>
+                <DealerOptionName id={d.dealerId} name={d.dealerName} />
                 {statusByDealer.get(d.dealerId) === DealerPlanningStatus.COMPLETED ? " ✓" : statusByDealer.get(d.dealerId) === DealerPlanningStatus.NO_PLAN ? " ⦸" : ""}
               </option>
             ))}
-          </select>
+          </DealerOrder></select>
           {!monthId && editable && dealer && selectedStatus !== DealerPlanningStatus.NO_PLAN && (
             <Button variant="outline" size="sm" onClick={() => setNoPlanOpen(true)} className="text-noplan">
               <Ban className="h-4 w-4" /> No Plan

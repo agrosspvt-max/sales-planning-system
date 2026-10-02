@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -12,7 +14,6 @@ import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
-  TableBody,
   TableCell,
   TableHead,
   TableHeader,
@@ -234,12 +235,13 @@ export function ReportsPage({ initialType = "product", lockType = false, title }
                 data.rows.map((row) => (
                   <TableRow
                     key={row.id}
+                    data-dealer-id={data.type === "dealer" ? row.id : undefined}
                     className={cn(data.drillChild && "cursor-pointer")}
                     onClick={() => onRowClick(row)}
                   >
                     {data.columns.map((c) => (
                       <TableCell key={c.key} className={cn(c.format !== "text" && "text-right")}>
-                        {formatCell(row[c.key], c.format)}
+                        {data.type === "dealer" && c.key === "label" ? <DealerName id={row.id} name={String(row[c.key])} /> : formatCell(row[c.key], c.format)}
                       </TableCell>
                     ))}
                   </TableRow>

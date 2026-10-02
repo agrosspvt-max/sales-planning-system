@@ -1,11 +1,12 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo, useState } from "react";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { figuresForMode, achievement, nbv } from "@/lib/calc";
 import {
   Table,
-  TableBody,
   TableCell,
   TableHead,
   TableHeader,
@@ -70,8 +71,8 @@ export function MonthlyDealerSummary() {
               <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">No dealers.</TableCell></TableRow>
             ) : (
               rows.map((r) => (
-                <TableRow key={r.dealerId}>
-                  <TableCell className="font-medium">{r.name}</TableCell>
+                <TableRow key={r.dealerId} data-dealer-id={r.dealerId}>
+                  <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.name} /></TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCurrency(r.planNbv)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualAmount)}</TableCell>

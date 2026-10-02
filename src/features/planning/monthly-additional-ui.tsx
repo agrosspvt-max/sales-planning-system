@@ -94,7 +94,7 @@ export function AddDealerButton({ monthlyPlanId, onAdded }: { monthlyPlanId: str
                 <NativeSelect
                   value={pick}
                   onChange={(e) => setPick(e.target.value)}
-                  options={[{ value: "", label: "Choose a dealer…" }, ...(addable ?? []).map((d) => ({ value: d.id, label: d.name }))]}
+                  dealerOptions options={[{ value: "", label: "Choose a dealer…" }, ...(addable ?? []).map((d) => ({ value: d.id, label: d.name }))]}
                 />
               )}
               {error && <p className="text-sm text-destructive">{error}</p>}

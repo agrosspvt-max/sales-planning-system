@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerOrder, useTaggedDealersFirst } from "@/features/dealers/dealer-table-ui";
 
 import * as XLSX from "xlsx";
 import { ChevronRight, Download, AlertTriangle } from "lucide-react";
@@ -10,10 +12,10 @@ import { cn } from "@/lib/utils";
 type MatchedBy = "Exact" | "Alias" | "Fuzzy";
 type ProductStatus = "Imported" | "No Plan Found" | "Product Not Found";
 interface RProduct { productName: string; plannedQty: number; importedQty: number; amount: number; rate: number; status: ProductStatus }
-interface RDealer { dealerName: string; matchedBy: MatchedBy; originalTallyName: string | null; products: RProduct[] }
+interface RDealer { dealerId: string; dealerName: string; matchedBy: MatchedBy; originalTallyName: string | null; products: RProduct[] }
 interface ROfficer { officerName: string; dealers: RDealer[] }
 interface RNotMatched { originalName: string; suggestedMatch: string | null; reason: string }
-interface RPlannedNoSales { officerName: string; dealerName: string; productName: string; plannedQty: number }
+interface RPlannedNoSales { dealerId: string; officerName: string; dealerName: string; productName: string; plannedQty: number }
 interface RMatchedNotPlanned { officerId: string; officerName: string; dealerName: string; productId: string; productName: string; salesQty: number; amount: number; rate: number; matchedBy: MatchedBy }
 export interface ImportPreviewReportData {
   officers: ROfficer[];
@@ -60,6 +62,7 @@ interface AutoAddControls {
 }
 
 export function ImportPreviewReport({ report, workbookName, autoAddControls }: { report: ImportPreviewReportData; workbookName?: string; autoAddControls?: AutoAddControls }) {
+  const taggedFirst = useTaggedDealersFirst();
   const s = report.summary;
   const unplanned = groupUnplanned(report.matchedNotPlanned);
 
@@ -141,10 +144,10 @@ export function ImportPreviewReport({ report, workbookName, autoAddControls }: {
       <div className="space-y-1">
         {report.officers.map((o) => (
           <Section key={o.officerName} title={`${o.officerName} · ${o.dealers.length} dealer(s)`}>
-            {o.dealers.map((d) => (
-              <div key={d.dealerName} className="rounded-md border">
+            <DealerOrder>{o.dealers.map((d) => (
+              <div key={d.dealerId} data-dealer-id={d.dealerId} className="rounded-md border">
                 <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-2 py-1 text-xs">
-                  <span className="font-medium">{d.dealerName}</span>
+                  <span className="font-medium"><DealerName id={d.dealerId} name={d.dealerName} /></span>
                   <Badge variant="muted" className="text-[10px]">{d.matchedBy}</Badge>
                   {d.originalTallyName && <span className="text-muted-foreground">Tally: “{d.originalTallyName}”</span>}
                 </div>
@@ -170,7 +173,7 @@ export function ImportPreviewReport({ report, workbookName, autoAddControls }: {
                   </table>
                 </div>
               </div>
-            ))}
+            ))}</DealerOrder>
           </Section>
         ))}
       </div>
@@ -239,7 +242,7 @@ export function ImportPreviewReport({ report, workbookName, autoAddControls }: {
       )}
       {report.plannedNoSales.length > 0 && (
         <Section title={`Planned Products With No Sales (${report.plannedNoSales.length})`}>
-          <SimpleTable head={["Sales Officer", "Dealer", "Product", "Planned Qty"]} rows={report.plannedNoSales.map((r) => [r.officerName, r.dealerName, r.productName, n(r.plannedQty)])} />
+          <SimpleTable head={["Sales Officer", "Dealer", "Product", "Planned Qty"]} rows={taggedFirst(report.plannedNoSales, (r) => r.dealerId).map((r) => [r.officerName, <DealerName key={r.dealerId} id={r.dealerId} name={r.dealerName} />, r.productName, n(r.plannedQty)])} />
         </Section>
       )}
     </div>
@@ -267,7 +270,7 @@ function Section({ title, children, warn }: { title: string; children: React.Rea
   );
 }
 
-function SimpleTable({ head, rows, note }: { head: string[]; rows: (string | number)[][]; note?: string }) {
+function SimpleTable({ head, rows, note }: { head: string[]; rows: React.ReactNode[][]; note?: string }) {
   return (
     <div className="space-y-1">
       {note && <p className="text-[11px] text-muted-foreground">{note}</p>}

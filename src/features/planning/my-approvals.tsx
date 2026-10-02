@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "./status-badge";
 import type { PlanStatus } from "./types";
+import { DealerTagRequests } from "@/features/dealer-tags/dealer-tag-requests";
 
 interface SeasonalPlan { id: string; seasonName: string; planningType: string; versionName: string | null; version: number; status: PlanStatus; submittedAt: string | null; updatedAt: string }
 interface MonthlyPlan { id: string; seasonName: string; monthName: string; status: PlanStatus; submittedAt: string | null; updatedAt: string }
@@ -99,6 +100,7 @@ export function MyApprovals() {
           </TableBody>
         </Table>
       </div>
+      <DealerTagRequests />
     </div>
   );
 }

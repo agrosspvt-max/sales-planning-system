@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
@@ -23,7 +25,6 @@ import {
 } from "@/components/ui/dialog";
 import {
   Table,
-  TableBody,
   TableCell,
   TableHead,
   TableHeader,
@@ -716,8 +717,8 @@ export function DealerImportWizard() {
               </TableHeader>
               <TableBody>
                 {(reassignData ?? []).map((r) => (
-                  <TableRow key={r.dealerId}>
-                    <TableCell className="font-medium">{r.dealerName}</TableCell>
+                  <TableRow key={r.dealerId} data-dealer-id={r.dealerId}>
+                    <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
                     <TableCell className="text-muted-foreground">{r.currentOfficerName ?? "—"}</TableCell>
                     <TableCell className="text-right">{r.seasonPlans}</TableCell>
                     <TableCell className="text-right">{r.monthlyPlans}</TableCell>

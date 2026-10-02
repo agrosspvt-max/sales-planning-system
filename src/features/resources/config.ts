@@ -14,6 +14,7 @@ export interface FieldDef {
   createOnly?: boolean;
   helpText?: string;
   step?: string;
+  defaultValue?: string;
 }
 
 export interface ColumnDef {

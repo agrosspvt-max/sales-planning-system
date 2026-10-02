@@ -62,8 +62,13 @@ export async function submitRecoveryPlan(ctx: AuthContext, id: string) {
   assertRecoveryLive(p);
 
   // Dealer completion gate — every dealer must have a recovery plan value or be marked No Plan.
+  // Use the SAME eligibility rule as the Recovery view (getRecoveryPlan, which filters dealers to
+  // `dealer: { isActive: true }`): only active dealers must be accounted for. An Inactive dealer is hidden
+  // from the Recovery UI, so it must not count as "required" here — otherwise a deactivated dealer that
+  // still has a historical RecoveryPlanDealer row would block submission with no way to plan or mark it
+  // "No Plan". Historical rows are preserved; they are only excluded from the gate.
   const dealers = await prisma.recoveryPlanDealer.findMany({
-    where: { recoveryPlanId: id },
+    where: { recoveryPlanId: id, dealer: { isActive: true } },
     select: { noPlan: true, monthRecoveryPlan: true, monthRunningRecovery: true, dealer: { select: { name: true } } },
   });
   const remaining = dealers.filter((d) => !d.noPlan && num(d.monthRecoveryPlan ?? 0) <= 0 && num(d.monthRunningRecovery ?? 0) <= 0);

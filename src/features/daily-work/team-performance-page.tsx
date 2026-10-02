@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, Send, Lock } from "lucide-react";
@@ -206,14 +208,14 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
 
             <ReadSection title={L.conversion}>
               {data.conversion.rows.length === 0 ? dash : (
-                <ul className="space-y-1 text-sm">
+                <ul className="space-y-1 text-sm"><DealerOrder>
                   {data.conversion.rows.map((r) => (
-                    <li key={`${r.dealerId}:${r.schemeId}`} className="flex justify-between gap-2">
-                      <span>{r.dealerName} · {r.schemeName}</span>
+                    <li data-dealer-id={r.dealerId} key={`${r.dealerId}:${r.schemeId}`} className="flex justify-between gap-2">
+                      <span><DealerName id={r.dealerId} name={r.dealerName} /> · {r.schemeName}</span>
                       <span className="text-muted-foreground">{r.todaysPlan ?? 0} · {r.achievability ?? "—"}</span>
                     </li>
                   ))}
-                </ul>
+                </DealerOrder></ul>
               )}
             </ReadSection>
 
@@ -260,17 +262,17 @@ function DealerSection({ title, rows }: { title: string; rows: DealerRow[] }) {
   return (
     <ReadSection title={title}>
       {rows.length === 0 ? dash : (
-        <ul className="space-y-1 text-sm">
+        <ul className="space-y-1 text-sm"><DealerOrder>
           {rows.map((r) => (
-            <li key={r.dealerId} className="flex justify-between gap-2">
-              <span>{r.dealerName}</span>
+            <li data-dealer-id={r.dealerId} key={r.dealerId} className="flex justify-between gap-2">
+              <span><DealerName id={r.dealerId} name={r.dealerName} /></span>
               <span className="text-muted-foreground tabular-nums">
                 {r.todaysPlan == null ? "—" : formatCurrency(r.todaysPlan)}
                 {r.todaysActual != null ? ` · ${formatCurrency(r.todaysActual)}` : ""}
               </span>
             </li>
           ))}
-        </ul>
+        </DealerOrder></ul>
       )}
     </ReadSection>
   );

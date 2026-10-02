@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -10,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-interface MatchedLine { dealerName: string; officerName: string; receipt: number; srCr: number }
+interface MatchedLine { dealerId: string; dealerName: string; officerName: string; receipt: number; srCr: number }
 interface SkippedLine { dealerName: string; reason: string }
 interface Analysis {
   workbookName: string;
@@ -124,14 +126,14 @@ export function DaybookUploadWizard() {
               <div className="grid grid-cols-4 gap-2 border-b pb-1 text-[11px] font-medium uppercase text-muted-foreground">
                 <span>Dealer</span><span>Officer</span><span className="text-right">Receipt</span><span className="text-right">SR/CR</span>
               </div>
-              {analysis.matched.length === 0 ? <p className="py-1 text-xs text-muted-foreground">None.</p> : analysis.matched.map((m, i) => (
-                <div key={i} className="grid grid-cols-4 gap-2 py-0.5 text-xs">
-                  <span>{m.dealerName}</span>
+              <DealerOrder>{analysis.matched.length === 0 ? <p className="py-1 text-xs text-muted-foreground">None.</p> : analysis.matched.map((m, i) => (
+                <div key={i} data-dealer-id={m.dealerId} className="grid grid-cols-4 gap-2 py-0.5 text-xs">
+                  <span><DealerName id={m.dealerId} name={m.dealerName} /></span>
                   <span className="text-muted-foreground">{m.officerName}</span>
                   <span className="text-right tabular-nums">{fmt(m.receipt)}</span>
                   <span className="text-right tabular-nums">{fmt(m.srCr)}</span>
                 </div>
-              ))}
+              ))}</DealerOrder>
             </Section>
 
             {analysis.skipped.length > 0 && (

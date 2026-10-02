@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeBillFields, initialBillEditor, initialProductBillEditor, billEditorPayload } from "./scheme-bill-fields";
 import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import { bookingCoverage } from "@/lib/scheme-booking-coverage";
@@ -18,7 +20,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PillNav, UnderlineTabs } from "@/features/planning/plan-list-ui";
 import { L, useLabel } from "@/features/labels/label-ui";
 import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, PLAN_STATUS_LABEL, MarkedValue, conversionDateCell, bookingCell, documentCell, BillingDateValue, PlannedConversionCell, type SchemePlan } from "./scheme-detail-dialog";
@@ -621,17 +623,17 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                               </TableHeader>
                               <TableBody>
                                 {g.plans.map((r) => (
-                                  <TableRow key={r.id}>
+                                  <TableRow data-dealer-id={r.dealerId} key={r.id}>
                                     <TableCell className="font-medium">
                                       {isAdmin ? (
                                         <div className="flex items-center gap-1.5">
-                                          <span>{r.dealerName}</span>
+                                          <span><DealerName id={r.dealerId} name={r.dealerName} /></span>
                                           {/* Standalone Info — plan/scheme details + any Sales Officer note. Green when a note exists. */}
                                           <button type="button" title={r.soNote ? "Info · note added" : "Info"} onClick={() => setDetail(r)}>
                                             <Info className={cn("h-3.5 w-3.5", r.soNote ? "text-success" : "text-muted-foreground")} />
                                           </button>
                                         </div>
-                                      ) : r.dealerName}
+                                      ) : <DealerName id={r.dealerId} name={r.dealerName} />}
                                     </TableCell>
                                     {submitted ? (
                                       <>
@@ -862,7 +864,7 @@ export function AdminVerifyDialog({ plan, onClose, onSaved }: { plan: SchemePlan
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
-        <DialogHeader><DialogTitle>Verify — {plan.schemeName} · {plan.dealerName}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>Verify — {plan.schemeName} · <DealerName id={plan.dealerId} name={plan.dealerName} /></DialogTitle></DialogHeader>
         <div className="overflow-auto">
           <table className="w-full text-sm">
             <thead>

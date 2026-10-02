@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 /**
  * FOLLOW UP (/planning/scheme/follow-up-monitor) — a NEW monitoring hub, SEPARATE from the existing
  * "Follow-up Plans" recovery page. Top-level tab "Follow Up" with three underlined sub-tabs:
@@ -28,7 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { NativeSelect } from "@/components/ui/select";
 import { PageHeader } from "@/components/layout/page-header";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PillNav, UnderlineTabs } from "@/features/planning/plan-list-ui";
 import { L, useLabel } from "@/features/labels/label-ui";
 import { PlanStateBadge, SchemeStatusBadge, SchemePlanDialog, MarkedValue, documentCell, PlannedConversionCell, type SchemePlan } from "./scheme-detail-dialog";
@@ -114,11 +116,11 @@ export function SchemeConversionFollowUp({ role, officerId, representation = "sc
   // One dealer row, reused by the nested (Scheme-wise) and flat (Dealer-wise) tables. `withScheme` prepends a
   // Scheme column so a flat row is identifiable without its parent grouping.
   const dealerRow = (p: SchemePlan, withScheme: boolean) => (
-    <TableRow key={p.id}>
+    <TableRow data-dealer-id={p.dealerId} key={p.id}>
       {withScheme && <TableCell className="font-medium">{p.schemeName}</TableCell>}
       <TableCell className="font-medium">
         <div className="flex items-center gap-1.5">
-          <span>{p.dealerName}</span>
+          <span><DealerName id={p.dealerId} name={p.dealerName} /></span>
           <button type="button" title={p.soNote ? "Info · note added" : "Info"} onClick={() => setInfoPlan(p)}>
             <Info className={cn("h-3.5 w-3.5", p.soNote ? "text-success" : "text-muted-foreground")} />
           </button>

@@ -1,11 +1,12 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo } from "react";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { amount as calcAmount, nbv as calcNbv, achievement } from "@/lib/calc";
 import {
   Table,
-  TableBody,
   TableCell,
   TableHeader,
   TableRow,
@@ -85,8 +86,8 @@ export function DealerSummaryView() {
             </TableRow>
           ) : (
             rows.map((r) => (
-              <TableRow key={r.dealerId}>
-                <TableCell className="font-medium">{r.name}</TableCell>
+              <TableRow key={r.dealerId} data-dealer-id={r.dealerId}>
+                <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.name} /></TableCell>
                 <TableCell className="text-right tabular-nums">{formatCurrency(r.salesPlan)}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatCurrency(r.salesPlanNbv)}</TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.liveMonthPlan)}</TableCell>

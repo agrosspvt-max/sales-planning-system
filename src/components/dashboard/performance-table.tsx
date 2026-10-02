@@ -1,11 +1,12 @@
 "use client";
 
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import Link from "next/link";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
-  TableBody,
   TableCell,
   TableHead,
   TableHeader,
@@ -38,8 +39,10 @@ export function PerformanceTable({
   labelHeader,
   emptyText = "Nothing planned yet.",
   showStatus = false,
+  dealerRows = false,
 }: {
   rows: PerfRowVM[];
+  dealerRows?: boolean;
   labelHeader: string;
   emptyText?: string;
   showStatus?: boolean;
@@ -69,14 +72,14 @@ export function PerformanceTable({
             </TableRow>
           ) : (
             rows.map((r) => (
-              <TableRow key={r.id}>
+              <TableRow key={r.id} data-dealer-id={dealerRows ? r.id : undefined}>
                 <TableCell className="font-medium">
                   {r.href ? (
                     <Link href={r.href} className="text-primary hover:underline">
-                      {r.label}
+                      {dealerRows ? <DealerName id={r.id} name={r.label} /> : r.label}
                     </Link>
                   ) : (
-                    r.label
+                    dealerRows ? <DealerName id={r.id} name={r.label} /> : r.label
                   )}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{qty(r.planQty)}</TableCell>

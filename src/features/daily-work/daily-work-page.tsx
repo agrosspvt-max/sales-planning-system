@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -14,7 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
@@ -655,8 +657,8 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                   : [{ value: "REGULAR", label: L.regular }];
                 const rowAutoTasks = (data?.materializedCnTasks ?? []).filter((task) => task.dealerId === r.dealerId);
                 return (
-                  <TableRow key={r.entryId}>
-                    <TableCell className="font-medium">{r.dealerName}</TableCell>
+                  <TableRow data-dealer-id={r.dealerId} key={r.entryId}>
+                    <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
                     {/* Task Type — derived from the authoritative Auto Task contribution link (Daily Plan only). */}
                     {showTaskType && <TableCell>{taskTypeText(rowTaskTypeOf(r.dealerId), taskTypeL)}</TableCell>}
                     {/* Monthly plan + pending are SOURCED and non-editable. */}
@@ -817,8 +819,8 @@ function MaterializedTaskRescheduleDialog({ tasks, onChanged, onClose }: { tasks
           <Table>
             <TableHeader><TableRow><TableHead>{L.dealer}</TableHead><TableHead className="text-right">{L.amount}</TableHead><TableHead>{L.taskDate}</TableHead></TableRow></TableHeader>
             <TableBody>{tasks.map((task) => (
-              <TableRow key={taskKey(task)}>
-                <TableCell>{task.partyName}</TableCell>
+              <TableRow data-dealer-id={task.dealerId} key={taskKey(task)}>
+                <TableCell><DealerName id={task.dealerId} name={task.partyName} /></TableCell>
                 <TableCell className="text-right tabular-nums">{task.recoveryAmount == null ? "—" : money(task.recoveryAmount)}</TableCell>
                 <TableCell><Input
                   aria-label={`${L.taskDate} — ${task.partyName}`}
@@ -867,7 +869,7 @@ function AddDealerDialog({ available, labels, onAdd, onClose }: {
             disabled={available.length === 0}
             value={dealerId}
             onChange={(e) => setDealerId(e.target.value)}
-            options={available.map((d) => ({ value: d.id, label: d.name }))}
+            dealerOptions options={available.map((d) => ({ value: d.id, label: d.name }))}
           />
         </div>
         <DialogFooter>
@@ -1207,8 +1209,8 @@ function ConversionSection({ workDate, view, locked }: { workDate: string; view:
             ) : visibleRows.map((r, i) => {
               const submitted = r.rowStatus !== "DRAFT" && r.rowStatus !== "NEW";
               return (
-                <TableRow key={r.entryId}>
-                  <TableCell className="font-medium">{r.dealerName}</TableCell>
+                <TableRow data-dealer-id={r.dealerId} key={r.entryId}>
+                  <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
                   {/* Task Type — Scheme Conversion has no Auto Task source, so rows are Manual. */}
                   {showTaskType && <TableCell>{taskTypeText(rowTaskType(false), taskTypeL)}</TableCell>}
                   <TableCell className="p-1">
@@ -1506,8 +1508,8 @@ function CnTasksPanel({ onChanged }: { onChanged: () => void }) {
           </TableRow></TableHeader>
           <TableBody>
             {activeTasks.length === 0 ? <TableRow><TableCell colSpan={6} className="py-6 text-center text-muted-foreground">{L.noActive}</TableCell></TableRow> : activeTasks.map((task) => (
-              <TableRow key={taskKey(task)}>
-                <TableCell className="font-medium">{task.partyName}</TableCell>
+              <TableRow data-dealer-id={task.dealerId} key={taskKey(task)}>
+                <TableCell className="font-medium"><DealerName id={task.dealerId} name={task.partyName} /></TableCell>
                 <TableCell className="text-right tabular-nums">{task.recoveryAmount == null ? "—" : money(task.recoveryAmount)}</TableCell>
                 <TableCell>{task.taskType === "CN_REQUEST" ? L.cnRequest : task.taskType}</TableCell>
                 <TableCell>{task.planType === "RECOVERY" ? L.recovery : task.planType}</TableCell>

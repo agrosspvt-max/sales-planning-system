@@ -1,4 +1,6 @@
 "use client";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -153,14 +155,14 @@ export function DealerFormBody({
               <span>A dealer like “{form.name}” may already exist. Review before creating a duplicate.</span>
             </div>
             <ul className="space-y-1">
-              {duplicates.map((d) => (
-                <li key={d.id} className="flex items-center justify-between rounded-md border p-2 text-sm">
-                  <span>{d.name} <Badge variant="muted" className="ml-1 text-[10px]">{d.reason}</Badge></span>
+              <DealerOrder>{duplicates.map((d) => (
+                <li key={d.id} data-dealer-id={d.id} className="flex items-center justify-between rounded-md border p-2 text-sm">
+                  <span><DealerName id={d.id} name={d.name} /> <Badge variant="muted" className="ml-1 text-[10px]">{d.reason}</Badge></span>
                   {ctx.variant === "admin" && (
                     <Button size="sm" variant="outline" disabled={assignExisting.isPending} onClick={() => assignExisting.mutate(d.id)}>Assign this dealer</Button>
                   )}
                 </li>
-              ))}
+              ))}</DealerOrder>
             </ul>
             {error && <p className="text-sm text-destructive">{error}</p>}
             <DialogFooter>

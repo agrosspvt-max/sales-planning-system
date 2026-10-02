@@ -1,5 +1,7 @@
 "use client";
 
+import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { Fragment, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Loader2, Check, ArrowLeft, ArrowRight, ChevronRight, ChevronDown, AlertTriangle } from "lucide-react";
@@ -278,10 +280,10 @@ function ProductTable({ lines }: { lines: ImpactLine[] }) {
           <th className="p-1.5 text-right">Required</th><th className="p-1.5 text-right">Previously</th><th className="p-1.5 text-right">Incoming</th>
           <th className="p-1.5 text-right">New Total</th><th className="p-1.5 text-right">Remaining</th><th className="p-1.5 text-right">Completion</th>
         </tr></thead>
-        <tbody>
+        <tbody><DealerOrder>
           {lines.map((l) => (
-            <tr key={`${l.dealerId}|${l.productId}`} className="border-t">
-              <td className="p-1.5">{l.dealerName}</td><td className="p-1.5">{l.productName}</td>
+            <tr data-dealer-id={l.dealerId} key={`${l.dealerId}|${l.productId}`} className="border-t">
+              <td className="p-1.5"><DealerName id={l.dealerId} name={l.dealerName} /></td><td className="p-1.5">{l.productName}</td>
               <td className="p-1.5 text-right tabular-nums">{q(l.requiredQty)}</td>
               <td className="p-1.5 text-right tabular-nums">{q(l.previouslyAchievedQty)}</td>
               <td className="p-1.5 text-right tabular-nums font-medium">{q(l.incomingQty)}</td>
@@ -290,7 +292,7 @@ function ProductTable({ lines }: { lines: ImpactLine[] }) {
               <td className="p-1.5 text-right">{l.completedAfter ? <Badge variant="success">Complete</Badge> : `${q(l.newTotalQty)} / ${q(l.requiredQty)}`}</td>
             </tr>
           ))}
-        </tbody>
+        </DealerOrder></tbody>
       </table>
     </div>
   );
@@ -305,10 +307,10 @@ function ValueTable({ lines }: { lines: ImpactLine[] }) {
           <th className="p-1.5 text-right">Required</th><th className="p-1.5 text-right">Previously</th><th className="p-1.5 text-right">Incoming</th>
           <th className="p-1.5 text-right">New Total</th><th className="p-1.5 text-right">Remaining</th><th className="p-1.5 text-right">Completion</th>
         </tr></thead>
-        <tbody>
+        <tbody><DealerOrder>
           {lines.map((l) => (
-            <tr key={`${l.dealerId}|${l.productId}`} className="border-t">
-              <td className="p-1.5">{l.dealerName}</td><td className="p-1.5">{l.productName}</td>
+            <tr data-dealer-id={l.dealerId} key={`${l.dealerId}|${l.productId}`} className="border-t">
+              <td className="p-1.5"><DealerName id={l.dealerId} name={l.dealerName} /></td><td className="p-1.5">{l.productName}</td>
               <td className="p-1.5 text-right tabular-nums">{formatCurrency(l.requiredValue)}</td>
               <td className="p-1.5 text-right tabular-nums">{formatCurrency(l.previouslyAchievedValue)}</td>
               <td className="p-1.5 text-right tabular-nums font-medium">{formatCurrency(l.incomingValue)}</td>
@@ -317,7 +319,7 @@ function ValueTable({ lines }: { lines: ImpactLine[] }) {
               <td className="p-1.5 text-right">{l.completedAfter ? <Badge variant="success">Complete</Badge> : "Pending"}</td>
             </tr>
           ))}
-        </tbody>
+        </DealerOrder></tbody>
       </table>
     </div>
   );
@@ -332,11 +334,11 @@ function CombinedTable({ rows }: { rows: CombinedDealerLine[] }) {
           <th className="p-1.5 text-right">Combined Required</th><th className="p-1.5 text-right">Previously</th><th className="p-1.5 text-right">Incoming</th>
           <th className="p-1.5 text-right">New Total</th><th className="p-1.5 text-right">Remaining</th><th className="p-1.5 text-right">Completion</th>
         </tr></thead>
-        <tbody>
+        <tbody><DealerOrder>
           {rows.map((r) => (
             <Fragment key={r.dealerId}>
-              <tr className="border-t">
-                <td className="p-1.5">{r.dealerName}</td>
+              <tr data-dealer-id={r.dealerId} className="border-t">
+                <td className="p-1.5"><DealerName id={r.dealerId} name={r.dealerName} /></td>
                 <td className="p-1.5 text-right tabular-nums">{formatCurrency(r.requiredValue)}</td>
                 <td className="p-1.5 text-right tabular-nums">{formatCurrency(r.previouslyAchievedValue)}</td>
                 <td className="p-1.5 text-right tabular-nums font-medium">{formatCurrency(r.incomingValue)}</td>
@@ -346,7 +348,7 @@ function CombinedTable({ rows }: { rows: CombinedDealerLine[] }) {
               </tr>
             </Fragment>
           ))}
-        </tbody>
+        </DealerOrder></tbody>
       </table>
     </div>
   );

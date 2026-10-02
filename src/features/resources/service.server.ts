@@ -7,6 +7,7 @@ import { buildPage, type PageParams, type Paginated } from "@/lib/pagination";
 import type { Resource } from "@/lib/rbac";
 import { announcementRecipientIds, notifyMany } from "@/features/notifications/service.server";
 import { categoryIdForNbv, resyncAllProductCategories } from "@/features/products/categories.server";
+import { listDealerResourcePage } from "@/lib/dealer-page.server";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -191,6 +192,7 @@ export async function listResource(
   key: Resource,
   params: PageParams,
 ): Promise<Paginated<unknown>> {
+  if (key === "dealers") return listDealerResourcePage(params);
   const r = getServerResource(key);
   const where = buildWhere(r, params.search);
   const [items, total] = await Promise.all([

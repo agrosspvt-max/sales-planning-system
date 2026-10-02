@@ -1,8 +1,10 @@
 "use client";
 
+import { DealerTableBody as TableBody, DealerRowGroup } from "@/features/dealers/dealer-table-ui";
+import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import type { EnrolledInstanceRow, EnrolledBillRow } from "./scheme-enrolled.server";
-import { Fragment, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronRight, ChevronDown, Eye, FileText, IndianRupee } from "lucide-react";
 import { api } from "@/lib/api-client";
@@ -13,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { L } from "@/features/labels/label-ui";
 import { schemeTable } from "./scheme-table-theme";
 
@@ -154,10 +156,10 @@ function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: strin
                 data.dealers.map((d) => {
                   const open = expanded.has(d.planId);
                   return (
-                    <Fragment key={d.planId}>
-                      <TableRow className={cn(schemeTable.parentRow, open && schemeTable.parentRowOpen)}>
+                    <DealerRowGroup data-dealer-id={d.dealerId} key={d.planId}>
+                      <TableRow data-dealer-id={d.dealerId} className={cn(schemeTable.parentRow, open && schemeTable.parentRowOpen)}>
                         <TableCell className="cursor-pointer" onClick={() => toggle(d.planId)}>{open ? <ChevronDown className="h-4 w-4 text-primary" /> : <ChevronRight className="h-4 w-4" />}</TableCell>
-                        <TableCell className="font-medium">{d.dealerName}{d.numberOfSchemes > 1 && <span className="ml-2 text-xs text-muted-foreground">{d.numberOfSchemes} schemes</span>}</TableCell>
+                        <TableCell className="font-medium"><DealerName id={d.dealerId} name={d.dealerName} />{d.numberOfSchemes > 1 && <span className="ml-2 text-xs text-muted-foreground">{d.numberOfSchemes} schemes</span>}</TableCell>
                         <TableCell>
                           {(d.billMode || d.instances.some(i => i.billMode)) ? <span className="text-muted-foreground">Per bill</span> : d.numberOfSchemes > 1 ? (
                             <span className="text-muted-foreground">Per scheme</span>
@@ -211,7 +213,7 @@ function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: strin
                           </TableCell>
                         </TableRow>
                       )}
-                    </Fragment>
+                    </DealerRowGroup>
                   );
                 })
               )}
@@ -386,7 +388,7 @@ function AddPaymentDialog({ dealer, schemeName, onClose, onSaved }: { dealer: De
       <DialogContent className="max-w-lg">
         <DialogHeader><DialogTitle>Add Payment</DialogTitle></DialogHeader>
         <div className="space-y-3">
-          <div className="text-sm text-muted-foreground">Dealer: <span className="font-medium text-foreground">{dealer.dealerName}</span> · Scheme: <span className="font-medium text-foreground">{schemeName}</span></div>
+          <div className="text-sm text-muted-foreground">Dealer: <span className="font-medium text-foreground"><DealerName id={dealer.dealerId} name={dealer.dealerName} /></span> · Scheme: <span className="font-medium text-foreground">{schemeName}</span></div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5"><Label>Payment Amount *</Label><FormattedNumberInput value={amount} onValueChange={setAmount} placeholder="0" autoFocus /></div>
             <div className="space-y-1.5"><Label>Payment Received Date *</Label><SchemeDateInput value={date} onValueChange={setDate} /></div>

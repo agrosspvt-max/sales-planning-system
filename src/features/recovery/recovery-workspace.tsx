@@ -44,6 +44,7 @@ interface RecoveryDealer {
   // "Last Payment" (informational): latest Day Book Receipt date ("YYYY-MM-DD") + that row's Credit Amount.
   lastPaymentDate: string | null;
   lastPaymentAmount: number | null;
+  lastPaymentUnavailableReason?: string | null;
   // DERIVED: Live Recovery + SR/CR − (Due + Overdue). Auto-refreshes from Daybook or Aging changes.
   actualRunningRecovery: number;
   monthRecoveryPlan: number;
@@ -144,7 +145,7 @@ function DateSuffix({ date }: { date: string }) {
 
 /** Dealer-level latest Receipt display shared by Month and Week View. Both views receive the same fields from
  * the Recovery detail response, so changing the selected week can never change this value. */
-function LastPaymentCell({ date, amount }: { date: string | null; amount: number | null }) {
+function LastPaymentCell({ date, amount, unavailableReason }: { date: string | null; amount: number | null; unavailableReason?: string | null }) {
   return (
     <TableCell className="text-right">
       {date ? (
@@ -153,7 +154,7 @@ function LastPaymentCell({ date, amount }: { date: string | null; amount: number
           <span className="text-[10px] font-medium tabular-nums text-success">{money(amount ?? 0)}</span>
         </div>
       ) : (
-        <span className="text-muted-foreground">—</span>
+        <span className="text-muted-foreground" title={unavailableReason ?? undefined}>—</span>
       )}
     </TableCell>
   );
@@ -540,7 +541,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
                   {/* Last Payment — latest Day Book Receipt: date on top, that same Receipt's Credit Amount
                       below in the existing small green delta style. "—" when the dealer has no Receipt. */}
-                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} />
+                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} unavailableReason={d.lastPaymentUnavailableReason} />
                   {/* Section 2 — Recovery Planning. Delta indicators removed (kept only on Current Outstanding
                       and Actual Running Recovery). */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
@@ -889,7 +890,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                       Till Date (same calc as Month View) added beside it. */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
-                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} />
+                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} unavailableReason={d.lastPaymentUnavailableReason} />
                   {/* Section 2 — Weekly Planning. "This Week's Due" = only invoices due in the
                       SELECTED business week (not the whole month's Due). Delta removed from Overdue. */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>

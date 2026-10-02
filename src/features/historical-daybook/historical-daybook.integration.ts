@@ -84,8 +84,8 @@ async function isolatedSnapshot() {
 }
 function assertRecoveryViews(
   detail: Awaited<ReturnType<typeof recovery.getRecoveryPlan>>,
-  expectedDate: string,
-  expectedAmount: number,
+  expectedDate: string | null,
+  expectedAmount: number | null,
 ) {
   for (const tab of ["month", "week"]) {
     const uiLoad = testLoader({
@@ -132,16 +132,18 @@ function assertRecoveryViews(
         .replace(/\s+/g, " ")
         .trim(),
     );
+    const dealerIndex = cells.findIndex((cell) => cell.includes(detail.dealers[0].dealerName));
+    const paymentCell = cells[dealerIndex + 3];
+    assert.ok(dealerIndex >= 0 && paymentCell);
     assert.ok(
-      cells.some(
-        (cell) =>
-          cell.includes(expectedDate.split("-").reverse().join("/")) &&
-          cell.includes(
-            new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(expectedAmount),
-          ),
-      ),
+      expectedDate
+        ? paymentCell.includes(expectedDate.split("-").reverse().join("/")) &&
+          paymentCell.includes(new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(expectedAmount!))
+        : paymentCell === "—",
       `${tab} view must render date and amount from the real plan response in the same cell`,
     );
+    if (detail.dealers[0].lastPaymentUnavailableReason)
+      assert.ok(html.includes(detail.dealers[0].lastPaymentUnavailableReason));
   }
 }
 async function commit(
@@ -158,6 +160,109 @@ async function commit(
     confirmed: true,
   });
 }
+async function verifyCalendarScenarios() {
+  await prisma.dealer.createMany({ data: [
+    { id: "period", name: "Period Dealer" }, { id: "first-august", name: "Unpaid Dealer" },
+  ] });
+  await prisma.dealerAssignment.create({ data: { officerId: "so", dealerId: "period", effectiveFrom: new Date("2024-01-01") } });
+  await prisma.season.create({ data: { id: "period-season", name: "Calendar scenarios", year: 2026, startMonth: 4, startYear: 2026 } });
+  for (let month = 4; month <= 11; month++) {
+    await prisma.seasonMonth.create({ data: {
+      id: `period-m${month}`, seasonId: "period-season", name: `Month ${month}`, order: month - 3,
+      calendarMonth: month, calendarYear: 2026,
+    } });
+    await prisma.recoveryPlan.create({ data: {
+      id: `period-p${month}`, seasonId: "period-season", seasonMonthId: `period-m${month}`, officerId: "so",
+      cutoffDate: new Date(Date.UTC(2026, month - 1, 1)), status: "APPROVED",
+      dealers: { create: [{ dealerId: "period", outstanding: 1234, monthRecoveryPlan: 567 }, { dealerId: "first-august" }] },
+    } });
+  }
+  const totalPlans = await prisma.recoveryPlan.count();
+  const history = book([
+    ["2024-01-10", "Period Dealer", "Receipt", "PERIOD-1", 10000],
+    ["2025-02-15", "Period Dealer", "Receipt", "PERIOD-2", 20000],
+    ["2026-03-10", "Period Dealer", "Receipt", "PERIOD-3", 30000],
+  ]);
+  const beforeHistory = await operationalSnapshot();
+  const preview = await svc.analyzeHistoricalDaybook(admin, history, "calendar-history.xlsx", {});
+  assert.equal(preview.changes.length, 8);
+  await commit(history, "calendar-history.xlsx", [], preview);
+  assert.deepEqual(await operationalSnapshot(), beforeHistory);
+  for (let month = 4; month <= 11; month++) {
+    const detail = await recovery.getRecoveryPlan(admin, `period-p${month}`);
+    const row = detail.dealers.find((d) => d.dealerId === "period")!;
+    assert.deepEqual([row.lastPaymentDate, row.lastPaymentAmount], ["2026-03-10", 30000]);
+    const projection = preview.changes.find((c) => c.calendarMonth === month)!;
+    assert.deepEqual(plain(projection.after), { date: row.lastPaymentDate, amount: row.lastPaymentAmount });
+    assertRecoveryViews({ ...detail, dealers: [row] }, "2026-03-10", 30000);
+  }
+  assert.equal(await prisma.recoveryPlan.count(), totalPlans, "Old receipt years never create missing recovery plans");
+
+  const july = book([["2026-07-15", "Period Dealer", "Receipt", "PERIOD-4", 40000]]);
+  const julyPreview = await svc.analyzeHistoricalDaybook(admin, july, "july-history.xlsx", {});
+  assert.deepEqual(plain(julyPreview.changes.map((c) => c.calendarMonth)), [7, 8, 9, 10, 11]);
+  await prisma.recoveryPlan.update({ where: { id: "period-p7" }, data: { cutoffDate: new Date("2026-06-01") } });
+  assert.equal((await svc.analyzeHistoricalDaybook(admin, july, "july-history.xlsx", {})).previewToken, julyPreview.previewToken, "Unrelated aging cutoff does not determine Last Payment preview");
+  const beforeJuly = await operationalSnapshot();
+  await commit(july, "july-history.xlsx", [], julyPreview);
+  assert.deepEqual(await operationalSnapshot(), beforeJuly);
+  for (let month = 4; month <= 11; month++) {
+    const detail = await recovery.getRecoveryPlan(admin, `period-p${month}`);
+    const row = detail.dealers.find((d) => d.dealerId === "period")!;
+    const expected = month < 7 ? ["2026-03-10", 30000] as const : ["2026-07-15", 40000] as const;
+    assert.deepEqual([row.lastPaymentDate, row.lastPaymentAmount], expected);
+    assertRecoveryViews({ ...detail, dealers: [row] }, expected[0], expected[1]);
+  }
+  assert.equal((await prisma.recoveryPlan.findUniqueOrThrow({ where: { id: "period-p7" } })).cutoffDate.toISOString().slice(0, 10), "2026-06-01");
+
+  const august = book([["2026-08-10", "Unpaid Dealer", "Receipt", "FIRST", 6000]]);
+  const augustPreview = await svc.analyzeHistoricalDaybook(admin, august, "first-august.xlsx", {});
+  assert.deepEqual(plain(augustPreview.changes.map((c) => c.calendarMonth)), [8, 9, 10, 11]);
+  const beforeAugust = await operationalSnapshot();
+  await commit(august, "first-august.xlsx", [], augustPreview);
+  assert.deepEqual(await operationalSnapshot(), beforeAugust);
+  for (let month = 4; month <= 11; month++) {
+    const detail = await recovery.getRecoveryPlan(admin, `period-p${month}`);
+    const row = detail.dealers.find((d) => d.dealerId === "first-august")!;
+    const expected = month < 8 ? [null, null] as const : ["2026-08-10", 6000] as const;
+    assert.deepEqual([row.lastPaymentDate, row.lastPaymentAmount], expected);
+    assertRecoveryViews({ ...detail, dealers: [row] }, expected[0], expected[1]);
+  }
+
+  const normal = await recovery.commitDaybook(admin, book([["2026-09-10", "Period Dealer", "Receipt", "NORMAL", 50000]]), "calendar-normal.xlsx", { seasonMonthId: "period-m9" });
+  assert.equal(normal.receiptTotal, 50000);
+  assert.equal(normal.srCrTotal, 0);
+  assert.ok(!normal.receiptHistoryWarning);
+  for (const [month, date, amount] of [[8, "2026-07-15", 40000], [9, "2026-09-10", 50000], [11, "2026-09-10", 50000]] as const) {
+    const detail = await recovery.getRecoveryPlan(admin, `period-p${month}`);
+    const row = detail.dealers.find((d) => d.dealerId === "period")!;
+    assert.deepEqual([row.lastPaymentDate, row.lastPaymentAmount], [date, amount]);
+    assertRecoveryViews({ ...detail, dealers: [row] }, date, amount);
+  }
+  const septemberRow = await prisma.recoveryPlanDealer.findUniqueOrThrow({ where: { recoveryPlanId_dealerId: { recoveryPlanId: "period-p9", dealerId: "period" } } });
+  assert.equal(Number(septemberRow.liveRecovery), 50000);
+  assert.equal(Number(septemberRow.outstanding), 1234);
+  assert.equal(Number(septemberRow.monthRecoveryPlan), 567);
+
+  await prisma.seasonMonth.create({ data: { id: "unresolved-month", seasonId: "period-season", name: "March", order: 9 } });
+  await prisma.recoveryPlan.create({ data: { id: "unresolved-plan", seasonId: "period-season", seasonMonthId: "unresolved-month", officerId: "so", cutoffDate: new Date("2026-12-31"), dealers: { create: { dealerId: "period" } } } });
+  const unresolved = await recovery.getRecoveryPlan(admin, "unresolved-plan");
+  assert.equal(unresolved.dealers[0].lastPaymentDate, null);
+  assert.equal(unresolved.dealers[0].lastPaymentAmount, null);
+  assert.match(unresolved.dealers[0].lastPaymentUnavailableReason!, /month\/year needs review/);
+  assertRecoveryViews(unresolved, null, null);
+  const future = book([["2027-01-10", "Period Dealer", "Receipt", "FUTURE", 6]]);
+  const unresolvedPreview = await svc.analyzeHistoricalDaybook(admin, future, "unresolved-preview.xlsx", {});
+  assert.deepEqual(plain(unresolvedPreview.unresolvedPeriods), [{ planId: "unresolved-plan", seasonMonthId: "unresolved-month", monthName: "March" }]);
+  assert.equal(unresolvedPreview.changes.length, 0);
+  assert.equal(unresolvedPreview.canCommit, true, "Unresolved plan period does not prevent retaining valid receipt history");
+  await prisma.seasonMonth.update({ where: { id: "period-m11" }, data: { calendarMonth: 12 } });
+  const beforeStaleCommit = await isolatedSnapshot();
+  await denied(commit(future, "unresolved-preview.xlsx", [], unresolvedPreview), 409);
+  assert.deepEqual(await isolatedSnapshot(), beforeStaleCommit, "A period change invalidates even an unchanged payment projection without writing");
+  await prisma.seasonMonth.update({ where: { id: "period-m11" }, data: { calendarMonth: 11 } });
+}
+
 async function run() {
   assert.equal(await prisma.user.count(), 0, "Use a fresh isolated database, not an installation.");
   await prisma.user.createMany({
@@ -469,13 +574,15 @@ async function run() {
     [6, ["2025-04-10", 10000]],
     [7, ["2025-07-15", 20000]],
     [8, ["2025-07-15", 20000]],
-    [9, ["2025-04-10", 10000]],
+    [9, ["2025-07-15", 20000]],
     [11, ["2025-07-15", 20000]],
     [12, ["2025-12-10", 15000]],
   ] as const) {
     const detail = await recovery.getRecoveryPlan(admin, `p${month}`);
     assert.equal(detail.dealers[0].lastPaymentDate, expected[0]);
     assert.equal(detail.dealers[0].lastPaymentAmount, expected[1]);
+    const projected = preview.changes.find((c) => c.dealerId === "a" && c.calendarYear === 2025 && c.calendarMonth === month);
+    assert.deepEqual(plain(projected?.after), { date: expected[0], amount: expected[1] }, "Preview agrees with actual calendar-month display");
     assertRecoveryViews(detail, expected[0], expected[1]);
     assert.equal(
       detail.dealers[0].actualRunningRecovery,
@@ -483,6 +590,7 @@ async function run() {
       "existing recovery formula unchanged",
     );
   }
+  assert.equal((await prisma.recoveryPlan.findUniqueOrThrow({ where: { id: "p9" } })).cutoffDate.toISOString().slice(0, 10), "2025-07-14", "Last Payment never rewrites the aging cutoff");
   for (const [planId, date, amount] of [
     ["p2024", "2024-01-10", 100],
     ["p2026", "2025-12-10", 15000],
@@ -880,8 +988,9 @@ async function run() {
     "isolated retention failure is visible, not a financial rollback",
   );
   assert.equal(fallbackResult.receiptTotal, 53050);
+  await verifyCalendarScenarios();
   console.log(
-    `Historical Daybook PostgreSQL integration passed: migration, ${Object.keys(original).length} operational tables unchanged, cutoff views, aliases/ambiguity, distinct same-day receipts, duplicate/conflict review, retry/race, audit rollback, 1,000 rows and real monthly retention/regression.`,
+    `Historical Daybook PostgreSQL integration passed: ${Object.keys(original).length} operational tables unchanged, calendar-month preview/views, multi-year scenarios, cutoff independence, unresolved identity, aliases/ambiguity, distinct same-day receipts, duplicate/conflict review, retry/race, audit rollback, 1,000 rows and real monthly retention/regression.`,
   );
 }
 run()

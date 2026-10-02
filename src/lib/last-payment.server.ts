@@ -8,7 +8,7 @@ type ReadClient = Pick<Prisma.TransactionClient, "$queryRaw" | "lastPaymentRecei
  * individual history ties use stable import/source order, matching the selector's first-on-tie rule. */
 export async function loadLastPaymentPoints(
   dealerIds: string[],
-  cutoff: Date,
+  throughDate: Date,
   db: ReadClient = prisma,
 ) {
   const points = new Map<string, ReceiptPoint[]>();
@@ -24,7 +24,7 @@ export async function loadLastPaymentPoints(
   const history = await db.lastPaymentReceipt.findMany({
     where: {
       dealerId: { in: dealerIds },
-      receiptDate: { lte: cutoff },
+      receiptDate: { lte: throughDate },
       import: { isActive: true },
     },
     orderBy: [{ import: { createdAt: "asc" } }, { sourceOrder: "asc" }, { id: "asc" }],
@@ -39,13 +39,13 @@ export async function loadLastPaymentPoints(
 }
 export async function latestReceiptAsOfByDealer(
   dealerIds: string[],
-  cutoff: Date,
+  throughDate: Date,
   db: ReadClient = prisma,
 ) {
-  const points = await loadLastPaymentPoints(dealerIds, cutoff, db);
+  const points = await loadLastPaymentPoints(dealerIds, throughDate, db);
   const out = new Map<string, { date: string | null; amount: number | null }>();
   for (const [id, receipts] of points) {
-    const best = latestReceiptAsOf(receipts, cutoff.toISOString().slice(0, 10));
+    const best = latestReceiptAsOf(receipts, throughDate.toISOString().slice(0, 10));
     if (best) out.set(id, best);
   }
   return out;

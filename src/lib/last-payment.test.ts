@@ -3,18 +3,18 @@
  *   npx tsx src/lib/last-payment.test.ts
  *
  * Mirrors the acceptance scenario: Day Book has 12-Apr ₹10,000 and 06-Jun ₹5,000; each Recovery Plan month
- * shows the latest receipt on or before its cutoff, carried forward until a newer receipt supersedes it.
+ * shows the latest receipt on or before its explicit month-end, carried forward until a newer receipt supersedes it.
  */
 import assert from "node:assert/strict";
-import { latestReceiptAsOf, type ReceiptPoint } from "./last-payment";
+import { lastPaymentMonthEnd, latestReceiptAsOf, type ReceiptPoint } from "./last-payment";
 
 let passed = 0;
 function test(name: string, fn: () => void) { fn(); passed += 1; console.log(`  ok  ${name}`); }
 
-// The dealer's known receipt points (as persisted per-month by the Day Book upload).
+// The dealer's individual known receipt points.
 const APR: ReceiptPoint = { date: "2026-04-12", amount: 10000 };
 const JUN: ReceiptPoint = { date: "2026-06-06", amount: 5000 };
-// Month cutoffs (end-of-month style; any date within the month works the same for the comparison).
+// Explicit calendar month-end boundaries.
 const cut = { apr: "2026-04-30", may: "2026-05-31", jun: "2026-06-30", jul: "2026-07-31", aug: "2026-08-31", mar: "2026-03-31" };
 
 // 1) April shows the April receipt.
@@ -73,6 +73,59 @@ test("order-independent result", () => {
 // All receipts after cutoff → null (e.g. a plan month earlier than the first receipt).
 test("all receipts after cutoff → null (empty state for an earlier month)", () => {
   assert.equal(latestReceiptAsOf([APR, JUN], cut.mar), null);
+});
+
+const forMonth = (points: ReceiptPoint[], calendarMonth: number, calendarYear: number) =>
+  latestReceiptAsOf(points, lastPaymentMonthEnd({ calendarMonth, calendarYear })!.toISOString().slice(0, 10));
+test("A) multi-year receipts carry forward through all existing April–November months", () => {
+  const points = [
+    { date: "2024-01-10", amount: 10000 },
+    { date: "2025-02-15", amount: 20000 },
+    { date: "2026-03-10", amount: 30000 },
+  ];
+  for (let month = 4; month <= 11; month++)
+    assert.deepEqual(forMonth(points, month, 2026), points[2]);
+  const later = { date: "2026-07-15", amount: 40000 };
+  for (let month = 4; month <= 11; month++)
+    assert.deepEqual(forMonth([...points, later], month, 2026), month < 7 ? points[2] : later);
+});
+test("C) no eligible receipt stays blank before the first payment month", () => {
+  const first = { date: "2026-08-10", amount: 123 };
+  for (let month = 4; month <= 11; month++)
+    assert.deepEqual(forMonth([first], month, 2026), month < 8 ? null : first);
+});
+test("D) full calendar years and December-to-January boundaries", () => {
+  const points = [
+    { date: "2025-12-31", amount: 1 },
+    { date: "2026-01-31", amount: 2 },
+    { date: "2026-12-31", amount: 3 },
+  ];
+  assert.deepEqual(forMonth(points, 12, 2025), points[0]);
+  assert.deepEqual(forMonth(points, 1, 2026), points[1]);
+  assert.deepEqual(forMonth(points, 12, 2026), points[2]);
+  assert.deepEqual(forMonth(points, 1, 2027), points[2]);
+});
+test("month-end uses UTC and Gregorian leap-year rules", () => {
+  for (const [year, month, expected] of [[2024, 2, "2024-02-29"], [2026, 2, "2026-02-28"], [2100, 2, "2100-02-28"], [2026, 4, "2026-04-30"]] as const)
+    assert.equal(lastPaymentMonthEnd({ calendarMonth: month, calendarYear: year })!.toISOString(), `${expected}T00:00:00.000Z`);
+  const leap = { date: "2024-02-29", amount: 100 };
+  assert.deepEqual(forMonth([leap, { date: "2024-03-01", amount: 200 }], 2, 2024), leap);
+});
+test("unresolved identities never infer a year from name, order or cutoff", () => {
+  for (const period of [
+    {}, { calendarMonth: 4 }, { calendarYear: 2026 },
+    { calendarMonth: null, calendarYear: null },
+    { calendarMonth: 0, calendarYear: 2026 }, { calendarMonth: 13, calendarYear: 2026 },
+    { calendarMonth: 4, calendarYear: 1999 }, { calendarMonth: 4, calendarYear: 2101 },
+    { calendarMonth: 4.5, calendarYear: 2026 }, { calendarMonth: 4, calendarYear: 2026.5 },
+  ]) {
+    const legacy = { ...period, name: "April", order: 1, cutoffDate: new Date("2026-04-30") };
+    assert.equal(lastPaymentMonthEnd(legacy), null);
+  }
+});
+test("equal-date receipts still select one amount with existing first-on-tie precedence", () => {
+  const existing = { date: "2026-04-30", amount: 100 };
+  assert.deepEqual(forMonth([existing, { date: existing.date, amount: 999 }], 4, 2026), existing);
 });
 
 console.log(`\n${passed} last-payment tests passed`);

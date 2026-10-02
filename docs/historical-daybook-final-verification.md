@@ -1,5 +1,7 @@
 # Historical Daybook final verification — 2 October 2026
 
+This report records the original cutoff-based verification, before the approved calendar-month rule. The current implementation and month/year tests are documented in `historical-daybook.md`: Last Payment now uses explicit `SeasonMonth` calendar month-end, never the aging cutoff. The historical production/deployment findings below are snapshots from that earlier audit, not a fresh production status check.
+
 ## Verdict for the five core requirements
 
 | Requirement | Result | Evidence |

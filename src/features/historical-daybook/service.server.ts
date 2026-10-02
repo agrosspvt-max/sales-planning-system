@@ -8,7 +8,7 @@ import { writeAudit } from "@/lib/audit";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { loadLastPaymentPoints } from "@/lib/last-payment.server";
-import { latestReceiptAsOf } from "@/lib/last-payment";
+import { lastPaymentMonthEnd, latestReceiptAsOf } from "@/lib/last-payment";
 import { parseHistoricalDaybook } from "./parser";
 import type { HistoricalAnalysis, HistoricalRow, HistoricalResult, ReceiptReview } from "./types";
 
@@ -174,14 +174,26 @@ async function buildAnalysis(
   const plans = dealerIds.length
     ? await db.recoveryPlanDealer.findMany({
         where: { dealerId: { in: dealerIds } },
-        select: { dealerId: true, recoveryPlan: { select: { cutoffDate: true } } },
+        select: {
+          dealerId: true,
+          recoveryPlan: {
+            select: {
+              id: true,
+              seasonMonthId: true,
+              seasonMonth: { select: { name: true, calendarMonth: true, calendarYear: true } },
+            },
+          },
+        },
       })
     : [];
-  const maxCutoff = plans.reduce(
-    (max, p) => (p.recoveryPlan.cutoffDate > max ? p.recoveryPlan.cutoffDate : max),
+  const maxMonthEnd = plans.reduce(
+    (max, p) => {
+      const end = lastPaymentMonthEnd(p.recoveryPlan.seasonMonth);
+      return end && end > max ? end : max;
+    },
     new Date("1900-01-01T00:00:00Z"),
   );
-  const points = await loadLastPaymentPoints(dealerIds, maxCutoff, db);
+  const points = await loadLastPaymentPoints(dealerIds, maxMonthEnd, db);
   // Legacy monthly pairs have no voucher identity. Their same-day overlaps also require review.
   for (const r of rows) {
     if (r.duplicate || r.excluded || r.errors.length || !r.dealerId) continue;
@@ -205,22 +217,33 @@ async function buildAnalysis(
       { date: r.date!, amount: Number(r.amount) },
     ]);
   const names = await loadDealerAliasNameMap(dealerIds, db);
-  const cutoffs = new Map<string, { dealerId: string; cutoff: string; plans: number }>();
+  const periods = new Map<string, {
+    dealerId: string; calendarMonth: number; calendarYear: number; monthEnd: string; plans: number;
+  }>();
+  const unresolved = new Map<string, HistoricalAnalysis["unresolvedPeriods"][number]>();
   for (const p of plans) {
-    const cutoff = p.recoveryPlan.cutoffDate.toISOString().slice(0, 10),
-      k = JSON.stringify([p.dealerId, cutoff]);
-    cutoffs.set(k, { dealerId: p.dealerId, cutoff, plans: (cutoffs.get(k)?.plans ?? 0) + 1 });
+    const plan = p.recoveryPlan;
+    const end = lastPaymentMonthEnd(plan.seasonMonth);
+    if (!end) {
+      unresolved.set(plan.id, { planId: plan.id, seasonMonthId: plan.seasonMonthId, monthName: plan.seasonMonth.name });
+      continue;
+    }
+    const calendarMonth = plan.seasonMonth.calendarMonth!, calendarYear = plan.seasonMonth.calendarYear!;
+    const k = JSON.stringify([p.dealerId, calendarYear, calendarMonth]);
+    periods.set(k, { dealerId: p.dealerId, calendarMonth, calendarYear, monthEnd: end.toISOString().slice(0, 10), plans: (periods.get(k)?.plans ?? 0) + 1 });
   }
   const changes: HistoricalAnalysis["changes"] = [];
-  for (const { dealerId, cutoff, plans: count } of cutoffs.values()) {
+  for (const { dealerId, calendarMonth, calendarYear, monthEnd, plans: count } of periods.values()) {
     const current = points.get(dealerId) ?? [];
-    const before = latestReceiptAsOf(current, cutoff);
-    const after = latestReceiptAsOf([...current, ...(importsByDealer.get(dealerId) ?? [])], cutoff);
+    const before = latestReceiptAsOf(current, monthEnd);
+    const after = latestReceiptAsOf([...current, ...(importsByDealer.get(dealerId) ?? [])], monthEnd);
     if (JSON.stringify(before) !== JSON.stringify(after))
       changes.push({
         dealerId,
         dealerName: names.get(dealerId) ?? dealersById.get(dealerId)?.name ?? dealerId,
-        cutoff,
+        calendarMonth,
+        calendarYear,
+        monthEnd,
         plans: count,
         before,
         after,
@@ -247,13 +270,17 @@ async function buildAnalysis(
       importing: selectedImports.length,
     },
     changes: changes.sort(
-      (a, b) => a.dealerName.localeCompare(b.dealerName) || a.cutoff.localeCompare(b.cutoff),
+      (a, b) => a.dealerName.localeCompare(b.dealerName) || a.monthEnd.localeCompare(b.monthEnd),
     ),
+    unresolvedPeriods: [...unresolved.values()].sort((a, b) => a.planId.localeCompare(b.planId)),
     canCommit: !existing && rows.every((r) => r.ready) && selectedImports.length > 0,
     alreadyImported: !!existing,
   };
-  // Pin workbook, choices, current matching, stored receipts and cutoff impact. Re-analysis on commit.
-  analysis.previewToken = hash(JSON.stringify({ analysis, reviews, stored }));
+  // Pin workbook, choices, matching, receipts and explicit plan periods. Re-analysis on commit.
+  analysis.previewToken = hash(JSON.stringify({
+    analysis, reviews, stored,
+    periods: [...plans].sort((a, b) => a.dealerId.localeCompare(b.dealerId) || a.recoveryPlan.id.localeCompare(b.recoveryPlan.id)),
+  }));
   return analysis;
 }
 
@@ -294,7 +321,7 @@ export async function commitHistoricalDaybook(
       if (analysis.previewToken !== input.previewToken)
         throw new ApiError(
           409,
-          "Receipt history, dealer matching or plan cutoffs changed. Analyze again before importing.",
+          "Receipt history, dealer matching or recovery periods changed. Analyze again before importing.",
         );
       if (!analysis.canCommit)
         throw new ApiError(

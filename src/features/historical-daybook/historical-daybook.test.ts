@@ -154,8 +154,36 @@ async function run() {
       html.includes("Analyze"),
   );
   assert.ok(!html.includes("Choose the month") && html.includes("No Recovery Month is required"));
+  const analysis: import("./types").HistoricalAnalysis = {
+    fileHash: "test", previewToken: "test", workbookName: "history.xlsx", sheet: "Day Book",
+    ignoredSheets: [], totalRows: 1, ignoredRows: 0,
+    rows: [{ ...parsed.rows[0], dealerId: "a", candidates: [], reviewReasons: [], duplicate: false, excluded: false, ready: true }],
+    summary: { receipts: 1, valid: 1, dealers: 1, invalid: 0, unmatched: 0, review: 0, duplicates: 0, excluded: 0, importing: 1 },
+    changes: [{ dealerId: "a", dealerName: "Dealer A", calendarMonth: 7, calendarYear: 2026, monthEnd: "2026-07-31", plans: 1, before: null, after: { date: "2026-07-15", amount: 40000 } }],
+    unresolvedPeriods: [{ planId: "unresolved", seasonMonthId: "unknown", monthName: "July" }],
+    canCommit: true, alreadyImported: false,
+  };
+  let stateIndex = 0;
+  const previewLoad = testLoader({
+    react: { ...React, useState: (initial: unknown) => React.useState(stateIndex++ === 1 ? analysis : initial) },
+    "@/lib/api-client": { api: {} },
+    "@tanstack/react-query": {
+      useQueryClient: () => ({ invalidateQueries() {} }),
+      useQuery: () => ({ data: [{ id: "a", name: "Dealer A" }] }),
+      useMutation: () => ({ isPending: false }),
+    },
+    "@/features/labels/label-ui": { useLabel: (key: keyof typeof DEFAULT_LABELS) => DEFAULT_LABELS[key] },
+    "@/features/dealers/dealer-name-ui": { DealerName: () => null, useDealerMarkers: () => ({}) },
+  });
+  const Preview = previewLoad<typeof import("./wizard")>("src/features/historical-daybook/wizard.tsx").HistoricalDaybookWizard;
+  const previewHtml = renderToStaticMarkup(React.createElement(Preview));
+  assert.ok(previewHtml.includes("existing recovery months") && previewHtml.includes("Recovery month / Plans"));
+  assert.match(previewHtml.replace(/<!--.*?-->/g, ""), /July 2026 \/ 1/);
+  assert.ok(previewHtml.includes("15/07/2026") && previewHtml.includes("40,000"));
+  assert.ok(!previewHtml.includes("Cutoff / Plans") && !previewHtml.includes("existing plan cutoffs"));
+  assert.ok(previewHtml.includes("unresolved calendar month/year") && previewHtml.includes("valid receipt history can still be imported"));
   console.log(
-    "Historical Daybook unit/UI tests passed: dates/amounts, multi-year rows, provenance, distinct receipts, cutoff examples, matching ambiguity, unchanged monthly aggregation and isolated upload UI.",
+    "Historical Daybook unit/UI tests passed: dates/amounts, multi-year rows, provenance, distinct receipts, month/year preview, unresolved-period notice, matching ambiguity, unchanged monthly aggregation and isolated upload UI.",
   );
 }
 run().catch((error) => {

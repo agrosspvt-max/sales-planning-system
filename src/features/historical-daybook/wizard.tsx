@@ -5,6 +5,7 @@ import { Check, Loader2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { useLabel } from "@/features/labels/label-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { MONTH_NAMES } from "@/lib/season-months";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
@@ -311,31 +312,39 @@ export function HistoricalDaybookWizard() {
                 )}
                 <details open className="rounded-md border p-3">
                   <summary className="text-sm font-medium">
-                    Last Payment changes for existing plan cutoffs ({analysis.changes.length})
+                    Last Payment changes for existing recovery months ({analysis.changes.length})
                   </summary>
                   <p className="py-2 text-xs text-muted-foreground">
+                    Receipt eligibility uses the calendar month-end of each recovery period, not its aging cutoff.
                     No plans are created or changed. Equal-date ties retain the existing regular
                     value; otherwise the first retained source row wins. Amounts are never summed.
                   </p>
+                  {!!analysis.unresolvedPeriods.length && (
+                    <p role="status" className="pb-2 text-xs text-amber-600">
+                      Last Payment cannot be projected for {analysis.unresolvedPeriods.length} existing
+                      plan(s) with unresolved calendar month/year. Their Last Payment remains blank;
+                      valid receipt history can still be imported.
+                    </p>
+                  )}
                   {analysis.changes.length ? (
                     <div className="overflow-x-auto">
                       <Table>
                         <TableHeader>
                           <TableRow>
                             <TableHead>{dealerLabel}</TableHead>
-                            <TableHead>Cutoff / Plans</TableHead>
+                            <TableHead>Recovery month / Plans</TableHead>
                             <TableHead>Previous Last Payment</TableHead>
                             <TableHead>Projected Last Payment</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           {analysis.changes.map((c) => (
-                            <TableRow key={`${c.dealerId}:${c.cutoff}`}>
+                            <TableRow key={`${c.dealerId}:${c.calendarYear}:${c.calendarMonth}`}>
                               <TableCell>
                                 <DealerName id={c.dealerId} name={c.dealerName} />
                               </TableCell>
                               <TableCell>
-                                {date(c.cutoff)} / {c.plans}
+                                {MONTH_NAMES[c.calendarMonth - 1]} {c.calendarYear} / {c.plans}
                               </TableCell>
                               <TableCell>{payment(c.before)}</TableCell>
                               <TableCell>{payment(c.after)}</TableCell>
@@ -347,7 +356,7 @@ export function HistoricalDaybookWizard() {
                   ) : (
                     <p className="text-sm text-muted-foreground">
                       No current plan values would change. Valid receipts are still retained for
-                      applicable existing/future cutoff lookups.
+                      applicable existing/future recovery-month lookups.
                     </p>
                   )}
                 </details>

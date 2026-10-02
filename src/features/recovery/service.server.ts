@@ -18,6 +18,7 @@ import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./par
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
 import { aggregateDaybookByDealer, type ClassifiedDaybookRow } from "@/lib/daybook-aggregate";
 import { latestReceiptAsOfByDealer } from "@/lib/last-payment.server";
+import { lastPaymentMonthEnd } from "@/lib/last-payment";
 import { retainRegularReceipts, type RegularReceipt } from "@/features/historical-daybook/service.server";
 import { zeroPopulationDealers } from "@/lib/recovery-population";
 
@@ -724,11 +725,17 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   ]);
 
   // "Last Payment" (informational, CARRY-FORWARD): the latest Day Book Receipt for each dealer whose Receipt
-  // date is ON OR BEFORE this plan's cutoff — carried across months until a newer Receipt supersedes it.
+  // date is ON OR BEFORE this plan's explicit calendar month-end, independently of the aging cutoff.
   // Read legacy monthly pairs plus isolated historical/regular receipt rows in batched queries and
-  // pick the latest with date ≤ cutoff. Receipts after the cutoff are excluded, so a later Day Book upload never
+  // pick the latest with date ≤ month-end. Receipts after month-end are excluded, so a later Day Book upload never
   // changes an earlier month. Never part of any recovery calculation.
-  const lastPaymentByDealer = await latestReceiptAsOfByDealer(recoveryDealerIds, plan.cutoffDate);
+  const lastPaymentEnd = lastPaymentMonthEnd(plan.seasonMonth);
+  const lastPaymentUnavailableReason = lastPaymentEnd
+    ? null
+    : "Last Payment unavailable: recovery month/year needs review.";
+  const lastPaymentByDealer = lastPaymentEnd
+    ? await latestReceiptAsOfByDealer(recoveryDealerIds, lastPaymentEnd)
+    : new Map<string, { date: string | null; amount: number | null }>();
 
   // "Missing in Latest Aging" (derived, Option C): a dealer kept in the plan but absent from the newest
   // snapshot shows its last-known aging with a stale badge — no value is zeroed, no row is removed.
@@ -802,6 +809,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         // "Last Payment" (informational): latest Day Book Receipt date + THAT row's Credit Amount, or null → "—".
         lastPaymentDate: lastPaymentByDealer.get(d.dealerId)?.date ?? null,
         lastPaymentAmount: lastPaymentByDealer.get(d.dealerId)?.amount ?? null,
+        lastPaymentUnavailableReason,
         // DERIVED (Part 5): Actual Running Recovery = Live Recovery + SR/CR − (Due + Overdue). Computed
         // at read time so it auto-refreshes from EITHER a Daybook or an Aging change; never stored.
         actualRunningRecovery: num(d.liveRecovery ?? 0) + num(d.srCr ?? 0) - (cur.due + cur.overdue),

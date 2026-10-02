@@ -21,7 +21,9 @@ export interface HistoricalRow {
 export interface LastPaymentChange {
   dealerId: string;
   dealerName: string;
-  cutoff: string;
+  calendarMonth: number;
+  calendarYear: number;
+  monthEnd: string;
   plans: number;
   before: { date: string; amount: number } | null;
   after: { date: string; amount: number } | null;
@@ -47,6 +49,7 @@ export interface HistoricalAnalysis {
     importing: number;
   };
   changes: LastPaymentChange[];
+  unresolvedPeriods: { planId: string; seasonMonthId: string; monthName: string }[];
   canCommit: boolean;
   alreadyImported: boolean;
 }

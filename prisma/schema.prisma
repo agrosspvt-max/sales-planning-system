@@ -42,6 +42,7 @@ model User {
   asManagerRmAssignments   RmAssignment[]              @relation("ManagerRm")
   asOfficerRmAssignments   RmAssignment[]              @relation("OfficerRm")
   salesUploads             SalesUploadRun[]            @relation("SalesUploads")
+  lastPaymentImports       LastPaymentImport[]
   seasonPlans              SeasonPlan[]                @relation("OfficerPlans")
   planImportRecords        SeasonPlanImportRecord[]    @relation("PlanImports")
   cnRequests               CnRequest[]                 @relation("OfficerCnRequests")
@@ -720,6 +721,7 @@ model Dealer {
   assignments         DealerAssignment[]
   planDealers         PlanDealer[]
   recoveryPlanDealers RecoveryPlanDealer[]
+  lastPaymentReceipts LastPaymentReceipt[]
   cnRequests          CnRequest[]
   schemePlans         DealerSchemePlan[]
   schemeSales         SchemeSale[]
@@ -1469,6 +1471,43 @@ model SalesUploadRun {
   uploadedBy      User         @relation("SalesUploads", fields: [uploadedById], references: [id])
 
   @@index([createdAt])
+}
+
+/// Isolated receipt provenance used ONLY by Last Payment. No operational plan/season foreign key.
+/// REGULAR batches may be superseded within scopeKey (SeasonMonth ID); HISTORICAL is append-only.
+model LastPaymentImport {
+  id           String               @id @default(cuid())
+  kind         String // HISTORICAL | REGULAR
+  scopeKey     String               @default("")
+  fileHash     String
+  workbookName String
+  uploadedById String
+  isActive     Boolean              @default(true)
+  summary      String
+  createdAt    DateTime             @default(now())
+  uploadedBy   User                 @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  receipts     LastPaymentReceipt[]
+
+  @@unique([kind, scopeKey, fileHash])
+  @@index([kind, scopeKey, isActive])
+}
+
+/// Individual source rows, including distinct identical same-day receipts. A voucher number alone is NOT unique.
+model LastPaymentReceipt {
+  id            String            @id @default(cuid())
+  importId      String
+  dealerId      String
+  rowKey        String // sheet + physical row; stable within an exact file hash
+  sourceOrder   Int
+  receiptDate   DateTime          @db.Date
+  creditAmount  Decimal           @db.Decimal(14, 2)
+  voucherNumber String?
+  createdAt     DateTime          @default(now())
+  import        LastPaymentImport @relation(fields: [importId], references: [id], onDelete: Restrict)
+  dealer        Dealer            @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+
+  @@unique([importId, rowKey])
+  @@index([dealerId, receiptDate])
 }
 
 /// One Recovery Plan per (season month, officer). The admin uploads the company Aging Report;

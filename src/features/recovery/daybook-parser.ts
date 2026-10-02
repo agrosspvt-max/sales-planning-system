@@ -25,12 +25,26 @@ export interface ParsedDaybook {
   totalRows: number;
 }
 
-const HEADER_LABELS = {
+export const DAYBOOK_HEADER_LABELS = {
   date: /^date$/i,
   particulars: /^particulars$/i,
   vchType: /^vch\.?\s*type$/i,
   credit: /^credit\s*amount$/i,
 };
+
+/** Shared layout recognition; historical validation does not change monthly conversion semantics. */
+export function daybookColumns(row: unknown[]) {
+  const index = (pattern: RegExp) => row.findIndex((cell) => cell != null && pattern.test(String(cell).trim()));
+  return {
+    date: index(DAYBOOK_HEADER_LABELS.date), particulars: index(DAYBOOK_HEADER_LABELS.particulars),
+    vchType: index(DAYBOOK_HEADER_LABELS.vchType), credit: index(DAYBOOK_HEADER_LABELS.credit),
+    voucher: index(/^vch\.?\s*(no\.?|number)$/i),
+  };
+}
+
+export function daybookSheet(names: string[]) {
+  return names.find((n) => /day\s*book/i.test(n)) ?? names[0];
+}
 
 function toNum(v: string | number | null): number {
   if (v === null || v === "") return 0;
@@ -48,7 +62,7 @@ export function parseDaybook(buffer: Buffer): ParsedDaybook {
   const wb = readWorkbook(buffer, { cellDates: true });
   const names = sheetNames(wb);
   // Prefer a sheet named like "Day Book"; otherwise the first sheet.
-  const sheet = names.find((n) => /day\s*book/i.test(n)) ?? names[0];
+  const sheet = daybookSheet(names);
   if (!sheet) return { rows: [], totalRows: 0 };
   const grid = sheetRows(wb, sheet);
 
@@ -62,10 +76,10 @@ export function parseDaybook(buffer: Buffer): ParsedDaybook {
       const cell = row[c];
       if (cell == null) continue;
       const s = String(cell).trim();
-      if (idx.date < 0 && HEADER_LABELS.date.test(s)) idx.date = c;
-      if (idx.particulars < 0 && HEADER_LABELS.particulars.test(s)) idx.particulars = c;
-      if (idx.vchType < 0 && HEADER_LABELS.vchType.test(s)) idx.vchType = c;
-      if (idx.credit < 0 && HEADER_LABELS.credit.test(s)) idx.credit = c;
+      if (idx.date < 0 && DAYBOOK_HEADER_LABELS.date.test(s)) idx.date = c;
+      if (idx.particulars < 0 && DAYBOOK_HEADER_LABELS.particulars.test(s)) idx.particulars = c;
+      if (idx.vchType < 0 && DAYBOOK_HEADER_LABELS.vchType.test(s)) idx.vchType = c;
+      if (idx.credit < 0 && DAYBOOK_HEADER_LABELS.credit.test(s)) idx.credit = c;
     }
     if (idx.particulars >= 0 && idx.vchType >= 0 && idx.credit >= 0) {
       headerIdx = i;

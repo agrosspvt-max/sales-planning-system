@@ -17,7 +17,8 @@ import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, i
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
 import { aggregateDaybookByDealer, type ClassifiedDaybookRow } from "@/lib/daybook-aggregate";
-import { latestReceiptAsOf, type ReceiptPoint } from "@/lib/last-payment";
+import { latestReceiptAsOfByDealer } from "@/lib/last-payment.server";
+import { retainRegularReceipts, type RegularReceipt } from "@/features/historical-daybook/service.server";
 import { zeroPopulationDealers } from "@/lib/recovery-population";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -637,34 +638,6 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
   }));
 }
 
-/**
- * CARRY-FORWARD "Last Payment" per dealer: the latest persisted Day Book Receipt (date + that row's amount)
- * with Receipt date ON OR BEFORE `cutoff`, across ALL of each dealer's RecoveryPlanDealer snapshots. ONE
- * batched query (no N+1); the selection reuses the pure, tested `latestReceiptAsOf`. Receipts after the cutoff
- * are excluded so historical months stay stable when a later Day Book is uploaded.
- */
-async function latestReceiptAsOfByDealer(dealerIds: string[], cutoff: Date): Promise<Map<string, { date: string | null; amount: number | null }>> {
-  const out = new Map<string, { date: string | null; amount: number | null }>();
-  if (dealerIds.length === 0) return out;
-  const cutoffKey = cutoff.toISOString().slice(0, 10); // "YYYY-MM-DD" (lexicographically comparable)
-  const rows = (await prisma.$queryRaw<{ dealerId: string; date: string | null; amount: string | null }[]>`
-    SELECT "dealerId", "lastReceiptDate"::text AS "date", "lastReceiptAmount"::text AS "amount"
-    FROM "RecoveryPlanDealer"
-    WHERE "dealerId" = ANY(${dealerIds}) AND "lastReceiptDate" IS NOT NULL`);
-  const byDealer = new Map<string, ReceiptPoint[]>();
-  for (const r of rows) {
-    if (!r.date) continue;
-    const list = byDealer.get(r.dealerId) ?? [];
-    list.push({ date: r.date.slice(0, 10), amount: r.amount == null ? 0 : Number(r.amount) });
-    byDealer.set(r.dealerId, list);
-  }
-  for (const [dealerId, points] of byDealer) {
-    const best = latestReceiptAsOf(points, cutoffKey);
-    if (best) out.set(dealerId, { date: best.date, amount: best.amount });
-  }
-  return out;
-}
-
 /* ------------------------------- Detail ----------------------------------- */
 
 export async function getRecoveryPlan(ctx: AuthContext, id: string) {
@@ -751,9 +724,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   ]);
 
   // "Last Payment" (informational, CARRY-FORWARD): the latest Day Book Receipt for each dealer whose Receipt
-  // date is ON OR BEFORE this plan's cutoff — carried across months until a newer Receipt supersedes it. The
-  // Day Book upload persists each month's latest Receipt (date + that row's amount) on its RecoveryPlanDealer
-  // rows; here we read ALL of the dealer's such snapshots (across every recovery plan) in ONE batched query and
+  // date is ON OR BEFORE this plan's cutoff — carried across months until a newer Receipt supersedes it.
+  // Read legacy monthly pairs plus isolated historical/regular receipt rows in batched queries and
   // pick the latest with date ≤ cutoff. Receipts after the cutoff are excluded, so a later Day Book upload never
   // changes an earlier month. Never part of any recovery calculation.
   const lastPaymentByDealer = await latestReceiptAsOfByDealer(recoveryDealerIds, plan.cutoffDate);
@@ -1890,9 +1862,10 @@ export interface DaybookAnalysis {
   matched: DaybookMatchedLine[];
   skipped: DaybookSkippedLine[];
 }
-export interface DaybookResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number }
+export interface DaybookResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number; receiptHistoryWarning?: string }
 
 interface DaybookResolution {
+  receipts: RegularReceipt[];
   monthName: string;
   seasonName: string;
   totalRows: number;
@@ -1957,7 +1930,8 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
   // computes the latest Receipt (date + that row's amount) for the "Last Payment" column.
   const unknownSet = new Set<string>();
   const classified: ClassifiedDaybookRow[] = [];
-  for (const row of parsed.rows) {
+  const receipts: RegularReceipt[] = [];
+  for (const [sourceOrder, row] of parsed.rows.entries()) {
     const isSr = isSrCrVoucher(row.vchType);
     const isRcpt = isReceiptVoucher(row.vchType);
     if (!isSr && !isRcpt) continue; // other voucher types don't contribute to SR/CR, Live Recovery or Receipts
@@ -1967,6 +1941,7 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
       continue;
     }
     classified.push({ dealerId: match.dealer.id, isReceipt: isRcpt, isSrCr: isSr, date: row.date, creditAmount: row.creditAmount });
+    if (isRcpt && row.date && rpdByDealer.has(match.dealer.id)) receipts.push({ dealerId: match.dealer.id, date: row.date, amount: row.creditAmount, sourceOrder });
   }
   const byDealer = aggregateDaybookByDealer(classified);
 
@@ -1984,6 +1959,7 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
   }
 
   return {
+    receipts,
     monthName: month.name,
     seasonName: `${month.season.name} ${month.season.year}`,
     totalRows: parsed.totalRows,
@@ -2060,6 +2036,14 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
     { timeout: 60000, maxWait: 10000 },
   );
 
+  // Informational history is isolated from the original financial transaction. A retention failure
+  // must never replay or roll back the already-successful monthly SR/CR/Live Recovery operation.
+  let receiptHistoryWarning: string | undefined;
+  try { await retainRegularReceipts(ctx, buffer, filename, input.seasonMonthId, res.receipts, matched); }
+  catch (error) {
+    console.error("[daybook] Isolated receipt retention failed", error instanceof Error ? error.name : "Unknown error");
+    receiptHistoryWarning = "Monthly Day Book values were saved, but individual Last Payment receipt history could not be retained. Retry this same upload to retain history; monthly totals will not accumulate.";
+  }
   const receiptTotal = matched.reduce((t, m) => t + m.receipt, 0);
   const srCrTotal = matched.reduce((t, m) => t + m.srCr, 0);
   await writeAudit({
@@ -2069,5 +2053,5 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
     summary: `Day Book upload for ${res.seasonName} · ${res.monthName} (${filename}): ${matched.length} dealer(s) updated — Receipts ₹${Math.round(receiptTotal)}, SR/CR ₹${Math.round(srCrTotal)}`,
   });
 
-  return { monthName: res.monthName, dealersUpdated: matched.length, receiptTotal, srCrTotal, dealersCleared: res.monthRpdIds.length };
+  return { monthName: res.monthName, dealersUpdated: matched.length, receiptTotal, srCrTotal, dealersCleared: res.monthRpdIds.length, ...(receiptHistoryWarning ? { receiptHistoryWarning } : {}) };
 }

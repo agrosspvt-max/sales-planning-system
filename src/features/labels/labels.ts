@@ -8,6 +8,14 @@
  * at runtime. Keys are stable identifiers and must never change once shipped.
  */
 export const DEFAULT_LABELS = {
+  "historical_daybook.tab": "Historical Daybook",
+  "historical_daybook.file": "Day Book Excel file",
+  "historical_daybook.analyze": "Analyze",
+  "historical_daybook.review": "Update Preview",
+  "historical_daybook.import": "Import Historical Receipts",
+  "historical_daybook.date": "Receipt Date",
+  "historical_daybook.voucher": "Voucher Reference",
+  "historical_daybook.decision": "Review Decision",
   // ---- Shared column concepts (reused across grids) ----
   "col.product": "Product",
   "col.dealer": "Dealer",
@@ -973,6 +981,7 @@ const SCHEME_PLANNING_META: Partial<Record<LabelKey, LabelMeta>> = {} as Partial
 
 /** Classify any key into { module, group } — explicit Scheme Planning metadata first, else by prefix. */
 export function labelMeta(key: LabelKey): LabelMeta {
+  if (key.startsWith("historical_daybook.")) return { module: "Historical Daybook", group: key.endsWith(".date") || key.endsWith(".voucher") || key.endsWith(".decision") ? "Table Columns" : "View Buttons" };
   const explicit = SCHEME_PLANNING_META[key];
   if (explicit) return explicit;
   if (key.startsWith("scheme_master.requirement.col.")) return { module: "Scheme Master", group: "Table Columns" };

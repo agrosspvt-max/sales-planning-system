@@ -24,9 +24,9 @@ function groupAliases(rows: { id: string; systemDealerId: string; tallyName: str
  * intentionally absent (callers fall back to the dealer's own name). Pass `dealerIds` to scope the query to
  * just the dealers on the current page; omit it to load every alias override (used by the client provider).
  */
-export async function loadDealerAliasNameMap(dealerIds?: readonly string[]): Promise<Map<string, string>> {
+export async function loadDealerAliasNameMap(dealerIds?: readonly string[], db: Pick<typeof prisma, "dealerAlias"> = prisma): Promise<Map<string, string>> {
   if (dealerIds && dealerIds.length === 0) return new Map();
-  const rows = (await prisma.dealerAlias.findMany({
+  const rows = (await db.dealerAlias.findMany({
     where: dealerIds ? { systemDealerId: { in: [...new Set(dealerIds)] } } : undefined,
     select: { id: true, systemDealerId: true, tallyName: true, createdAt: true },
   })) as { id: string; systemDealerId: string; tallyName: string; createdAt: Date }[];

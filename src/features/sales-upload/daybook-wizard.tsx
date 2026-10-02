@@ -22,7 +22,7 @@ interface Analysis {
   matched: MatchedLine[];
   skipped: SkippedLine[];
 }
-interface CommitResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number }
+interface CommitResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number; receiptHistoryWarning?: string }
 
 const fmt = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(n);
 
@@ -156,6 +156,7 @@ export function DaybookUploadWizard() {
         {step === "done" && result && (
           <div className="space-y-3">
             <p className="flex items-center gap-2 font-medium text-success"><Check className="h-5 w-5" /> Day Book imported for {result.monthName} — {result.dealersUpdated} dealer(s) updated (Receipts {fmt(result.receiptTotal)}, SR/CR {fmt(result.srCrTotal)}).</p>
+            {result.receiptHistoryWarning && <p role="alert" className="text-sm text-amber-600">{result.receiptHistoryWarning}</p>}
             <Button variant="outline" onClick={() => { setStep("upload"); setFile(null); setAnalysis(null); setResult(null); }}>Upload another</Button>
           </div>
         )}

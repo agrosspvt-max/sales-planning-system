@@ -1,5 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { decorate, dealerNameProfile, dealerSimilarityWithProfile, tightKey, looseKey, type DealerNameProfile, type Keyed } from "@/lib/match-key";
 
 /**
@@ -45,15 +46,17 @@ export interface DealerResolver {
   resolveWithReason(rawName: string): DealerMatchResult | null;
   /** Same matching, classified into EXISTING / NEW / INVALID. Reusable by any importer. */
   classify(rawName: string): DealerResolution;
+  /** All candidates at the winning matching tier, for imports that require ambiguity review. */
+  candidates(rawName: string): DealerMatchResult[];
 }
 
-export async function loadDealerResolver(): Promise<DealerResolver> {
+export async function loadDealerResolver(db: Pick<Prisma.TransactionClient, "dealer" | "dealerAlias"> = prisma): Promise<DealerResolver> {
   const [dealerRows, aliasRows] = await Promise.all([
     // Matching gates on isActive (source of truth: status !== "INACTIVE"). Pending, Active AND
     // Defaulter dealers all participate in uploads/matching/recovery; only Inactive is excluded.
     // (Planning eligibility is enforced separately — see the DEFAULTER exclusions in planning queries.)
-    prisma.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
-    prisma.dealerAlias.findMany({ select: { tallyKey: true, tallyName: true, systemDealerId: true } }),
+    db.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
+    db.dealerAlias.findMany({ select: { tallyKey: true, tallyName: true, systemDealerId: true } }),
   ]);
   const dealers: DealerMatch[] = decorate(dealerRows as { id: string; name: string }[]).map((dealer) => ({
     ...dealer,
@@ -137,6 +140,18 @@ export async function loadDealerResolver(): Promise<DealerResolver> {
     dealers,
     resolve,
     resolveWithReason,
+    candidates(rawName: string): DealerMatchResult[] {
+      const t = tightKey(rawName), l = looseKey(rawName);
+      const ids = new Set(aliasRows.filter((a) => (tightKey(a.tallyName) || a.tallyKey) === t).map((a) => a.systemDealerId));
+      const aliases = dealers.filter((d) => ids.has(d.id));
+      if (aliases.length) return aliases.map((dealer) => ({ dealer, matchType: "ALIAS", score: 1 }));
+      const exact = t ? dealers.filter((d) => d.tight === t) : [];
+      if (exact.length) return exact.map((dealer) => ({ dealer, matchType: "EXACT", score: 1 }));
+      const loose = l ? dealers.filter((d) => d.loose === l) : [];
+      if (loose.length) return loose.map((dealer) => ({ dealer, matchType: "LOOSE", score: 0.95 }));
+      return dealers.map((dealer) => ({ dealer, matchType: "FUZZY" as const, score: dealerSimilarityWithProfile(rawName, dealer.profile) }))
+        .filter((m) => m.score >= DEALER_FUZZY_THRESHOLD).sort((a, b) => b.score - a.score || a.dealer.id.localeCompare(b.dealer.id));
+    },
     classify(rawName: string): DealerResolution {
       const name = rawName.trim();
       if (!name || !tightKey(name)) return { outcome: "INVALID", rawName, reason: "Empty or unusable dealer name" };

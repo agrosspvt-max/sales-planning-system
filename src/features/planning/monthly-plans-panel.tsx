@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { monthLabel, type MonthIdentity } from "@/lib/season-calendar";
 
@@ -108,11 +110,11 @@ export function MonthlyPlansPanel({
   historyFilters?: Record<string, string[]>;
 }) {
   const router = useRouter();
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const isOfficer = role === Role.SALES_OFFICER;
   const isCreate = mode === "create";
   const isHistory = subView === "HISTORY";
-  const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN";
+  const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN" | "CUSTOM_ADMIN";
 
   const { data: plans, isLoading } = useQuery<MonthlyPlanRow[]>({
     queryKey: ["monthly-plans", ALL_STATUSES],

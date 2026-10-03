@@ -1,6 +1,8 @@
+import { auth } from "@/auth";
 import { redirect } from "next/navigation";
 
 // Superseded: Dealer Summary is now an in-plan tab. Cross-plan analysis lives under Reports.
-export default function Page() {
+export default async function Page() {
+  await auth();
   redirect("/planning/sales/plans");
 }

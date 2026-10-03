@@ -8,7 +8,7 @@ const page = readFileSync(resolve("src/features/daily-work/daily-work-page.tsx")
 const route = readFileSync(resolve("src/app/api/daily-work/admin-view/route.ts"), "utf8");
 const server = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
 
-assert.ok(page.includes("role === Role.SUPER_ADMIN ? <AdminDailyWorkViewer /> : <OwnerDailyWorkPage />"));
+assert.ok(page.includes("isAdministrativeRole(role) ? <AdminDailyWorkViewer /> : <OwnerDailyWorkPage />"));
 
 assert.ok(viewer.includes("<DailyWorkFieldset legend={L.planReport}>"));
 assert.ok(viewer.includes('api.get<GroupOption[]>("/api/groups")'), "State reuses authoritative UserGroup endpoint");
@@ -43,7 +43,7 @@ assert.ok(server.includes('e."dailyWorkEntryId"'));
 assert.ok(server.includes('c."legacyDailyWorkEntryId"'));
 assert.ok(viewer.includes("new Set(data.autoTaskEntryIds)"));
 
-assert.ok(server.includes("ctx.role !== Role.SUPER_ADMIN"));
+assert.ok(server.includes("!isAdministrativeRole(ctx.role)"));
 assert.ok(server.includes("officer.role !== Role.SALES_OFFICER"));
 assert.ok(server.includes("officer.groupId !== groupId"));
 assert.ok(server.includes("return getDailyWorkReviewDetail(ctx, officerId, workDate)"), "existing report source of truth is reused");

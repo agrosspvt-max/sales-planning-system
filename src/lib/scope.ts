@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { Role, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -33,7 +35,7 @@ export function isDealerOwnerRole(role: Role): boolean {
  * - Sales Officer: only themselves.
  */
 export async function getOfficerScope(ctx: AuthContext, db: ScopeReadClient = prisma): Promise<OfficerScope> {
-  if (ctx.role === Role.SUPER_ADMIN) return { all: true, ids: [] };
+  if (isAdministrativeRole(ctx.role)) return { all: true, ids: [] };
   if (ctx.role === Role.SALES_OFFICER) return { all: false, ids: [ctx.userId] };
 
   // Regional Manager — group-scoped. An RM with no group sees only their own data.

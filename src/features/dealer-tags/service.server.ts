@@ -1,4 +1,8 @@
 import "server-only";
+import { actorDisplayName } from "@/features/accounts/identity";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { assertAdminPermission } from "@/features/accounts/permissions";
+
 import { Prisma, Role, PlanStatus, ApprovalActionType, NotificationType } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
@@ -53,7 +57,7 @@ const decisionSchema = z
   .strict();
 const pending = [PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN];
 const admin = (ctx: AuthContext) => {
-  if (ctx.role !== Role.SUPER_ADMIN)
+  if (!isAdministrativeRole(ctx.role))
     throw new ApiError(403, "Only Super Admin can manage tags or directly assign/revoke them.");
 };
 
@@ -194,7 +198,7 @@ export async function listTagDealers(ctx: AuthContext) {
   return taggedDealersFirst(rows, (d) => d.id, tags);
 }
 export async function requestTag(ctx: AuthContext, raw: unknown) {
-  if (ctx.role === Role.SUPER_ADMIN)
+  if (isAdministrativeRole(ctx.role))
     throw new ApiError(403, "Use the separate Admin direct action.");
   const pair = pairSchema.parse(raw);
   await assertDealerScope(ctx, pair.dealerId);
@@ -229,7 +233,7 @@ export async function requestTag(ctx: AuthContext, raw: unknown) {
       const approval = await tx.approvalAction.create({
         data: {
           dealerTagRequestId: row.id,
-          actorId: ctx.userId,
+          actorId: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
           action: ApprovalActionType.SUBMIT,
           toStatus: row.status,
         },
@@ -254,6 +258,7 @@ export async function requestTag(ctx: AuthContext, raw: unknown) {
 export async function directTag(ctx: AuthContext, raw: unknown) {
   admin(ctx);
   const pair = pairSchema.parse(raw);
+  assertAdminPermission(ctx, "dealerTags", pair.operation === "ADD" ? "assign" : "revoke");
   return prisma.$transaction(
     async (tx) => {
       const { tag, assignment } = await lockPair(tx, pair.dealerId, pair.tagId);
@@ -278,6 +283,7 @@ export async function directTag(ctx: AuthContext, raw: unknown) {
 }
 export async function decideTagRequest(ctx: AuthContext, id: string, raw: unknown) {
   const { action, remarks } = decisionSchema.parse(raw);
+  assertAdminPermission(ctx, "dealerTags", action);
   if (action === "reject" && !remarks)
     throw new ApiError(422, "A reason is required to reject a tag request.");
   if (ctx.role === Role.SALES_OFFICER)
@@ -302,7 +308,7 @@ export async function decideTagRequest(ctx: AuthContext, id: string, raw: unknow
             403,
             "The applicable RM must review this request before Admin final approval.",
           );
-      } else if (ctx.role !== Role.SUPER_ADMIN)
+      } else if (!isAdministrativeRole(ctx.role))
         throw new ApiError(403, "Only Super Admin can perform final approval.");
       await assertDealerScope(ctx, row.dealerId, tx);
       if (action === "approve" && row.operation === "ADD" && !tag.isActive)
@@ -328,7 +334,7 @@ export async function decideTagRequest(ctx: AuthContext, id: string, raw: unknow
       const approval = await tx.approvalAction.create({
         data: {
           dealerTagRequestId: id,
-          actorId: ctx.userId,
+          actorId: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
           action: action === "approve" ? ApprovalActionType.APPROVE : ApprovalActionType.REJECT,
           fromStatus: row.status,
           toStatus: next,
@@ -393,7 +399,7 @@ export async function listTagRequests(ctx: AuthContext) {
     requestedByName: r.requestedBy.name,
     createdAt: r.createdAt.toISOString(),
     canAct:
-      ctx.role === Role.SUPER_ADMIN
+      isAdministrativeRole(ctx.role)
         ? r.status === PlanStatus.PENDING_ADMIN
         : ctx.role === Role.REGIONAL_MANAGER &&
           ctx.userId === applicableManager &&
@@ -401,7 +407,7 @@ export async function listTagRequests(ctx: AuthContext) {
           r.status === PlanStatus.PENDING_RM,
     history: r.actions.map((a) => ({
       action: a.action,
-      actorName: a.actor.name,
+      actorName: actorDisplayName(a.actor.name, a.actorDesignation),
       fromStatus: a.fromStatus,
       toStatus: a.toStatus,
       remarks: a.remarks,

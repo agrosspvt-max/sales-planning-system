@@ -1,6 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import type { NextRequest } from "next/server";
-import { Role } from "@prisma/client";
 import { ApiError, handle, ok, requireAuth } from "@/lib/http";
 import { fileToBuffer } from "@/lib/import/workbook";
 import { MAX_FILE_BYTES } from "./parser";
@@ -9,7 +10,7 @@ import { analyzeHistoricalDaybook, commitHistoricalDaybook } from "./service.ser
 export function historicalUpload(req: NextRequest, commit: boolean) {
   return handle(async () => {
     const auth = await requireAuth();
-    if (auth.role !== Role.SUPER_ADMIN)
+    if (!isAdministrativeRole(auth.role))
       throw new ApiError(403, "Only the Super Admin can import historical Day Book receipts.");
     const form = await req.formData(),
       file = form.get("file");

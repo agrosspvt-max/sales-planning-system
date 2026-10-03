@@ -30,9 +30,13 @@ type Row = Record<string, unknown> & { id: string; isActive?: boolean };
 export function ResourcePage({
   config,
   canWrite,
+  canEdit = canWrite,
+  canDeactivate = canWrite,
 }: {
   config: ResourceClientConfig;
   canWrite: boolean;
+  canEdit?: boolean;
+  canDeactivate?: boolean;
 }) {
   const qc = useQueryClient();
   const [page, setPage] = useState(1);
@@ -164,9 +168,9 @@ export function ResourcePage({
                       );
                     })}
                     <TableCell className="text-right">
-                      {canWrite && (
+                      {(canEdit || canDeactivate) && (
                         <div className="flex justify-end gap-1">
-                          <Button
+                          {canEdit && <Button
                             variant="ghost"
                             size="sm"
                             title="Edit"
@@ -176,8 +180,8 @@ export function ResourcePage({
                             }}
                           >
                             <Pencil className="h-4 w-4" />
-                          </Button>
-                          {config.softDelete &&
+                          </Button>}
+                          {canDeactivate && config.softDelete &&
                             (active ? (
                               <Button
                                 variant="ghost"

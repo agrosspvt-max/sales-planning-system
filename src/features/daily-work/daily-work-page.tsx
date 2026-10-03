@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -122,7 +124,7 @@ function useDailyStatus(workDate: string) {
 type Section = "SALES" | "RECOVERY" | "APPOINTMENT" | "SCHEME_CONVERSION" | "VISITS" | "OTHERS";
 
 export function DailyWorkPage({ role }: { role: Role }) {
-  return role === Role.SUPER_ADMIN ? <AdminDailyWorkViewer /> : <OwnerDailyWorkPage />;
+  return isAdministrativeRole(role) ? <AdminDailyWorkViewer /> : <OwnerDailyWorkPage />;
 }
 
 function OwnerDailyWorkPage() {

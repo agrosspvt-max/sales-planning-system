@@ -1,6 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
-import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { isDealerOwnerRole } from "@/lib/scope";
@@ -17,7 +18,7 @@ import { DEALER_STATUSES, isActiveForStatus, type DealerStatus } from "@/lib/dea
  */
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can manage dealers");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can manage dealers");
 }
 async function loadDealerOr404(id: string) {
   const d = await prisma.dealer.findUnique({ where: { id }, select: { id: true, name: true, isActive: true, status: true, deletedAt: true } });
@@ -120,7 +121,7 @@ export async function editDealer(ctx: AuthContext, dealerId: string, raw: unknow
       }
     }
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Edited dealer ${data.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Edited dealer ${data.name}` });
   return { ok: true };
 }
 
@@ -129,7 +130,7 @@ export async function deactivateDealer(ctx: AuthContext, dealerId: string) {
   const d = await loadDealerOr404(dealerId);
   // status is the source of truth; INACTIVE ⇔ isActive:false.
   await prisma.dealer.update({ where: { id: dealerId }, data: { status: "INACTIVE", isActive: false } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Deactivated dealer ${d.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Deactivated dealer ${d.name}` });
   return { ok: true };
 }
 
@@ -138,7 +139,7 @@ export async function activateDealer(ctx: AuthContext, dealerId: string) {
   const d = await loadDealerOr404(dealerId);
   if (d.deletedAt) throw new ApiError(409, "Deleted dealers cannot be reactivated");
   await prisma.dealer.update({ where: { id: dealerId }, data: { status: "ACTIVE", isActive: true } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Activated dealer ${d.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Activated dealer ${d.name}` });
   return { ok: true };
 }
 
@@ -147,7 +148,7 @@ export async function deleteDealer(ctx: AuthContext, dealerId: string) {
   assertAdmin(ctx);
   const d = await loadDealerOr404(dealerId);
   await prisma.dealer.update({ where: { id: dealerId }, data: { status: "INACTIVE", isActive: false, deletedAt: new Date() } });
-  await writeAudit({ userId: ctx.userId, action: "DELETE", entity: "dealer", entityId: dealerId, summary: `Soft-deleted dealer ${d.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "DELETE", entity: "dealer", entityId: dealerId, summary: `Soft-deleted dealer ${d.name}` });
   return { ok: true };
 }
 

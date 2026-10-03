@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { PlanStatus, Role, ImportStatus, SeasonStatus } from "@prisma/client";
@@ -20,7 +22,7 @@ export type ImportDealerStatus = "EXISTING" | "NEW" | "INVALID";
 type Tx = any;
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN)
+  if (!isAdministrativeRole(ctx.role))
     throw new ApiError(403, "Only the Super Admin can import plans");
 }
 
@@ -557,7 +559,7 @@ export async function commitSeasonalImport(
   }
 
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "CREATE",
     entity: "seasonPlanImport",
     entityId: planId,

@@ -1,5 +1,7 @@
 import "server-only";
-import { Role, Prisma } from "@prisma/client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
@@ -25,7 +27,7 @@ import { writeAudit } from "@/lib/audit";
 const TX_OPTIONS = { timeout: 60000, maxWait: 10000 } as const;
 
 function assertSuperAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can transfer Recovery Plans");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can transfer Recovery Plans");
 }
 
 export interface SeasonPlanOption {

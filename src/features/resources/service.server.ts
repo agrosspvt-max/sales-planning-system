@@ -35,7 +35,7 @@ const optionalBool = z.preprocess(
   z.boolean().optional(),
 );
 
-const roleEnum = z.nativeEnum(Role);
+const roleEnum = z.enum([Role.SUPER_ADMIN, Role.REGIONAL_MANAGER, Role.SALES_OFFICER]);
 
 const SERVER: Partial<Record<Resource, ServerResource>> = {
   categories: {

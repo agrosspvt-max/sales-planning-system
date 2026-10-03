@@ -1,3 +1,4 @@
+import { isAdministrativeRole } from "@/features/accounts/permissions";
 import "server-only";
 import { PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -157,5 +158,5 @@ export async function getDealerProfile(
 }
 
 async function isSuperAdmin(ctx: AuthContext): Promise<boolean> {
-  return ctx.role === "SUPER_ADMIN";
+  return isAdministrativeRole(ctx.role);
 }

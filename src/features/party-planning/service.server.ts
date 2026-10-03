@@ -1,4 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { assertAdminPermission } from "@/features/accounts/permissions";
+
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
@@ -120,7 +123,7 @@ async function persistOwnerPlans(ctx: AuthContext, raw: unknown, status: string)
           VALUES (${randomUUID()}, ${ownerId}, ${r.partyName!.trim()}, ${market}, ${date}, ${status}, NOW(), NOW())`);
       }
     }
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "partyPlan", entityId: ownerId, summary: submitting ? `Submitted ${meaningful.length} party plan(s)` : `Saved ${meaningful.length} party plan draft(s)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyPlan", entityId: ownerId, summary: submitting ? `Submitted ${meaningful.length} party plan(s)` : `Saved ${meaningful.length} party plan draft(s)` }, tx);
     return { count: meaningful.length };
   });
 }
@@ -164,13 +167,15 @@ export async function listPartyPlans(ctx: AuthContext, view: "editable" | "submi
 
 /** Admin approves or rejects a submitted party plan. Super Admin only (a Sales Officer can never approve). */
 export async function actOnPartyPlan(ctx: AuthContext, id: string, raw: unknown): Promise<{ status: string }> {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can approve or reject party plans");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can approve or reject party plans");
   const { action, remarks } = actSchema.parse(raw);
+  assertAdminPermission(ctx, "partyPlanning", action);
+  assertAdminPermission(ctx, "approvals", action);
   const rows = await prisma.$queryRaw<{ status: string }[]>`SELECT "status" FROM "PartyPlan" WHERE "id" = ${id}`;
   if (rows.length === 0) throw new ApiError(404, "Party plan not found");
   if (rows[0].status !== PARTY_STATUS.PENDING) throw new ApiError(409, "Only a submitted party plan can be approved or rejected");
   const next = action === "approve" ? PARTY_STATUS.APPROVED : PARTY_STATUS.REJECTED;
   await prisma.$executeRaw`UPDATE "PartyPlan" SET "status" = ${next}, "remarks" = ${action === "reject" ? remarks?.trim() || null : null}, "updatedAt" = NOW() WHERE "id" = ${id}`;
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "partyPlan", entityId: id, summary: `Party plan ${action === "approve" ? "approved" : "rejected"} by Super Admin` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyPlan", entityId: id, summary: `Party plan ${action === "approve" ? "approved" : "rejected"} by ${ctx.designation ?? "Super Admin"}` });
   return { status: next };
 }

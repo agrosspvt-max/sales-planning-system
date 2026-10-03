@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     const auth = await requirePermission("seasons", "create");
     const season = await createSeason(await req.json());
     await writeAudit({
-      userId: auth.userId,
+      userId: auth.userId, actorDesignation: auth.designation,
       action: "CREATE",
       entity: "seasons",
       entityId: season.id,

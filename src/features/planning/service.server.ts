@@ -1,4 +1,8 @@
+import { actorDisplayName } from "@/features/accounts/identity";
+import { assertAdminPermission, hasAdminPermission } from "@/features/accounts/permissions";
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { PlanStatus, ApprovalActionType, Role, SeasonStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -112,14 +116,14 @@ export async function finalizeApprovalTx(
 
 async function recordAction(
   seasonPlanId: string,
-  actorId: string,
+  ctx: AuthContext,
   action: ApprovalActionType,
   fromStatus: PlanStatus | null,
   toStatus: PlanStatus | null,
   remarks?: string,
 ) {
   await prisma.approvalAction.create({
-    data: { seasonPlanId, actorId, action, fromStatus, toStatus, remarks },
+    data: { seasonPlanId, actorId: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}), action, fromStatus, toStatus, remarks },
   });
 }
 
@@ -149,7 +153,7 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
   } else if (ctx.role === Role.REGIONAL_MANAGER) {
     // An RM creates plans only for THEMSELVES (My Plans) — same self-owned flow as a Sales Officer.
     officerId = ctx.userId;
-  } else if (ctx.role === Role.SUPER_ADMIN) {
+  } else if (isAdministrativeRole(ctx.role)) {
     if (!input.officerId) throw new ApiError(422, "Select a Sales Officer for this plan");
     officerId = input.officerId;
   } else {
@@ -237,7 +241,7 @@ export async function setDealerNoPlan(
 ): Promise<{ noPlan: boolean; noPlanReason: string | null }> {
   const plan = await loadPlanOr404(planId);
   const isOwner = isPlanOwner(ctx, plan.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this plan");
+  if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this plan");
   if (!EDITABLE.includes(plan.status)) throw new ApiError(409, "This plan is not editable");
   assertLifecycleEditable(plan.lifecycleState);
 
@@ -281,7 +285,7 @@ export async function createSeasonalPlans(
   if (ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER) {
     // Sales Officer and Regional Manager both create only their OWN plan (My Plans).
     officerIds = [ctx.userId];
-  } else if (ctx.role === Role.SUPER_ADMIN) {
+  } else if (isAdministrativeRole(ctx.role)) {
     if (input.officerScope === "all") {
       const officers = await prisma.user.findMany({
         where: { role: Role.SALES_OFFICER, isActive: true },
@@ -303,7 +307,7 @@ export async function createSeasonalPlans(
       await createSalesPlan(ctx, {
         seasonId,
         planningType: "SEASONAL",
-        officerId: ctx.role === Role.SUPER_ADMIN ? officerId : undefined,
+        officerId: isAdministrativeRole(ctx.role) ? officerId : undefined,
       }),
     );
   }
@@ -384,7 +388,7 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
   const canEdit = isOwner && EDITABLE.includes(plan.status) && plan.season.status === SeasonStatus.OPEN;
   // Admin Override: a Super Admin may correct the APPROVED, active version (read-only flag only).
   const canAdminEdit =
-    ctx.role === Role.SUPER_ADMIN &&
+    isAdministrativeRole(ctx.role) &&
     plan.status === PlanStatus.APPROVED &&
     plan.isActiveVersion &&
     ((plan as { lifecycleState?: string }).lifecycleState ?? "ACTIVE") === "ACTIVE";
@@ -690,7 +694,7 @@ export async function submitPlan(ctx: AuthContext, planId: string) {
     where: { id: planId },
     data: { status: nextStatus, submittedAt: new Date() },
   });
-  await recordAction(planId, ctx.userId, ApprovalActionType.SUBMIT, plan.status, nextStatus);
+  await recordAction(planId, ctx, ApprovalActionType.SUBMIT, plan.status, nextStatus);
 
   const label = await planLabel(plan);
   if (nextStatus === PlanStatus.PENDING_RM && managerId) {
@@ -724,7 +728,7 @@ export async function recallPlan(ctx: AuthContext, planId: string) {
   }
   assertLifecycleEditable(plan.lifecycleState);
   await prisma.seasonPlan.update({ where: { id: planId }, data: { status: PlanStatus.DRAFT } });
-  await recordAction(planId, ctx.userId, ApprovalActionType.RECALL, plan.status, PlanStatus.DRAFT);
+  await recordAction(planId, ctx, ApprovalActionType.RECALL, plan.status, PlanStatus.DRAFT);
   return { status: PlanStatus.DRAFT };
 }
 
@@ -734,13 +738,13 @@ async function assertCurrentApprover(ctx: AuthContext, plan: { officerId: string
   if (plan.status === PlanStatus.PENDING_RM) {
     // Super Admin has FINAL authority and may act on a submitted plan directly — RM approval is never a
     // prerequisite for the admin (a plan sitting at Pending RM stays admin-actionable). RM flow unchanged.
-    if (ctx.role === Role.SUPER_ADMIN) return;
+    if (isAdministrativeRole(ctx.role)) return;
     const managerId = await getCurrentManagerId(plan.officerId);
     if (ctx.userId !== managerId) {
       throw new ApiError(403, "Only the assigned Regional Manager can act on this plan"); // V15
     }
   } else if (plan.status === PlanStatus.PENDING_ADMIN) {
-    if (ctx.role !== Role.SUPER_ADMIN) {
+    if (!isAdministrativeRole(ctx.role)) {
       throw new ApiError(403, "Only the Super Admin can act on this plan"); // V15
     }
   } else {
@@ -749,19 +753,21 @@ async function assertCurrentApprover(ctx: AuthContext, plan: { officerId: string
 }
 
 export async function approvePlan(ctx: AuthContext, planId: string) {
+  assertAdminPermission(ctx, "salesPlanning", "approve");
+  assertAdminPermission(ctx, "approvals", "approve");
   const plan = await loadPlanOr404(planId);
   await assertCurrentApprover(ctx, plan);
   assertLifecycleEditable(plan.lifecycleState);
 
   // RM approving a Pending-RM plan advances it to Pending Super Admin (RM workflow UNCHANGED).
-  if (plan.status === PlanStatus.PENDING_RM && ctx.role !== Role.SUPER_ADMIN) {
+  if (plan.status === PlanStatus.PENDING_RM && !isAdministrativeRole(ctx.role)) {
     await prisma.seasonPlan.update({
       where: { id: planId },
       data: { status: PlanStatus.PENDING_ADMIN },
     });
     await recordAction(
       planId,
-      ctx.userId,
+      ctx,
       ApprovalActionType.APPROVE,
       PlanStatus.PENDING_RM,
       PlanStatus.PENDING_ADMIN,
@@ -785,7 +791,7 @@ export async function approvePlan(ctx: AuthContext, planId: string) {
   });
   await recordAction(
     planId,
-    ctx.userId,
+    ctx,
     ApprovalActionType.APPROVE,
     fromStatus,
     PlanStatus.APPROVED,
@@ -803,12 +809,14 @@ export async function approvePlan(ctx: AuthContext, planId: string) {
 }
 
 export async function returnPlan(ctx: AuthContext, planId: string, raw: unknown) {
+  assertAdminPermission(ctx, "salesPlanning", "return");
+  assertAdminPermission(ctx, "approvals", "return");
   const { remarks } = remarksSchema.parse(raw); // V14
   const plan = await loadPlanOr404(planId);
   await assertCurrentApprover(ctx, plan);
   assertLifecycleEditable(plan.lifecycleState);
   await prisma.seasonPlan.update({ where: { id: planId }, data: { status: PlanStatus.RETURNED } });
-  await recordAction(planId, ctx.userId, ApprovalActionType.RETURN, plan.status, PlanStatus.RETURNED, remarks);
+  await recordAction(planId, ctx, ApprovalActionType.RETURN, plan.status, PlanStatus.RETURNED, remarks);
   await createNotification({
     userId: plan.officerId,
     type: NotificationType.PLAN_RETURNED,
@@ -821,12 +829,14 @@ export async function returnPlan(ctx: AuthContext, planId: string, raw: unknown)
 }
 
 export async function rejectPlan(ctx: AuthContext, planId: string, raw: unknown) {
+  assertAdminPermission(ctx, "salesPlanning", "reject");
+  assertAdminPermission(ctx, "approvals", "reject");
   const { remarks } = remarksSchema.parse(raw); // V14
   const plan = await loadPlanOr404(planId);
   await assertCurrentApprover(ctx, plan);
   assertLifecycleEditable(plan.lifecycleState);
   await prisma.seasonPlan.update({ where: { id: planId }, data: { status: PlanStatus.REJECTED } });
-  await recordAction(planId, ctx.userId, ApprovalActionType.REJECT, plan.status, PlanStatus.REJECTED, remarks);
+  await recordAction(planId, ctx, ApprovalActionType.REJECT, plan.status, PlanStatus.REJECTED, remarks);
   await createNotification({
     userId: plan.officerId,
     type: NotificationType.PLAN_RETURNED,
@@ -854,7 +864,7 @@ export async function requestRevision(ctx: AuthContext, planId: string, raw: unk
     where: { id: planId },
     data: { revisionRequested: true, revisionReason: reason },
   });
-  await recordAction(planId, ctx.userId, ApprovalActionType.REQUEST_REVISION, plan.status, plan.status, reason);
+  await recordAction(planId, ctx, ApprovalActionType.REQUEST_REVISION, plan.status, plan.status, reason);
   await notifyMany(await getSuperAdminIds(), {
     type: NotificationType.SYSTEM,
     title: "Revision requested",
@@ -867,7 +877,7 @@ export async function requestRevision(ctx: AuthContext, planId: string, raw: unk
 
 /** Super Admin authorizes: copy the approved version into a new DRAFT version. */
 export async function authorizeRevision(ctx: AuthContext, planId: string): Promise<string> {
-  if (ctx.role !== Role.SUPER_ADMIN) {
+  if (!isAdministrativeRole(ctx.role)) {
     throw new ApiError(403, "Only the Super Admin can authorize a revision");
   }
   const plan = await prisma.seasonPlan.findUnique({
@@ -916,7 +926,7 @@ export async function authorizeRevision(ctx: AuthContext, planId: string): Promi
   await prisma.seasonPlan.update({ where: { id: plan.id }, data: { revisionRequested: false } });
   await recordAction(
     plan.id,
-    ctx.userId,
+    ctx,
     ApprovalActionType.AUTHORIZE_REVISION,
     plan.status,
     plan.status,
@@ -956,7 +966,7 @@ export async function getPlanHistory(ctx: AuthContext, planId: string) {
     versions,
     timeline: actions.map((a) => ({
       id: a.id,
-      actorName: a.actor.name,
+      actorName: actorDisplayName(a.actor.name, a.actorDesignation),
       action: a.action,
       fromStatus: a.fromStatus,
       toStatus: a.toStatus,
@@ -1014,7 +1024,7 @@ export async function listPlans(ctx: AuthContext, seasonId?: string, mine = fals
 
 function canManagePlan(ctx: AuthContext, plan: { officerId: string }): boolean {
   return (
-    ctx.role === Role.SUPER_ADMIN ||
+    isAdministrativeRole(ctx.role) ||
     (isPlanOwner(ctx, plan.officerId))
   );
 }
@@ -1030,7 +1040,7 @@ export async function deleteSalesPlan(ctx: AuthContext, planId: string) {
   }
   await prisma.seasonPlan.delete({ where: { id: planId } });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "DEACTIVATE",
     entity: "seasonPlan",
     entityId: planId,
@@ -1080,7 +1090,7 @@ export async function duplicateSalesPlan(ctx: AuthContext, planId: string): Prom
     },
   });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "CREATE",
     entity: "seasonPlan",
     entityId: copy.id,
@@ -1091,6 +1101,7 @@ export async function duplicateSalesPlan(ctx: AuthContext, planId: string): Prom
 
 /** Plans awaiting the current user's action (approvals inbox). */
 export async function getApprovalsInbox(ctx: AuthContext) {
+  if (ctx.role === Role.CUSTOM_ADMIN && !hasAdminPermission(ctx, "salesPlanning")) return [];
   // TEMP DIAGNOSTIC (approval visibility, prod-only empty). This endpoint is the RM/Admin queue; a Sales
   // Officer legitimately gets []. Logged so the prod session id + role are visible in the request trace.
   // Remove after diagnosis.
@@ -1100,7 +1111,7 @@ export async function getApprovalsInbox(ctx: AuthContext) {
 
   const pending = await prisma.seasonPlan.findMany({
     where:
-      ctx.role === Role.SUPER_ADMIN
+      isAdministrativeRole(ctx.role)
         ? {
             // Closed/deactivated plans are frozen and never appear in the approval queue.
             lifecycleState: "ACTIVE",

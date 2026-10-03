@@ -1,4 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { assertAdminPermission } from "@/features/accounts/permissions";
+
 import { PlanStatus, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -50,7 +53,7 @@ function lifecyclePatch(action: LifecycleAction): { lifecycleState: LifecycleSta
 }
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can manage plan lifecycle");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can manage plan lifecycle");
 }
 
 /**
@@ -149,7 +152,7 @@ export async function setSeasonalPlanLifecycle(
   });
 
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: AUDIT_ACTION[action],
     entity: "seasonPlan",
     entityId: planId,
@@ -181,7 +184,7 @@ export async function deleteSeasonalPlan(ctx: AuthContext, planId: string): Prom
   // Cascade removes dealers → lines → packs → monthly entries, child MonthlyPlans and ApprovalActions.
   await prisma.seasonPlan.delete({ where: { id: planId } });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "DELETE",
     entity: "seasonPlan",
     entityId: planId,
@@ -204,7 +207,7 @@ export async function setMonthlyPlanLifecycle(
   // Direct admin action → this state is admin-managed, not inherited from a parent cascade.
   await prisma.monthlyPlan.update({ where: { id: monthlyPlanId }, data: { ...patch, lifecycleFromParent: false } });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: AUDIT_ACTION[action],
     entity: "monthlyPlan",
     entityId: monthlyPlanId,
@@ -222,7 +225,7 @@ export async function deleteMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
   }
   await prisma.monthlyPlan.delete({ where: { id: monthlyPlanId } });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "DELETE",
     entity: "monthlyPlan",
     entityId: monthlyPlanId,
@@ -245,7 +248,7 @@ export async function setRecoveryPlanLifecycle(
   // Direct admin action → admin-managed, not inherited from a parent cascade.
   await prisma.recoveryPlan.update({ where: { id: recoveryPlanId }, data: { ...patch, lifecycleFromParent: false } });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: AUDIT_ACTION[action],
     entity: "recoveryPlan",
     entityId: recoveryPlanId,
@@ -263,7 +266,7 @@ export async function deleteRecoveryPlan(ctx: AuthContext, recoveryPlanId: strin
   }
   await prisma.recoveryPlan.delete({ where: { id: recoveryPlanId } });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "DELETE",
     entity: "recoveryPlan",
     entityId: recoveryPlanId,
@@ -327,6 +330,7 @@ export interface RestoreContext {
 
 /** Detect whether restoring a Monthly/Recovery child requires resolving an archived parent. */
 export async function getChildRestoreContext(ctx: AuthContext, kind: ChildKind, childId: string): Promise<RestoreContext> {
+  assertAdminPermission(ctx, kind === "RECOVERY" ? "recoveryPlanning" : "salesPlanning", "read");
   assertAdmin(ctx);
   const c = await loadChildContext(kind, childId);
   const parentArchived = !!c.parent && (c.parent.lifecycleState ?? "ACTIVE") === "DEACTIVATED";
@@ -351,6 +355,7 @@ export async function getChildRestoreContext(ctx: AuthContext, kind: ChildKind, 
  *     + child (explicit, confirmed by the admin).
  */
 export async function restoreChildPlan(ctx: AuthContext, kind: ChildKind, childId: string, mode: RestoreMode): Promise<{ ok: true }> {
+  assertAdminPermission(ctx, kind === "RECOVERY" ? "recoveryPlanning" : "salesPlanning", "lifecycle");
   assertAdmin(ctx);
   const c = await loadChildContext(kind, childId);
   const setChildLifecycle = kind === "MONTHLY" ? setMonthlyPlanLifecycle : setRecoveryPlanLifecycle;
@@ -413,7 +418,7 @@ export async function archiveActiveSeasonalForReplace(
     await cascadeToChildren(tx, { seasonPlanId: { in: ids } }, patch);
   });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "REPLACE",
     entity: "seasonPlan",
     entityId: ids[0],

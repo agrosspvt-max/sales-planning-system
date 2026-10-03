@@ -15,6 +15,11 @@ model User {
   username                 String                      @unique
   passwordHash             String
   role                     Role
+  /// Display only; never used to authorize an account.
+  designation              String?
+  /// Explicit module -> action grants for CUSTOM_ADMIN only. Existing roles ignore this field.
+  adminPermissions         Json                        @default("{}")
+  accountManagementOwner   AccountManagementOwner?
   phone                    String?
   email                    String?                     @unique
   // Sales Officer's assigned territory (distinct from `name` and from the group/region). Admin-editable.
@@ -814,6 +819,8 @@ model CnPaymentEvent {
   source                String // ACCEPTANCE | SO_UPDATE | ADMIN_UPDATE | ADMIN_CORRECTION
   requestKey            String          @unique // client/server idempotency key; one status change creates at most one event/task
   recordedById          String
+  /// Optional title captured at the payment action, never inferred for historical events.
+  actorDesignation      String?
   createdAt             DateTime        @default(now())
   cnRequest             CnRequest       @relation(fields: [cnRequestId], references: [id], onDelete: Restrict)
   recordedBy            User            @relation("CnPaymentEventRecordedBy", fields: [recordedById], references: [id])
@@ -1079,6 +1086,8 @@ model AuditLog {
   entity    String
   entityId  String?
   summary   String?
+  /// Title at the time of the action; null for legacy records (never backfilled).
+  actorDesignation String?
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id])
 
@@ -1291,6 +1300,8 @@ model ApprovalAction {
   id                 String             @id @default(cuid())
   seasonPlanId       String?
   actorId            String
+  /// Optional title captured at the approval action; historical rows remain null.
+  actorDesignation   String?
   action             ApprovalActionType
   fromStatus         PlanStatus?
   toStatus           PlanStatus?
@@ -1743,6 +1754,15 @@ enum Role {
   SUPER_ADMIN
   REGIONAL_MANAGER
   SALES_OFFICER
+  CUSTOM_ADMIN
+}
+
+/// Single trusted owner, bound to an existing stable User ID during reviewed deployment.
+/// Generic settings/profile/user-edit APIs cannot alter this record.
+model AccountManagementOwner {
+  id     String @id @default("primary")
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
 }
 
 enum SeasonStatus {

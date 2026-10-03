@@ -1,5 +1,7 @@
 import "server-only";
-import { SchemeBenefit, SchemeStatus, SchemeCalcType, SchemeRequirementType, SchemeValueMode, SchemeStructure, SchemeOptionAchievementType, Role } from "@prisma/client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
+import { SchemeBenefit, SchemeStatus, SchemeCalcType, SchemeRequirementType, SchemeValueMode, SchemeStructure, SchemeOptionAchievementType } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -238,7 +240,7 @@ const schemeInput = schemeInputBase.transform(deriveProductQuantityValues).super
 });
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can manage schemes");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can manage schemes");
 }
 
 /** Reusable end-date rule for a future scheduler. Booking date never closes a scheme; neither does a perpetual scheme. */
@@ -357,7 +359,7 @@ export async function createScheme(ctx: AuthContext, raw: unknown) {
       options: { create: isOptions ? optionCreateRows(data.options, achievementType) : [] },
     },
   });
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "scheme", entityId: scheme.id, summary: `Created scheme ${scheme.schemeName} (${data.structure})` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "scheme", entityId: scheme.id, summary: `Created scheme ${scheme.schemeName} (${data.structure})` });
   return { id: scheme.id };
 }
 
@@ -445,14 +447,14 @@ export async function updateScheme(ctx: AuthContext, id: string, raw: unknown) {
   });
 
   await refreshSchemeStatuses();
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "scheme", entityId: id, summary: `Updated scheme ${data.schemeName} (${data.structure})` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "scheme", entityId: id, summary: `Updated scheme ${data.schemeName} (${data.structure})` });
   return { id };
 }
 
 export async function closeScheme(ctx: AuthContext, id: string) {
   assertAdmin(ctx);
   const scheme = await prisma.scheme.update({ where: { id }, data: { status: SchemeStatus.CLOSED }, select: { schemeName: true } });
-  await writeAudit({ userId: ctx.userId, action: "CLOSE", entity: "scheme", entityId: id, summary: `Closed scheme ${scheme.schemeName}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CLOSE", entity: "scheme", entityId: id, summary: `Closed scheme ${scheme.schemeName}` });
   return { closed: true };
 }
 
@@ -556,6 +558,6 @@ export async function reopenScheme(ctx: AuthContext, id: string, now = new Date(
     throw new ApiError(422, "This scheme's period has expired. Extend the Scheme End Date (Edit) before reopening.");
   }
   await prisma.scheme.update({ where: { id }, data: { status: SchemeStatus.OPEN } });
-  await writeAudit({ userId: ctx.userId, action: "REOPEN", entity: "scheme", entityId: id, summary: `Reopened scheme ${scheme.schemeName}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "REOPEN", entity: "scheme", entityId: id, summary: `Reopened scheme ${scheme.schemeName}` });
   return { reopened: true };
 }

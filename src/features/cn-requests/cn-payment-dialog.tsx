@@ -1,4 +1,5 @@
 "use client";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 
 import { useRef, useState } from "react";
@@ -171,6 +172,7 @@ function SalesOfficerReportForm({ data, requestId, labels, onSaved }: { data: Pa
 
 /** ADMIN VERIFICATION — authoritative. Admin picks only the status (+ Amount Paid for Partial); never dates. */
 function AdminVerifyForm({ requestId, labels, onSaved }: { requestId: string; labels: PaymentLabels; onSaved: (next: PaymentDetail) => void }) {
+  const canPost = useAdminPermission("cnRequests", "post");
   const [status, setStatus] = useState<CnPaymentStatusValue | "">("");
   const [amountPaid, setAmountPaid] = useState("");
   const [requestKey, setRequestKey] = useState(() => crypto.randomUUID());
@@ -201,7 +203,7 @@ function AdminVerifyForm({ requestId, labels, onSaved }: { requestId: string; la
       <p className="text-xs text-muted-foreground">{labels.verifyHelp}</p>
       <NativeSelect
         placeholder={labels.selectVerifiedStatus}
-        options={[{ value: "NOT_PAID", label: labels.notPaid }, { value: "PARTIAL_PAID", label: labels.partialPaid }, { value: "PAID", label: labels.paid }]}
+        options={[{ value: "NOT_PAID", label: labels.notPaid }, { value: "PARTIAL_PAID", label: labels.partialPaid }, ...(canPost ? [{ value: "PAID", label: labels.paid }] : [])]}
         value={status}
         onChange={(e) => { setStatus(e.target.value as CnPaymentStatusValue | ""); setFormError(null); }}
       />

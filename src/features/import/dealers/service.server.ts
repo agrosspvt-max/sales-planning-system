@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { Role, ImportStatus } from "@prisma/client";
@@ -19,7 +21,7 @@ const DUP_THRESHOLD = 0.8;
 type Tx = any;
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can import");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can import");
 }
 
 /* ---- Dealer matching is delegated to the shared central DealerResolver. ---- */
@@ -547,7 +549,7 @@ export async function commitDealerImport(ctx: AuthContext, raw: unknown): Promis
     },
   });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "CREATE",
     entity: "dealerImport",
     summary: `Imported ${plan.counts.dealerCount} dealers (${plan.counts.createdDealers} new, ${plan.counts.reassignedDealers} reassigned)`,

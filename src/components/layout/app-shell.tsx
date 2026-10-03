@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api-client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Role } from "@prisma/client";
@@ -15,11 +17,16 @@ import { LogoutButton } from "./logout-button";
 import { NotificationBell } from "@/features/notifications/notification-bell";
 import { GlobalSearch } from "@/features/search/global-search";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
+import { PermissionContext } from "@/features/accounts/permission-ui";
+import type { AdminPermissions } from "@/features/accounts/permissions";
 
 interface AppUser {
   name: string;
   username: string;
   role: Role;
+  designation?: string | null;
+  permissions?: AdminPermissions;
+  accountOwner?: boolean;
 }
 
 export function AppShell({ user, children, calendarEnabled = true }: { user: AppUser; children: React.ReactNode; calendarEnabled?: boolean }) {
@@ -30,7 +37,11 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
   // Second-level (nested parent) collapse state, keyed by the parent item's href.
   const [collapsedSub, setCollapsedSub] = useState<Set<string>>(new Set());
   const pathname = usePathname();
-  const items = navForRole(user.role, calendarEnabled);
+  const access = useQuery({ queryKey: ["account-access", pathname], enabled: user.role === Role.CUSTOM_ADMIN,
+    queryFn: () => api.get<Pick<AppUser, "role" | "designation" | "permissions">>("/api/users/me/access"),
+    staleTime: 0, refetchOnWindowFocus: true });
+  const identity = access.data ?? user;
+  const items = navForRole(user.role, calendarEnabled, identity.permissions, user.accountOwner);
 
   // One centralized computation of the active page + its section. The sidebar reuses this
   // instead of each item running its own prefix test — so only one leaf can be selected.
@@ -200,7 +211,7 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
             </span>
           </div>
           <div className="flex items-center gap-3">
-            <GlobalSearch />
+            {user.role !== Role.CUSTOM_ADMIN && <GlobalSearch />}
             <NotificationBell />
             <ThemeToggle />
             <div className="hidden text-right sm:block">
@@ -208,7 +219,7 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
               <p className="text-xs text-muted-foreground">@{user.username}</p>
             </div>
             {/* A Sales Officer sees their own name here (not the generic role); admins/others keep the role label. */}
-            <Badge variant="secondary">{user.role === Role.SALES_OFFICER ? user.name : ROLE_LABELS[user.role]}</Badge>
+            <Badge variant="secondary">{user.role === Role.SALES_OFFICER ? user.name : identity.designation ?? ROLE_LABELS[user.role]}</Badge>
             <LogoutButton />
           </div>
         </header>
@@ -217,7 +228,7 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
             OWN root a definite viewport height (see the grids) so the data grid becomes the one bounded
             scroll region and its sticky header can pin; plain pages just scroll here as normal. */}
         <main className="flex-1 overflow-y-auto">
-          <div className="px-4 py-4 md:px-6 md:py-6">{children}</div>
+          <div className="px-4 py-4 md:px-6 md:py-6"><PermissionContext.Provider value={identity}>{children}</PermissionContext.Provider></div>
         </main>
       </div>
     </div>

@@ -1,6 +1,8 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { hasAdminPermission, assertAdminPermission } from "@/features/accounts/permissions";
+
 import { z } from "zod";
-import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { DEFAULT_LABELS, resolveLabels, type LabelKey } from "./labels";
@@ -45,7 +47,7 @@ async function readOverrides(): Promise<Record<string, string>> {
 
 /** Overrides + whether the caller may edit them (Super Admin only). */
 export async function getLabelState(ctx: AuthContext): Promise<{ overrides: Record<string, string>; canEdit: boolean }> {
-  return { overrides: await readOverrides(), canEdit: ctx.role === Role.SUPER_ADMIN };
+  return { overrides: await readOverrides(), canEdit: hasAdminPermission(ctx, "labels", "update") };
 }
 
 /** Server-side access to the same override → default label map consumed by LabelProvider. */
@@ -61,7 +63,8 @@ const patchSchema = z.object({
 
 /** Set or clear ONE label override (Super Admin only). Returns the full override map. */
 export async function setLabelOverride(ctx: AuthContext, raw: unknown): Promise<Record<string, string>> {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can edit labels");
+  assertAdminPermission(ctx, "labels", "update");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can edit labels");
   const { key, value } = patchSchema.parse(raw);
   if (!(key in DEFAULT_LABELS)) throw new ApiError(422, "Unknown label key");
 

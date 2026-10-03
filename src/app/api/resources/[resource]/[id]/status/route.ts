@@ -1,3 +1,4 @@
+import { protectManagedUser } from "@/features/accounts/service.server";
 import { type NextRequest } from "next/server";
 import { z } from "zod";
 import { handle, ok, requirePermission, ApiError } from "@/lib/http";
@@ -18,10 +19,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ resource: 
     const { resource, id } = await ctx.params;
     const key = assertResource(resource);
     const auth = await requirePermission(key, "delete");
+    if (key === "users") await protectManagedUser(auth, id, true);
     const { isActive } = bodySchema.parse(await req.json());
     await setResourceActive(key, id, isActive);
     await writeAudit({
-      userId: auth.userId,
+      userId: auth.userId, actorDesignation: auth.designation,
       action: isActive ? "REACTIVATE" : "DEACTIVATE",
       entity: key,
       entityId: id,

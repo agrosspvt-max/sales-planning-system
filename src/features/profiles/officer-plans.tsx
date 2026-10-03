@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
@@ -79,7 +81,7 @@ type RestoreMode = "WITH_PARENT" | "HISTORICAL" | "RESTORE_PARENT_ARCHIVE_NEWER"
 /** Officer profile → Plans: manage every plan's lifecycle (Super Admin). Reuses the lifecycle APIs. */
 export function OfficerPlansManagement({ officerId, role }: { officerId: string; role: Role }) {
   const qc = useQueryClient();
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [restore, setRestore] = useState<{ row: PlanRow; ctx: RestoreContext } | null>(null);
   const [recoveryImport, setRecoveryImport] = useState(false);

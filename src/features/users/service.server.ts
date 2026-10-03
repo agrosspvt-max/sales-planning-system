@@ -1,10 +1,13 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, invalidateAuthCache, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
+import { protectManagedUser } from "@/features/accounts/service.server";
 import { ROLE_LABELS } from "@/lib/rbac";
 
 /**
@@ -14,7 +17,7 @@ import { ROLE_LABELS } from "@/lib/rbac";
  */
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can manage users");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can manage users");
 }
 
 async function loadUserOr404(userId: string) {
@@ -68,13 +71,14 @@ export async function createUser(ctx: AuthContext, raw: unknown) {
     data: { name: data.name.trim(), username, passwordHash, role: data.role, groupId: data.groupId || null },
     select: { id: true, name: true },
   });
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "user", entityId: user.id, summary: `Created ${ROLE_LABELS[data.role]} ${user.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "user", entityId: user.id, summary: `Created ${ROLE_LABELS[data.role]} ${user.name}` });
   return { id: user.id };
 }
 
 /** Promote a Sales Officer to Regional Manager (must already be in a group; one RM per group). */
 export async function promoteToRegionalManager(ctx: AuthContext, userId: string) {
   assertAdmin(ctx);
+  await protectManagedUser(ctx, userId, false);
   const user = (await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, role: true, isActive: true, deletedAt: true, groupId: true } })) as
     | { id: string; name: string; role: Role; isActive: boolean; deletedAt: Date | null; groupId: string | null }
     | null;
@@ -85,18 +89,19 @@ export async function promoteToRegionalManager(ctx: AuthContext, userId: string)
   await assertNoOtherRmInGroup(user.groupId, userId);
   await prisma.user.update({ where: { id: userId }, data: { role: Role.REGIONAL_MANAGER } });
   invalidateAuthCache(userId); // a role change must take effect immediately
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Promoted ${user.name} to Regional Manager` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "user", entityId: userId, summary: `Promoted ${user.name} to Regional Manager` });
   return { ok: true };
 }
 
 /** Demote a Regional Manager back to Sales Officer. Their group membership is kept. */
 export async function demoteToSalesOfficer(ctx: AuthContext, userId: string) {
   assertAdmin(ctx);
+  await protectManagedUser(ctx, userId, false);
   const user = await loadUserOr404(userId);
   if (user.role !== Role.REGIONAL_MANAGER) throw new ApiError(409, "Only a Regional Manager can be demoted");
   await prisma.user.update({ where: { id: userId }, data: { role: Role.SALES_OFFICER } });
   invalidateAuthCache(userId);
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Demoted ${user.name} to Sales Officer` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "user", entityId: userId, summary: `Demoted ${user.name} to Sales Officer` });
   return { ok: true };
 }
 
@@ -105,12 +110,13 @@ export async function demoteToSalesOfficer(ctx: AuthContext, userId: string) {
 /** Admin resets any user's password without the old one. Invalidates their sessions. */
 export async function resetUserPassword(ctx: AuthContext, userId: string, raw: unknown) {
   assertAdmin(ctx);
+  await protectManagedUser(ctx, userId, false);
   const { newPassword } = z.object({ newPassword: passwordSchema }).parse(raw);
   const user = await loadUserOr404(userId);
   const passwordHash = await bcrypt.hash(newPassword, 10);
   await prisma.user.update({ where: { id: userId }, data: { passwordHash, sessionValidAfter: new Date() } });
   invalidateAuthCache(userId); // security change takes effect immediately, not after the TTL
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Reset password for ${user.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "user", entityId: userId, summary: `Reset password for ${user.name}` });
   return { ok: true };
 }
 
@@ -126,7 +132,7 @@ export async function changeOwnPassword(ctx: AuthContext, raw: unknown) {
   const passwordHash = await bcrypt.hash(newPassword, 10);
   await prisma.user.update({ where: { id: ctx.userId }, data: { passwordHash, sessionValidAfter: new Date() } });
   invalidateAuthCache(ctx.userId);
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: ctx.userId, summary: "Changed own password" });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "user", entityId: ctx.userId, summary: "Changed own password" });
   return { ok: true };
 }
 
@@ -144,6 +150,7 @@ const editSchema = z.object({
 
 export async function editUser(ctx: AuthContext, userId: string, raw: unknown) {
   assertAdmin(ctx);
+  await protectManagedUser(ctx, userId, false);
   const data = editSchema.parse(raw);
   const existing = await loadUserOr404(userId);
   // Only write fields that were actually provided (partial update).
@@ -154,7 +161,7 @@ export async function editUser(ctx: AuthContext, userId: string, raw: unknown) {
   if (data.territory !== undefined) patch.territory = data.territory.trim() || null;
   if (Object.keys(patch).length === 0) return { ok: true };
   await prisma.user.update({ where: { id: userId }, data: patch });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Edited user ${patch.name ?? existing.name} (${Object.keys(patch).join(", ")})` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "user", entityId: userId, summary: `Edited user ${patch.name ?? existing.name} (${Object.keys(patch).join(", ")})` });
   return { ok: true };
 }
 
@@ -162,32 +169,35 @@ export async function editUser(ctx: AuthContext, userId: string, raw: unknown) {
 
 export async function deactivateUser(ctx: AuthContext, userId: string) {
   assertAdmin(ctx);
+  await protectManagedUser(ctx, userId, true);
   if (userId === ctx.userId) throw new ApiError(422, "You cannot deactivate your own account");
   const user = await loadUserOr404(userId);
   await prisma.user.update({ where: { id: userId }, data: { isActive: false, sessionValidAfter: new Date() } });
   invalidateAuthCache(userId);
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Deactivated ${user.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "user", entityId: userId, summary: `Deactivated ${user.name}` });
   return { ok: true };
 }
 
 export async function activateUser(ctx: AuthContext, userId: string) {
   assertAdmin(ctx);
+  await protectManagedUser(ctx, userId, false);
   const user = await loadUserOr404(userId);
   if (user.deletedAt) throw new ApiError(409, "Deleted users cannot be reactivated");
   await prisma.user.update({ where: { id: userId }, data: { isActive: true } });
   invalidateAuthCache(userId);
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "user", entityId: userId, summary: `Activated ${user.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "user", entityId: userId, summary: `Activated ${user.name}` });
   return { ok: true };
 }
 
 /** Soft delete — never hard delete. Keeps every plan/approval/audit/upload record intact. */
 export async function deleteUser(ctx: AuthContext, userId: string) {
   assertAdmin(ctx);
+  await protectManagedUser(ctx, userId, true);
   if (userId === ctx.userId) throw new ApiError(422, "You cannot delete your own account");
   const user = await loadUserOr404(userId);
   await prisma.user.update({ where: { id: userId }, data: { isActive: false, deletedAt: new Date(), sessionValidAfter: new Date() } });
   invalidateAuthCache(userId);
-  await writeAudit({ userId: ctx.userId, action: "DELETE", entity: "user", entityId: userId, summary: `Soft-deleted ${user.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "DELETE", entity: "user", entityId: userId, summary: `Soft-deleted ${user.name}` });
   return { ok: true };
 }
 

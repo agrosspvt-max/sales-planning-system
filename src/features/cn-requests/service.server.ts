@@ -1,4 +1,9 @@
 import "server-only";
+import { actorDisplayName } from "@/features/accounts/identity";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { assertAdminPermission } from "@/features/accounts/permissions";
+import { hasAdminPermission } from "@/features/accounts/permissions";
+
 import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -238,7 +243,7 @@ export async function createCnRequest(ctx: AuthContext, raw: unknown): Promise<{
     data: { officerId: targetOfficerId, dealerId: data.dealerId, cnType: data.cnType, amount: null, paymentStatus: null, details: data.details, status: "SUBMITTED" },
     select: { id: true },
   })) as { id: string };
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "cnRequest", entityId: created.id, summary: `CN Request (${data.cnType}) raised${targetOfficerId !== ctx.userId ? " for a team member" : ""}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "cnRequest", entityId: created.id, summary: `CN Request (${data.cnType}) raised${targetOfficerId !== ctx.userId ? " for a team member" : ""}` });
   return { id: created.id };
 }
 
@@ -354,6 +359,7 @@ export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequ
  * multipart flow and posting requires an Admin-entered actual ledger amount.
  */
 export async function actOnCnRequest(ctx: AuthContext, id: string, raw: unknown): Promise<{ status: string }> {
+  assertAdminPermission(ctx, "cnRequests", "reject");
   const L = await getResolvedLabels();
   const parsed = cnSchemas(L).act.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? L["cn_requests.validation.invalid_action"]);
@@ -373,15 +379,15 @@ export async function actOnCnRequest(ctx: AuthContext, id: string, raw: unknown)
     if (r.status !== "SUBMITTED") throw new ApiError(409, L["cn_requests.error.submitted_reject_only"]);
     const transitionAt = new Date();
     await prisma.cnRequest.update({ where: { id }, data: { status: CN_REQUEST_STATUSES.REJECTED, actedByRmId: ctx.userId, rejectedAt: transitionAt, ...rejectionData } });
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `CN Request rejected by RM (Reason: ${reason})` });
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `CN Request rejected by RM (Reason: ${reason})` });
     return { status: CN_REQUEST_STATUSES.REJECTED };
   }
 
-  if (ctx.role === Role.SUPER_ADMIN) {
+  if (isAdministrativeRole(ctx.role)) {
     if (r.status !== CN_REQUEST_STATUSES.SUBMITTED) throw new ApiError(409, L["cn_requests.error.submitted_reject_only"]);
     const transitionAt = new Date();
     await prisma.cnRequest.update({ where: { id }, data: { status: CN_REQUEST_STATUSES.REJECTED, actedByAdminId: ctx.userId, rejectedAt: transitionAt, ...rejectionData } });
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `CN Request rejected by Super Admin (Reason: ${reason})` });
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `CN Request rejected by ${ctx.designation ?? "Super Admin"} (Reason: ${reason})` });
     return { status: CN_REQUEST_STATUSES.REJECTED };
   }
 
@@ -464,7 +470,7 @@ export async function acceptCnRequest(
   rawUpload: CnWorkingUpload | null | undefined,
 ): Promise<{ status: string }> {
   const L = await getResolvedLabels();
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, L["cn_requests.error.admin_accept_only"]);
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["cn_requests.error.admin_accept_only"]);
   const parsed = cnSchemas(L).acceptance.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? L["cn_requests.validation.invalid_acceptance"]);
   const transitionAt = new Date();
@@ -495,6 +501,8 @@ export async function acceptCnRequest(
     if (!request) throw new ApiError(404, L["cn_requests.error.not_found"]);
     const postingExisting = request.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED && !isNotPosted;
     const acceptingSubmitted = request.status === CN_REQUEST_STATUSES.SUBMITTED;
+    if (acceptingSubmitted) assertAdminPermission(ctx, "cnRequests", "approve");
+    if (!isNotPosted) assertAdminPermission(ctx, "cnRequests", "post");
     if (!acceptingSubmitted && !postingExisting) {
       throw new ApiError(409, L["cn_requests.error.process_state"]);
     }
@@ -546,7 +554,7 @@ export async function acceptCnRequest(
           taskRescheduled: false,
           source: "ACCEPTANCE",
           requestKey: `acceptance:${id}`,
-          recordedById: ctx.userId,
+          recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
         },
       });
     }
@@ -557,7 +565,7 @@ export async function acceptCnRequest(
     ? `; Reason: ${acceptanceReason}${acceptanceReason === "OTHER" ? `; Details: ${acceptanceReasonDetails}` : ""}`
     : "";
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "cnRequest",
     entityId: id,
@@ -649,7 +657,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
     outstandingBefore: Number(event.outstandingBefore),
     outstandingAfter: Number(event.outstandingAfter),
     source: event.source,
-    recordedBy: event.recordedBy.name,
+    recordedBy: actorDisplayName(event.recordedBy.name, event.actorDesignation),
     createdAt: event.createdAt.toISOString(),
   }));
   const tasks = request.paymentEvents.filter((event) => event.taskStatus && event.taskAmount != null).map((event) => ({
@@ -661,7 +669,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
     createdAt: event.createdAt.toISOString(),
   }));
   const activeTask = [...request.paymentEvents].reverse().find((event) => event.taskStatus === "UNSCHEDULED" || event.taskStatus === "SCHEDULED");
-  const isAdmin = ctx.role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(ctx.role);
   const outstanding = num(request.paymentOutstandingAmount);
   const [verifiedRow] = await prisma.$queryRaw<{ paymentVerified: boolean }[]>(
     Prisma.sql`SELECT "paymentVerified" FROM "CnRequest" WHERE "id" = ${id}`,
@@ -679,7 +687,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
     expiryDate: request.acceptedAt ? cnRequestExpiryDateKey(request.acceptedAt, request.cnExpiryDays) : null,
     // SO reports a payment on the active SCHEDULED task; Admin verifies once the SO has reported a status.
     canUpdate: ctx.role === Role.SALES_OFFICER && ctx.userId === request.officerId && activeTask?.taskStatus === "SCHEDULED",
-    canVerify: isAdmin && request.paymentStatus != null && request.paymentStatus !== "Pending",
+    canVerify: isAdmin && hasAdminPermission(ctx, "cnRequests", "verifyPayment") && request.paymentStatus != null && request.paymentStatus !== "Pending",
     paymentVerified: verifiedRow?.paymentVerified ?? false,
     isAdmin,
     activeTaskId: activeTask?.id ?? null,
@@ -815,12 +823,12 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
         taskRescheduled: taskStatus === "SCHEDULED",
         source: "SO_UPDATE",
         requestKey: data.requestKey,
-        recordedById: ctx.userId,
+        recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
       },
     });
   });
   await writeAudit({
-    userId: ctx.userId, action: "UPDATE", entity: "cnRequestPayment", entityId: id,
+    userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequestPayment", entityId: id,
     summary: `CN payment reported as ${data.status} (awaiting Admin verification)`,
   });
   return getCnPaymentDetail(ctx, id);
@@ -838,11 +846,13 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
  * history; a separate ADMIN_VERIFY event records the Admin decision.
  */
 export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown): Promise<CnPaymentDetailDto> {
+  assertAdminPermission(ctx, "cnRequests", "verifyPayment");
   const L = await getResolvedLabels();
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, L["cn_requests.error.admin_verify_only"]);
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["cn_requests.error.admin_verify_only"]);
   const parsed = paymentSchemas(L).verify.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? L["cn_requests.validation.invalid_payment_verification"]);
   const data = parsed.data;
+  if (data.status === "PAID") assertAdminPermission(ctx, "cnRequests", "post");
   const existingKey = await prisma.cnPaymentEvent.findUnique({ where: { requestKey: data.requestKey }, select: { cnRequestId: true } });
   if (existingKey) {
     if (existingKey.cnRequestId !== id) throw new ApiError(409, L["cn_requests.error.verification_key_used"]);
@@ -961,7 +971,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
           taskRescheduled: false,
           source: "ADMIN_VERIFY",
           requestKey: data.requestKey,
-          recordedById: ctx.userId,
+          recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
         },
       });
       if (data.status !== "PAID") return { idempotent: false, posted: false, postedAmount: null, documentName: null };
@@ -993,7 +1003,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
   }
   if (postingResult.idempotent) return getCnPaymentDetail(ctx, id);
   await writeAudit({
-    userId: ctx.userId, action: "UPDATE", entity: "cnRequestPayment", entityId: id,
+    userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequestPayment", entityId: id,
     summary: `CN payment verified as ${data.status}`,
   });
   if (postingResult.posted) {
@@ -1160,7 +1170,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
       // (Raw SQL — the column is not part of the generated client type.)
       await tx.$executeRaw(Prisma.sql`UPDATE "CnPaymentEvent" SET "dailyWorkConfirmed" = false WHERE "id" = ${taskId}`);
       const refreshed = await tx.cnPaymentEvent.findUniqueOrThrow({ where: { id: taskId }, include: { cnRequest: { include: { dealer: true } } } });
-      await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "cnPaymentTask", entityId: taskId, summary: `CN Recovery task scheduled for ${taskDate}` }, tx);
+      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnPaymentTask", entityId: taskId, summary: `CN Recovery task scheduled for ${taskDate}` }, tx);
       return toNewTaskDto(refreshed);
     }
 
@@ -1194,7 +1204,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
     if (updated === 0) throw new ApiError(409, L["cn_requests.error.legacy_task_inactive"]);
     const rows = await tx.$queryRaw<LegacyCnTaskRawRow[]>(Prisma.sql`${LEGACY_TASK_SELECT} WHERE c."id" = ${id}`);
     if (!rows[0]) throw new ApiError(409, L["cn_requests.error.legacy_task_inactive"]);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `Legacy CN follow-up task scheduled for ${taskDate}` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `Legacy CN follow-up task scheduled for ${taskDate}` }, tx);
     return toLegacyTaskDto(rows[0]);
   }, { timeout: 15_000 });
 }
@@ -1244,7 +1254,7 @@ export async function confirmMaterializedAutoTask(ctx: AuthContext, id: string, 
         UPDATE "CnPaymentEvent" SET "dailyWorkConfirmed" = true
         WHERE "id" = ${taskId} AND "taskStatus" = 'SCHEDULED' AND "dailyWorkEntryId" IS NOT NULL`);
       const refreshed = await tx.cnPaymentEvent.findUniqueOrThrow({ where: { id: taskId }, include: { cnRequest: { include: { dealer: true } } } });
-      await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "cnPaymentTask", entityId: taskId, summary: "CN Auto Task confirmed for today's Daily Work" }, tx);
+      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnPaymentTask", entityId: taskId, summary: "CN Auto Task confirmed for today's Daily Work" }, tx);
       return toNewTaskDto(refreshed, true);
     }
 
@@ -1266,7 +1276,7 @@ export async function confirmMaterializedAutoTask(ctx: AuthContext, id: string, 
         AND "legacyDailyWorkEntryId" IS NOT NULL`);
     const rows = await tx.$queryRaw<LegacyCnTaskRawRow[]>(Prisma.sql`${LEGACY_TASK_SELECT} WHERE c."id" = ${id}`);
     if (!rows[0]) throw new ApiError(409, L["cn_requests.error.legacy_task_inactive"]);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "cnRequest", entityId: id, summary: "Legacy CN Auto Task confirmed for today's Daily Work" }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequest", entityId: id, summary: "Legacy CN Auto Task confirmed for today's Daily Work" }, tx);
     return toLegacyTaskDto(rows[0]);
   }, { timeout: 15_000 });
 }

@@ -170,7 +170,7 @@ export async function applyConversionQuantity(
     },
   });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "dealerSchemePlan",
     entityId: plan.id,

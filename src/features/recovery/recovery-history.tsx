@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -46,7 +48,7 @@ function DeltaSpan({ value }: { value: number }) {
 }
 
 export function RecoveryHistory({ id, role }: { id: string; role: Role }) {
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const { data: timeline, isLoading: tLoading } = useQuery<{ items: Snapshot[] }>({
     queryKey: ["recovery-timeline", id],
     queryFn: () => api.get(`/api/recovery/plans/${id}/timeline`),

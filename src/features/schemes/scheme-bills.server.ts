@@ -1,3 +1,4 @@
+import { isAdministrativeRole } from "@/features/accounts/permissions";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
@@ -152,13 +153,13 @@ export async function saveBillConversion(ctx: AuthContext, planId: string, commo
         }
       }
     }
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: JSON.stringify({ event: "SO combined bills submitted", before: { ...plan, bills: before }, after: { ...common, billing: data } }) }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: JSON.stringify({ event: "SO combined bills submitted", before: { ...plan, bills: before }, after: { ...common, billing: data } }) }, tx);
     return { ok: true as const };
   }, { timeout: 15000 });
 }
 interface AdminCommon { adminConversionDate: Date; adminBookingStatus: "RECEIVED" | "PARTIAL" | "NOT_RECEIVED"; adminBookingAmount?: number | null; adminBookingSchemeCount?: number | null; adminDocumentStatus: string; adminPrePlacementDays?: number | null; remarks?: string }
 export async function verifyBills(ctx: AuthContext, planId: string, common: AdminCommon, raw: unknown) {
-  if (ctx.role !== "SUPER_ADMIN") throw new ApiError(403, "Only Admin can verify bills");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only Admin can verify bills");
   const data = parse(adminPlanBills, raw);
   const { source, scope } = await prepare(ctx, planId);
   // Product-rate billing derives verified amounts from Admin ACTUAL quantities × historical rates. The result
@@ -251,7 +252,7 @@ export async function verifyBills(ctx: AuthContext, planId: string, common: Admi
     }
     // Persist booking coverage via raw SQL (client not regenerated in this environment). Additive + null-safe.
     await tx.$executeRaw`UPDATE "DealerSchemePlan" SET "adminBookingSchemeCount" = ${bookingSchemeCount} WHERE "id" = ${planId}`;
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: JSON.stringify({ event: "Admin combined bill verification", before: { ...plan, bills: before }, after: { ...common, billing: data, bookingReserved: booking, enrolled: complete } }) }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: JSON.stringify({ event: "Admin combined bill verification", before: { ...plan, bills: before }, after: { ...common, billing: data, bookingReserved: booking, enrolled: complete } }) }, tx);
     return { enrolled: complete, eligible: complete };
   }, { timeout: 15000 });
 }

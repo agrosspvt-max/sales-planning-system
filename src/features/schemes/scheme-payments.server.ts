@@ -1,5 +1,7 @@
 import "server-only";
-import { Role, SchemeEnrollmentStatus } from "@prisma/client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
+import { SchemeEnrollmentStatus } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -78,7 +80,7 @@ async function assertPlanInScope(ctx: AuthContext, salesOfficerId: string): Prom
  * immediate re-submit (double-click), complementing the button-disable on the client.
  */
 export async function addSchemePayment(ctx: AuthContext, planId: string, raw: unknown): Promise<{ paymentId: string; allocations: AllocLine[] }> {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can record payments");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can record payments");
   const { amount, receivedDate, note } = addSchema.parse(raw);
 
   const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id: planId }, select: { id: true, salesOfficerId: true, enrollmentStatus: true } })) as

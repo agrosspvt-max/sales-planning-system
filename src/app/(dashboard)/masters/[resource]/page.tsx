@@ -19,7 +19,7 @@ export default async function MasterResourcePage({
   const session = await auth();
   const role = session!.user.role;
   const key = resource as Resource;
-  if (!can(role, key, "read")) return <Forbidden />;
+  if (!can(role, key, "read", session!.user.permissions)) return <Forbidden />;
 
   // The flat Users page is replaced by the Group View | All Users management screen.
   // A Regional Manager sees a scoped, read-only variant (their group's officers only).
@@ -28,5 +28,5 @@ export default async function MasterResourcePage({
     return <UsersManagement role={role} groupId={ctx.groupId} />;
   }
 
-  return <ResourcePage config={config} canWrite={can(role, key, "create")} />;
+  return <ResourcePage config={config} canWrite={can(role, key, "create", session!.user.permissions)} canEdit={can(role, key, "update", session!.user.permissions)} canDeactivate={can(role, key, "delete", session!.user.permissions)} />;
 }

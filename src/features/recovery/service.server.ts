@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { recoveryCalendar, type MonthIdentity } from "@/lib/season-calendar";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -28,7 +30,7 @@ type Tx = any;
 const EDITABLE: PlanStatus[] = [PlanStatus.DRAFT, PlanStatus.RETURNED, PlanStatus.REJECTED];
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can upload the Aging Report");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can upload the Aging Report");
 }
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -591,7 +593,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   );
 
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "CREATE",
     entity: "recoveryPlan",
     summary: `Recovery created from ${filename} — ${planIds.length} officer plan(s), ${dealerCount} dealers, ${billCount} bills`,
@@ -678,7 +680,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   const pending = plan.status === PlanStatus.PENDING_RM || plan.status === PlanStatus.PENDING_ADMIN;
   const weekEditable = canManage && plan.weeklyEditEnabled && !pending && isLive;
   // Admin Override: a Super Admin may correct an APPROVED, live recovery plan (read-only flag only).
-  const canAdminEdit = ctx.role === Role.SUPER_ADMIN && plan.status === PlanStatus.APPROVED && isLive;
+  const canAdminEdit = isAdministrativeRole(ctx.role) && plan.status === PlanStatus.APPROVED && isLive;
   const weekCount = weekCountForCutoff();
 
   // Per-week "This Week's Due": distribute the month's Due across the four business weeks by each
@@ -854,7 +856,7 @@ const weekSchema = z.object({
  * resubmit a plan sent back to the team. Any other status keeps the existing owner/admin-only rule.
  */
 async function canManageRecovery(ctx: AuthContext, officerId: string, status: PlanStatus): Promise<boolean> {
-  if (ctx.role === Role.SUPER_ADMIN || isPlanOwner(ctx, officerId)) return true;
+  if (isAdministrativeRole(ctx.role) || isPlanOwner(ctx, officerId)) return true;
   if (ctx.role === Role.REGIONAL_MANAGER && status === PlanStatus.RETURNED) {
     const scope = await getOfficerScope(ctx);
     return scope.all || scope.ids.includes(officerId);
@@ -937,7 +939,7 @@ export async function toggleRecoveryWeekLock(ctx: AuthContext, id: string, raw: 
     create: { recoveryPlanId: id, weekNo, locked: next },
     update: { locked: next },
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "recoveryPlan", entityId: id, summary: `Week ${weekNo} manually ${next ? "locked" : "unlocked"} (admin override)` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "recoveryPlan", entityId: id, summary: `Week ${weekNo} manually ${next ? "locked" : "unlocked"} (admin override)` });
   return { weekNo, locked: next };
 }
 
@@ -1072,7 +1074,7 @@ export async function uploadWeeklyAging(ctx: AuthContext, buffer: Buffer, filena
     { timeout: 60000, maxWait: 10000 },
   );
 
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "recoveryPlan", entityId: plan.id, summary: `Weekly Aging (week ${input.weekNo}) for ${filename}: +${outstandingIncreased}/-${outstandingDecreased} outstanding, ${newDealers} new, ${removedDealers} removed` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "recoveryPlan", entityId: plan.id, summary: `Weekly Aging (week ${input.weekNo}) for ${filename}: +${outstandingIncreased}/-${outstandingDecreased} outstanding, ${newDealers} new, ${removedDealers} removed` });
   return summary;
 }
 
@@ -1302,7 +1304,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
 
   // Audit ALWAYS runs now (the batch never aborts mid-way), so partial progress is recorded truthfully.
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "recoveryPlan",
     summary: `Update Recovery from ${filename}: ${updatedPlans} updated, ${skipped.length} skipped, ${failed.length} failed, ${dealersRefreshed} dealer(s), ₹${Math.round(totalOutstandingDelta)} outstanding change`,
@@ -1714,7 +1716,7 @@ async function applyStaticOutstanding(
   }
 
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "recoveryPlan",
     summary: `Static Outstanding from ${filename}: ${officers.size} officer(s), ${updatedDealers} dealer(s) — Outstanding Till Date only (live aging untouched)`,
@@ -1806,7 +1808,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
         failedOfficers.push({ officerId: p.officerId, officerName: p.officer.name, reason: "Replace did not complete — you can retry this officer." });
       }
     }
-    await writeAudit({ userId: ctx.userId, action: "REPLACE", entity: "recoveryPlan", summary: `Recovery reset & refreshed from ${filename} (${replaced} plan(s), ${failedOfficers.length} failed)` });
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "REPLACE", entity: "recoveryPlan", summary: `Recovery reset & refreshed from ${filename} (${replaced} plan(s), ${failedOfficers.length} failed)` });
   } else {
     // UPDATE: refresh aging only (officer planning preserved) via the shared batch service, which is
     // itself resilient and returns per-officer failures.
@@ -2055,7 +2057,7 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
   const receiptTotal = matched.reduce((t, m) => t + m.receipt, 0);
   const srCrTotal = matched.reduce((t, m) => t + m.srCr, 0);
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "recoveryPlan",
     summary: `Day Book upload for ${res.seasonName} · ${res.monthName} (${filename}): ${matched.length} dealer(s) updated — Receipts ₹${Math.round(receiptTotal)}, SR/CR ₹${Math.round(srCrTotal)}`,

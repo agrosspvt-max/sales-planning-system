@@ -1,6 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
-import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
@@ -66,7 +67,7 @@ export async function setMonthStatus(
   seasonMonthId: string,
   next: MonthStatus,
 ): Promise<{ id: string; status: MonthStatus }> {
-  if (ctx.role !== Role.SUPER_ADMIN) {
+  if (!isAdministrativeRole(ctx.role)) {
     throw new ApiError(403, "Only the Super Admin can open or close planning months");
   }
   const month = (await prisma.seasonMonth.findUnique({
@@ -81,7 +82,7 @@ export async function setMonthStatus(
   }
   await prisma.seasonMonth.update({ where: { id: seasonMonthId }, data: { status: next } });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "seasonMonth",
     entityId: seasonMonthId,

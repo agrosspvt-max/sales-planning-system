@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import * as XLSX from "xlsx";
 import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -11,7 +13,7 @@ import { writeAudit } from "@/lib/audit";
 import { createDealerForOfficer } from "@/features/planning/monthly-plan.server";
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can manage dealer aliases");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can manage dealer aliases");
 }
 
 const HEADER = /^(dealer\s*name|dealer\s*alias|system\s*dealer|tally\s*dealer)$/i;
@@ -329,7 +331,7 @@ export async function importDealerAliases(ctx: AuthContext, buffer: Buffer): Pro
   r.updated = r.aliasesAdded;
 
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "CREATE",
     entity: "dealerAlias",
     summary: `Dealer+Alias import — ${r.createdDealers} created, ${r.aliasesAdded} aliases added, ${r.statusUpdated} status updated, ${r.addedToSeasonalPlans} added to plans, ${r.errors} errors`,

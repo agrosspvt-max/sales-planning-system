@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     const auth = await requirePermission("dealerAssignments", "create");
     const body = await req.json();
     await assignDealer(body);
-    await writeAudit({ userId: auth.userId, action: "CREATE", entity: "dealerAssignments" });
+    await writeAudit({ userId: auth.userId, actorDesignation: auth.designation, action: "CREATE", entity: "dealerAssignments" });
     return ok({ success: true }, 201);
   });
 }

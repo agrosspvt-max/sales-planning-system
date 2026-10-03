@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -126,7 +128,7 @@ export function PlanWorkspace({
       {detail.revisionRequested && (
         <div className="rounded-md border border-info/40 bg-info/10 p-3 text-sm">
           A revision has been requested{detail.revisionReason ? `: “${detail.revisionReason}”` : "."}
-          {role === Role.SUPER_ADMIN && " Authorize it to open a new editable version."}
+          {isAdministrativeRole(role) && " Authorize it to open a new editable version."}
         </div>
       )}
 

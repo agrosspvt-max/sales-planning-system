@@ -13,7 +13,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const auth = await requirePermission("seasons", "update");
     const { status } = bodySchema.parse(await req.json());
     await setSeasonStatus(id, status);
-    await writeAudit({ userId: auth.userId, action: "UPDATE", entity: "seasons", entityId: id });
+    await writeAudit({ userId: auth.userId, actorDesignation: auth.designation, action: "UPDATE", entity: "seasons", entityId: id });
     return ok({ id, status });
   });
 }

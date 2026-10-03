@@ -1,4 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { assertAdminPermission } from "@/features/accounts/permissions";
+
 import { Role, NotificationType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -8,7 +11,7 @@ import { createNotification } from "@/features/notifications/service.server";
 /** Legacy free-text requests remain readable/declinable. They are not migrated or
  * assigned an invented year. All new extensions use Seasons → Add Months. */
 export async function requestMonthExtension(ctx: AuthContext, _seasonId: string, _monthNameRaw: string): Promise<{ id: string }> {
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Not permitted to request a month extension");
+  if (ctx.role !== Role.SALES_OFFICER && !isAdministrativeRole(ctx.role)) throw new ApiError(403, "Not permitted to request a month extension");
   throw new ApiError(410, "Free-text month requests are retired. Ask the Super Admin to use Seasons → Add Months.");
 }
 
@@ -49,7 +52,9 @@ export async function decideMonthExtension(
   approve: boolean,
   note?: string,
 ) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can decide a month extension");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can decide a month extension");
+  assertAdminPermission(ctx, "approvals", approve ? "approve" : "reject");
+  assertAdminPermission(ctx, "salesPlanning", approve ? "approve" : "reject");
   const req = await prisma.monthExtensionRequest.findUnique({ where: { id: requestId } });
   if (!req) throw new ApiError(404, "Request not found");
   if (req.status !== "PENDING") throw new ApiError(409, "This request has already been decided");

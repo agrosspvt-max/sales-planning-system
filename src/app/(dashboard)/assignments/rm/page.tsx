@@ -6,7 +6,7 @@ import { AssignmentPage } from "@/features/assignments/assignment-page";
 export default async function Page() {
   const session = await auth();
   const role = session!.user.role;
-  if (!can(role, "rmAssignments", "read")) return <Forbidden />;
+  if (!can(role, "rmAssignments", "read", session!.user.permissions)) return <Forbidden />;
 
   return (
     <AssignmentPage
@@ -15,7 +15,7 @@ export default async function Page() {
         description:
           "Assign Sales Officers to Regional Managers. Officers without an assignment report directly to the Super Admin.",
         endpoint: "/api/rm-assignments",
-        canManage: can(role, "rmAssignments", "create"),
+        canManage: can(role, "rmAssignments", "create", session!.user.permissions),
         columns: [
           { key: "officerName", label: "Sales Officer" },
           { key: "managerName", label: "Regional Manager" },

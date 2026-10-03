@@ -1,7 +1,9 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { Role, type Prisma } from "@prisma/client";
+import { type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
@@ -28,7 +30,7 @@ const reviewSchema = z.object({
 });
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const assertAdmin = (ctx: AuthContext) => {
-  if (ctx.role !== Role.SUPER_ADMIN)
+  if (!isAdministrativeRole(ctx.role))
     throw new ApiError(403, "Only the Super Admin can import historical Day Book receipts.");
 };
 type DB = Prisma.TransactionClient;

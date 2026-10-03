@@ -1,6 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
-import { Role } from "@prisma/client";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { PLANNING_MODES } from "@/lib/calc";
 import { getPlanningConfig, savePlanningConfig, type PlanningConfig } from "@/lib/planning-config";
@@ -8,7 +9,7 @@ import { getRecoveryConfig, saveRecoveryConfig, type RecoveryConfig } from "@/li
 import { writeAudit } from "@/lib/audit";
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) {
+  if (!isAdministrativeRole(ctx.role)) {
     throw new ApiError(403, "Only the Super Admin can change planning configuration");
   }
 }
@@ -29,7 +30,7 @@ export async function updatePlanningConfig(ctx: AuthContext, raw: unknown): Prom
   const config = configSchema.parse(raw) as PlanningConfig;
   const saved = await savePlanningConfig(config);
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "planningConfig",
     summary: `Planning configuration set — Seasonal: ${saved.seasonalMode}, Monthly: ${saved.monthlyMode}`,
@@ -55,7 +56,7 @@ export async function updateRecoveryConfig(ctx: AuthContext, raw: unknown): Prom
   const config = recoveryConfigSchema.parse(raw) as RecoveryConfig;
   const saved = await saveRecoveryConfig(config);
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "recoveryConfig",
     summary: `Recovery configuration set — Due Recovery Validation: ${saved.dueValidation ? "ON" : "OFF"}, Calendar: ${saved.calendarEnabled ? "ON" : "OFF"}, Auto Tasks: ${saved.autoTasksEnabled ? "ON" : "OFF"}`,

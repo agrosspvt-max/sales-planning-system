@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -110,7 +112,7 @@ export function MonthlyPlanActions({
   // Super Admin has full override authority: may approve/return from EITHER Pending RM or Pending Super
   // Admin (approving a Pending-RM plan finalizes it directly, skipping the RM). RM/Officer flow unchanged.
   const isRmApprover = role === Role.REGIONAL_MANAGER && status === "PENDING_RM";
-  const isAdminApprover = role === Role.SUPER_ADMIN && (status === "PENDING_ADMIN" || status === "PENDING_RM");
+  const isAdminApprover = isAdministrativeRole(role) && (status === "PENDING_ADMIN" || status === "PENDING_RM");
   if (isRmApprover || isAdminApprover) {
     buttons.push(
       <Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>Approve</Button>,

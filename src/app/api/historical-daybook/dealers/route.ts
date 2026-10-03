@@ -1,11 +1,11 @@
-import { Role } from "@prisma/client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { prisma } from "@/lib/prisma";
 import { ApiError, handle, ok, requireAuth } from "@/lib/http";
 import { resolveDealerDisplayNames } from "@/lib/dealer-display-name.server";
 export async function GET() {
   return handle(async () => {
     const auth = await requireAuth();
-    if (auth.role !== Role.SUPER_ADMIN)
+    if (!isAdministrativeRole(auth.role))
       throw new ApiError(403, "Only the Super Admin can review historical receipts.");
     const dealers = await prisma.dealer.findMany({
       where: { isActive: true },

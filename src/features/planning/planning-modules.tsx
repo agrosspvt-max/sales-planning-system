@@ -6,6 +6,9 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/layout/page-header";
+import { useContext } from "react";
+import { PermissionContext } from "@/features/accounts/permission-ui";
+import { mayEnterPage } from "@/features/accounts/permissions";
 
 export type PlanningWorkspaceMode = "create" | "view";
 
@@ -25,6 +28,7 @@ interface Module {
  * The optional `mode` is kept only for backward-compatible deep links and no longer changes the landing.
  */
 export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?: PlanningWorkspaceMode; schemePlanningEnabled?: boolean }) {
+  const identity = useContext(PermissionContext);
   void mode;
   const modules: Module[] = [
     {
@@ -49,7 +53,7 @@ export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?
         subtitle="Choose a planning module. Each module lets you create new plans or view submitted, approved and historical plans."
       />
       <div className="grid gap-4 sm:grid-cols-2">
-        {modules.map((m) => {
+        {modules.filter(m => mayEnterPage(identity, m.href)).map((m) => {
           const Icon = m.icon;
           const inner = (
             <Card

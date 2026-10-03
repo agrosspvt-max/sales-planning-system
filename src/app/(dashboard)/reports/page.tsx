@@ -1,5 +1,7 @@
+import { auth } from "@/auth";
 import { ReportsPage } from "@/features/reports/reports-page";
 
-export default function Page() {
+export default async function Page() {
+  await auth();
   return <ReportsPage />;
 }

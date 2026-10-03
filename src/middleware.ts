@@ -1,16 +1,23 @@
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
+import { NextResponse } from "next/server";
 
-export const { auth: middleware } = NextAuth(authConfig);
+const { auth: withAuth } = NextAuth(authConfig);
 
-export default middleware((req) => {
+export const middleware = withAuth((req) => {
   // The `authorized` callback in authConfig decides access; this wrapper is
   // required so Next.js applies it as middleware.
-  void req;
+  const headers = new Headers(req.headers);
+  // Overwrite untrusted client headers on every page/API request.
+  headers.set("x-account-request-path", req.nextUrl.pathname);
+  headers.set("x-account-request-method", req.method);
+  return NextResponse.next({ request: { headers } });
 });
 
+export default middleware;
+
 export const config = {
-  // Protect page routes only. API routes self-guard via requireAuth/requirePermission,
-  // so they are excluded here to keep JSON error responses (not HTML redirects).
-  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+  // Pages and APIs need trusted request context. API authentication remains in the
+  // handlers so authorization failures retain JSON responses rather than redirects.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };

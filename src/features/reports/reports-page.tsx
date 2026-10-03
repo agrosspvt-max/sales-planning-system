@@ -1,4 +1,5 @@
 "use client";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
@@ -68,6 +69,7 @@ function formatCell(value: string | number, format: CellFormat): string {
 }
 
 export function ReportsPage({ initialType = "product", lockType = false, title }: { initialType?: ReportType; lockType?: boolean; title?: string } = {}) {
+  const canExport = useAdminPermission("reports", "export");
   const [baseType, setBaseType] = useState<ReportType>(initialType);
   const [seasonId, setSeasonId] = useState("");
   const [drill, setDrill] = useState<DrillStep[]>([]);
@@ -130,7 +132,7 @@ export function ReportsPage({ initialType = "product", lockType = false, title }
         title={title ?? "Reports"}
         subtitle="Calculated live from approved plans and actual sales — nothing is stored."
         actions={
-          <Button
+          canExport ? <Button
             variant="outline"
             size="sm"
             asChild
@@ -139,7 +141,7 @@ export function ReportsPage({ initialType = "product", lockType = false, title }
             <a href={`/api/reports/export?${params.toString()}`}>
               <Download className="h-4 w-4" /> Export to Excel
             </a>
-          </Button>
+          </Button> : undefined
         }
       />
 

@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
@@ -51,11 +53,11 @@ const VIEW_SUBS: { value: ViewSub; label: string }[] = [
  * newest-first. History uses a dynamic "+ Add Filter" (Officer / Season / Region).
  */
 export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: string; mode: RecoveryMode }) {
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const isOfficer = role === Role.SALES_OFFICER;
   const isManager = role === Role.REGIONAL_MANAGER;
   const isCreate = mode === "create";
-  const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN";
+  const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN" | "CUSTOM_ADMIN";
 
   const [viewSub, setViewSub] = useState<ViewSub>("SUBMITTED");
   const [historyFilters, setHistoryFilters] = useState<Record<string, string[]>>({});

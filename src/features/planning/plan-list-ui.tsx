@@ -50,11 +50,11 @@ export interface Section<T> {
  */
 export function roleSections<T extends { officerId: string }>(
   rows: T[],
-  role: "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN",
+  role: "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN" | "CUSTOM_ADMIN",
   userId: string,
   labels: { mine: string; team: string; admin: string },
 ): Section<T>[] {
-  if (role === "SUPER_ADMIN") return [{ key: "all", title: labels.admin, rows }];
+  if (role === "SUPER_ADMIN" || role === "CUSTOM_ADMIN") return [{ key: "all", title: labels.admin, rows }];
   if (role === "REGIONAL_MANAGER") {
     return [
       { key: "mine", title: labels.mine, rows: rows.filter((r) => r.officerId === userId) },

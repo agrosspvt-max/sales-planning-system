@@ -1,6 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
-import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
@@ -22,7 +23,7 @@ export type PriceField =
 export type PriceMapping = Partial<Record<PriceField, string>>; // field → header name
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can import");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can import");
 }
 
 function headerSignature(headers: string[]): string {
@@ -291,7 +292,7 @@ export async function commitPriceImport(ctx: AuthContext, raw: unknown): Promise
   }
 
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "priceImport",
     summary: `${summary.newProducts} new, ${summary.updatedProducts} updated products`,

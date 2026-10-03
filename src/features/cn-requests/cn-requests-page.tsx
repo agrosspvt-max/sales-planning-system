@@ -1,4 +1,7 @@
 "use client";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -66,10 +69,13 @@ const businessDate = (s: string) => new Date(`${s}T00:00:00`).toLocaleDateString
  * role server-side; the columns and layout are identical for every role.
  */
 export function CnRequestsPage({ role, userId }: { role: Role; userId: string }) {
+  const allowAccept = useAdminPermission("cnRequests", "approve");
+  const allowReject = useAdminPermission("cnRequests", "reject");
+  const allowPost = useAdminPermission("cnRequests", "post");
   const qc = useQueryClient();
   const isOfficer = role === Role.SALES_OFFICER;
   const isManager = role === Role.REGIONAL_MANAGER;
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const canCreate = isOfficer || isManager; // RM can also raise requests for their own dealers
 
   const labels = {
@@ -236,9 +242,9 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   // RM retains team rejection. Super Admin alone accepts and performs explicit posting.
   const canReject = (r: CnRequest) =>
     (isManager && r.status === CN_REQUEST_STATUSES.SUBMITTED && r.officerId !== userId) ||
-    (isAdmin && r.status === CN_REQUEST_STATUSES.SUBMITTED);
-  const canAccept = (r: CnRequest) => isAdmin && r.status === CN_REQUEST_STATUSES.SUBMITTED;
-  const canPost = (r: CnRequest) => isAdmin && r.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED;
+    (isAdmin && allowReject && r.status === CN_REQUEST_STATUSES.SUBMITTED);
+  const canAccept = (r: CnRequest) => isAdmin && allowAccept && r.status === CN_REQUEST_STATUSES.SUBMITTED;
+  const canPost = (r: CnRequest) => isAdmin && allowPost && r.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED;
   const showExpires = view === "accepted-not-posted";
   // Amount and Payment Status are intentionally shown only in the Accepted section.
   const showAmountPayment = section === "accepted";

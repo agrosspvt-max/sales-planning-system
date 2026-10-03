@@ -1,6 +1,8 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
-import { PlanStatus, Role } from "@prisma/client";
+import { PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope, isPlanOwner } from "@/lib/scope";
@@ -75,7 +77,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
   return {
     planId: plan.id,
     seasonName: season ? `${season.name} ${season.year}` : "",
-    canEdit: isOwner || ctx.role === Role.SUPER_ADMIN, // manual actuals: owner SO or admin
+    canEdit: isOwner || isAdministrativeRole(ctx.role), // manual actuals: owner SO or admin
     monthlyMode,
     months: calendarRows(months).map((m) => {
       const status = ((m as { status?: string }).status as MonthStatus) ?? "OPEN";
@@ -204,7 +206,7 @@ export async function saveMonthly(ctx: AuthContext, planId: string, raw: unknown
   // also enter actuals (manual Actual Sales entry) on any plan. Manual entry and the future
   // Tally Import write to the SAME MonthlyEntry records — one actual-sales store.
   const isOwner = isPlanOwner(ctx, plan.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) {
+  if (!(isOwner || isAdministrativeRole(ctx.role))) {
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can enter monthly figures");
   }
 

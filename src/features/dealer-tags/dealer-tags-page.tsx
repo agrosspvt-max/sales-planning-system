@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { refreshDealerTags } from "./refresh";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -37,7 +39,7 @@ export function DealerTagsPage({ role }: { role: Role }) {
   const act = useMutation({
     mutationFn: () =>
       api.post(
-        role === Role.SUPER_ADMIN ? "/api/dealer-tags/direct" : "/api/dealer-tags/requests",
+        isAdministrativeRole(role) ? "/api/dealer-tags/direct" : "/api/dealer-tags/requests",
         { dealerId, tagId, operation },
       ),
     onSuccess: async () => {
@@ -50,7 +52,7 @@ export function DealerTagsPage({ role }: { role: Role }) {
       <PageHeader
         title="Dealer Tags"
         subtitle={
-          role === Role.SUPER_ADMIN
+          isAdministrativeRole(role)
             ? "Direct Admin assignment/revocation takes effect immediately."
             : "Request an addition or revocation. Existing markers change only after final approval."
         }
@@ -100,7 +102,7 @@ export function DealerTagsPage({ role }: { role: Role }) {
             disabled={!selected || !choices.some((t) => t.id === tagId) || act.isPending}
             onClick={() => act.mutate()}
           >
-            {role === Role.SUPER_ADMIN
+            {isAdministrativeRole(role)
               ? operation === "ADD"
                 ? "Assign Tag"
                 : "Revoke Tag"
@@ -117,7 +119,7 @@ export function DealerTagsPage({ role }: { role: Role }) {
       )}
       {act.isSuccess && (
         <p className="text-sm text-muted-foreground">
-          {role === Role.SUPER_ADMIN ? "Dealer tag updated." : "Request submitted for approval."}
+          {isAdministrativeRole(role) ? "Dealer tag updated." : "Request submitted for approval."}
         </p>
       )}
       <Input

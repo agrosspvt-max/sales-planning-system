@@ -26,7 +26,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ resource: 
     const auth = await requirePermission(resource, "create");
     const body = await req.json();
     const { id } = await createResource(resource, body);
-    await writeAudit({ userId: auth.userId, action: "CREATE", entity: resource, entityId: id });
+    await writeAudit({ userId: auth.userId, actorDesignation: auth.designation, action: "CREATE", entity: resource, entityId: id });
     return ok({ id }, 201);
   });
 }

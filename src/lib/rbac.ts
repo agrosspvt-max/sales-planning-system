@@ -1,4 +1,5 @@
 import { Role } from "@prisma/client";
+import { hasAdminPermission, type AdminModule, type AdminPermissions } from "@/features/accounts/permissions";
 
 /**
  * Master data and administrative resources managed in Phase 1.
@@ -36,6 +37,7 @@ export type Action = "read" | "create" | "update" | "delete";
  * hierarchy is visible; write access is Super-Admin-only).
  */
 const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
+  [Role.CUSTOM_ADMIN]: {}, // Explicit user grants, checked on the server, never inherited from a title.
   [Role.SUPER_ADMIN]: {
     users: ["read", "create", "update", "delete"],
     products: ["read", "create", "update", "delete"],
@@ -94,7 +96,8 @@ const MATRIX: Record<Role, Partial<Record<Resource, Action[]>>> = {
   },
 };
 
-export function can(role: Role, resource: Resource, action: Action): boolean {
+export function can(role: Role, resource: Resource, action: Action, permissions?: AdminPermissions): boolean {
+  if (role === Role.CUSTOM_ADMIN) return hasAdminPermission({ role, permissions }, resource === "announcements" ? "announcementMaster" : resource === "dealerTags" ? "tagMaster" : resource as AdminModule, action);
   return MATRIX[role]?.[resource]?.includes(action) ?? false;
 }
 
@@ -103,6 +106,7 @@ export function isSuperAdmin(role: Role): boolean {
 }
 
 export const ROLE_LABELS: Record<Role, string> = {
+  [Role.CUSTOM_ADMIN]: "Administrative Account",
   [Role.SUPER_ADMIN]: "Super Admin",
   [Role.REGIONAL_MANAGER]: "Regional Manager",
   [Role.SALES_OFFICER]: "Sales Officer",

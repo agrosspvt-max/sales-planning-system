@@ -1,4 +1,5 @@
 import { Role } from "@prisma/client";
+import { mayEnterPage, type AdminPermissions } from "@/features/accounts/permissions";
 import {
   LayoutDashboard,
   Package,
@@ -43,6 +44,7 @@ const ADMIN_ONLY = [Role.SUPER_ADMIN];
 const ALL_ROLES = [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER, Role.SALES_OFFICER];
 
 export const NAV_ITEMS: NavItem[] = [
+  { label: "Account Management", href: "/account-management", icon: Users, roles: ADMIN_ONLY, group: "Organization" },
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard, roles: ALL_ROLES },
   { label: "Company Onboarding", href: "/onboarding", icon: Rocket, roles: ADMIN_ONLY, group: "Setup" },
   { label: "Onboarding History", href: "/onboarding/history", icon: History, roles: ADMIN_ONLY, group: "Setup" },
@@ -128,8 +130,9 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "RM Assignments", href: "/assignments/rm", icon: Network, roles: ADMIN_ONLY, group: "Organization" },
 ];
 
-export function navForRole(role: Role, calendarEnabled = true): NavItem[] {
-  return NAV_ITEMS.filter((item) => item.roles.includes(role) && (calendarEnabled || item.href !== "/planning/calendar")).map((item) =>
-    item.children ? { ...item, children: item.children.filter((c) => c.roles.includes(role)) } : item,
-  );
+export function navForRole(role: Role, calendarEnabled = true, permissions?: AdminPermissions, accountOwner = false): NavItem[] {
+  const allowed = (item: NavItem) => item.href === "/account-management" ? accountOwner && role === Role.SUPER_ADMIN :
+    role === Role.CUSTOM_ADMIN ? mayEnterPage({ role, permissions }, item.href) : item.roles.includes(role);
+  return NAV_ITEMS.filter(item => (item.children ? item.children.some(allowed) : allowed(item)) && (calendarEnabled || item.href !== "/planning/calendar"))
+    .map(item => item.children ? { ...item, children: item.children.filter(allowed) } : item);
 }

@@ -1,5 +1,7 @@
 import "server-only";
-import { Role, PlanStatus, Prisma } from "@prisma/client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
+import { PlanStatus, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 
@@ -18,7 +20,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
  */
 
 function assertSuperAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can use Admin Edit Mode");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can use Admin Edit Mode");
 }
 function cleanReason(reason: unknown): string {
   const r = typeof reason === "string" ? reason.trim() : "";

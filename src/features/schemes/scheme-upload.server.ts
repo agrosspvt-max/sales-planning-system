@@ -1,6 +1,8 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
-import { Role, SchemeRequirementType, SchemeUploadStatus } from "@prisma/client";
+import { SchemeRequirementType, SchemeUploadStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
@@ -36,7 +38,7 @@ import { validateRange, schemeRangeInvalidReason, filterIncoming, type DateRange
  */
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can upload scheme sales");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can upload scheme sales");
 }
 
 /* --------------------------------- input --------------------------------- */

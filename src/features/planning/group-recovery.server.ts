@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -68,7 +70,7 @@ type PlanDealerRow = {
 };
 
 export async function getGroupRecovery(ctx: AuthContext, groupId: string, seasonId: string, seasonMonthId: string, bucketsIn: StatusBucket[], officerId?: string): Promise<GroupRecovery> {
-  if (ctx.role !== Role.SUPER_ADMIN && ctx.role !== Role.REGIONAL_MANAGER) {
+  if (!isAdministrativeRole(ctx.role) && ctx.role !== Role.REGIONAL_MANAGER) {
     throw new ApiError(403, "Only an admin or manager can view group recovery");
   }
   // A Regional Manager may only view their OWN group's recovery.

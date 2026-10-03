@@ -1,4 +1,7 @@
 "use client";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -36,6 +39,10 @@ interface ExtensionRequest {
 }
 
 export function ApprovalsInbox({ role, userId }: { role: Role; userId: string }) {
+  const useSales = useAdminPermission("salesPlanning");
+  const useRecovery = useAdminPermission("recoveryPlanning");
+  const useCn = useAdminPermission("cnRequests");
+  const useTags = useAdminPermission("dealerTags");
   const { data, isLoading } = useQuery<InboxItem[]>({
     queryKey: ["approvals"],
     queryFn: () => api.get<InboxItem[]>("/api/planning/approvals"),
@@ -96,11 +103,11 @@ export function ApprovalsInbox({ role, userId }: { role: Role; userId: string })
         </Table>
       </div>
 
-      <MonthlyApprovals role={role} />
-      <RecoveryApprovals role={role} />
-      <CnRequestApprovals role={role} userId={userId} />
-      <DealerTagRequests pendingOnly />
-      {role === Role.SUPER_ADMIN && <MonthExtensionReview />}
+      {useSales && <MonthlyApprovals role={role} />}
+      {useRecovery && <RecoveryApprovals role={role} />}
+      {useCn && <CnRequestApprovals role={role} userId={userId} />}
+      {useTags && <DealerTagRequests pendingOnly />}
+      {isAdministrativeRole(role) && useSales && <MonthExtensionReview />}
     </div>
   );
 }
@@ -286,7 +293,7 @@ function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["cn-requests"] }),
     onError: (e) => alert((e as Error).message),
   });
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const isManager = role === Role.REGIONAL_MANAGER;
   // Server returns SUBMITTED only; RM still cannot act on a request they raised themselves.
   const rows = useMemo(

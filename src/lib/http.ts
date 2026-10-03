@@ -5,21 +5,19 @@ import { prisma } from "@/lib/prisma";
 import { withDbRetry } from "@/lib/db-retry";
 import { can, type Action, type Resource } from "@/lib/rbac";
 import type { Role } from "@prisma/client";
-
-export class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+import { Role as Roles } from "@prisma/client";
+import { ApiError } from "@/lib/api-error";
+import { assertAdminPermission, canReadSeasonOptions, type AdminModule, type AdminPermissions } from "@/features/accounts/permissions";
+export { ApiError } from "@/lib/api-error";
 
 export interface AuthContext {
   userId: string;
   role: Role;
   username: string;
   groupId: string | null; // the caller's group (drives Regional-Manager group scoping)
+  designation?: string | null;
+  permissions?: AdminPermissions;
+  authenticationMethod?: string;
 }
 
 type AuthUserRow = {
@@ -99,6 +97,11 @@ export async function requireAuth(): Promise<AuthContext> {
   // turn every request into a 500. Security is not affected — the same user validation still runs.
   // Concurrent requests for the same (user, iat) share a single in-flight lookup (see loadAuthUser).
   const iat = session.user.iat;
+  if (session.user.role === Roles.CUSTOM_ADMIN) {
+    // auth() already validated the current DB account and grants; never use the TTL cache.
+    return { userId: session.user.id, role: session.user.role, username: session.user.username,
+      groupId: null, designation: session.user.designation, permissions: session.user.permissions, authenticationMethod: session.user.authenticationMethod };
+  }
   const user = await loadAuthUser(session.user.id, `${session.user.id}:${typeof iat === "number" ? iat : "0"}`);
   // Every request re-verifies the DB user: must exist, not be soft-deleted, and be active — so
   // deactivating/deleting a user takes effect immediately, even for an already-issued JWT. The most
@@ -113,7 +116,7 @@ export async function requireAuth(): Promise<AuthContext> {
     console.warn(`[requireAuth] 401 — session predates sessionValidAfter (id=${session.user.id})`);
     throw new ApiError(401, "Your session has expired. Please sign in again.");
   }
-  return { userId: user.id, role: user.role, username: user.username, groupId: user.groupId };
+  return { userId: user.id, role: user.role, username: user.username, groupId: user.groupId, authenticationMethod: session.user.authenticationMethod };
 }
 
 /** Resolve the session and assert a permission, or throw 401/403. */
@@ -122,6 +125,11 @@ export async function requirePermission(
   action: Action,
 ): Promise<AuthContext> {
   const ctx = await requireAuth();
+  if (ctx.role === Roles.CUSTOM_ADMIN) {
+    if (resource === "seasons" && action === "read" && canReadSeasonOptions(ctx)) return ctx;
+    assertAdminPermission(ctx, resource === "announcements" ? "announcementMaster" : resource === "dealerTags" ? "tagMaster" : resource as AdminModule, action);
+    return ctx;
+  }
   if (!can(ctx.role, resource, action)) {
     throw new ApiError(403, "You do not have permission to perform this action");
   }

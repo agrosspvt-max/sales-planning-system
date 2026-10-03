@@ -6,7 +6,7 @@ import { AssignmentPage } from "@/features/assignments/assignment-page";
 export default async function Page() {
   const session = await auth();
   const role = session!.user.role;
-  if (!can(role, "dealerAssignments", "read")) return <Forbidden />;
+  if (!can(role, "dealerAssignments", "read", session!.user.permissions)) return <Forbidden />;
 
   return (
     <AssignmentPage
@@ -14,7 +14,7 @@ export default async function Page() {
         title: "Dealer Assignments",
         description: "Assign dealers to a Sales Officer or Regional Manager. History is preserved automatically.",
         endpoint: "/api/dealer-assignments",
-        canManage: can(role, "dealerAssignments", "create"),
+        canManage: can(role, "dealerAssignments", "create", session!.user.permissions),
         columns: [
           { key: "dealerName", label: "Dealer" },
           { key: "officerName", label: "Owner" },

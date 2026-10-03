@@ -1,5 +1,9 @@
+import { actorDisplayName } from "@/features/accounts/identity";
+import { assertAdminPermission } from "@/features/accounts/permissions";
 import "server-only";
-import { PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
+import { PlanStatus, ApprovalActionType, NotificationType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope, getCurrentManagerId, isPlanOwner } from "@/lib/scope";
@@ -51,8 +55,8 @@ async function label(p: RecoveryRow): Promise<string> {
   const officer = await prisma.user.findUnique({ where: { id: p.officerId }, select: { name: true } });
   return `${officer?.name ?? "Officer"} — ${p.season.name} ${p.season.year} · ${p.seasonMonth.name} Recovery`;
 }
-async function record(p: { id: string }, actorId: string, action: ApprovalActionType, fromStatus: PlanStatus, toStatus: PlanStatus, remarks?: string) {
-  await prisma.approvalAction.create({ data: { recoveryPlanId: p.id, actorId, action, fromStatus, toStatus, remarks } });
+async function record(p: { id: string }, ctx: AuthContext, action: ApprovalActionType, fromStatus: PlanStatus, toStatus: PlanStatus, remarks?: string) {
+  await prisma.approvalAction.create({ data: { recoveryPlanId: p.id, actorId: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}), action, fromStatus, toStatus, remarks } });
 }
 
 export async function submitRecoveryPlan(ctx: AuthContext, id: string) {
@@ -79,7 +83,7 @@ export async function submitRecoveryPlan(ctx: AuthContext, id: string) {
   const managerId = await getCurrentManagerId(p.officerId);
   const nextStatus = managerId ? PlanStatus.PENDING_RM : PlanStatus.PENDING_ADMIN;
   await prisma.recoveryPlan.update({ where: { id }, data: { status: nextStatus, submittedAt: new Date() } });
-  await record(p, ctx.userId, ApprovalActionType.SUBMIT, p.status, nextStatus);
+  await record(p, ctx, ApprovalActionType.SUBMIT, p.status, nextStatus);
 
   const l = await label(p);
   if (nextStatus === PlanStatus.PENDING_RM && managerId) {
@@ -96,7 +100,7 @@ export async function recallRecoveryPlan(ctx: AuthContext, id: string) {
   if (!PENDING.includes(p.status)) throw new ApiError(409, "Only a submitted recovery plan can be recalled");
   assertRecoveryLive(p);
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.DRAFT } });
-  await record(p, ctx.userId, ApprovalActionType.RECALL, p.status, PlanStatus.DRAFT);
+  await record(p, ctx, ApprovalActionType.RECALL, p.status, PlanStatus.DRAFT);
   return { status: PlanStatus.DRAFT };
 }
 
@@ -104,51 +108,57 @@ async function assertApprover(ctx: AuthContext, p: RecoveryRow) {
   if (p.status === PlanStatus.PENDING_RM) {
     // Super Admin has FINAL authority and may act on a submitted plan directly — RM approval is optional
     // and never a prerequisite for the admin (so a plan stuck at Pending RM is still admin-actionable).
-    if (ctx.role === Role.SUPER_ADMIN) return;
+    if (isAdministrativeRole(ctx.role)) return;
     const managerId = await getCurrentManagerId(p.officerId);
     if (ctx.userId !== managerId) throw new ApiError(403, "Only the assigned Regional Manager or a Super Admin can act on this recovery plan");
   } else if (p.status === PlanStatus.PENDING_ADMIN) {
-    if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can act on this recovery plan");
+    if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can act on this recovery plan");
   } else {
     throw new ApiError(409, "This recovery plan is not awaiting approval");
   }
 }
 
 export async function approveRecoveryPlan(ctx: AuthContext, id: string) {
+  assertAdminPermission(ctx, "recoveryPlanning", "approve");
+  assertAdminPermission(ctx, "approvals", "approve");
   const p = await loadOr404(id);
   await assertApprover(ctx, p);
   assertRecoveryLive(p);
   // RM approving a Pending-RM plan advances it to Pending Super Admin (RM workflow UNCHANGED).
-  if (p.status === PlanStatus.PENDING_RM && ctx.role !== Role.SUPER_ADMIN) {
+  if (p.status === PlanStatus.PENDING_RM && !isAdministrativeRole(ctx.role)) {
     await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.PENDING_ADMIN } });
-    await record(p, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN);
+    await record(p, ctx, ApprovalActionType.APPROVE, PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN);
     await notifyMany(await getSuperAdminIds(), { type: NotificationType.PLAN_SUBMITTED, title: "Recovery plan awaiting Super Admin approval", message: `${await label(p)} was approved by the Regional Manager.`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });
     return { status: PlanStatus.PENDING_ADMIN };
   }
   // Super Admin approval is FINAL from EITHER Pending RM or Pending Super Admin → Approved (RM step
   // optional). fromStatus reflects the plan's actual prior state for a truthful audit trail.
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.APPROVED, approvedAt: new Date() } });
-  await record(p, ctx.userId, ApprovalActionType.APPROVE, p.status, PlanStatus.APPROVED);
+  await record(p, ctx, ApprovalActionType.APPROVE, p.status, PlanStatus.APPROVED);
   await createNotification({ userId: p.officerId, type: NotificationType.PLAN_APPROVED, title: "Recovery plan approved", message: `${await label(p)} has been approved.`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });
   return { status: PlanStatus.APPROVED };
 }
 
 export async function returnRecoveryPlan(ctx: AuthContext, id: string, remarks: string) {
+  assertAdminPermission(ctx, "recoveryPlanning", "return");
+  assertAdminPermission(ctx, "approvals", "return");
   const p = await loadOr404(id);
   await assertApprover(ctx, p);
   assertRecoveryLive(p);
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.RETURNED } });
-  await record(p, ctx.userId, ApprovalActionType.RETURN, p.status, PlanStatus.RETURNED, remarks);
+  await record(p, ctx, ApprovalActionType.RETURN, p.status, PlanStatus.RETURNED, remarks);
   await createNotification({ userId: p.officerId, type: NotificationType.PLAN_RETURNED, title: "Recovery plan returned", message: `${await label(p)} was returned: "${remarks}"`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });
   return { status: PlanStatus.RETURNED };
 }
 
 export async function rejectRecoveryPlan(ctx: AuthContext, id: string, remarks: string) {
+  assertAdminPermission(ctx, "recoveryPlanning", "reject");
+  assertAdminPermission(ctx, "approvals", "reject");
   const p = await loadOr404(id);
   await assertApprover(ctx, p);
   assertRecoveryLive(p);
   await prisma.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.REJECTED } });
-  await record(p, ctx.userId, ApprovalActionType.REJECT, p.status, PlanStatus.REJECTED, remarks);
+  await record(p, ctx, ApprovalActionType.REJECT, p.status, PlanStatus.REJECTED, remarks);
   await createNotification({ userId: p.officerId, type: NotificationType.PLAN_RETURNED, title: "Recovery plan rejected", message: `${await label(p)} was rejected: "${remarks}"`, relatedEntityType: "RecoveryPlan", relatedEntityId: id });
   return { status: PlanStatus.REJECTED };
 }
@@ -158,6 +168,6 @@ export async function getRecoveryHistory(ctx: AuthContext, id: string) {
   await assertOfficerInScope(ctx, p.officerId);
   const actions = await prisma.approvalAction.findMany({ where: { recoveryPlanId: id }, include: { actor: { select: { name: true } } }, orderBy: { createdAt: "asc" } });
   return {
-    timeline: actions.map((a) => ({ id: a.id, actorName: a.actor.name, action: a.action, fromStatus: a.fromStatus, toStatus: a.toStatus, remarks: a.remarks, createdAt: a.createdAt })),
+    timeline: actions.map((a) => ({ id: a.id, actorName: actorDisplayName(a.actor.name, a.actorDesignation), action: a.action, fromStatus: a.fromStatus, toStatus: a.toStatus, remarks: a.remarks, createdAt: a.createdAt })),
   };
 }

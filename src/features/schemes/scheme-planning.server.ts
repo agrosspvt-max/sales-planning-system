@@ -1,4 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { assertAdminPermission } from "@/features/accounts/permissions";
+
 import { saveBillConversion, verifyBills, rejectLegacyBillWrite } from "./scheme-bills.server";
 import { billDate } from "@/lib/scheme-bills";
 import type { BillInstanceInfo, PlanBillInfo } from "@/lib/scheme-bills";
@@ -29,7 +32,7 @@ import { applyConversionQuantity } from "./scheme-plan-quantity.server";
 /** OPEN schemes applicable to the caller's State (group). SO/RM see their own group's schemes; Admin sees all OPEN. */
 export async function eligibleSchemes(ctx: AuthContext): Promise<{ id: string; schemeName: string }[]> {
   await refreshSchemeStatuses();
-  const stateFilter = ctx.role === Role.SUPER_ADMIN || !ctx.groupId ? {} : { states: { some: { groupId: ctx.groupId } } };
+  const stateFilter = isAdministrativeRole(ctx.role) || !ctx.groupId ? {} : { states: { some: { groupId: ctx.groupId } } };
   const rows = (await prisma.scheme.findMany({
     where: { status: SchemeStatus.OPEN, ...stateFilter },
     orderBy: { schemeName: "asc" },
@@ -708,7 +711,7 @@ export async function createSchemePlan(ctx: AuthContext, raw: unknown): Promise<
   if (dup) throw new ApiError(409, "This dealer is already planned into this scheme");
 
   const created = (await prisma.dealerSchemePlan.create({ data: { schemeId, dealerId, salesOfficerId: ctx.userId, planningStatus: SchemePlanStatus.DRAFT }, select: { id: true } })) as { id: string };
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "dealerSchemePlan", entityId: created.id, summary: "Scheme plan drafted" });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "dealerSchemePlan", entityId: created.id, summary: "Scheme plan drafted" });
   return { id: created.id };
 }
 
@@ -732,7 +735,7 @@ export async function submitSchemePlan(ctx: AuthContext, id: string): Promise<{ 
   const nextPlan = toRm ? SchemePlanState.PENDING_RM : SchemePlanState.PENDING_APPROVAL;
   const legacy = toRm ? SchemePlanStatus.SUBMITTED : SchemePlanStatus.RM_APPROVED;
   await prisma.dealerSchemePlan.update({ where: { id }, data: { planStatus: nextPlan, planningStatus: legacy, submittedAt: new Date(), ...(isRm ? { rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: null } : { rmActedById: null, rmActedAt: null, rmRemarks: null }) } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: "Scheme plan submitted" });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: "Scheme plan submitted" });
   return { planStatus: nextPlan };
 }
 
@@ -763,7 +766,7 @@ export async function actOnSchemePlan(ctx: AuthContext, id: string, raw: unknown
   const nextPlan = action === "approve" ? SchemePlanState.PENDING_APPROVAL : action === "reject" ? SchemePlanState.REJECTED : SchemePlanState.RETURNED;
   const legacy = action === "approve" ? SchemePlanStatus.RM_APPROVED : action === "reject" ? SchemePlanStatus.RM_REJECTED : SchemePlanStatus.RETURNED;
   await prisma.dealerSchemePlan.update({ where: { id }, data: { planStatus: nextPlan, planningStatus: legacy, rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: remarks?.trim() || null } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: `Scheme plan ${action === "approve" ? "accepted" : action}ed by RM` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: `Scheme plan ${action === "approve" ? "accepted" : action}ed by RM` });
   return { planStatus: nextPlan };
 }
 
@@ -777,8 +780,10 @@ export async function actOnSchemePlan(ctx: AuthContext, id: string, raw: unknown
  * neither DRAFT nor already-APPROVED are actionable. Legacy planningStatus is dual-written for compat only.
  */
 export async function adminActOnSchemePlan(ctx: AuthContext, id: string, raw: unknown): Promise<{ planStatus: string }> {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can act on this plan");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can act on this plan");
   const { action, remarks } = actSchema.parse(raw);
+  assertAdminPermission(ctx, "schemePlanning", action);
+  assertAdminPermission(ctx, "approvals", action);
   if ((action === "return" || action === "reject") && !remarks?.trim()) throw new ApiError(422, "A reason is required to return or reject a plan");
 
   const plan = (await prisma.dealerSchemePlan.findUnique({ where: { id }, select: { planStatus: true } })) as { planStatus: string } | null;
@@ -790,7 +795,7 @@ export async function adminActOnSchemePlan(ctx: AuthContext, id: string, raw: un
   const nextPlan = action === "approve" ? SchemePlanState.APPROVED : action === "reject" ? SchemePlanState.REJECTED : SchemePlanState.RETURNED;
   const legacy = action === "approve" ? SchemePlanStatus.RM_APPROVED : action === "reject" ? SchemePlanStatus.RM_REJECTED : SchemePlanStatus.RETURNED;
   await prisma.dealerSchemePlan.update({ where: { id }, data: { planStatus: nextPlan, planningStatus: legacy, ...(action !== "approve" ? { rmActedById: ctx.userId, rmActedAt: new Date(), rmRemarks: remarks?.trim() || null } : {}) } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: `Scheme plan ${action === "approve" ? "approved" : action + "ed"} by Super Admin` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: `Scheme plan ${action === "approve" ? "approved" : action + "ed"} by ${ctx.designation ?? "Super Admin"}` });
   return { planStatus: nextPlan };
 }
 
@@ -908,7 +913,7 @@ export function enrollmentEligible(p: { adminConversionDate: Date | string | nul
  * date on every instance it saves verification but does NOT enroll.
  */
 export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): Promise<{ enrolled: boolean; eligible: boolean }> {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can verify a scheme plan");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can verify a scheme plan");
   if (raw && typeof raw === "object" && "billing" in raw) billDate.parse((raw as { adminConversionDate?: unknown }).adminConversionDate);
   if (raw && typeof raw === "object" && "billInstances" in raw) throw new ApiError(409, "Instance-owned bill input is no longer supported; reload and use combined plan billing");
   const data = verifySchema.parse(raw);
@@ -996,7 +1001,7 @@ export async function verifyScheme(ctx: AuthContext, id: string, raw: unknown): 
   // Persist the booking coverage count via raw SQL: the generated Prisma client is not regenerated in this
   // environment, so the new `adminBookingSchemeCount` column is written directly. Additive + null-safe.
   await tx.$executeRaw`UPDATE "DealerSchemePlan" SET "adminBookingSchemeCount" = ${bookingSchemeCount} WHERE "id" = ${id}`;
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: eligible ? "Dealer enrolled after verification" : "Scheme verification saved" }, tx);
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: id, summary: eligible ? "Dealer enrolled after verification" : "Scheme verification saved" }, tx);
   return { enrolled: eligible, eligible };
   });
 }
@@ -1026,7 +1031,7 @@ export interface RunningScheme {
 /** OPEN schemes applicable to the caller's State — the "Running Schemes" tab for a Sales Officer. */
 export async function runningSchemes(ctx: AuthContext): Promise<RunningScheme[]> {
   await refreshSchemeStatuses();
-  const stateFilter = ctx.role === Role.SUPER_ADMIN || !ctx.groupId ? {} : { states: { some: { groupId: ctx.groupId } } };
+  const stateFilter = isAdministrativeRole(ctx.role) || !ctx.groupId ? {} : { states: { some: { groupId: ctx.groupId } } };
   const rows = (await prisma.scheme.findMany({
     where: { status: SchemeStatus.OPEN, ...stateFilter },
     orderBy: [{ isPerpetual: "desc" }, { endDate: "desc" }, { schemeName: "asc" }],
@@ -1415,7 +1420,7 @@ async function persistDraft(ctx: AuthContext, raw: unknown, submit: boolean): Pr
     // Explicit new-flow expansion retains the same preservation rules, but batches the whole working set.
     await expandInstancesForPlans(affectedIds, tx);
 
-    await writeAudit({ userId: ctx.userId, action: submit ? "UPDATE" : "CREATE", entity: "dealerSchemePlan", entityId: data.schemeId, summary: submit ? `Scheme plan submitted (${submitted} dealers${drafted ? `, ${drafted} kept in draft` : ""})` : `Scheme draft saved (${drafted} dealers)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: submit ? "UPDATE" : "CREATE", entity: "dealerSchemePlan", entityId: data.schemeId, summary: submit ? `Scheme plan submitted (${submitted} dealers${drafted ? `, ${drafted} kept in draft` : ""})` : `Scheme draft saved (${drafted} dealers)` }, tx);
     return { drafted, submitted };
   }, { timeout: 15000 });
 }
@@ -1494,7 +1499,7 @@ export async function saveConversion(ctx: AuthContext, planId: string, raw: unkn
       billingDate: converting && sameForAll ? (data.billingDate ?? null) : null,
     },
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Scheme status set to ${data.schemeStatus}` }, tx);
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Scheme status set to ${data.schemeStatus}` }, tx);
   return { ok: true };
   });
 }
@@ -1568,6 +1573,6 @@ export async function extendConversionDate(ctx: AuthContext, planId: string, raw
       data: { expectedBillingDate: newConversionDate, originalConversionDate: original, conversionExtensionCount: { increment: 1 } },
     }),
   ]);
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Conversion date extended (+${daysAdded}d, #${extensionNumber})` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemePlan", entityId: planId, summary: `Conversion date extended (+${daysAdded}d, #${extensionNumber})` });
   return { ok: true, newConversionDate: newConversionDate.toISOString(), extensionNumber };
 }

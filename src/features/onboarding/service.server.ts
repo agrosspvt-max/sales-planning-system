@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { Role, ImportStatus } from "@prisma/client";
@@ -20,7 +22,7 @@ import { writeAudit } from "@/lib/audit";
 type Tx = any;
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can run onboarding");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can run onboarding");
 }
 
 /** The 7 canonical planning pack sizes — single source of truth (Section 41 decision). */
@@ -306,7 +308,7 @@ export async function commitOnboarding(
     },
   });
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "CREATE",
     entity: "onboarding",
     entityId: planId ?? season.id,

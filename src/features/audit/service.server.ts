@@ -1,4 +1,5 @@
 import "server-only";
+import { actorDisplayName } from "@/features/accounts/identity";
 import { prisma } from "@/lib/prisma";
 import { buildPage, type PageParams, type Paginated } from "@/lib/pagination";
 
@@ -38,7 +39,7 @@ export async function listAudit(
 
   const items = rows.map((r) => ({
     id: r.id,
-    userName: r.user.name,
+    userName: actorDisplayName(r.user.name, r.actorDesignation),
     action: r.action,
     entity: r.entity,
     entityId: r.entityId,

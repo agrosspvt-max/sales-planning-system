@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -50,11 +52,11 @@ const VIEW_SUBS: { value: ViewSub; label: string }[] = [
 export function SalesPlanning({ role, userId, mode }: { role: Role; userId: string; mode: SalesMode }) {
   const router = useRouter();
   const qc = useQueryClient();
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const isOfficer = role === Role.SALES_OFFICER;
   const isManager = role === Role.REGIONAL_MANAGER;
   const isCreate = mode === "create";
-  const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN";
+  const roleKey = role as "SALES_OFFICER" | "REGIONAL_MANAGER" | "SUPER_ADMIN" | "CUSTOM_ADMIN";
 
   const [tab, setTab] = useState<Tab>("SEASONAL");
   const [viewSub, setViewSub] = useState<ViewSub>("SUBMITTED");

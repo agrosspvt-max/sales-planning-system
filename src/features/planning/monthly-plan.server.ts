@@ -1,4 +1,8 @@
+import { actorDisplayName } from "@/features/accounts/identity";
+import { assertAdminPermission } from "@/features/accounts/permissions";
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { z } from "zod";
 import { PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
@@ -85,14 +89,14 @@ async function monthlyLabel(mp: MonthlyPlanRow): Promise<string> {
 
 async function recordMonthlyAction(
   mp: { id: string; seasonPlanId: string },
-  actorId: string,
+  ctx: AuthContext,
   action: ApprovalActionType,
   fromStatus: PlanStatus,
   toStatus: PlanStatus,
   remarks?: string,
 ) {
   await prisma.approvalAction.create({
-    data: { seasonPlanId: mp.seasonPlanId, monthlyPlanId: mp.id, actorId, action, fromStatus, toStatus, remarks },
+    data: { seasonPlanId: mp.seasonPlanId, monthlyPlanId: mp.id, actorId: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}), action, fromStatus, toStatus, remarks },
   });
 }
 
@@ -110,7 +114,7 @@ export async function createMonthlyPlan(
   }
   assertLifecycleEditable((seasonPlan as { lifecycleState?: string }).lifecycleState, "The seasonal plan");
   const isOwner = isPlanOwner(ctx, seasonPlan.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) {
+  if (!(isOwner || isAdministrativeRole(ctx.role))) {
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can create a monthly plan");
   }
   // The month must belong to this plan's season.
@@ -275,10 +279,10 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const isOwner = isPlanOwner(ctx, mp.officerId);
   const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
   const isLive = mp.lifecycleState === "ACTIVE" && mp.seasonPlan.lifecycleState === "ACTIVE";
-  const canEdit = (isOwner || ctx.role === Role.SUPER_ADMIN) && EDITABLE.includes(mp.status) && isLive;
+  const canEdit = (isOwner || isAdministrativeRole(ctx.role)) && EDITABLE.includes(mp.status) && isLive;
   // Admin Override: a Super Admin may correct an APPROVED, live monthly plan (read-only flag; the
   // admin-edit service re-checks the parent seasonal version).
-  const canAdminEdit = ctx.role === Role.SUPER_ADMIN && mp.status === PlanStatus.APPROVED && isLive;
+  const canAdminEdit = isAdministrativeRole(ctx.role) && mp.status === PlanStatus.APPROVED && isLive;
   // Exactly ONE month — shaped as MonthlyData so the existing provider/planner consume it
   // unchanged (no in-page month selector). Editability comes from the monthly plan lifecycle.
   const months = month
@@ -363,7 +367,7 @@ export async function setMonthlyDealerNoPlan(
 ): Promise<{ noPlan: boolean; noPlanReason: string | null }> {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   const isOwner = isPlanOwner(ctx, mp.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
 
@@ -429,7 +433,7 @@ export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: st
   const { entries } = saveMonthlySchema.parse(raw);
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   const isOwner = isPlanOwner(ctx, mp.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) {
+  if (!(isOwner || isAdministrativeRole(ctx.role))) {
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can enter monthly figures");
   }
   if (!EDITABLE.includes(mp.status)) {
@@ -536,7 +540,7 @@ export async function getAdditionalProductCandidates(
 export async function addAdditionalProduct(ctx: AuthContext, monthlyPlanId: string, dealerId: string, productId: string) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   const isOwner = isPlanOwner(ctx, mp.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
 
@@ -679,7 +683,7 @@ export interface DealerCreateOutcome {
 export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: string, raw: unknown): Promise<DealerCreateOutcome> {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   const isOwner = isPlanOwner(ctx, mp.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
   const data = dealerFieldsSchema.parse(raw);
@@ -710,7 +714,7 @@ export async function createMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
  */
 export async function listAddableDealers(ctx: AuthContext, monthlyPlanId: string): Promise<{ id: string; name: string }[]> {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  if (!(isPlanOwner(ctx, mp.officerId) || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!(isPlanOwner(ctx, mp.officerId) || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
   await assertOfficerInScope(ctx, mp.officerId);
   const [assigns, present] = await Promise.all([
     prisma.dealerAssignment.findMany({
@@ -731,7 +735,7 @@ export async function listAddableDealers(ctx: AuthContext, monthlyPlanId: string
  */
 export async function addExistingDealerToMonthlyPlan(ctx: AuthContext, monthlyPlanId: string, dealerId: string): Promise<{ added: boolean }> {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  if (!(isPlanOwner(ctx, mp.officerId) || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!(isPlanOwner(ctx, mp.officerId) || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
   assertMonthlyLive(mp);
   await assertOfficerInScope(ctx, mp.officerId);
@@ -768,7 +772,7 @@ const adminCreateSchema = dealerFieldsSchema.extend({
  * passes a Tally alias, a group to validate against, and an optional "add to active seasonal plan".
  */
 export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Promise<DealerCreateOutcome> {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can create a dealer for an officer");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can create a dealer for an officer");
   const data = adminCreateSchema.parse(raw);
   const officer = await prisma.user.findUnique({ where: { id: data.officerId }, select: { role: true, isActive: true, groupId: true } });
   // A dealer may be owned by an active Sales Officer OR the group's Regional Manager (RMs also plan/own
@@ -807,13 +811,13 @@ export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Pr
     },
     { timeout: 60000, maxWait: 10000 },
   );
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "dealer", entityId: created.id, summary: `Admin created & assigned dealer "${created.name}" to a Sales Officer${created.plan.added ? " (added to active seasonal plan)" : ""}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "dealer", entityId: created.id, summary: `Admin created & assigned dealer "${created.name}" to a Sales Officer${created.plan.added ? " (added to active seasonal plan)" : ""}` });
   return { dealerId: created.id, dealerName: created.name, addedToPlan: created.plan.added, planWarning: created.plan.warning };
 }
 
 /** Admin shortcut: assign an EXISTING dealer to a Sales Officer (from the duplicate dialog). */
 export async function assignExistingDealer(ctx: AuthContext, dealerId: string, officerId: string) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can assign a dealer");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can assign a dealer");
   const [dealer, officer] = await Promise.all([
     prisma.dealer.findUnique({ where: { id: dealerId }, select: { name: true, status: true } }),
     prisma.user.findUnique({ where: { id: officerId }, select: { role: true, isActive: true } }),
@@ -824,7 +828,7 @@ export async function assignExistingDealer(ctx: AuthContext, dealerId: string, o
     await applyDealerAssignment(tx, dealerId, officerId, new Date());
     await ensureDealerAlias(tx, dealerId, dealer.name);
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Admin assigned existing dealer "${dealer.name}" to its owner` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealer", entityId: dealerId, summary: `Admin assigned existing dealer "${dealer.name}" to its owner` });
   return { dealerId };
 }
 
@@ -836,7 +840,7 @@ export async function assignExistingDealer(ctx: AuthContext, dealerId: string, o
 export async function updateMonthlyDealer(ctx: AuthContext, monthlyPlanId: string, dealerId: string, raw: unknown) {
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   const isOwner = isPlanOwner(ctx, mp.officerId);
-  if (!(isOwner || ctx.role === Role.SUPER_ADMIN)) throw new ApiError(403, "You cannot change this monthly plan");
+  if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
   if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "Dealer info is read-only once the plan is submitted");
   assertMonthlyLive(mp);
   const pd = (await prisma.planDealer.findUnique({
@@ -904,7 +908,7 @@ export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
   const managerId = await getCurrentManagerId(mp.officerId);
   const nextStatus = managerId ? PlanStatus.PENDING_RM : PlanStatus.PENDING_ADMIN;
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: nextStatus, submittedAt: new Date() } });
-  await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.SUBMIT, mp.status, nextStatus);
+  await recordMonthlyAction(mp, ctx, ApprovalActionType.SUBMIT, mp.status, nextStatus);
 
   const label = await monthlyLabel(mp);
   if (nextStatus === PlanStatus.PENDING_RM && managerId) {
@@ -936,32 +940,34 @@ export async function recallMonthlyPlan(ctx: AuthContext, monthlyPlanId: string)
   if (!PENDING.includes(mp.status)) throw new ApiError(409, "Only a submitted monthly plan can be recalled");
   assertMonthlyLive(mp);
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.DRAFT } });
-  await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.RECALL, mp.status, PlanStatus.DRAFT);
+  await recordMonthlyAction(mp, ctx, ApprovalActionType.RECALL, mp.status, PlanStatus.DRAFT);
   return { status: PlanStatus.DRAFT };
 }
 
 async function assertMonthlyApprover(ctx: AuthContext, mp: MonthlyPlanRow) {
   if (mp.status === PlanStatus.PENDING_RM) {
     // Super Admin override: may act on a submitted monthly plan directly, without waiting for the RM.
-    if (ctx.role === Role.SUPER_ADMIN) return;
+    if (isAdministrativeRole(ctx.role)) return;
     const managerId = await getCurrentManagerId(mp.officerId);
     if (ctx.userId !== managerId) throw new ApiError(403, "Only the assigned Regional Manager can act on this monthly plan");
   } else if (mp.status === PlanStatus.PENDING_ADMIN) {
-    if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can act on this monthly plan");
+    if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can act on this monthly plan");
   } else {
     throw new ApiError(409, "This monthly plan is not awaiting approval");
   }
 }
 
 export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
+  assertAdminPermission(ctx, "salesPlanning", "approve");
+  assertAdminPermission(ctx, "approvals", "approve");
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertMonthlyApprover(ctx, mp);
   assertMonthlyLive(mp);
 
   // RM approving a Pending-RM monthly plan advances it to Pending Super Admin (RM workflow UNCHANGED).
-  if (mp.status === PlanStatus.PENDING_RM && ctx.role !== Role.SUPER_ADMIN) {
+  if (mp.status === PlanStatus.PENDING_RM && !isAdministrativeRole(ctx.role)) {
     await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.PENDING_ADMIN } });
-    await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.APPROVE, PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN);
+    await recordMonthlyAction(mp, ctx, ApprovalActionType.APPROVE, PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN);
     await notifyMany(await getSuperAdminIds(), {
       type: NotificationType.PLAN_SUBMITTED,
       title: "Monthly plan awaiting Super Admin approval",
@@ -977,7 +983,7 @@ export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string
   const overrodeRm = mp.status === PlanStatus.PENDING_RM;
   const fromStatus = mp.status;
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.APPROVED, approvedAt: new Date() } });
-  await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.APPROVE, fromStatus, PlanStatus.APPROVED, overrodeRm ? "Super Admin override approval (approved directly from Pending RM; RM approval skipped)" : undefined);
+  await recordMonthlyAction(mp, ctx, ApprovalActionType.APPROVE, fromStatus, PlanStatus.APPROVED, overrodeRm ? "Super Admin override approval (approved directly from Pending RM; RM approval skipped)" : undefined);
 
   // NOTE: Dealer approval is fully DECOUPLED from plan approval. Approving a monthly plan must never
   // change a dealer's status — SO-created dealers stay PENDING until an admin activates them from the
@@ -996,11 +1002,13 @@ export async function approveMonthlyPlan(ctx: AuthContext, monthlyPlanId: string
 }
 
 export async function returnMonthlyPlan(ctx: AuthContext, monthlyPlanId: string, remarks: string) {
+  assertAdminPermission(ctx, "salesPlanning", "return");
+  assertAdminPermission(ctx, "approvals", "return");
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertMonthlyApprover(ctx, mp);
   assertMonthlyLive(mp);
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.RETURNED } });
-  await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.RETURN, mp.status, PlanStatus.RETURNED, remarks);
+  await recordMonthlyAction(mp, ctx, ApprovalActionType.RETURN, mp.status, PlanStatus.RETURNED, remarks);
   await createNotification({
     userId: mp.officerId,
     type: NotificationType.PLAN_RETURNED,
@@ -1013,11 +1021,13 @@ export async function returnMonthlyPlan(ctx: AuthContext, monthlyPlanId: string,
 }
 
 export async function rejectMonthlyPlan(ctx: AuthContext, monthlyPlanId: string, remarks: string) {
+  assertAdminPermission(ctx, "salesPlanning", "reject");
+  assertAdminPermission(ctx, "approvals", "reject");
   const mp = await loadMonthlyPlanOr404(monthlyPlanId);
   await assertMonthlyApprover(ctx, mp);
   assertMonthlyLive(mp);
   await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: PlanStatus.REJECTED } });
-  await recordMonthlyAction(mp, ctx.userId, ApprovalActionType.REJECT, mp.status, PlanStatus.REJECTED, remarks);
+  await recordMonthlyAction(mp, ctx, ApprovalActionType.REJECT, mp.status, PlanStatus.REJECTED, remarks);
 
   // Dealer status is DECOUPLED from plan workflow: rejecting a monthly plan no longer changes the
   // status of dealers created in it. They remain PENDING for an admin to triage (activate, mark
@@ -1044,7 +1054,7 @@ export async function getMonthlyPlanHistory(ctx: AuthContext, monthlyPlanId: str
   return {
     timeline: actions.map((a) => ({
       id: a.id,
-      actorName: a.actor.name,
+      actorName: actorDisplayName(a.actor.name, a.actorDesignation),
       action: a.action,
       fromStatus: a.fromStatus,
       toStatus: a.toStatus,

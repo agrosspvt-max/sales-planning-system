@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 /** Minimal client surface writeAudit needs — satisfied by both `prisma` and a transaction client. */
 interface AuditClient {
   auditLog: {
-    create(args: { data: { userId: string; action: string; entity: string; entityId?: string | null; summary?: string | null } }): Promise<unknown>;
+    create(args: { data: { userId: string; action: string; entity: string; entityId?: string | null; summary?: string | null; actorDesignation?: string | null } }): Promise<unknown>;
   };
 }
 
@@ -28,6 +28,7 @@ export async function writeAudit(
     entity: string;
     entityId?: string;
     summary?: string;
+    actorDesignation?: string | null;
   },
   // Pass a transaction client to keep the audit write atomic with the change it records; when omitted
   // the write uses the shared prisma client (the previous, non-transactional behaviour).
@@ -39,6 +40,7 @@ export async function writeAudit(
     entity: params.entity,
     entityId: params.entityId,
     summary: params.summary,
+    ...(params.actorDesignation ? { actorDesignation: params.actorDesignation } : {}),
   };
   if (client) await client.auditLog.create({ data });
   else await prisma.auditLog.create({ data });

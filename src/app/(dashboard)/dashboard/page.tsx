@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Role } from "@prisma/client";
 import { auth } from "@/auth";
 import { requireAuth } from "@/lib/http";
 import { ROLE_LABELS } from "@/lib/rbac";
@@ -19,6 +20,7 @@ import {
 } from "@/components/ui/table";
 import type { RankRow } from "@/features/reports/types";
 import { getCalendarEnabled } from "@/lib/recovery-config";
+import { hasAdminPermission } from "@/features/accounts/permissions";
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -32,7 +34,7 @@ export default async function DashboardPage() {
         title={`Welcome, ${session!.user.name}`}
         subtitle={
           <>
-            {ROLE_LABELS[ctx.role]}
+            {ctx.designation ?? ROLE_LABELS[ctx.role]}
             {data.seasonName ? ` · ${data.seasonName}` : ""}
           </>
         }
@@ -40,7 +42,7 @@ export default async function DashboardPage() {
       />
 
       {/* Work dashboard: Quick Actions + in-progress drafts replace the KPI summary. */}
-      <div className="grid gap-4 sm:grid-cols-2">
+      {(ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "salesPlanning")) && <div className="grid gap-4 sm:grid-cols-2">
         <QuickActionCard
           title="Create New Plan"
           description="Create Seasonal or Monthly plans and continue planning."
@@ -54,11 +56,11 @@ export default async function DashboardPage() {
           buttonLabel="View Plans"
           href="/planning/sales/plans"
         />
-      </div>
+      </div>}
 
-      {calendarEnabled && <UpcomingCard />}
+      {calendarEnabled && (ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "calendar")) && <UpcomingCard />}
 
-      <DraftPlans role={ctx.role} />
+      {(ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "salesPlanning")) && <DraftPlans role={ctx.role} />}
 
       {data.seasonName === null ? (
         <Card>

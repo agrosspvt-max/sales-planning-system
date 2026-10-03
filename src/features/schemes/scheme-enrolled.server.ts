@@ -1,4 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { hasAdminPermission } from "@/features/accounts/permissions";
+
 import { Role, SchemeStatus, SchemeEnrollmentStatus } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
@@ -356,8 +359,8 @@ export async function enrolledSchemeDetail(ctx: AuthContext, schemeId: string, o
       installments: scheme.installmentRules.slice().sort((a, b) => a.installmentNumber - b.installmentNumber).map((r) => ({ installmentNumber: r.installmentNumber, calculationType: r.calculationType, value: Number(r.value), daysAfterBillingDate: r.daysAfterBillingDate })),
     },
     dealers,
-    canEditPlanned: ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER || ctx.role === Role.SUPER_ADMIN,
-    canEditReceived: ctx.role === Role.SUPER_ADMIN,
+    canEditPlanned: ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER || (isAdministrativeRole(ctx.role) && hasAdminPermission(ctx, "schemePlanning", "update")),
+    canEditReceived: isAdministrativeRole(ctx.role) && hasAdminPermission(ctx, "payments", "payment"),
   };
 }
 
@@ -370,7 +373,7 @@ const billingSchema = z.object({ billingDate: z.coerce.date() });
  * (other instances are untouched). The instance's adminBillingDate is authoritative for the new flow.
  */
 export async function updateInstanceBillingDate(ctx: AuthContext, instanceId: string, raw: unknown): Promise<{ ok: true }> {
-  if (![Role.SALES_OFFICER, Role.REGIONAL_MANAGER, Role.SUPER_ADMIN].includes(ctx.role)) throw new ApiError(403, "Not allowed");
+  if (!([Role.SALES_OFFICER, Role.REGIONAL_MANAGER, Role.SUPER_ADMIN, Role.CUSTOM_ADMIN] as Role[]).includes(ctx.role)) throw new ApiError(403, "Not allowed");
   const inst = (await prisma.dealerSchemeInstance.findUnique({
     where: { id: instanceId },
     select: { id: true, billMode: true, dealerSchemePlan: { select: { billMode: true, salesOfficerId: true, enrollmentStatus: true, scheme: { select: { installmentRules: { select: { installmentNumber: true, daysAfterBillingDate: true } } } } } } },
@@ -392,7 +395,7 @@ export async function updateInstanceBillingDate(ctx: AuthContext, instanceId: st
     if (offset == null) continue;
     await prisma.dealerSchemeInstallment.update({ where: { id: i.id }, data: { plannedDate: addDays(billingDate, offset), updatedById: ctx.userId } });
   }
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemeInstance", entityId: instanceId, summary: "Enrolled instance billing date updated" });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemeInstance", entityId: instanceId, summary: "Enrolled instance billing date updated" });
   return { ok: true };
 }
 
@@ -421,7 +424,7 @@ export async function updateInstallment(ctx: AuthContext, installmentId: string,
   if (!inst) throw new ApiError(404, "Installment not found");
   const scope = await getOfficerScope(ctx);
   if (!scope.all && !scope.ids.includes(inst.instance?.dealerSchemePlan.salesOfficerId ?? inst.bill?.plan?.salesOfficerId ?? "")) throw new ApiError(403, "You cannot manage this scheme plan");
-  if (![Role.SALES_OFFICER, Role.REGIONAL_MANAGER, Role.SUPER_ADMIN].includes(ctx.role)) throw new ApiError(403, "Not allowed");
+  if (!([Role.SALES_OFFICER, Role.REGIONAL_MANAGER, Role.SUPER_ADMIN, Role.CUSTOM_ADMIN] as Role[]).includes(ctx.role)) throw new ApiError(403, "Not allowed");
   if (inst.billId) throw new ApiError(409, "Bill installment schedules are locked; planned amounts and dates cannot be changed");
   const patch = installmentPatchSchema.parse(raw);
 
@@ -430,6 +433,6 @@ export async function updateInstallment(ctx: AuthContext, installmentId: string,
   if (patch.plannedDate !== undefined) data.plannedDate = patch.plannedDate;
 
   await prisma.dealerSchemeInstallment.update({ where: { id: installmentId }, data });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dealerSchemeInstallment", entityId: installmentId, summary: "Enrolled installment planned values updated" });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerSchemeInstallment", entityId: installmentId, summary: "Enrolled installment planned values updated" });
   return { ok: true };
 }

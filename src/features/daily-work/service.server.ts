@@ -1,4 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { hasAdminPermission } from "@/features/accounts/permissions";
+
 import { resolveWorkDateMonth } from "@/lib/season-calendar";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -224,7 +227,7 @@ async function assertOwnerRole(ctx: AuthContext, resolved?: ResolvedLabels): Pro
  * session. All mutation functions continue to use assertOwnerRole directly.
  */
 async function assertReadRole(ctx: AuthContext, targetOfficerId?: string, resolved?: ResolvedLabels): Promise<void> {
-  if (ctx.role === Role.SUPER_ADMIN && targetOfficerId) return;
+  if (isAdministrativeRole(ctx.role) && targetOfficerId) return;
   await assertOwnerRole(ctx, resolved);
 }
 
@@ -612,7 +615,7 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
         ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
         DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId", "updatedAt" = NOW()`);
     }
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Saved ${rows.length} daily ${section.toLowerCase()} row(s)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Saved ${rows.length} daily ${section.toLowerCase()} row(s)` }, tx);
     return { count: rows.length };
   });
 }
@@ -652,7 +655,7 @@ export async function enterDailyActual(ctx: AuthContext, raw: unknown): Promise<
       count += Number(n);
     }
     if (count === 0) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Entered actuals for ${count} daily ${section.toLowerCase()} row(s)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Entered actuals for ${count} daily ${section.toLowerCase()} row(s)` }, tx);
     return { count };
   });
 }
@@ -718,7 +721,7 @@ export async function saveDailyAppointment(ctx: AuthContext, raw: unknown): Prom
         ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
         DO UPDATE SET "typedDealerName" = EXCLUDED."typedDealerName", "marketName" = EXCLUDED."marketName", "updatedAt" = NOW()`);
     }
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Saved ${meaningful.length} dealer appointment row(s)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Saved ${meaningful.length} dealer appointment row(s)` }, tx);
     return { count: meaningful.length };
   });
 }
@@ -750,7 +753,7 @@ export async function enterAppointmentStatus(ctx: AuthContext, raw: unknown): Pr
       count += Number(n);
     }
     if (count === 0) throw new ApiError(409, L["daily_work.validation.appointment_after_submit"]);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Set appointment status for ${count} row(s)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Set appointment status for ${count} row(s)` }, tx);
     return { count };
   });
 }
@@ -856,7 +859,7 @@ export async function saveDailyConversion(ctx: AuthContext, raw: unknown): Promi
         ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
         DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "updatedAt" = NOW()`);
     }
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `SCHEME_CONVERSION:${workDate}`, summary: `Saved ${rows.length} scheme conversion row(s)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `SCHEME_CONVERSION:${workDate}`, summary: `Saved ${rows.length} scheme conversion row(s)` }, tx);
     return { count: rows.length };
   });
 }
@@ -888,7 +891,7 @@ export async function enterConversionAchievability(ctx: AuthContext, raw: unknow
       count += Number(n);
     }
     if (count === 0) throw new ApiError(409, L["daily_work.validation.achievability_after_submit"]);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `SCHEME_CONVERSION:${workDate}`, summary: `Set achievability for ${count} row(s)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `SCHEME_CONVERSION:${workDate}`, summary: `Set achievability for ${count} row(s)` }, tx);
     return { count };
   });
 }
@@ -983,7 +986,7 @@ export async function saveDailySummary(ctx: AuthContext, raw: unknown): Promise<
         ${touchVisits ? Prisma.sql`"dealerVisits" = ${dealerVisits}, "newPartyVisits" = ${newPartyVisits},` : Prisma.empty}
         ${touchOthers ? Prisma.sql`"others" = ${note},` : Prisma.empty}
         "updatedAt" = NOW()`);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `SUMMARY:${workDate}`, summary: `Saved daily ${focus.toLowerCase()}` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `SUMMARY:${workDate}`, summary: `Saved daily ${focus.toLowerCase()}` }, tx);
   });
   return { ok: true };
 }
@@ -1008,7 +1011,7 @@ export async function enterVisitsActual(ctx: AuthContext, raw: unknown): Promise
           AND ("dealerVisits" IS NOT NULL OR "newPartyVisits" IS NOT NULL)`));
     }
     if (count === 0) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `VISITS:${workDate}`, summary: `Saved Visits actuals for ${count} planning batch(es)` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `VISITS:${workDate}`, summary: `Saved Visits actuals for ${count} planning batch(es)` }, tx);
     return { count };
   });
 }
@@ -1189,7 +1192,7 @@ export async function setDailyNoPlan(ctx: AuthContext, raw: unknown): Promise<Da
     const set = await loadNoPlanSet(officerId, workDate, day.currentBatchId, tx);
     if (noPlan) set.add(section); else set.delete(section);
     await persistNoPlanSet(tx, officerId, workDate, day.currentBatchId, set);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `NOPLAN:${workDate}`, summary: `${noPlan ? "Marked" : "Cleared"} No Plan for ${section}` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `NOPLAN:${workDate}`, summary: `${noPlan ? "Marked" : "Cleared"} No Plan for ${section}` }, tx);
   });
   return getDailyStatus(ctx, workDate);
 }
@@ -1235,7 +1238,7 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
     await tx.$executeRaw(Prisma.sql`
       UPDATE "DailyWorkDay" SET "currentBatchId" = ${randomUUID()}, "updatedAt" = NOW()
       WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date`);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `BATCH:${workDate}:${submittedBatchId}`, summary: "Submitted Daily Work planning batch" }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `BATCH:${workDate}:${submittedBatchId}`, summary: "Submitted Daily Work planning batch" }, tx);
   });
   return { ok: true, batchId: submittedBatchId };
 }
@@ -1279,7 +1282,7 @@ export async function submitDailyReport(ctx: AuthContext, raw: unknown): Promise
     await tx.$executeRaw(Prisma.sql`
       UPDATE "DailyWorkEntry" SET "status" = 'FINALIZED', "updatedAt" = NOW()
       WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "status" = 'PLAN_SUBMITTED'`);
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWork", entityId: `REPORT:${workDate}`, summary: `Submitted Daily Report; self-rating ${selfRating}/10` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `REPORT:${workDate}`, summary: `Submitted Daily Report; self-rating ${selfRating}/10` }, tx);
   });
   if (newlyMaterialized > 0) throw new ApiError(409, L["daily_work.validation.complete_current_plan"]);
   return { ok: true };
@@ -1321,7 +1324,7 @@ export interface TeamPerformancePayload {
 
 /** Only a Regional Manager (or Super Admin) may review a team; a Sales Officer never can. */
 async function assertReviewerRole(ctx: AuthContext, resolved?: ResolvedLabels): Promise<void> {
-  if (ctx.role !== Role.REGIONAL_MANAGER && ctx.role !== Role.SUPER_ADMIN) {
+  if (ctx.role !== Role.REGIONAL_MANAGER && !isAdministrativeRole(ctx.role)) {
     const L = resolved ?? await getResolvedLabels();
     throw new ApiError(403, L["daily_work.review.reviewer_only"]);
   }
@@ -1482,7 +1485,7 @@ const adminDailyWorkViewSchema = z.object({
  */
 export async function getAdminDailyWorkView(ctx: AuthContext, raw: unknown): Promise<DailyWorkReviewDetailPayload> {
   const L = await getResolvedLabels();
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, L["daily_work.performance.forbidden"]);
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["daily_work.performance.forbidden"]);
   const parsed = adminDailyWorkViewSchema.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? L["daily_work.validation.valid_date"]);
   const { workDate, groupId, officerId } = parsed.data;
@@ -1523,7 +1526,7 @@ export async function createDailyWorkReview(ctx: AuthContext, raw: unknown): Pro
     ON CONFLICT ("officerId","workDate") DO NOTHING`);
   if (inserted === 0) throw new ApiError(409, L["daily_work.review.already_reviewed"]);
 
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "dailyWorkReview", entityId: `${officerId}:${workDate}`, summary: `Reviewed daily work ${rating}/10` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "dailyWorkReview", entityId: `${officerId}:${workDate}`, summary: `Reviewed daily work ${rating}/10` });
   const review = await loadDailyWorkReview(officerId, workDate);
   if (!review) throw new ApiError(500, L["daily_work.review.already_reviewed"]);
   return review;
@@ -1560,7 +1563,7 @@ export interface AdminPerformancePayload {
 
 /** Only a Super Admin may see company-wide performance. */
 async function assertAdmin(ctx: AuthContext, resolved?: ResolvedLabels): Promise<void> {
-  if (ctx.role !== Role.SUPER_ADMIN) {
+  if (!isAdministrativeRole(ctx.role)) {
     const L = resolved ?? await getResolvedLabels();
     throw new ApiError(403, L["daily_work.performance.admin_only"]);
   }
@@ -1747,7 +1750,7 @@ async function performancePopulation(ctx: AuthContext): Promise<{ id: string; na
  */
 export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): Promise<PerformancePayload> {
   const L = await getResolvedLabels();
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER && ctx.role !== Role.SUPER_ADMIN) {
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER && !isAdministrativeRole(ctx.role)) {
     throw new ApiError(403, L["daily_work.performance.forbidden"]);
   }
   const filters = performanceFilterSchema.parse(raw ?? {});
@@ -1762,7 +1765,7 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
 
   // State establishes the Admin's authoritative SO scope first. The officer filter is then validated against
   // that narrowed population, so State=MP + an UP officer cannot bypass the State filter.
-  if (ctx.role === Role.SUPER_ADMIN && filters.groupId) {
+  if (isAdministrativeRole(ctx.role) && filters.groupId) {
     population = population.filter((p) => p.groupId === filters.groupId);
   }
   if (ctx.role !== Role.SALES_OFFICER && filters.officerId) {
@@ -1842,18 +1845,18 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   // State options always span the full authoritative population. Admin officer options follow the selected State;
   // with All States they span the company. RM options retain their existing team scope.
   const fullPopulation = await performancePopulation(ctx);
-  const officerOptions = ctx.role === Role.SUPER_ADMIN && filters.groupId
+  const officerOptions = isAdministrativeRole(ctx.role) && filters.groupId
     ? fullPopulation.filter((p) => p.groupId === filters.groupId)
     : fullPopulation;
   const officers = officerOptions.map((p) => ({ id: p.id, name: p.name }));
-  const states = ctx.role === Role.SUPER_ADMIN
+  const states = isAdministrativeRole(ctx.role)
     ? [...new Map(fullPopulation.filter((p) => p.groupId).map((p) => [p.groupId!, { id: p.groupId!, name: p.groupName ?? p.groupId! }])).values()].sort((a, b) => a.name.localeCompare(b.name))
     : [];
 
   return {
     role: ctx.role,
     from, to, rows, summary, officers, states,
-    canEditAttendance: ctx.role === Role.SUPER_ADMIN,
+    canEditAttendance: isAdministrativeRole(ctx.role) && (ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "performance", "attendance")),
   };
 }
 
@@ -1866,7 +1869,7 @@ const attendanceSchema = z.object({
 /** Set attendance for one officer/date. SUPER_ADMIN only; persisted so it survives refresh/navigation. */
 export async function setDailyWorkAttendance(ctx: AuthContext, raw: unknown): Promise<{ officerId: string; workDate: string; status: AttendanceStatus }> {
   const L = await getResolvedLabels();
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, L["daily_work.performance.attendance_admin_only"]);
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["daily_work.performance.attendance_admin_only"]);
   const parsed = attendanceSchema.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? "Invalid attendance");
   const { officerId, workDate, status } = parsed.data;
@@ -1876,6 +1879,6 @@ export async function setDailyWorkAttendance(ctx: AuthContext, raw: unknown): Pr
     INSERT INTO "DailyWorkAttendance" ("id","officerId","workDate","status","createdAt","updatedAt")
     VALUES (${randomUUID()}, ${officerId}, ${workDate}::date, ${status}, NOW(), NOW())
     ON CONFLICT ("officerId","workDate") DO UPDATE SET "status" = ${status}, "updatedAt" = NOW()`);
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "dailyWorkAttendance", entityId: `${officerId}:${workDate}`, summary: `Set attendance ${status}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWorkAttendance", entityId: `${officerId}:${workDate}`, summary: `Set attendance ${status}` });
   return { officerId, workDate, status };
 }

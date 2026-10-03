@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { SEASON_MONTH_ORDER, monthLabel } from "@/lib/season-calendar";
 import { z } from "zod";
 import { Role, ImportStatus, PlanStatus, SeasonStatus, type Prisma } from "@prisma/client";
@@ -12,7 +14,7 @@ import { writeAudit } from "@/lib/audit";
 import { parseSalesWorkbook, type ParsedSalesWorkbook } from "./parser";
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only the Super Admin can upload sales");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only the Super Admin can upload sales");
 }
 
 const inputSchema = z.object({
@@ -662,7 +664,7 @@ export async function commitSalesUpload(
   }
 
   await writeAudit({
-    userId: ctx.userId,
+    userId: ctx.userId, actorDesignation: ctx.designation,
     action: "CREATE",
     entity: "salesUpload",
     entityId: runId,

@@ -1,4 +1,7 @@
 "use client";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -33,6 +36,12 @@ interface Props {
  * can be Submitted by the owning officer (unchanged workflow). Underlying approval endpoints are intact.
  */
 export function PlanActions({ detail, role, userId }: Props) {
+  const planApprove = useAdminPermission("salesPlanning", "approve");
+  const queueApprove = useAdminPermission("approvals", "approve");
+  const planReturn = useAdminPermission("salesPlanning", "return");
+  const queueReturn = useAdminPermission("approvals", "return");
+  const allowApprove = planApprove && queueApprove;
+  const allowReturn = planReturn && queueReturn;
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [confirmNoPlan, setConfirmNoPlan] = useState(false);
@@ -90,15 +99,15 @@ export function PlanActions({ detail, role, userId }: Props) {
   // approve/return from EITHER Pending RM or Pending Super Admin — approving a Pending-RM plan finalizes it
   // directly (RM step skipped). This is an additional admin path; the RM/Officer workflow is untouched.
   const isRmApprover = role === Role.REGIONAL_MANAGER && detail.status === "PENDING_RM";
-  const isAdminApprover = role === Role.SUPER_ADMIN && (detail.status === "PENDING_ADMIN" || detail.status === "PENDING_RM");
-  if (isRmApprover || isAdminApprover) {
+  const isAdminApprover = isAdministrativeRole(role) && (detail.status === "PENDING_ADMIN" || detail.status === "PENDING_RM");
+  if ((isRmApprover || isAdminApprover) && allowApprove) {
     buttons.push(
       <Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending}>
         Approve
       </Button>,
     );
   }
-  if (isAdminApprover) {
+  if (isAdminApprover && allowReturn) {
     buttons.push(
       <Button key="return" variant="outline" onClick={() => { setError(null); setReturnOpen(true); }} disabled={act.isPending}>
         Return

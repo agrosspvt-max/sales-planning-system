@@ -1,5 +1,7 @@
 import "server-only";
-import { Prisma, Role } from "@prisma/client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
@@ -23,7 +25,7 @@ const schema = z
   })
   .strict();
 export async function addSeasonMonths(ctx: AuthContext, seasonId: string, raw: unknown) {
-  if (ctx.role !== Role.SUPER_ADMIN)
+  if (!isAdministrativeRole(ctx.role))
     throw new ApiError(403, "Only the Super Admin can add Season months");
   const payload = schema.parse(raw);
   return prisma.$transaction(

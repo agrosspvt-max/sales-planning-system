@@ -14,6 +14,7 @@ export const authConfig = {
   providers: [],
   callbacks: {
     authorized({ auth, request: { nextUrl } }) {
+      if (nextUrl.pathname.startsWith("/api/")) return true; // APIs retain their JSON auth/error handling.
       const isLoggedIn = !!auth?.user;
       const isOnLogin = nextUrl.pathname.startsWith("/login");
 
@@ -24,16 +25,18 @@ export const authConfig = {
       if (nextUrl.pathname.startsWith("/admin-access")) return true;
 
       if (isOnLogin) {
+        if (auth?.user?.role === "CUSTOM_ADMIN") return true; // A DB-revoked JWT must be able to reach login.
         if (isLoggedIn) return Response.redirect(new URL("/dashboard", nextUrl));
         return true;
       }
       return isLoggedIn;
     },
-    jwt({ token, user }) {
+    jwt({ token, user, account }) {
       if (user) {
         token.id = user.id as string;
         token.role = user.role;
         token.username = user.username;
+        token.authenticationMethod = account?.provider;
       }
       return token;
     },
@@ -45,6 +48,7 @@ export const authConfig = {
         // Expose the JWT issued-at so requireAuth can invalidate sessions minted before a
         // password change / deactivation (User.sessionValidAfter).
         session.user.iat = token.iat as number | undefined;
+        session.user.authenticationMethod = token.authenticationMethod as string | undefined;
       }
       return session;
     },

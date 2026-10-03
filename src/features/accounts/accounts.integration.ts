@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import bcrypt from "bcryptjs";
+import { PrismaClient, Role } from "@prisma/client";
+import { testLoader } from "@/features/dealer-tags/test-loader";
+import { ApiError } from "@/lib/api-error";
+import type { AuthContext } from "@/lib/http";
+import { actorDisplayName } from "./identity";
+const url = process.env.ACCOUNT_MANAGEMENT_TEST_URL;
+if (!url || new URL(url).hostname !== "127.0.0.1" || new URL(url).port !== "55442" || new URL(url).pathname !== "/account_management_test") {
+  throw new Error("Only the disposable localhost:55442/account_management_test database is allowed.");
+}
+const db = new PrismaClient({ datasources: { db: { url } } });
+let failAudit = false;
+const load = testLoader({
+  "@/lib/prisma": { prisma: db },
+  "@/lib/http": { ApiError, invalidateAuthCache() {} },
+  "@/lib/audit": { writeAudit: async (data: Parameters<typeof db.auditLog.create>[0]["data"], tx = db) => {
+    if (failAudit) throw new Error("Injected audit failure");
+    await tx.auditLog.create({ data });
+  } },
+});
+const accounts = load<typeof import("./service.server")>("src/features/accounts/service.server.ts");
+const cn = load<typeof import("@/features/cn-requests/service.server")>("src/features/cn-requests/service.server.ts");
+const audit = load<typeof import("@/features/audit/service.server")>("src/features/audit/service.server.ts");
+const users = load<typeof import("@/features/users/service.server")>("src/features/users/service.server.ts");
+const plans = load<typeof import("@/features/planning/service.server")>("src/features/planning/service.server.ts");
+async function main() {
+  assert.equal(await db.user.count(), 0, "Integration fixture requires an empty isolated database");
+  const owner = await db.user.create({ data: { id: "account-test-owner", name: "Test Owner", username: "account_test_owner", role: Role.SUPER_ADMIN, passwordHash: await bcrypt.hash("local-owner-test-password", 10) } });
+  await db.accountManagementOwner.create({ data: { id: "primary", userId: owner.id } });
+  const root: AuthContext = { userId: owner.id, username: owner.username, role: owner.role, groupId: null, authenticationMethod: "credentials" };
+  const body = { name: "Test Operations", username: "Account_Test_Controller", password: "local-controller-test-password", designation: "Operations Head", isActive: true, permissions: { cnRequests: ["read", "approve"], salesPlanning: ["read", "return"], approvals: ["read", "return"] } };
+  const created = await accounts.createAccount(root, body);
+  const user = await db.user.findUniqueOrThrow({ where: { id: created.id } });
+  assert.equal(user.role, Role.CUSTOM_ADMIN);
+  assert.equal(user.username, "account_test_controller");
+  assert.notEqual(user.passwordHash, body.password);
+  assert.equal(await bcrypt.compare(body.password, user.passwordHash), true);
+  await assert.rejects(accounts.createAccount(root, body), e => (e as { code: string }).code === "P2002");
+  const rows = await accounts.listAccounts(root);
+  assert.equal(rows.length, 1);
+  assert.equal("passwordHash" in rows[0], false);
+  const custom: AuthContext = { userId: user.id, username: user.username, role: user.role, groupId: null, designation: user.designation, permissions: body.permissions };
+  await assert.rejects(accounts.listAccounts(custom), e => (e as { status: number }).status === 403);
+  await assert.rejects(users.resetUserPassword(custom, owner.id, { newPassword: "takeover-not-allowed" }), e => (e as { status: number }).status === 403);
+  await assert.rejects(users.resetUserPassword({ ...root, authenticationMethod: "admin-bypass" }, owner.id, { newPassword: "takeover-not-allowed" }), e => (e as { status: number }).status === 403);
+  await assert.rejects(users.deactivateUser(root, owner.id), e => (e as { status: number }).status === 403);
+  await assert.rejects(users.editUser(root, user.id, { name: "Alternate account API" }), e => (e as { status: number }).status === 403);
+  const edit = { ...body, username: user.username, password: undefined, isActive: false, permissions: { reports: ["read"] } };
+  await accounts.editAccount(root, user.id, edit);
+  const inactive = await db.user.findUniqueOrThrow({ where: { id: user.id } });
+  assert.equal(inactive.isActive, false);
+  assert.ok(inactive.sessionValidAfter);
+  assert.deepEqual(inactive.adminPermissions, edit.permissions);
+  await accounts.editAccount(root, user.id, { ...edit, isActive: true });
+  assert.equal((await db.user.findUniqueOrThrow({ where: { id: user.id } })).isActive, true);
+  const beforeFailure = await db.user.findUniqueOrThrow({ where: { id: user.id } });
+  const beforeAudit = await db.auditLog.count();
+  failAudit = true;
+  await assert.rejects(accounts.editAccount(root, user.id, { ...edit, name: "Must roll back" }), /Injected audit failure/);
+  await assert.rejects(accounts.createAccount(root, { ...body, username: "must_rollback" }), /Injected audit failure/);
+  failAudit = false;
+  assert.deepEqual(await db.user.findUniqueOrThrow({ where: { id: user.id } }), beforeFailure);
+  assert.equal(await db.user.count({ where: { username: "must_rollback" } }), 0);
+  assert.equal(await db.auditLog.count(), beforeAudit);
+  assert.ok(!(await db.auditLog.findMany()).some(a => a.summary?.includes(body.password)));
+
+  const officer = await db.user.create({ data: { name: "Test SO", username: "account_test_so", role: Role.SALES_OFFICER, passwordHash: "not-a-login-fixture" } });
+  const dealer = await db.dealer.create({ data: { name: "Test Dealer" } });
+  const request = await db.cnRequest.create({ data: { officerId: officer.id, dealerId: dealer.id, cnType: "Freight", details: "Account permission regression" } });
+  const accepted = { status: "ACCEPTED_NOT_POSTED", reason: "OTHER", acceptanceReasonDetails: "Test only", cnExpiryDays: 30 };
+  const upload = { name: "fixture.pdf", type: "application/pdf", buffer: Buffer.from("%PDF-1.4\nlocal-test-fixture") };
+  await assert.rejects(cn.acceptCnRequest({ ...custom, permissions: { cnRequests: ["read"] } }, request.id, accepted, upload), e => (e as { status: number }).status === 403);
+  assert.equal((await db.cnRequest.findUniqueOrThrow({ where: { id: request.id } })).status, "SUBMITTED");
+  await cn.acceptCnRequest(custom, request.id, accepted, upload);
+  const afterAccept = await db.cnRequest.findUniqueOrThrow({ where: { id: request.id } });
+  assert.equal(afterAccept.status, "ACCEPTED_NOT_POSTED");
+  await assert.rejects(cn.acceptCnRequest(custom, request.id, { status: "POSTED_IN_LEDGER", postedAmount: 100 }, null), e => (e as { status: number }).status === 403);
+  assert.deepEqual(await db.cnRequest.findUniqueOrThrow({ where: { id: request.id } }), afterAccept);
+  await cn.acceptCnRequest({ ...custom, permissions: { cnRequests: ["read", "post"] } }, request.id, { status: "POSTED_IN_LEDGER", postedAmount: 100 }, null);
+  const posted = await db.cnRequest.findUniqueOrThrow({ where: { id: request.id } });
+  assert.equal(posted.status, "POSTED_IN_LEDGER");
+  await assert.rejects(cn.verifyCnPayment({ ...custom, permissions: { cnRequests: ["read", "verifyPayment"] } }, request.id, { status: "PAID", requestKey: "local-permission-denial" }), e => (e as { status: number }).status === 403);
+  await assert.rejects(cn.verifyCnPayment({ ...custom, permissions: { cnRequests: ["read", "verifyPayment", "post"] } }, request.id, { status: "PAID", requestKey: "local-workflow-denial" }), e => (e as { status: number }).status === 409);
+  assert.equal(await db.cnPaymentEvent.count(), 0, "OTHER acceptance/payment restrictions unchanged");
+  await assert.rejects(cn.actOnCnRequest(custom, request.id, { action: "reject", reason: "OTHER", rejectionReasonDetails: "Test" }), e => (e as { status: number }).status === 403);
+  await assert.rejects(cn.actOnCnRequest({ ...custom, permissions: { cnRequests: ["read", "reject"] } }, request.id, { action: "reject", reason: "OTHER", rejectionReasonDetails: "Test" }), e => (e as { status: number }).status === 409);
+  const toReject = await db.cnRequest.create({ data: { officerId: officer.id, dealerId: dealer.id, cnType: "Scheme", details: "Reject permission fixture" } });
+  await cn.actOnCnRequest({ ...custom, permissions: { cnRequests: ["read", "reject"] } }, toReject.id, { action: "reject", reason: "OTHER", rejectionReasonDetails: "Permission fixture" });
+  assert.equal((await db.cnRequest.findUniqueOrThrow({ where: { id: toReject.id } })).status, "REJECTED");
+  await assert.rejects(plans.returnPlan(custom, "missing-plan", { remarks: "Test return" }), e => (e as { status: number }).status === 404);
+  await assert.rejects(plans.returnPlan({ ...custom, permissions: { salesPlanning: ["read"], approvals: ["read", "return"] } }, "missing-plan", { remarks: "Test return" }), e => (e as { status: number }).status === 403);
+  const season = await db.season.create({ data: { name: "Account permission fixture", year: 2026 } });
+  const plan = await db.seasonPlan.create({ data: { seasonId: season.id, officerId: officer.id, status: "PENDING_ADMIN" } });
+  await assert.rejects(plans.returnPlan({ ...custom, permissions: { salesPlanning: ["read"], approvals: ["read", "return"] } }, plan.id, { remarks: "Not authorized" }), e => (e as { status: number }).status === 403);
+  assert.equal((await db.seasonPlan.findUniqueOrThrow({ where: { id: plan.id } })).status, "PENDING_ADMIN");
+  await plans.returnPlan(custom, plan.id, { remarks: "Return fixture for correction" });
+  assert.equal((await db.seasonPlan.findUniqueOrThrow({ where: { id: plan.id } })).status, "RETURNED");
+  const returnAction = await db.approvalAction.findFirstOrThrow({ where: { seasonPlanId: plan.id } });
+  assert.equal(returnAction.actorId, user.id);
+  assert.equal(returnAction.actorDesignation, "Operations Head");
+  await assert.rejects(plans.returnPlan(custom, plan.id, { remarks: "Wrong workflow state" }), e => (e as { status: number }).status === 409);
+  await accounts.editAccount(root, user.id, { ...edit, isActive: true, designation: "Accounts Controller" });
+  const logs = await audit.listAudit({}, { page: 1, pageSize: 100, search: "" });
+  assert.ok(logs.items.some((a: unknown) => (a as { userName: string }).userName === "Test Operations (Operations Head)"), "Historical title comes from the action snapshot even after the profile title changes");
+  assert.equal(actorDisplayName("Historical actor", null), "Historical actor");
+  assert.equal(await db.seasonPlan.count(), 1, "Only the explicit return-permission fixture exists");
+  assert.equal(await db.recoveryPlan.count(), 0);
+  assert.equal(await db.dealerSchemePlan.count(), 0);
+  assert.equal(await db.dailyWorkEntry.count(), 0);
+  console.log("Account DB integration passed: owner binding, bcrypt, duplicates, live grants, lifecycle, rollback, protected owner, alternate APIs, CN authority/workflow, file-return permissions, audit snapshots and financial isolation.");
+}
+void main().finally(() => db.$disconnect());

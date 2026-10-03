@@ -1,3 +1,4 @@
+import { protectManagedUser } from "@/features/accounts/service.server";
 import { type NextRequest } from "next/server";
 import { handle, ok, requirePermission, ApiError } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
@@ -26,9 +27,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ resource:
     const { resource, id } = await ctx.params;
     const key = assertResource(resource);
     const auth = await requirePermission(key, "update");
+    if (key === "users") await protectManagedUser(auth, id, true);
     const body = await req.json();
     await updateResource(key, id, body);
-    await writeAudit({ userId: auth.userId, action: "UPDATE", entity: key, entityId: id });
+    await writeAudit({ userId: auth.userId, actorDesignation: auth.designation, action: "UPDATE", entity: key, entityId: id });
     return ok({ id });
   });
 }
@@ -38,8 +40,9 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ resourc
     const { resource, id } = await ctx.params;
     const key = assertResource(resource);
     const auth = await requirePermission(key, "delete");
+    if (key === "users") await protectManagedUser(auth, id, true);
     await setResourceActive(key, id, false);
-    await writeAudit({ userId: auth.userId, action: "DEACTIVATE", entity: key, entityId: id });
+    await writeAudit({ userId: auth.userId, actorDesignation: auth.designation, action: "DEACTIVATE", entity: key, entityId: id });
     return ok({ id });
   });
 }

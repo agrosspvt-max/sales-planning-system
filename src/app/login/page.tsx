@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { signIn } from "next-auth/react";
+import { signIn, getSession } from "next-auth/react";
+import { accountLandingPage } from "@/features/accounts/permissions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,7 +26,10 @@ export default function LoginPage() {
       setError("Invalid username or password.");
       return;
     }
-    router.push("/dashboard");
+    // A custom administrator may have no Dashboard grant. Start on their own
+    // account page instead of racing a denied-dashboard redirect with refresh.
+    const session = await getSession();
+    router.push(accountLandingPage(session?.user.role));
     router.refresh();
   }
 

@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -62,7 +64,7 @@ function schemeSummary(plans: SchemePlan[]): string {
  */
 export function SchemePlanningPage({ role, userId }: { role: Role; userId: string }) {
   if (role === Role.SALES_OFFICER) return <SchemeOfficerWorkspace />;
-  if (role === Role.SUPER_ADMIN) return <SchemeAdminCreatePlan role={role} />;
+  if (isAdministrativeRole(role)) return <SchemeAdminCreatePlan role={role} />;
   return <SchemeManagerCreatePlan role={role} userId={userId} />;
 }
 
@@ -305,7 +307,7 @@ type ReviewView = "review" | "running" | "enrolled" | "dealer";
 function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role; userId: string; embedded?: boolean }) {
   const qc = useQueryClient();
   const isManager = role === Role.REGIONAL_MANAGER;
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
 
   // View Plan (Admin Scheme-wise + RM Review) excludes Draft/Returned/Rejected — those live in Create Plan.
   const { data: rows, isLoading } = useQuery<SchemePlan[]>({ queryKey: ["scheme-plans", "view", "all"], queryFn: () => api.get("/api/scheme-plans?bucket=view") });

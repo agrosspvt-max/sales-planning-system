@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -341,7 +343,7 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
       </div>
 
       {tab === "month" && <MonthView key={data.id + data.status} detail={data} role={role} userId={userId} />}
-      {tab === "week" && <WeekView key={data.id + data.status} detail={data} isAdmin={role === Role.SUPER_ADMIN} />}
+      {tab === "week" && <WeekView key={data.id + data.status} detail={data} isAdmin={isAdministrativeRole(role)} />}
       {tab === "history" && <RecoveryHistory id={id} role={role} />}
     </div>
   );

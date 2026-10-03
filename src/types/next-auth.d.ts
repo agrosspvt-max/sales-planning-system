@@ -1,5 +1,6 @@
 import type { Role } from "@prisma/client";
 import type { DefaultSession } from "next-auth";
+import type { AdminPermissions } from "@/features/accounts/permissions";
 
 declare module "next-auth" {
   interface User {
@@ -14,6 +15,9 @@ declare module "next-auth" {
       username: string;
       /** JWT issued-at (seconds) — compared to User.sessionValidAfter to invalidate sessions. */
       iat?: number;
+      designation?: string | null;
+      permissions?: AdminPermissions;
+      authenticationMethod?: string;
     } & DefaultSession["user"];
   }
 }
@@ -23,5 +27,6 @@ declare module "next-auth/jwt" {
     id: string;
     role: Role;
     username: string;
+    authenticationMethod?: string;
   }
 }

@@ -19,7 +19,7 @@ export default async function OfficerPlansPage({
 
   const session = await auth();
   const role = session!.user.role;
-  if (!can(role, resource as Resource, "read")) return <Forbidden />;
+  if (!can(role, resource as Resource, "read", session!.user.permissions)) return <Forbidden />;
 
   return <OfficerPlansManagement officerId={id} role={role} />;
 }

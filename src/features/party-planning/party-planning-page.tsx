@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -198,7 +200,7 @@ export function PartyCreatePlanPage() {
  * Create Plan for the owner to correct (the app's Returned/Rejected → editable convention).
  */
 export function PartyViewPage({ role }: { role: Role }) {
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const [tab, setTab] = useState<"submitted" | "approved">("submitted");
   const title = useLabel("party_planning.title");
   const viewLabel = useLabel("party_planning.nav.view");

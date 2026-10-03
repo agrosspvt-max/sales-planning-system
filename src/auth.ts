@@ -5,8 +5,13 @@ import { Role } from "@prisma/client";
 import { authConfig } from "@/auth.config";
 import { prisma } from "@/lib/prisma";
 import { loginSchema } from "@/lib/validations/auth";
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { ApiError } from "@/lib/api-error";
+import { mayEnterPage, type AdminPermissions } from "@/features/accounts/permissions";
+import { assertApiAccess } from "@/features/accounts/route-permissions";
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+const nextAuth = NextAuth({
   ...authConfig,
   providers: [
     // Primary login used by Sales Officers, RMs and admins (username + password). UNCHANGED.
@@ -61,3 +66,30 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     // ─────────────────────────────────────────────────────────────────────────────────────────
   ],
 });
+
+export const { handlers, signIn, signOut } = nextAuth;
+/** Custom grants are read from the DB, never authorized from JWT snapshots. */
+export async function auth() {
+  const session = await nextAuth.auth();
+  if (session?.user?.role !== Role.CUSTOM_ADMIN) return session;
+  const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: {
+    id: true, role: true, name: true, username: true, isActive: true, deletedAt: true,
+    sessionValidAfter: true, designation: true, adminPermissions: true,
+  } });
+  const h = await headers();
+  const path = h.get("x-account-request-path");
+  const api = path?.startsWith("/api/");
+  if (!user || !user.isActive || user.deletedAt || user.role !== Role.CUSTOM_ADMIN ||
+      (user.sessionValidAfter && (!session.user.iat || session.user.iat * 1000 < user.sessionValidAfter.getTime()))) {
+    if (api) throw new ApiError(401, "Your session is no longer valid. Please sign in again.");
+    redirect("/login");
+  }
+  session.user.name = user.name;
+  session.user.username = user.username;
+  session.user.designation = user.designation;
+  session.user.permissions = user.adminPermissions as AdminPermissions;
+  if (!path) throw new ApiError(403, "Request authorization context is unavailable.");
+  if (api) assertApiAccess(session.user, path, h.get("x-account-request-method") ?? "");
+  else if (!mayEnterPage(session.user, path)) redirect("/account?unavailable=1");
+  return session;
+}

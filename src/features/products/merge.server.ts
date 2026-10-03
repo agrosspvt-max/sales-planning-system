@@ -1,6 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
-import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
@@ -29,7 +30,7 @@ import { validateMerge, terminalSurvivor } from "@/lib/product-merge";
  */
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can merge products");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can merge products");
 }
 
 const mergeSchema = z.object({
@@ -184,7 +185,7 @@ export async function mergeProducts(ctx: AuthContext, raw: unknown): Promise<Mer
     /* -------- 4. Auditable, reversible ProductMerge row -------- */
     const rec = (await tx.productMerge.create({ data: { sourceProductId, survivingProductId: survivorId, performedById: ctx.userId, catalogueImpact: JSON.stringify(impact), note: note?.trim() || null }, select: { id: true } })) as { id: string };
 
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "product", entityId: sourceProductId, summary: `Merged product "${sourceName}" into "${survivorName}" (${impact.catalogue.length} catalogue group(s))` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "product", entityId: sourceProductId, summary: `Merged product "${sourceName}" into "${survivorName}" (${impact.catalogue.length} catalogue group(s))` }, tx);
     return rec.id;
   });
 
@@ -240,7 +241,7 @@ export async function unmergeProduct(ctx: AuthContext, raw: unknown): Promise<{ 
     /* -------- Restore the source product + close the merge record -------- */
     await tx.product.update({ where: { id: sourceProductId }, data: { isActive: true, mergedIntoId: null, mergedAt: null, mergedById: null } });
     if (rec) await tx.productMerge.update({ where: { id: rec.id }, data: { reversedAt: new Date(), reversedById: ctx.userId } });
-    await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "product", entityId: sourceProductId, summary: `Reversed merge of "${product.name}"` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "product", entityId: sourceProductId, summary: `Reversed merge of "${product.name}"` }, tx);
   });
 
   return { ok: true, sourceName: product.name };

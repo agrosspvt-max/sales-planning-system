@@ -21,7 +21,7 @@ export default async function MasterProfilePage({
 
   const session = await auth();
   const role = session!.user.role;
-  if (!can(role, resource as Resource, "read")) return <Forbidden />;
+  if (!can(role, resource as Resource, "read", session!.user.permissions)) return <Forbidden />;
 
   if (resource === "users") return <SalesOfficerProfile officerId={id} />;
   return <DealerProfileView dealerId={id} />;

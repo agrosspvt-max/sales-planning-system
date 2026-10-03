@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -48,7 +50,7 @@ export function PerformancePage({ role }: { role: Role }) {
 
   const isSO = role === Role.SALES_OFFICER;
   const isRM = role === Role.REGIONAL_MANAGER;
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
 
   const L = {
     my: useLabel("daily_work.performance.my_title"),

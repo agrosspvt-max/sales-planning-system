@@ -1,4 +1,5 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 import Link from "next/link";
 import { useMemo } from "react";
@@ -48,7 +49,7 @@ const DRAFT_STATUSES: PlanStatus[] = ["DRAFT", "RETURNED"];
  * endpoints (which already apply role scope). No new backend query.
  */
 export function DraftPlans({ role }: { role: Role }) {
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
 
   const seasonal = useQuery<PlanListItem[]>({
     queryKey: ["plans"],

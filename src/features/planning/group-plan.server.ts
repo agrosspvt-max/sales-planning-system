@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -152,7 +154,7 @@ const emptyBucketTotals = (): Record<StatusBucket, BucketTotal> => ({
 type SeasonPlanRow = { id: string; officerId: string; version: number; status: string; isActiveVersion: boolean };
 
 export async function getGroupProductPlan(ctx: AuthContext, groupId: string, seasonId: string, filter: GroupPlanFilter): Promise<GroupProductPlan> {
-  if (ctx.role !== Role.SUPER_ADMIN && ctx.role !== Role.REGIONAL_MANAGER) {
+  if (!isAdministrativeRole(ctx.role) && ctx.role !== Role.REGIONAL_MANAGER) {
     throw new ApiError(403, "Only an admin or manager can view group planning");
   }
   // A Regional Manager may only view their OWN group's planning.

@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -69,13 +71,13 @@ export function RecoveryActions({
   const isRm = role === Role.REGIONAL_MANAGER && status === "PENDING_RM";
   // Super Admin has final authority on ANY submitted plan — Pending RM or Pending Super Admin — so RM
   // approval is never a prerequisite for the admin to approve.
-  const isAdmin = role === Role.SUPER_ADMIN && (status === "PENDING_ADMIN" || status === "PENDING_RM");
+  const isAdmin = isAdministrativeRole(role) && (status === "PENDING_ADMIN" || status === "PENDING_RM");
   if (isRm || isAdmin) {
     buttons.push(<Button key="approve" onClick={() => act.mutate("approve")} disabled={act.isPending || returnMut.isPending}>Approve</Button>);
     buttons.push(<Button key="return" variant="outline" onClick={() => { setError(null); setReturnOpen(true); }} disabled={act.isPending || returnMut.isPending}>Return</Button>);
   }
   // Super Admin can move this Recovery Plan to another Seasonal Plan version (self-contained dialog).
-  const canTransfer = role === Role.SUPER_ADMIN;
+  const canTransfer = isAdministrativeRole(role);
   if (buttons.length === 0 && !error && !canTransfer) return null;
 
   return (

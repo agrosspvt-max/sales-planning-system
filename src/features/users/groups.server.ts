@@ -1,4 +1,7 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
+import { protectManagedUser } from "@/features/accounts/service.server";
 import { z } from "zod";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -11,7 +14,7 @@ import { writeAudit } from "@/lib/audit";
  */
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can manage groups");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can manage groups");
 }
 
 export async function listGroups(ctx: AuthContext) {
@@ -46,7 +49,7 @@ export async function createGroup(ctx: AuthContext, raw: unknown) {
   assertAdmin(ctx);
   const data = groupSchema.parse(raw);
   const group = await prisma.userGroup.create({ data: { name: data.name.trim(), description: data.description?.trim() || null } });
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "userGroup", entityId: group.id, summary: `Created group ${group.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "userGroup", entityId: group.id, summary: `Created group ${group.name}` });
   return { id: group.id };
 }
 
@@ -54,7 +57,7 @@ export async function updateGroup(ctx: AuthContext, id: string, raw: unknown) {
   assertAdmin(ctx);
   const data = groupSchema.parse(raw);
   await prisma.userGroup.update({ where: { id }, data: { name: data.name.trim(), description: data.description?.trim() || null } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "userGroup", entityId: id, summary: `Edited group ${data.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "userGroup", entityId: id, summary: `Edited group ${data.name}` });
   return { ok: true };
 }
 
@@ -74,17 +77,18 @@ export async function addOfficersToGroup(ctx: AuthContext, groupId: string, raw:
   if (ids.length === 0) throw new ApiError(422, "No eligible Sales Officers (already in another group?)");
 
   await prisma.user.updateMany({ where: { id: { in: ids } }, data: { groupId } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "userGroup", entityId: groupId, summary: `Added ${ids.length} officer(s) to group ${group.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "userGroup", entityId: groupId, summary: `Added ${ids.length} officer(s) to group ${group.name}` });
   return { added: ids.length };
 }
 
 /** Remove an officer from its group → back to Unassigned. */
 export async function removeOfficerFromGroup(ctx: AuthContext, officerId: string) {
+  await protectManagedUser(ctx, officerId);
   assertAdmin(ctx);
   const user = (await prisma.user.findUnique({ where: { id: officerId }, select: { name: true, groupId: true } })) as { name: string; groupId: string | null } | null;
   if (!user) throw new ApiError(404, "User not found");
   await prisma.user.update({ where: { id: officerId }, data: { groupId: null } });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "userGroup", entityId: user.groupId ?? officerId, summary: `Removed ${user.name} from group` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "userGroup", entityId: user.groupId ?? officerId, summary: `Removed ${user.name} from group` });
   return { ok: true };
 }
 
@@ -93,6 +97,6 @@ export async function deleteGroup(ctx: AuthContext, id: string) {
   const group = await prisma.userGroup.findUnique({ where: { id }, select: { name: true } });
   if (!group) throw new ApiError(404, "Group not found");
   await prisma.userGroup.delete({ where: { id } }); // members' groupId → null (FK onDelete SetNull)
-  await writeAudit({ userId: ctx.userId, action: "DELETE", entity: "userGroup", entityId: id, summary: `Deleted group ${group.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "DELETE", entity: "userGroup", entityId: id, summary: `Deleted group ${group.name}` });
   return { ok: true };
 }

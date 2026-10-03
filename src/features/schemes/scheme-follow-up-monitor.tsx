@@ -1,4 +1,6 @@
 "use client";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
@@ -69,7 +71,7 @@ interface SchemeGroup {
  *  "Team" scope); omitted → the caller's own server-scoped set. */
 export function SchemeConversionFollowUp({ role, officerId, representation = "scheme" }: { role: Role; officerId?: string; representation?: "scheme" | "dealer" }) {
   const qc = useQueryClient();
-  const isAdmin = role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(role);
   const isOfficer = role === Role.SALES_OFFICER;
   const scopeKey = officerId ?? (isAdmin ? "all" : "mine");
   const { data, isLoading } = useQuery<SchemePlan[]>({

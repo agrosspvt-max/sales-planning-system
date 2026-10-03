@@ -83,7 +83,7 @@ export const DEFAULT_LABELS = {
   "recovery.cnRequest": "CN Request",
   "recovery.requestCn": "Request CN",
   "recovery.cnStatus.lastCn": "Last CN",
-  "recovery.cnStatus.requestRaised": "Request Raised",
+  "recovery.cnStatus.requestRaised": "CN Submitted",
   "recovery.cnStatus.rejected": "Rejected",
   "recovery.cnStatus.cnWorkingSent": "CN Working Sent",
   "recovery.cnStatus.postedInLedger": "Posted in Ledger",

@@ -1,4 +1,6 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -71,7 +73,7 @@ type NoteRow = { id: string; ownerId: string; date: Date; text: string; createdA
 /** Notes visible to the caller in [gte, lt): own notes always; Admin also sees everyone's. `officerId`
  *  (Admin only) narrows to that owner. RM/SO always see only their own notes. */
 async function loadNotes(ctx: AuthContext, gte: Date, lt: Date, officerId?: string): Promise<CalendarNoteDto[]> {
-  const isAdmin = ctx.role === Role.SUPER_ADMIN;
+  const isAdmin = isAdministrativeRole(ctx.role);
   const ownerWhere = isAdmin ? (officerId ? { ownerId: officerId } : {}) : { ownerId: ctx.userId };
   const rows = (await prisma.calendarNote.findMany({
     where: { date: { gte, lt }, ...ownerWhere },

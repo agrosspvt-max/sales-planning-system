@@ -1,7 +1,9 @@
 import "server-only";
+import { isAdministrativeRole } from "@/features/accounts/permissions";
+
 import * as XLSX from "xlsx";
 import { z } from "zod";
-import { Role, PlanStatus, type Prisma } from "@prisma/client";
+import { PlanStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { readWorkbook, sheetNames, sheetRows } from "@/lib/import/workbook";
@@ -16,7 +18,7 @@ import { categoryIdForNbv } from "@/features/products/categories.server";
  */
 
 function assertAdmin(ctx: AuthContext) {
-  if (ctx.role !== Role.SUPER_ADMIN) throw new ApiError(403, "Only a Super Admin can manage a group's product catalogue");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can manage a group's product catalogue");
 }
 
 /** A Prisma client or an interactive transaction client — the seeders call this inside a tx. */
@@ -219,7 +221,7 @@ export async function initializeFromMaster(ctx: AuthContext, groupId: string) {
       data: toCreate.map((m) => ({ groupId, productId: m.id, price: m.rate, isActive: true, priceIsInitial: true })),
     });
   }
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "groupProductCatalogue", entityId: groupId, summary: `Initialized ${group.name} catalogue from Master (${toCreate.length} added)` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "groupProductCatalogue", entityId: groupId, summary: `Initialized ${group.name} catalogue from Master (${toCreate.length} added)` });
   return { added: toCreate.length, alreadyPresent: have.size };
 }
 
@@ -253,7 +255,7 @@ export async function updateCatalogueEntry(ctx: AuthContext, groupId: string, pr
   if (Object.keys(patch).length === 0) return { ok: true, priceChanged: false };
 
   await prisma.groupProductCatalogue.update({ where: { groupId_productId: { groupId, productId } }, data: patch });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "groupProductCatalogue", entityId: productId, summary: `Updated ${group.name} catalogue entry${priceChanged ? " (price changed)" : ""}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "groupProductCatalogue", entityId: productId, summary: `Updated ${group.name} catalogue entry${priceChanged ? " (price changed)" : ""}` });
   return { ok: true, priceChanged };
 }
 
@@ -273,7 +275,7 @@ export async function setClearance(ctx: AuthContext, groupId: string, raw: unkno
     where: { groupId, productId: { in: productIds } },
     data: { isClearance: true, clearanceQty: clearanceQty ?? null },
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "groupProductCatalogue", entityId: groupId, summary: `Marked ${productIds.length} product(s) as clearance in ${group.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "groupProductCatalogue", entityId: groupId, summary: `Marked ${productIds.length} product(s) as clearance in ${group.name}` });
   return { ok: true };
 }
 
@@ -286,7 +288,7 @@ export async function removeClearance(ctx: AuthContext, groupId: string, raw: un
     where: { groupId, productId: { in: productIds } },
     data: { isClearance: false, clearanceQty: null },
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "groupProductCatalogue", entityId: groupId, summary: `Removed clearance from ${productIds.length} product(s) in ${group.name}` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "groupProductCatalogue", entityId: groupId, summary: `Removed clearance from ${productIds.length} product(s) in ${group.name}` });
   return { ok: true };
 }
 
@@ -364,7 +366,7 @@ export async function applyPriceRefresh(ctx: AuthContext, groupId: string, produ
     where: { productId, planDealer: { seasonPlan: { officer: { groupId }, OR: statusFilters } } },
     data: { rateSnapshot: price },
   })) as { count: number };
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "groupProductCatalogue", entityId: productId, summary: `Applied price refresh to ${res.count} plan line(s) in one group` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "groupProductCatalogue", entityId: productId, summary: `Applied price refresh to ${res.count} plan line(s) in one group` });
   return { updatedLines: res.count };
 }
 
@@ -389,7 +391,7 @@ export async function addCatalogueProduct(ctx: AuthContext, groupId: string, raw
   await prisma.groupProductCatalogue.create({
     data: { groupId, productId: product.id, price, isActive: true, priceIsInitial: data.price === undefined },
   });
-  await writeAudit({ userId: ctx.userId, action: "CREATE", entity: "groupProductCatalogue", entityId: product.id, summary: `Added ${product.name} to ${group.name} catalogue` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "groupProductCatalogue", entityId: product.id, summary: `Added ${product.name} to ${group.name} catalogue` });
   return { ok: true };
 }
 
@@ -524,7 +526,7 @@ export async function updateProductMaster(ctx: AuthContext, productId: string, r
       });
     }
   });
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "product", entityId: productId, summary: `Edited product ${data.name} (master + group prices)` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "product", entityId: productId, summary: `Edited product ${data.name} (master + group prices)` });
   return { ok: true };
 }
 
@@ -630,6 +632,6 @@ export async function importCatalogueExcel(ctx: AuthContext, groupId: string, bu
     }
   }
 
-  await writeAudit({ userId: ctx.userId, action: "UPDATE", entity: "groupProductCatalogue", entityId: groupId, summary: `${group.name} catalogue Excel: ${r.updated} updated, ${r.added} added, ${r.createdMaster} created, ${r.errors.length} errors` });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "groupProductCatalogue", entityId: groupId, summary: `${group.name} catalogue Excel: ${r.updated} updated, ${r.added} added, ${r.createdMaster} created, ${r.errors.length} errors` });
   return r;
 }

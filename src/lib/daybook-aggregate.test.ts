@@ -132,7 +132,7 @@ test("10) Week View reuses the same dealer-level Last Payment immediately after 
   const overdue = weekView.indexOf('labelKey="recovery.overdue"');
   assert.ok(till >= 0 && last >= 0 && overdue >= 0, "all three Week View headers are present");
   assert.ok(till < last && last < overdue, "Week View order is Outstanding Till → Last Payment → Overdue");
-  assert.equal((src.match(/<LastPaymentCell date=\{d\.lastPaymentDate\} amount=\{d\.lastPaymentAmount\} unavailableReason=\{d\.lastPaymentUnavailableReason\} \/>/g) ?? []).length, 2,
+  assert.equal((src.match(/<LastPaymentCell date=\{d\.lastPaymentDate\} amount=\{d\.lastPaymentAmount\} outstanding=\{d\.outstanding\} unavailableReason=\{d\.lastPaymentUnavailableReason\} \/>/g) ?? []).length, 2,
     "Month and Week View render the exact same dealer-level Last Payment fields through one shared cell");
   assert.ok(!weekView.slice(weekView.indexOf("<LastPaymentCell"), weekView.indexOf("<LastPaymentCell") + 100).includes("weekNo"),
     "Last Payment is independent of the selected week");

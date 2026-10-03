@@ -67,6 +67,7 @@ export const DEFAULT_LABELS = {
   // so the base label omits the word "Date".
   "recovery.outstandingTillDate": "Outstanding Till",
   "recovery.lastPayment": "Last Payment",
+  "recovery.lastPaymentFallback": "Before 01/04/2026",
   "recovery.overdue": "Overdue",
   "recovery.due": "Due",
   "recovery.dueOverdue": "Due + Overdue",

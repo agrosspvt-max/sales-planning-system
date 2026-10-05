@@ -309,6 +309,15 @@ async function main() {
     await expectStatus(() => svc.saveDailyConversion(SO, { workDate: DATE, rows: [{ dealerId: "d2", schemeId: "A", todaysPlan: 1 }] }), 422, "no planned scheme");
   }
 
+  // Scheme Conversion is TEMPORARILY disabled in Daily Work: the write guard used by the routes rejects it (409) and
+  // allows every other section; the conversion service functions above are intact (history/re-enable).
+  {
+    const f = makeFake({ assignedDealerIds: [], dealers: [] });
+    const svc = loadService(f.prisma, []);
+    await expectStatus(async () => svc.assertDailyWorkSectionWritable("SCHEME_CONVERSION"), 409, "disabled section is not writable");
+    for (const section of ["SALES", "RECOVERY", "APPOINTMENT", "VISITS", "OTHERS", "SUMMARY", undefined]) assert.doesNotThrow(() => svc.assertDailyWorkSectionWritable(section), String(section));
+  }
+
   console.log("daily-work-sections.test.ts — all assertions passed");
 }
 

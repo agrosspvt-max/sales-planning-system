@@ -372,7 +372,7 @@ async function main() {
     assert.equal(detail.selfRating, 8);
     assert.equal(detail.review?.rating, 9);
     assert.ok(detail.sales && detail.recovery && detail.appointment && detail.conversion && detail.summary, "all six-section report sources are returned");
-    assert.equal(detail.reportSections.length, 6, "existing completion metadata for all sections is preserved");
+    assert.equal(detail.reportSections.length, 5, "completion metadata covers the 5 active sections (Scheme Conversion is temporarily disabled)");
   }
 
   // 16) State/SO pairing is server-authoritative; a mismatched State cannot retrieve the officer's report.

@@ -304,9 +304,29 @@ export function visibleDailyWorkRows<T>(
 export const SectionStatus = { FILLED: "FILLED", NO_PLAN: "NO_PLAN", REMAINING: "REMAINING" } as const;
 export type SectionStatus = (typeof SectionStatus)[keyof typeof SectionStatus];
 
-/** The 5 mandatory Daily Work sections (Others is optional and excluded). Order = progress-bar order. */
-export const MANDATORY_SECTIONS = ["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", "VISITS", "OTHERS"] as const;
-export type MandatorySection = (typeof MANDATORY_SECTIONS)[number];
+/**
+ * TEMPORARY SWITCH — Scheme Conversion in Daily Work.
+ * `false` hides the Scheme Conversion Plan Type and removes it from every Daily Work requirement (progress bar,
+ * No Plan, Submit Daily Work gate, Daily Report completion). Nothing is deleted: the code, DB columns/rows and
+ * services stay intact (read paths keep working for history). To RE-ENABLE, change this ONE value to `true`.
+ */
+export const SCHEME_CONVERSION_ENABLED = false;
+
+/** Every Daily Work section the system knows about (including a temporarily disabled one). Order = tab order. */
+export const ALL_DAILY_WORK_SECTIONS = ["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", "VISITS", "OTHERS"] as const;
+export type MandatorySection = (typeof ALL_DAILY_WORK_SECTIONS)[number];
+
+/** Whether a section is currently part of the active Daily Work workflow. Unknown values are not enabled. */
+export function isDailyWorkSectionEnabled(section: string | null | undefined): section is MandatorySection {
+  return (ALL_DAILY_WORK_SECTIONS as readonly string[]).includes(section ?? "") && (section !== "SCHEME_CONVERSION" || SCHEME_CONVERSION_ENABLED);
+}
+/** The requested section if it is enabled, else the first enabled one (SALES) — a safe, loop-free fallback for stale state. */
+export function resolveDailyWorkSection(section: string | null | undefined): MandatorySection {
+  return isDailyWorkSectionEnabled(section) ? section : "SALES";
+}
+
+/** The active Daily Work sections (tabs, progress bar, submit gate, report completion), in order. Others is always shown. */
+export const MANDATORY_SECTIONS: readonly MandatorySection[] = ALL_DAILY_WORK_SECTIONS.filter((s) => isDailyWorkSectionEnabled(s));
 
 /** Whether each mandatory section has REAL user-entered data (derived; never trust placeholders/defaults). */
 export interface SectionDataPresence {
@@ -359,10 +379,10 @@ export function parseNoPlanSet(csv: string | null | undefined): Set<MandatorySec
   const set = new Set<MandatorySection>();
   if (!csv) return set;
   for (const raw of csv.split(",").map((s) => s.trim())) {
-    if ((MANDATORY_SECTIONS as readonly string[]).includes(raw)) set.add(raw as MandatorySection);
+    if ((ALL_DAILY_WORK_SECTIONS as readonly string[]).includes(raw)) set.add(raw as MandatorySection); // keeps stored flags of a disabled section
   }
   return set;
 }
 export function serializeNoPlanSet(set: ReadonlySet<string>): string {
-  return MANDATORY_SECTIONS.filter((s) => set.has(s)).join(",");
+  return ALL_DAILY_WORK_SECTIONS.filter((s) => set.has(s)).join(",");
 }

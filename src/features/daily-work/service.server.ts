@@ -26,7 +26,7 @@ import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction
 import {
   currentBusinessDate, monthNameForDate, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
-  MANDATORY_SECTIONS, SectionStatus, RECOVERY_PAYMENT_MODES,
+  MANDATORY_SECTIONS, SectionStatus, SCHEME_CONVERSION_ENABLED, isDailyWorkSectionEnabled, RECOVERY_PAYMENT_MODES,
   type RecoveryPaymentMode,
   type DailyWorkSection, type DailyWorkType, type DailyWorkDealerRow,
   type SectionDataPresence, type MandatorySection, type SectionStatusCounts,
@@ -1082,6 +1082,17 @@ async function sectionDataPresence(officerId: string, workDate: string, batchId:
   };
 }
 
+/**
+ * Write guard for a section that is TEMPORARILY disabled (see SCHEME_CONVERSION_ENABLED). Used by the Daily Work write
+ * routes so a stale/manipulated client cannot create or change Scheme Conversion data while it is switched off.
+ * Reads and the service functions themselves are untouched, so history stays readable and re-enabling is one flag.
+ */
+export function assertDailyWorkSectionWritable(section: unknown): void {
+  if (section === "SCHEME_CONVERSION" && !isDailyWorkSectionEnabled(section)) {
+    throw new ApiError(409, "Scheme Conversion is temporarily disabled in Daily Work.");
+  }
+}
+
 /** The persisted No-Plan set for the day (from the SUMMARY row's CSV). */
 async function loadNoPlanSet(officerId: string, workDate: string, batchId: string, db: DbClient = prisma): Promise<Set<MandatorySection>> {
   const rows = await db.$queryRaw<{ noPlanSections: string | null }[]>(Prisma.sql`
@@ -1128,7 +1139,8 @@ async function reportCompletion(db: DbClient, officerId: string, workDate: strin
       "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "noPlanSections"
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date
-      AND "batchId" <> ${currentBatchId} AND "status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')`);
+      AND "batchId" <> ${currentBatchId} AND "status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
+      AND (${SCHEME_CONVERSION_ENABLED}::boolean OR "section" <> 'SCHEME_CONVERSION')`);
   const required = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, false]));
   const complete = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, true]));
   for (const row of rows) {

@@ -25,7 +25,8 @@ interface Day { currentBatchId: string; status: "OPEN" | "FINALIZED"; selfRating
 
 const DATE = "2026-09-21";
 const OFFICER = "so1";
-const ALL_EXCEPT_SALES_AND_VISITS = "RECOVERY,APPOINTMENT,SCHEME_CONVERSION,OTHERS";
+// Scheme Conversion is deliberately NOT in this set: it is temporarily disabled and must never block submit or the report.
+const ALL_EXCEPT_SALES_AND_VISITS = "RECOVERY,APPOINTMENT,OTHERS";
 const ALL_EXCEPT_SALES = `${ALL_EXCEPT_SALES_AND_VISITS},VISITS`;
 
 function makeFake() {
@@ -215,7 +216,7 @@ async function main() {
   const svc = loadService(fake.prisma);
 
   const empty = await svc.getDailyStatus(SO, DATE);
-  assert.deepEqual(empty.counts, { filled: 0, noPlan: 0, remaining: 6, total: 6 });
+  assert.deepEqual(empty.counts, { filled: 0, noPlan: 0, remaining: 5, total: 5 });
   assert.equal(empty.hasSubmittedWork, false);
   // The Auto Tasks block visibility flag defaults OFF and is surfaced for the UI only (stub returns false).
   assert.equal(empty.autoTasksEnabled, false);

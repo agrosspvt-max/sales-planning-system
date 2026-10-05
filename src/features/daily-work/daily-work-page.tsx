@@ -32,6 +32,7 @@ import {
   combineDailyWorkRows, combineAppointmentRows, combineConversionRows, rowTaskType,
   currentBusinessDate, dailyWorkShowsResults, visibleDailyWorkRows, DEFAULT_DAILY_WORK_VIEW, DailyWorkView,
   type RecoveryPaymentMode, type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
+  MANDATORY_SECTIONS, resolveDailyWorkSection,
 } from "@/lib/daily-work";
 
 /* --------------------------------- Types (mirror the service DTO) --------------------------------- */
@@ -133,7 +134,9 @@ export function DailyWorkPage({ role }: { role: Role }) {
 function OwnerDailyWorkPage() {
   const qc = useQueryClient();
   const [view, setView] = useState<DailyWorkViewType>(DEFAULT_DAILY_WORK_VIEW);
-  const [section, setSection] = useState<Section>("SALES");
+  const [requestedSection, setSection] = useState<Section>("SALES");
+  // A stale/disabled section (e.g. Scheme Conversion while switched off) falls back to Sales — never an unusable page, no loop.
+  const section = resolveDailyWorkSection(requestedSection);
   const [workDate, setWorkDate] = useState(currentBusinessDate);
   // Keep a long-open page aligned with the India business day when midnight passes.
   useEffect(() => {
@@ -213,7 +216,7 @@ function OwnerDailyWorkPage() {
             On narrow widths the action group wraps to its own line instead of overlapping the tabs. */}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="inline-flex flex-wrap rounded-md border bg-background p-0.5 text-sm">
-            {(["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", "VISITS", "OTHERS"] as const).map((s) => (
+            {MANDATORY_SECTIONS.map((s) => (
               // Each section is a column: the button holds ONLY the label; the status icon sits directly below it,
               // outside the button, so the active (blue) button never hides the icon. Reuses the existing status.
               <div key={s} className="flex flex-col items-center">

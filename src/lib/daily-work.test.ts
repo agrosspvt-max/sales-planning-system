@@ -209,28 +209,28 @@ test("sectionStatus: data ⇒ FILLED (No Plan ignored); No Plan ⇒ NO_PLAN; els
   assert.equal(sectionStatus(false, true), SectionStatus.NO_PLAN);
   assert.equal(sectionStatus(false, false), SectionStatus.REMAINING);
 });
-test("MANDATORY_SECTIONS has exactly the 6 mandatory sections (Others now compulsory)", () => {
-  assert.equal(MANDATORY_SECTIONS.join(","), "SALES,RECOVERY,APPOINTMENT,SCHEME_CONVERSION,VISITS,OTHERS");
+test("MANDATORY_SECTIONS has exactly the 5 ACTIVE mandatory sections (Scheme Conversion temporarily disabled; Others compulsory)", () => {
+  assert.equal(MANDATORY_SECTIONS.join(","), "SALES,RECOVERY,APPOINTMENT,VISITS,OTHERS");
   assert.ok((MANDATORY_SECTIONS as readonly string[]).includes("OTHERS"));
 });
-test("1) all empty → 0/0/6 · submit disabled", () => {
+test("1) all empty → 0/0/5 · submit disabled", () => {
   const s = statusesFor(noData, []);
-  assert.deepEqual(sectionStatusCounts(s), { filled: 0, noPlan: 0, remaining: 6, total: 6 });
+  assert.deepEqual(sectionStatusCounts(s), { filled: 0, noPlan: 0, remaining: 5, total: 5 });
   assert.equal(canSubmitDailyWork(s), false);
 });
-test("2) one section filled → 1/0/5 · submit disabled", () => {
+test("2) one section filled → 1/0/4 · submit disabled", () => {
   const s = statusesFor({ ...noData, SALES: true }, []);
-  assert.deepEqual(sectionStatusCounts(s), { filled: 1, noPlan: 0, remaining: 5, total: 6 });
+  assert.deepEqual(sectionStatusCounts(s), { filled: 1, noPlan: 0, remaining: 4, total: 5 });
   assert.equal(canSubmitDailyWork(s), false);
 });
-test("3) one section No Plan → 0/1/5 · submit disabled", () => {
+test("3) one section No Plan → 0/1/4 · submit disabled", () => {
   const s = statusesFor(noData, ["RECOVERY"]);
-  assert.deepEqual(sectionStatusCounts(s), { filled: 0, noPlan: 1, remaining: 5, total: 6 });
+  assert.deepEqual(sectionStatusCounts(s), { filled: 0, noPlan: 1, remaining: 4, total: 5 });
   assert.equal(canSubmitDailyWork(s), false);
 });
-test("4) all 6 filled → submit ENABLED", () => {
+test("4) all 5 active sections filled → submit ENABLED", () => {
   const s = statusesFor({ SALES: true, RECOVERY: true, APPOINTMENT: true, SCHEME_CONVERSION: true, VISITS: true, OTHERS: true }, []);
-  assert.deepEqual(sectionStatusCounts(s), { filled: 6, noPlan: 0, remaining: 0, total: 6 });
+  assert.deepEqual(sectionStatusCounts(s), { filled: 5, noPlan: 0, remaining: 0, total: 5 });
   assert.equal(canSubmitDailyWork(s), true);
 });
 test("Others REMAINING blocks submit until text entered or No Plan (Others compulsory)", () => {
@@ -242,7 +242,7 @@ test("Others REMAINING blocks submit until text entered or No Plan (Others compu
 });
 test("5) mixed Filled + No Plan, all resolved → submit ENABLED (spec example 2)", () => {
   const s = statusesFor({ SALES: true, RECOVERY: false, APPOINTMENT: true, SCHEME_CONVERSION: false, VISITS: true, OTHERS: true }, ["RECOVERY", "SCHEME_CONVERSION"]);
-  assert.deepEqual(sectionStatusCounts(s), { filled: 4, noPlan: 2, remaining: 0, total: 6 });
+  assert.deepEqual(sectionStatusCounts(s), { filled: 4, noPlan: 1, remaining: 0, total: 5 });
   assert.equal(canSubmitDailyWork(s), true);
 });
 test("6) any one section Remaining → submit DISABLED (spec example 3)", () => {
@@ -250,9 +250,9 @@ test("6) any one section Remaining → submit DISABLED (spec example 3)", () => 
   assert.equal(s.APPOINTMENT, SectionStatus.REMAINING);
   assert.equal(canSubmitDailyWork(s), false);
 });
-test("4b) all 6 No Plan → submit ENABLED (spec example 4)", () => {
+test("4b) all 5 active sections No Plan → submit ENABLED (spec example 4)", () => {
   const s = statusesFor(noData, ["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", "VISITS", "OTHERS"]);
-  assert.deepEqual(sectionStatusCounts(s), { filled: 0, noPlan: 6, remaining: 0, total: 6 });
+  assert.deepEqual(sectionStatusCounts(s), { filled: 0, noPlan: 5, remaining: 0, total: 5 });
   assert.equal(canSubmitDailyWork(s), true);
 });
 test("No Plan + data ⇒ the section is FILLED, not NO_PLAN (stale flag never surfaces)", () => {

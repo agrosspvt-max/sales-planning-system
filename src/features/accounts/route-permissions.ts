@@ -42,7 +42,7 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
     return null; // SO payment/task/creation operations stay SO/RM-only.
   }
   if (p.startsWith("dealer-tags/requests") || p === "dealer-tags/direct") return ["dealerTags", "read"]; // payload decision checked by service
-  if (p === "dealer-tags/dealers") return ["dealerTags", "read"];
+  if (p === "dealer-tags/dealers" || p === "dealer-tags/sales-officers") return ["dealerTags", "read"];
   if (p.startsWith("dealer-tags")) return ["tagMaster", read ? "read" : writeAction(method)];
   if (p.startsWith("dealer-alias")) return ["dealerAlias", read ? "read" : method === "DELETE" ? "delete" : "update"];
   if (p.startsWith("onboarding")) return [p.includes("history") ? "onboardingHistory" : "onboarding", read ? "read" : p.endsWith("commit") ? "import" : "analyze"];

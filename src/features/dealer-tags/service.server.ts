@@ -158,7 +158,8 @@ export async function saveTag(ctx: AuthContext, raw: unknown, id?: string) {
     { timeout: 15000 },
   );
 }
-export async function listTagDealers(ctx: AuthContext) {
+/** The dealers the caller may see (existing scope rules) plus each one's CURRENT owner (open DealerAssignment). */
+async function scopedTagDealers(ctx: AuthContext) {
   const scope = await getOfficerScope(ctx);
   const dealers = await prisma.dealer.findMany({
     where: {
@@ -170,11 +171,28 @@ export async function listTagDealers(ctx: AuthContext) {
     select: { id: true, name: true, isActive: true },
     orderBy: [{ name: "asc" }, { id: "asc" }],
   });
-  const owners = scope.all ? null : await getCurrentOwnerByDealer(dealers.map((d) => d.id));
-  const allowed = dealers.filter((d) => !owners || scope.ids.includes(owners.get(d.id) ?? ""));
-  const [aliases, tags] = await Promise.all([
+  const owners = await getCurrentOwnerByDealer(dealers.map((d) => d.id));
+  const allowed = dealers.filter((d) => scope.all || scope.ids.includes(owners.get(d.id) ?? ""));
+  return { scope, allowed, owners };
+}
+async function officerNames(ids: string[]) {
+  if (ids.length === 0) return new Map<string, string>();
+  const users = await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } });
+  return new Map(users.map((u) => [u.id, u.name]));
+}
+/**
+ * Dealers for the Dealer Tags page. Optional `officerIds` narrows to dealers whose CURRENT owner is any one of the
+ * given officers (OR). The filter is applied only AFTER the caller's scope, so an id outside the caller's scope can
+ * never widen the result — it simply matches nothing.
+ */
+export async function listTagDealers(ctx: AuthContext, filter: { officerIds?: string[] } = {}) {
+  const { allowed: scoped, owners } = await scopedTagDealers(ctx);
+  const wanted = filter.officerIds?.length ? new Set(filter.officerIds) : null;
+  const allowed = wanted ? scoped.filter((d) => wanted.has(owners.get(d.id) ?? "")) : scoped;
+  const [aliases, tags, names] = await Promise.all([
     loadDealerAliasNameMap(allowed.map((d) => d.id)),
     loadDealerMarkerMap(allowed.map((d) => d.id)),
+    officerNames([...new Set(allowed.map((d) => owners.get(d.id)).filter((id): id is string => !!id))]),
   ]);
   const assignments = await prisma.dealerTagAssignment.findMany({
     where: { dealerId: { in: allowed.map((d) => d.id) }, isActive: true },
@@ -188,14 +206,28 @@ export async function listTagDealers(ctx: AuthContext) {
     byDealer.set(a.dealerId, group);
   }
   const rows = allowed
-    .map((d) => ({
-      ...d,
-      name: aliases.get(d.id) ?? d.name,
-      tags: tags[d.id] ?? [],
-      assignedTags: (byDealer.get(d.id) ?? []).map((a) => a.tag),
-    }))
+    .map((d) => {
+      const ownerId = owners.get(d.id);
+      return {
+        ...d,
+        name: aliases.get(d.id) ?? d.name,
+        tags: tags[d.id] ?? [],
+        assignedTags: (byDealer.get(d.id) ?? []).map((a) => a.tag),
+        // Current owner per the existing DealerAssignment model (a list so the UI never assumes a single owner).
+        salesOfficers: ownerId ? [{ id: ownerId, name: names.get(ownerId) ?? "—" }] : [],
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   return taggedDealersFirst(rows, (d) => d.id, tags);
+}
+/** Filter options: only the owners of dealers the caller can already see (so an RM only ever gets their own scope). */
+export async function listTagSalesOfficers(ctx: AuthContext) {
+  const { allowed, owners } = await scopedTagDealers(ctx);
+  const ids = [...new Set(allowed.map((d) => owners.get(d.id)).filter((id): id is string => !!id))];
+  const names = await officerNames(ids);
+  return ids
+    .map((id) => ({ id, name: names.get(id) ?? "—" }))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 export async function requestTag(ctx: AuthContext, raw: unknown) {
   if (isAdministrativeRole(ctx.role))

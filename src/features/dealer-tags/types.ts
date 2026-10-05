@@ -8,6 +8,7 @@ export interface TagDealer {
   isActive: boolean;
   tags: DealerMarker[];
   assignedTags: TagDefinition[];
+  salesOfficers: { id: string; name: string }[];
 }
 export interface TagRequest {
   id: string;

@@ -33,6 +33,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PlanStateBadge } from "./status-badge";
+import { PlanColumnHeader } from "./plan-column-filter-header";
+import { applyPlanFilters, planFilterOptions, type PlanFilterKey, type PlanFilters } from "./plan-column-filters";
 import type { PlanListItem, PlanStatus } from "./types";
 import type { SalesMode } from "./sales-planning";
 import { CREATE_STATUSES, SUBMITTED_STATUSES, roleSections, yearOf, seasonIndexOf } from "./plan-list-ui";
@@ -101,6 +103,9 @@ export function MonthlyPlansPanel({
   subView,
   officerFilter,
   historyFilters = {},
+  columnFilters = {},
+  onColumnFiltersChange = () => {},
+  filterKeys = [],
 }: {
   role: Role;
   userId: string;
@@ -108,6 +113,9 @@ export function MonthlyPlansPanel({
   subView: MonthlySubView;
   officerFilter: string;
   historyFilters?: Record<string, string[]>;
+  columnFilters?: PlanFilters;
+  onColumnFiltersChange?: (next: PlanFilters) => void;
+  filterKeys?: PlanFilterKey[];
 }) {
   const router = useRouter();
   const isAdmin = isAdministrativeRole(role);
@@ -136,8 +144,16 @@ export function MonthlyPlansPanel({
       }
       return true;
     });
-    return out.sort(byMonthlyNewestFirst);
-  }, [plans, subView, isHistory, historyFilters, isAdmin, officerFilter]);
+    // Role-allowed header filters (Month / Sales Officer / State): narrow within the rows the role scope returned.
+    return applyPlanFilters(out, columnFilters, filterKeys).sort(byMonthlyNewestFirst);
+  }, [plans, subView, isHistory, historyFilters, isAdmin, officerFilter, columnFilters, filterKeys]);
+
+  // Options come from the monthly plans this caller already received (their own role scope).
+  const filterOptions = useMemo<Record<PlanFilterKey, { value: string; label: string }[]>>(() => ({
+    month: planFilterOptions(plans ?? [], "month"),
+    officer: planFilterOptions(plans ?? [], "officer"),
+    state: planFilterOptions(plans ?? [], "state"),
+  }), [plans]);
 
   const sectionLabels = subView === "CREATE"
     ? { mine: "My Plans", team: "Team Plans", admin: "Draft Plans" }
@@ -215,9 +231,9 @@ export function MonthlyPlansPanel({
                 <TableHeader>
                   <TableRow>
                     <TableHead>Season</TableHead>
-                    <TableHead>Month</TableHead>
-                    {!isOfficer && <TableHead>Sales Officer</TableHead>}
-                    <TableHead>State</TableHead>
+                    <PlanColumnHeader column="month" label="Month" keys={filterKeys} options={filterOptions.month} filters={columnFilters} onChange={onColumnFiltersChange} />
+                    {!isOfficer && <PlanColumnHeader column="officer" label="Sales Officer" keys={filterKeys} options={filterOptions.officer} filters={columnFilters} onChange={onColumnFiltersChange} />}
+                    <PlanColumnHeader column="state" label="State" keys={filterKeys} options={filterOptions.state} filters={columnFilters} onChange={onColumnFiltersChange} />
                     <TableHead>Territory</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Last saved</TableHead>

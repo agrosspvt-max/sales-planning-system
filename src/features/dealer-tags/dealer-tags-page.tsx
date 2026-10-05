@@ -15,17 +15,32 @@ import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
 import { Table, TableHeader, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import { DealerTagRequests } from "./dealer-tag-requests";
+import { SalesOfficerFilterHeader, type SalesOfficerOption } from "./sales-officer-filter";
 import type { TagDefinition, TagDealer } from "./types";
 export function DealerTagsPage({ role }: { role: Role }) {
   const qc = useQueryClient();
   const [dealerId, setDealerId] = useState(""),
     [tagId, setTagId] = useState(""),
     [operation, setOperation] = useState<"ADD" | "REVOKE">("ADD"),
-    [search, setSearch] = useState("");
+    [search, setSearch] = useState(""),
+    [officerIds, setOfficerIds] = useState<string[]>([]);
   const dealers = useQuery<TagDealer[]>({
     queryKey: ["dealer-tags", "dealers"],
     queryFn: () => api.get("/api/dealer-tags/dealers"),
   });
+  // Sales Officer filter: options and the filtered rows both come from the server, already scoped to the caller. The
+  // picker above keeps using the unfiltered list, so the assignment workflow is unaffected by the filter.
+  const officers = useQuery<SalesOfficerOption[]>({
+    queryKey: ["dealer-tags", "sales-officers"],
+    queryFn: () => api.get("/api/dealer-tags/sales-officers"),
+  });
+  const filterKey = [...officerIds].sort().join(",");
+  const filtered = useQuery<TagDealer[]>({
+    queryKey: ["dealer-tags", "dealers", "by-officer", filterKey],
+    queryFn: () => api.get(`/api/dealer-tags/dealers?officerIds=${encodeURIComponent(filterKey)}`),
+    enabled: officerIds.length > 0,
+  });
+  const tableDealers = officerIds.length > 0 ? (filtered.data ?? []) : (dealers.data ?? []);
   const tags = useQuery<TagDefinition[]>({
     queryKey: ["dealer-tags", "master"],
     queryFn: () => api.get("/api/dealer-tags"),
@@ -112,9 +127,9 @@ export function DealerTagsPage({ role }: { role: Role }) {
           </Button>
         </div>
       </div>
-      {(dealers.error || tags.error || act.error) && (
+      {(dealers.error || tags.error || act.error || filtered.error || officers.error) && (
         <p className="text-sm text-destructive">
-          {(dealers.error ?? tags.error ?? act.error)?.message}
+          {(dealers.error ?? tags.error ?? act.error ?? filtered.error ?? officers.error)?.message}
         </p>
       )}
       {act.isSuccess && (
@@ -122,27 +137,38 @@ export function DealerTagsPage({ role }: { role: Role }) {
           {isAdministrativeRole(role) ? "Dealer tag updated." : "Request submitted for approval."}
         </p>
       )}
-      <Input
-        className="max-w-sm"
-        placeholder="Search dealers…"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          className="max-w-sm"
+          placeholder="Search dealers…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        {officerIds.length > 0 && (
+          <Button variant="ghost" size="sm" onClick={() => setOfficerIds([])}>
+            Clear Sales Officer filter ({officerIds.length})
+          </Button>
+        )}
+      </div>
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Dealer</TableHead>
+            <SalesOfficerFilterHeader options={officers.data ?? []} selected={officerIds} onChange={setOfficerIds} />
             <TableHead>Status</TableHead>
             <TableHead>Assignments</TableHead>
           </TableRow>
         </TableHeader>
         <DealerTableBody>
-          {(dealers.data ?? [])
+          {tableDealers
             .filter((d) => d.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
             .map((d) => (
               <TableRow key={d.id} data-dealer-id={d.id}>
                 <TableCell>
                   <DealerName id={d.id} name={d.name} />
+                </TableCell>
+                <TableCell className="break-words">
+                  {d.salesOfficers?.map((o) => o.name).join(", ") || "—"}
                 </TableCell>
                 <TableCell>{d.isActive ? "Active" : "Inactive"}</TableCell>
                 <TableCell>

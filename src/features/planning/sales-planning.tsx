@@ -20,6 +20,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/layout/page-header";
 import { PlanStateBadge } from "./status-badge";
+import { PlanColumnHeader } from "./plan-column-filter-header";
+import { applyPlanFilters, planFilterKeys, planFilterOptions, type PlanFilterKey, type PlanFilters } from "./plan-column-filters";
 import { MonthlyPlansPanel } from "./monthly-plans-panel";
 import { PLANNING_TYPE_LABELS, type PlanListItem, type PlanningType } from "./types";
 import {
@@ -62,6 +64,10 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
   const [viewSub, setViewSub] = useState<ViewSub>("SUBMITTED");
   const [officerFilter, setOfficerFilter] = useState(""); // admin, non-history
   const [historyFilters, setHistoryFilters] = useState<Record<string, string[]>>({});
+  // Clickable column-header filters (Month / Sales Officer / State, by role). They only narrow the rows the role scope
+  // already returned: OR within a column, AND across columns, and together with the existing tab/History controls.
+  const [columnFilters, setColumnFilters] = useState<PlanFilters>({});
+  const filterKeys = useMemo(() => planFilterKeys(role), [role]);
   const [open, setOpen] = useState(false);
 
   // New Seasonal draft form.
@@ -123,8 +129,18 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
       }
       return true;
     });
-    return out.sort(bySeasonNewestFirst);
-  }, [allPlans, tab, isCreate, viewSub, isHistory, historyFilters, isAdmin, officerFilter]);
+    // Seasonal / Yearly rows have no Month column, so the Month filter belongs to the Monthly tab only.
+    const rowKeys = filterKeys.filter((key) => key !== "month");
+    return applyPlanFilters(out, columnFilters, rowKeys).sort(bySeasonNewestFirst);
+  }, [allPlans, tab, isCreate, viewSub, isHistory, historyFilters, isAdmin, officerFilter, columnFilters, filterKeys]);
+
+  // Filter options come from the plans the caller already received for this tab (their own role scope).
+  const tabPlans = useMemo(() => allPlans.filter((p) => p.planningType === tab), [allPlans, tab]);
+  const filterOptions = useMemo<Record<PlanFilterKey, { value: string; label: string }[]>>(() => ({
+    month: [],
+    officer: planFilterOptions(tabPlans, "officer"),
+    state: planFilterOptions(tabPlans, "state"),
+  }), [tabPlans]);
 
   // Role sections (SO → own; RM → My + Team; Admin → all) with bucket-specific titles.
   const sectionLabels = isCreate
@@ -141,9 +157,9 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
     const base = allPlans.filter((p) => p.planningType === tab);
     return [
       { key: "season", label: "Season", options: optionsFrom(base, (p) => ({ id: p.seasonName, label: p.seasonName })) },
-      ...(isOfficer ? [] : [{ key: "officer", label: "Sales Officer", options: optionsFrom(base, (p) => ({ id: p.officerId, label: p.officerName })) }]),
+      // Sales Officer is filtered from its column header on View Plans (including Older Plans), so it is not repeated here.
     ];
-  }, [allPlans, tab, isOfficer]);
+  }, [allPlans, tab]);
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -215,8 +231,8 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {/* Admin officer filter (not on Older Plans, which uses + Add Filter above). */}
-          {isAdmin && !isHistory && (
+          {/* Admin officer selector for Create New Plan. On View Plans the Sales Officer column header is the filter. */}
+          {isAdmin && isCreate && !isHistory && (
             <NativeSelect
               className="w-56"
               options={[{ value: "", label: "All Sales Officers" }, ...(options?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))]}
@@ -229,11 +245,11 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
       </div>
 
       {tab === "MONTHLY" ? (
-        <MonthlyPlansPanel role={role} userId={userId} mode={mode} subView={isCreate ? "CREATE" : viewSub} officerFilter={officerFilter} historyFilters={historyFilters} />
+        <MonthlyPlansPanel role={role} userId={userId} mode={mode} subView={isCreate ? "CREATE" : viewSub} officerFilter={officerFilter} historyFilters={historyFilters} columnFilters={columnFilters} onColumnFiltersChange={setColumnFilters} filterKeys={filterKeys} />
       ) : (
         <div className="space-y-6">
           {sections.map((sec) => (
-            <PlanSection key={sec.key} title={sec.title} showTitle rows={sec.rows} isOfficer={isOfficer} loading={isLoading} />
+            <PlanSection key={sec.key} title={sec.title} showTitle rows={sec.rows} isOfficer={isOfficer} loading={isLoading} filterKeys={filterKeys} filters={columnFilters} onFilters={setColumnFilters} options={filterOptions} />
           ))}
         </div>
       )}
@@ -315,7 +331,11 @@ function PillNavLinks({ isCreate, createHref, viewHref }: { isCreate: boolean; c
 }
 
 /** One role section (heading + table) for Seasonal / Yearly plan rows. */
-function PlanSection({ title, showTitle, rows, isOfficer, loading }: { title: string; showTitle: boolean; rows: PlanListItem[]; isOfficer: boolean; loading: boolean }) {
+function PlanSection({ title, showTitle, rows, isOfficer, loading, filterKeys, filters, onFilters, options }: {
+  title: string; showTitle: boolean; rows: PlanListItem[]; isOfficer: boolean; loading: boolean;
+  filterKeys: PlanFilterKey[]; filters: PlanFilters; onFilters: (next: PlanFilters) => void;
+  options: Record<PlanFilterKey, { value: string; label: string }[]>;
+}) {
   return (
     <div className="space-y-2">
       {showTitle && <h3 className="text-sm font-semibold">{title}</h3>}
@@ -324,8 +344,8 @@ function PlanSection({ title, showTitle, rows, isOfficer, loading }: { title: st
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>
-              {!isOfficer && <TableHead>Sales Officer</TableHead>}
-              <TableHead>State</TableHead>
+              {!isOfficer && <PlanColumnHeader column="officer" label="Sales Officer" keys={filterKeys} options={options.officer} filters={filters} onChange={onFilters} />}
+              <PlanColumnHeader column="state" label="State" keys={filterKeys} options={options.state} filters={filters} onChange={onFilters} />
               <TableHead>Territory</TableHead>
               <TableHead>Version</TableHead>
               <TableHead>Status</TableHead>

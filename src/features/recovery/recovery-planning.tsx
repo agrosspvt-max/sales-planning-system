@@ -15,6 +15,8 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/features/planning/status-badge";
+import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
+import { applyRecoveryPlanFilters, recoveryFilterKeys, recoveryFilterOptions, type RecoveryPlanFilterKey, type RecoveryPlanFilters } from "@/features/recovery/recovery-plan-filters";
 import { Badge } from "@/components/ui/badge";
 import type { PlanStatus } from "@/features/planning/types";
 import { RecoveryImportWizard } from "@/features/recovery/recovery-import-wizard";
@@ -61,6 +63,10 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
 
   const [viewSub, setViewSub] = useState<ViewSub>("SUBMITTED");
   const [historyFilters, setHistoryFilters] = useState<Record<string, string[]>>({});
+  // Clickable column-header filters (Month / Sales Officer / State, by role). They only narrow the rows the role scope
+  // already returned: OR within a column, AND across columns, and together with the existing History filters.
+  const [columnFilters, setColumnFilters] = useState<RecoveryPlanFilters>({});
+  const filterKeys = useMemo(() => recoveryFilterKeys(role), [role]);
   const [open, setOpen] = useState(false);
   const isHistory = !isCreate && viewSub === "HISTORY";
 
@@ -101,8 +107,24 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
       }
       return true;
     });
-    return out.sort(byDateDesc((p) => p.cutoffDate));
-  }, [allPlans, isCreate, viewSub, isHistory, historyFilters]);
+    return applyRecoveryPlanFilters(out, columnFilters, filterKeys).sort(byDateDesc((p) => p.cutoffDate));
+  }, [allPlans, isCreate, viewSub, isHistory, historyFilters, columnFilters, filterKeys]);
+
+  // Header cell: a shared filter header when this role may filter by the column, otherwise the plain header.
+  const filterOptions = useMemo(() => ({
+    month: recoveryFilterOptions(allPlans, "month"),
+    officer: recoveryFilterOptions(allPlans, "officer"),
+    state: recoveryFilterOptions(allPlans, "state"),
+  }), [allPlans]);
+  const columnHeader = (key: RecoveryPlanFilterKey, label: string) => filterKeys.includes(key) ? (
+    <ColumnFilterHeader
+      label={label}
+      ariaLabel={`Filter by ${label}`}
+      options={filterOptions[key]}
+      selected={columnFilters[key] ?? []}
+      onChange={(next) => setColumnFilters((current) => ({ ...current, [key]: next }))}
+    />
+  ) : <TableHead>{label}</TableHead>;
 
   const sectionLabels = isCreate
     ? { mine: "My Plans", team: "Team Plans", admin: "Draft Plans" }
@@ -154,9 +176,9 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
                 <TableHeader>
                   <TableRow>
                     <TableHead>Season</TableHead>
-                    <TableHead>Month</TableHead>
-                    {!isOfficer && <TableHead>Sales Officer</TableHead>}
-                    <TableHead>State</TableHead>
+                    {columnHeader("month", "Month")}
+                    {!isOfficer && columnHeader("officer", "Sales Officer")}
+                    {columnHeader("state", "State")}
                     <TableHead>Territory</TableHead>
                     <TableHead>Cutoff</TableHead>
                     <TableHead>Status</TableHead>

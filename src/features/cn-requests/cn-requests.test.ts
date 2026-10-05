@@ -90,6 +90,12 @@ interface StoredRequest {
   cnWorkingFileSize?: number | null;
   cnWorkingUploadedById?: string | null;
   cnWorkingUploadedAt?: Date | null;
+  finalCnDocument?: string | null;
+  finalCnFileName?: string | null;
+  finalCnMimeType?: string | null;
+  finalCnFileSize?: number | null;
+  finalCnUploadedById?: string | null;
+  finalCnUploadedAt?: Date | null;
   remarks?: string | null;
   actedByRmId?: string | null;
   actedByAdminId?: string | null;
@@ -529,6 +535,12 @@ const PDF_UPLOAD = {
   type: CN_WORKING_PDF_MIME,
   buffer: Buffer.from("%PDF-1.7\nCN working test"),
 };
+// The Final CN uploaded when Paid is verified. Deliberately different name/content from PDF_UPLOAD (the CN Working file).
+const FINAL_CN_UPLOAD = {
+  name: "Final CN.pdf",
+  type: CN_WORKING_PDF_MIME,
+  buffer: Buffer.from("%PDF-1.7\nFINAL CN test"),
+};
 const XLSX_UPLOAD = {
   name: "CN Working.xlsx",
   type: CN_WORKING_XLSX_MIME,
@@ -693,7 +705,39 @@ async function main() {
   assert.ok(createPageSource.includes("showExpires && <TableHead>{labels.expires}</TableHead>"), "only the Accepted / Not Posted table adds Expires");
   assert.ok(createPageSource.includes('const showApproval = !isOfficer && section === "submitted-rejected"'), "Approval is limited to Submitted / Rejected");
   assert.ok(createPageSource.includes('{showApproval && <TableHead className="text-right">{labels.approval}</TableHead>}'), "Accepted tables do not render the Approval header");
-  assert.ok(createPageSource.includes("onPostInLedger={canPost(r)"), "manual Post in Ledger remains available through the Accepted row Action menu");
+  // Test 3 — no manual Post in Ledger route: the CN Working Shared (and Posted) row menu is View Details + Download only.
+  assert.ok(!createPageSource.includes("onPostInLedger"), "the Accepted row Action menu no longer offers manual Post in Ledger");
+  assert.ok(!createPageSource.includes("labels.postInLedger"), "no replacement posting control is rendered");
+  assert.ok(!createPageSource.includes('status: "POSTED_IN_LEDGER" }); } : undefined'), "no UI path opens the Accept dialog for an already-accepted request");
+  for (const view of ["accepted-not-posted", "posted-in-ledger"] as const) {
+    assert.deepEqual(
+      cnActionMenuItems({ section: "accepted", view, hasWorking: true }).map((item) => item.id),
+      ["VIEW_DETAILS", "DOWNLOAD_CN_WORKING"],
+      `${view} menu is exactly View Details + Download`,
+    );
+  }
+  assert.ok(createPageSource.includes("<CnPaymentDialog"), "Payment Status → Verify Payment remains the way to complete CN Working Shared");
+
+  // Final CN in the row menu: its own "Download Final CN" item, only when a Final CN exists, beside the unchanged CN Working item.
+  for (const view of ["accepted-not-posted", "posted-in-ledger"] as const) {
+    const withFinal = cnActionMenuItems({ section: "accepted", view, hasWorking: true, hasFinalCn: true });
+    assert.deepEqual(withFinal.map((item) => item.id), ["VIEW_DETAILS", "DOWNLOAD_CN_WORKING", "DOWNLOAD_FINAL_CN"]);
+    assert.equal(withFinal[1]!.labelKey, view === "posted-in-ledger" ? "cn_requests.action.download_cn" : "cn_requests.action.download_cn_workaround", "CN Working keeps its existing option and label");
+    assert.equal(withFinal[2]!.labelKey, "cn_requests.action.download_final_cn");
+    assert.equal(withFinal[2]!.enabled, true);
+    assert.deepEqual(
+      cnActionMenuItems({ section: "accepted", view, hasWorking: true, hasFinalCn: false }).map((item) => item.id),
+      cnActionMenuItems({ section: "accepted", view, hasWorking: true }).map((item) => item.id),
+      "no Final CN → no Final CN item",
+    );
+    assert.equal(cnActionMenuItems({ section: "accepted", view, hasWorking: false, hasFinalCn: true })[1]!.enabled, false, "CN Working enablement is independent of the Final CN");
+  }
+  for (const view of ["submitted", "rejected"] as const) {
+    assert.deepEqual(cnActionMenuItems({ section: "submitted-rejected", view, hasWorking: true, hasFinalCn: true }).map((item) => item.id), ["VIEW_DETAILS"], "Submitted / Rejected never expose downloads");
+  }
+  assert.equal(DEFAULT_LABELS["cn_requests.action.download_final_cn"], "Download Final CN");
+  assert.ok(createPageSource.includes("hasFinalCn: request.finalCn != null"), "the row menu reads the Final CN from the list row");
+  assert.ok(createPageSource.includes('/api/cn-requests/${request.id}/${endpoint}?download=1') && createPageSource.includes('"final-cn" : "working"'), "Final CN downloads use /final-cn; CN Working keeps /working");
   const acceptRouteSource = readFileSync(resolve("src/app/api/cn-requests/[id]/accept/route.ts"), "utf8");
   assert.ok(acceptRouteSource.includes('form.get("cnExpiryDays")'), "the multipart acceptance route forwards expiry days to the server");
   assert.ok(acceptRouteSource.includes('form.get("postedAmount")'), "the multipart acceptance route forwards Posted Amount to the server");
@@ -943,43 +987,32 @@ async function main() {
   await expectStatus(() => service.getCnWorkingDocument(OTHER_SO, "cn-1"), 403);
   assert.deepEqual((await service.getCnWorkingDocument(ADMIN, "cn-1")).buffer, PDF_UPLOAD.buffer);
 
+  // There is no standalone "post" of an already-accepted CN. Every variant is rejected server-side and leaves the CN
+  // exactly as it was (CN Working Shared, Pending, nothing posted) — only direct acceptance or Verify Payment → Paid post.
   accepted.taskDate = "2099-09-25";
-  await expect422(
-    () => acceptanceService.acceptCnRequest(ADMIN, "cn-1", { status: "POSTED_IN_LEDGER" }, null),
-    CN_POSTED_AMOUNT_REQUIRED_MESSAGE,
-  );
-  await expect422(
-    () => acceptanceService.acceptCnRequest(ADMIN, "cn-1", { status: "POSTED_IN_LEDGER", postedAmount: 0 }, null),
-    CN_POSTED_AMOUNT_INVALID_MESSAGE,
-  );
-  assert.equal((await acceptanceService.acceptCnRequest(
-    ADMIN,
-    "cn-1",
-    { status: "POSTED_IN_LEDGER", postedAmount: 12000 },
-    null,
-  )).status, "POSTED_IN_LEDGER");
-  assert.ok(store.rows.find((row) => row.id === "cn-1")?.postedAt, "posting persists its authoritative timestamp");
-  assert.equal(store.rows.find((row) => row.id === "cn-1")?.postedAmount, 12000);
-  assert.equal(store.rows.find((row) => row.id === "cn-1")?.taskDate, "2099-09-25", "posting preserves the previously scheduled task date");
-  assert.equal(store.rows.find((row) => row.id === "cn-1")?.acceptanceReason, "PAYMENT_PENDING", "posting preserves the prior reason");
-  assert.equal(store.rows.find((row) => row.id === "cn-1")?.cnExpiryDays, 3, "posting preserves the prior expiry");
-  assert.equal(store.rows.find((row) => row.id === "cn-1")?.cnWorkingFileName, PDF_UPLOAD.name, "later posting preserves the acceptance document");
-  const workingAfterSecondStep = await service.listCnRequests(ADMIN, "accepted-not-posted");
-  assert.equal(workingAfterSecondStep.map((r) => r.id).join(","), "cn-1", "non-Paid remains in CN Working Shared even after ledger posting");
-  assert.equal((await service.listCnRequests(ADMIN, "posted-in-ledger")).length, 0, "Pending never qualifies for the payment-driven Posted section");
-  assert.equal(workingAfterSecondStep[0]?.amount, 12000, "the Amount column uses the actual Posted Amount");
-  assert.equal(workingAfterSecondStep[0]?.postedAmount, 12000);
-  assert.equal(workingAfterSecondStep[0]?.paymentStatus, "Pending", "posting does not change the independent Payment Status");
-  assert.equal(
-    workingAfterSecondStep[0]?.days,
-    inclusiveCnRequestDays(accepted.createdAt!, accepted.postedAt!),
-    "Posted Days use submission through posting",
-  );
+  const beforeStandalonePost = structuredClone(store.rows.find((row) => row.id === "cn-1"));
+  const eventCountBeforeStandalonePost = store.paymentEvents.length;
+  for (const attempt of [
+    { raw: { status: "POSTED_IN_LEDGER", postedAmount: 12000 }, upload: null },
+    { raw: { status: "POSTED_IN_LEDGER", postedAmount: 12000 }, upload: PDF_UPLOAD },
+  ]) {
+    await expectStatus(() => acceptanceService.acceptCnRequest(ADMIN, "cn-1", attempt.raw, attempt.upload), 409);
+  }
+  assert.deepEqual(store.rows.find((row) => row.id === "cn-1"), beforeStandalonePost, "a rejected standalone post changes nothing");
+  assert.equal(store.paymentEvents.length, eventCountBeforeStandalonePost, "no payment event is created by a rejected post");
+  const stillWorkingShared = await service.listCnRequests(ADMIN, "accepted-not-posted");
+  assert.equal(stillWorkingShared.map((r) => r.id).join(","), "cn-1", "the CN stays in CN Working Shared");
+  assert.equal((await service.listCnRequests(ADMIN, "posted-in-ledger")).length, 0);
+  assert.equal(stillWorkingShared[0]?.paymentStatus, "Pending");
+  assert.equal(stillWorkingShared[0]?.postedAmount, null);
+  assert.equal(store.rows.find((row) => row.id === "cn-1")?.taskDate, "2099-09-25", "the scheduled task date is untouched");
+  assert.equal(store.rows.find((row) => row.id === "cn-1")?.cnWorkingFileName, PDF_UPLOAD.name, "the acceptance document is untouched");
 
   // Direct Accepted, Posted in Ledger requires no reason, persists an XLSX, and sets both timestamps.
   const directPostedStore = makeStore();
   const directPostedId = directPostedStore.seed("SUBMITTED", "cn-direct-posted");
-  const directPostedService = loadService(directPostedStore.prisma);
+  const directPostedAudits: Array<{ summary?: string | null }> = [];
+  const directPostedService = loadService(directPostedStore.prisma, directPostedAudits);
   await expect422(
     () => directPostedService.acceptCnRequest(ADMIN, directPostedId, { status: "POSTED_IN_LEDGER" }, XLSX_UPLOAD),
     CN_POSTED_AMOUNT_REQUIRED_MESSAGE,
@@ -1004,16 +1037,58 @@ async function main() {
   assert.equal(directPosted.cnExpiryDays, null, "direct Posted in Ledger does not create a scheduling expiry");
   assert.equal(directPosted.postedAmount, 15000);
   assert.equal(directPosted.amount, 10000, "historical Approx Amount data remains intact");
-  assert.equal(directPosted.paymentStatus, "Bill Paid", "existing Payment Status remains intact");
+  assert.equal(directPosted.paymentStatus, "Paid", "Accepted, Posted in Ledger persists the canonical Paid payment status");
   assert.equal(directPosted.cnWorkingFileName, XLSX_UPLOAD.name);
   assert.equal(directPosted.cnWorkingMimeType, XLSX_UPLOAD.type);
   assert.equal(directPosted.acceptedAt?.toISOString(), directPosted.postedAt?.toISOString());
-  const directPostedRow = (await directPostedService.listCnRequests(ADMIN, "accepted-not-posted"))[0]!;
-  assert.equal((await directPostedService.listCnRequests(ADMIN, "posted-in-ledger")).length, 0, "legacy Bill Paid is not the canonical Paid status");
+  // Test 1 / 6 — direct acceptance never passes through Pending / Partial Paid / CN Working Shared.
+  assert.equal(directPosted.status, "POSTED_IN_LEDGER");
+  assert.equal(directPosted.paymentVerified, true);
+  assert.equal(directPosted.paymentOutstandingAmount, 0);
+  assert.equal(directPosted.paymentOriginalAmount, 15000);
+  assert.equal(directPosted.paymentTrackingMode, "PAYMENT_V1");
+  assert.equal((await directPostedService.listCnRequests(ADMIN, "accepted-not-posted")).length, 0, "no intermediate CN Working Shared state");
+  const directPostedRow = (await directPostedService.listCnRequests(ADMIN, "posted-in-ledger"))[0]!;
+  assert.equal(directPostedRow.id, directPostedId, "appears under Accepted → Posted in Ledger");
+  assert.equal(cnRequestCurrentDisplayStatus(directPosted.status, directPosted.paymentStatus), "POSTED_IN_LEDGER", "not Returned from Ledger");
+  assert.equal(directPostedStore.paymentEvents.length, 1);
+  assert.equal(directPostedStore.paymentEvents[0]?.status, "PAID");
+  assert.equal(directPostedStore.paymentEvents[0]?.taskStatus, null, "a settled CN creates no follow-up task");
   assert.equal(directPostedRow.amount, 15000, "Posted in Ledger displays the actual posted amount");
   assert.equal(directPostedRow.postedAmount, 15000);
   assert.equal(directPostedRow.days, inclusiveCnRequestDays(directPosted.createdAt!, directPosted.postedAt!));
   assert.deepEqual((await directPostedService.getCnWorkingDocument(SO, directPostedId)).buffer, XLSX_UPLOAD.buffer);
+  assert.equal((await directPostedService.getCnPaymentDetail(ADMIN, directPostedId)).events.length, 1, "Payment History opens for a directly posted CN");
+
+  // Test 7 — Path A (direct) and Path B (CN Working Shared → SO Paid → Admin Verify Paid) persist the same canonical state.
+  {
+    const pathBStore = makeStore();
+    const pathBId = pathBStore.seed("SUBMITTED", "cn-path-b", "so-1");
+    const pathBAudits: Array<{ summary?: string | null }> = [];
+    const pathBService = loadService(pathBStore.prisma, pathBAudits);
+    await pathBService.acceptCnRequest(ADMIN, pathBId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 15000 }, PDF_UPLOAD);
+    assert.equal((await pathBService.listCnRequests(ADMIN, "accepted-not-posted")).length, 1, "Path B starts in CN Working Shared");
+    await pathBService.updateCnPayment(SO, pathBId, { status: "PAID", paymentDate: "2026-09-23", taskId: pathBStore.paymentEvents[0]!.id, requestKey: "path-b-so-paid" });
+    await pathBService.verifyCnPayment(ADMIN, pathBId, { status: "PAID", requestKey: "path-b-verify-paid" }, FINAL_CN_UPLOAD);
+    const pathB = pathBStore.rows[0]!;
+    const canonical = (row: typeof pathB) => ({
+      status: row.status, paymentStatus: row.paymentStatus, paymentVerified: row.paymentVerified,
+      paymentTrackingMode: row.paymentTrackingMode, paymentOriginalAmount: row.paymentOriginalAmount,
+      paymentOutstandingAmount: row.paymentOutstandingAmount, postedAmount: row.postedAmount, hasPostedAt: row.postedAt != null,
+    });
+    assert.deepEqual(canonical(directPosted), { ...canonical(pathB), paymentOriginalAmount: 15000, postedAmount: 15000 });
+    assert.equal(canonical(pathB).status, "POSTED_IN_LEDGER");
+    const finalEvent = (store: { paymentEvents: Array<{ status: string; source: string; outstandingBefore: unknown; outstandingAfter: unknown; taskStatus: string | null; amountPaid: unknown }> }) => store.paymentEvents.at(-1)!;
+    const a = finalEvent(directPostedStore), b = finalEvent(pathBStore);
+    assert.deepEqual(
+      { status: a.status, source: a.source, before: Number(a.outstandingBefore), after: Number(a.outstandingAfter), taskStatus: a.taskStatus, amountPaid: a.amountPaid },
+      { status: b.status, source: b.source, before: Number(b.outstandingBefore), after: Number(b.outstandingAfter), taskStatus: b.taskStatus, amountPaid: b.amountPaid },
+      "the final payment event has the same shape on both paths",
+    );
+    assert.equal((await pathBService.listCnRequests(ADMIN, "posted-in-ledger"))[0]?.id, pathBId);
+    assert.equal(directPostedAudits.filter((entry) => entry.summary?.includes("posted in ledger")).length, 1, "direct post writes exactly one audit entry");
+    assert.ok(directPostedAudits.some((entry) => entry.summary?.includes("Payment Status: Paid")), "audit records the Paid payment state");
+  }
 
   // Other acceptance reason is trimmed and persisted only for Accepted / Not Posted.
   const otherAcceptanceStore = makeStore();
@@ -1450,7 +1525,7 @@ async function main() {
     // Admin-verified Paid settles the balance and atomically performs the existing Post in Ledger transition.
     await verifyService.verifyCnPayment(ADMIN, verifyId, {
       status: "PAID", requestKey: "v-paid-1",
-    });
+    }, FINAL_CN_UPLOAD);
     assert.equal(vRequest.paymentStatus, "Paid");
     assert.equal(vRequest.paymentOutstandingAmount, 0);
     assert.equal(vRequest.paymentVerified, true);
@@ -1552,8 +1627,8 @@ async function main() {
     });
     const eventsBefore = concurrentStore.paymentEvents.length;
     await Promise.all([
-      concurrentService.verifyCnPayment(ADMIN, concurrentId, { status: "PAID", requestKey: "concurrent-admin-paid-a" }),
-      concurrentService.verifyCnPayment(ADMIN, concurrentId, { status: "PAID", requestKey: "concurrent-admin-paid-b" }),
+      concurrentService.verifyCnPayment(ADMIN, concurrentId, { status: "PAID", requestKey: "concurrent-admin-paid-a" }, FINAL_CN_UPLOAD),
+      concurrentService.verifyCnPayment(ADMIN, concurrentId, { status: "PAID", requestKey: "concurrent-admin-paid-b" }, FINAL_CN_UPLOAD),
     ]);
     assert.equal(concurrentStore.rows[0]?.paymentStatus, "Paid");
     assert.equal(concurrentStore.rows[0]?.status, "POSTED_IN_LEDGER");
@@ -1581,7 +1656,8 @@ async function main() {
     rollbackStore.setFailLedgerPosting(true);
     await assert.rejects(() => rollbackService.verifyCnPayment(ADMIN, rollbackId, {
       status: "PAID", requestKey: "rollback-admin-paid",
-    }), /simulated ledger write failure/);
+    }, FINAL_CN_UPLOAD), /simulated ledger write failure/);
+    assert.equal(rollbackStore.rows[0]?.finalCnDocument ?? null, null, "a failed ledger write also leaves no Final CN document behind");
     assert.equal(rollbackStore.rows[0]?.paymentStatus, "Paid", "the SO report remains unchanged after rollback");
     assert.equal(rollbackStore.rows[0]?.paymentVerified, false, "the failed Admin verification is rolled back");
     assert.equal(rollbackStore.rows[0]?.status, "ACCEPTED_NOT_POSTED", "the failed ledger transition is rolled back");
@@ -1736,6 +1812,171 @@ async function main() {
     const missing = cnActionMenuItems({ section: "accepted", view: "accepted-not-posted", hasWorking: false });
     assert.equal(missing[1]?.id, "DOWNLOAD_CN_WORKING");
     assert.equal(missing[1]?.enabled, false, "download disabled when no attachment exists");
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Final CN document — required when an Admin verifies Paid on a CN Working Shared request. Stored separately from the
+  // CN Working document, written in the same update that posts the CN, and never overwriting CN Working.
+  // ---------------------------------------------------------------------------------------------------------------
+  {
+    const setupWorkingShared = async (name: string) => {
+      const fStore = makeStore();
+      const fId = fStore.seed("SUBMITTED", `cn-final-${name}`, "so-1");
+      const fAudits: Array<{ summary?: string | null }> = [];
+      const fService = loadService(fStore.prisma, fAudits);
+      await fService.acceptCnRequest(ADMIN, fId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 20000 }, PDF_UPLOAD);
+      const taskId = fStore.paymentEvents[0]!.id;
+      const taskDate = fStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
+      return { fStore, fId, fAudits, fService, row: fStore.rows[0]!, taskId, taskDate };
+    };
+    const workingDataUrl = `data:${PDF_UPLOAD.type};base64,${PDF_UPLOAD.buffer.toString("base64")}`;
+
+    // Test 1 — CN Working acceptance is unchanged: CN Working document stored, no Final CN.
+    const w = await setupWorkingShared("paid");
+    assert.equal(w.row.status, "ACCEPTED_NOT_POSTED");
+    assert.equal(w.row.cnWorkingDocument, workingDataUrl);
+    assert.equal(w.row.cnWorkingFileName, PDF_UPLOAD.name);
+    assert.equal(w.row.finalCnDocument ?? null, null, "no Final CN exists before Paid is verified");
+
+    // Test 10 — an existing CN without a Final CN loads and displays correctly.
+    const beforeRow = (await w.fService.listCnRequests(ADMIN, "accepted-not-posted"))[0]!;
+    assert.equal(beforeRow.finalCn, null);
+    assert.equal(beforeRow.cnWorking?.fileName, PDF_UPLOAD.name);
+    assert.equal((await w.fService.getCnRequest(SO, w.fId)).finalCn, null);
+    await expectStatus(() => w.fService.getCnFinalDocument(ADMIN, w.fId), 404);
+
+    await w.fService.updateCnPayment(SO, w.fId, { status: "PAID", paymentDate: w.taskDate, taskId: w.taskId, requestKey: "final-so-paid" });
+
+    // Test 2 — Paid without a Final CN is rejected and nothing changes.
+    const snapshot = structuredClone(w.row);
+    const eventCount = w.fStore.paymentEvents.length;
+    const auditCount = w.fAudits.length;
+    await expect422(() => w.fService.verifyCnPayment(ADMIN, w.fId, { status: "PAID", requestKey: "final-missing" }), "Final CN document is required to verify the payment as Paid.");
+    await expect422(() => w.fService.verifyCnPayment(ADMIN, w.fId, { status: "PAID", requestKey: "final-empty" }, { name: "Final CN.pdf", type: CN_WORKING_PDF_MIME, buffer: Buffer.alloc(0) }), "Final CN document is required to verify the payment as Paid.");
+    assert.deepEqual(w.row, snapshot, "a rejected Paid verification changes nothing, including the CN Working document");
+    assert.equal(w.row.status, "ACCEPTED_NOT_POSTED");
+    assert.equal(w.fStore.paymentEvents.length, eventCount, "no payment event is finalized");
+    assert.equal(w.fAudits.length, auditCount, "no audit entry is written for a rejected verification");
+    // The Final CN uses the same safe validation as CN Working: type, signature and size are all enforced.
+    await expect422(() => w.fService.verifyCnPayment(ADMIN, w.fId, { status: "PAID", requestKey: "final-bad-type" }, { name: "Final CN.png", type: "image/png", buffer: Buffer.from("image") }), "Final CN document must be a PDF or XLSX file.");
+    await expect422(() => w.fService.verifyCnPayment(ADMIN, w.fId, { status: "PAID", requestKey: "final-bad-sig" }, { name: "Final CN.pdf", type: CN_WORKING_PDF_MIME, buffer: Buffer.from("not a PDF") }), "Final CN document content does not match its file type.");
+    await expect422(() => w.fService.verifyCnPayment(ADMIN, w.fId, { status: "PAID", requestKey: "final-too-big" }, { name: "Final CN.xlsx", type: CN_WORKING_XLSX_MIME, buffer: Buffer.alloc(CN_WORKING_MAX_BYTES + 1) }), "Final CN document must be smaller than 3.5 MB.");
+    assert.deepEqual(w.row, snapshot, "invalid Final CN files change nothing");
+    assert.equal(w.fStore.paymentEvents.length, eventCount);
+
+    // Test 3 — Paid with a Final CN stores it, verifies Paid and posts, with the shared posting audit.
+    await w.fService.verifyCnPayment(ADMIN, w.fId, { status: "PAID", requestKey: "final-paid" }, FINAL_CN_UPLOAD);
+    assert.equal(w.row.status, "POSTED_IN_LEDGER");
+    assert.equal(w.row.paymentStatus, "Paid");
+    assert.equal(w.row.paymentVerified, true);
+    assert.equal(w.row.paymentOutstandingAmount, 0);
+    assert.equal(w.row.postedAmount, 20000);
+    assert.equal(w.row.finalCnFileName, FINAL_CN_UPLOAD.name);
+    assert.equal(w.row.finalCnMimeType, FINAL_CN_UPLOAD.type);
+    assert.equal(w.row.finalCnFileSize, FINAL_CN_UPLOAD.buffer.length);
+    assert.equal(w.row.finalCnUploadedById, "admin-1");
+    assert.ok(w.row.finalCnUploadedAt, "upload time is recorded");
+    assert.equal(w.fStore.paymentEvents.at(-1)?.source, "ADMIN_VERIFY");
+    assert.equal(w.fStore.paymentEvents.at(-1)?.status, "PAID");
+    assert.equal((await w.fService.listCnRequests(ADMIN, "posted-in-ledger"))[0]?.id, w.fId);
+    assert.ok(w.fAudits.some((entry) => entry.summary?.includes(`Final CN document: ${FINAL_CN_UPLOAD.name}`)), "payment-verified audit mentions the Final CN file name");
+    assert.ok(w.fAudits.some((entry) => entry.summary?.includes("posted in ledger") && entry.summary.includes(`Final CN: ${FINAL_CN_UPLOAD.name}`)));
+    assert.ok(w.fAudits.every((entry) => !entry.summary?.includes("JVBER") && !entry.summary?.includes("base64")), "document contents are never written to the audit log");
+    assert.equal(w.fAudits.filter((entry) => entry.summary?.includes("posted in ledger")).length, 1);
+
+    // Test 4 — both documents are preserved and independent.
+    assert.equal(w.row.cnWorkingDocument, workingDataUrl, "CN Working document is untouched");
+    assert.equal(w.row.cnWorkingFileName, PDF_UPLOAD.name);
+    assert.equal(w.row.cnWorkingFileSize, PDF_UPLOAD.buffer.length);
+    assert.notEqual(w.row.finalCnDocument, w.row.cnWorkingDocument);
+    const rowAfter = (await w.fService.listCnRequests(ADMIN, "posted-in-ledger"))[0]!;
+    assert.equal(rowAfter.cnWorking?.fileName, PDF_UPLOAD.name);
+    assert.equal(rowAfter.finalCn?.fileName, FINAL_CN_UPLOAD.name);
+    assert.ok(!JSON.stringify(rowAfter).includes("base64"), "list rows never carry document contents");
+
+    // Test 7 — downloads: each endpoint returns its own document; authorized scopes can read both.
+    for (const who of [ADMIN, SO]) {
+      assert.deepEqual((await w.fService.getCnWorkingDocument(who, w.fId)).buffer, PDF_UPLOAD.buffer);
+      const finalDoc = await w.fService.getCnFinalDocument(who, w.fId);
+      assert.deepEqual(finalDoc.buffer, FINAL_CN_UPLOAD.buffer);
+      assert.equal(finalDoc.fileName, FINAL_CN_UPLOAD.name);
+      assert.equal(finalDoc.mimeType, FINAL_CN_UPLOAD.type);
+    }
+    // Test 8 — a user outside the officer's scope cannot download the Final CN (same rule as CN Working).
+    await expectStatus(() => w.fService.getCnFinalDocument(OTHER_SO, w.fId), 403);
+    await expectStatus(() => w.fService.getCnWorkingDocument(OTHER_SO, w.fId), 403);
+
+    // Replaying the same verification key stays idempotent and does not touch either document.
+    const finalBefore = w.row.finalCnDocument;
+    await w.fService.verifyCnPayment(ADMIN, w.fId, { status: "PAID", requestKey: "final-paid" });
+    assert.equal(w.row.finalCnDocument, finalBefore);
+
+    // Test 5 — Not Paid needs no Final CN and stores none.
+    const n = await setupWorkingShared("notpaid");
+    await n.fService.updateCnPayment(SO, n.fId, { status: "NOT_PAID", followUpDate: n.taskDate, taskId: n.taskId, requestKey: "final-so-notpaid" });
+    await n.fService.verifyCnPayment(ADMIN, n.fId, { status: "NOT_PAID", requestKey: "final-notpaid" });
+    assert.equal(n.row.status, "ACCEPTED_NOT_POSTED");
+    assert.equal(n.row.paymentStatus, "Not Paid");
+    assert.equal(n.row.paymentVerified, true);
+    assert.equal(n.row.finalCnDocument ?? null, null);
+    // A Final CN sent with a non-Paid verification is ignored, never stored.
+    const n2 = await setupWorkingShared("notpaid-with-file");
+    await n2.fService.updateCnPayment(SO, n2.fId, { status: "NOT_PAID", followUpDate: n2.taskDate, taskId: n2.taskId, requestKey: "final-so-notpaid-2" });
+    await n2.fService.verifyCnPayment(ADMIN, n2.fId, { status: "NOT_PAID", requestKey: "final-notpaid-2" }, FINAL_CN_UPLOAD);
+    assert.equal(n2.row.finalCnDocument ?? null, null);
+
+    // Test 6 — Partial Paid needs no Final CN and stores none.
+    const pp = await setupWorkingShared("partial");
+    await pp.fService.updateCnPayment(SO, pp.fId, { status: "PARTIAL_PAID", amountPaid: 5000, paymentDate: pp.taskDate, followUpDate: pp.taskDate, taskId: pp.taskId, requestKey: "final-so-partial" });
+    await pp.fService.verifyCnPayment(ADMIN, pp.fId, { status: "PARTIAL_PAID", amountPaid: 5000, requestKey: "final-partial" });
+    assert.equal(pp.row.status, "ACCEPTED_NOT_POSTED");
+    assert.equal(pp.row.paymentStatus, "Partial Paid");
+    assert.equal(pp.row.paymentOutstandingAmount, 15000);
+    assert.equal(pp.row.finalCnDocument ?? null, null);
+
+    // The SO payment report itself never involves the Final CN.
+    assert.equal(w.fStore.paymentEvents.find((event) => event.source === "SO_UPDATE")?.status, "PAID");
+
+    // Test 9 — the direct "Accepted, Posted in Ledger" path keeps its single document and needs no Final CN.
+    const d = makeStore();
+    const dId = d.seed("SUBMITTED", "cn-final-direct", "so-1");
+    const dService = loadService(d.prisma);
+    await dService.acceptCnRequest(ADMIN, dId, { status: "POSTED_IN_LEDGER", postedAmount: 9000 }, PDF_UPLOAD);
+    assert.equal(d.rows[0]?.status, "POSTED_IN_LEDGER");
+    assert.equal(d.rows[0]?.cnWorkingFileName, PDF_UPLOAD.name, "the direct path's one document is stored where it always was");
+    assert.equal(d.rows[0]?.finalCnDocument ?? null, null, "no second document is created for the direct path");
+    assert.equal((await dService.getCnRequest(ADMIN, dId)).finalCn, null);
+
+    // Detail dialog: CN Working and Final CN each get View (PDF, inline) + Download; the Final CN row exists only with a Final CN.
+    const detailSource = readFileSync(resolve("src/features/cn-requests/cn-request-detail-dialog.tsx"), "utf8");
+    const workingRow = detailSource.slice(detailSource.indexOf("{request.cnWorking && ("), detailSource.indexOf("{request.finalCn && ("));
+    const finalRow = detailSource.slice(detailSource.indexOf("{request.finalCn && ("), detailSource.indexOf("{rejectionReason &&"));
+    assert.ok(workingRow.includes("/working`") && workingRow.includes("/working?download=1`"), "CN Working keeps View + Download on /working");
+    assert.ok(workingRow.includes("CN_WORKING_PDF_MIME") && workingRow.includes("L.view") && workingRow.includes("L.download"));
+    assert.ok(!workingRow.includes("final-cn"), "CN Working row never points at the Final CN");
+    assert.ok(finalRow.includes("/final-cn`") && finalRow.includes("target=\"_blank\""), "Final CN View opens /final-cn inline");
+    assert.ok(finalRow.includes("/final-cn?download=1`"), "Final CN Download uses ?download=1");
+    assert.ok(finalRow.includes("request.finalCn.mimeType === CN_WORKING_PDF_MIME") && finalRow.includes("L.view") && finalRow.includes("L.download"), "Final CN has View + Download, with the same PDF-only View rule as CN Working");
+    assert.ok(!finalRow.includes("/working"), "Final CN row never points at the CN Working document");
+    assert.ok(detailSource.includes("{request.finalCn && ("), "no Final CN → no Final CN row (so neither action renders)");
+    // Both routes share one inline/attachment contract and one authorization pattern.
+    for (const route of ["working", "final-cn"]) {
+      const source = readFileSync(resolve(`src/app/api/cn-requests/[id]/${route}/route.ts`), "utf8");
+      assert.ok(source.includes('searchParams.get("download") === "1" ? "attachment" : "inline"') && source.includes("await requireAuth()"), `${route}: inline by default, attachment with ?download=1, authenticated`);
+    }
+    // The row-menu data: the list row carries finalCn only when one exists.
+    assert.equal((await w.fService.listCnRequests(ADMIN, "posted-in-ledger"))[0]?.finalCn?.fileName, FINAL_CN_UPLOAD.name);
+    assert.equal((await n.fService.listCnRequests(ADMIN, "accepted-not-posted"))[0]?.finalCn, null);
+
+    // Source-level wiring: the verify route accepts multipart, and the Final CN has its own authenticated endpoint.
+    const verifyRouteSource = readFileSync(resolve("src/app/api/cn-requests/[id]/verify/route.ts"), "utf8");
+    assert.ok(verifyRouteSource.includes('form.get("file")') && verifyRouteSource.includes("multipart/form-data"));
+    const finalRouteSource = readFileSync(resolve("src/app/api/cn-requests/[id]/final-cn/route.ts"), "utf8");
+    assert.ok(finalRouteSource.includes("await requireAuth()") && finalRouteSource.includes("getCnFinalDocument"));
+    assert.ok(finalRouteSource.includes('"Cache-Control": "private, no-store"'), "Final CN is never publicly cached");
+    const dialogSource = readFileSync(resolve("src/features/cn-requests/cn-payment-dialog.tsx"), "utf8");
+    assert.ok(dialogSource.includes('status === "PAID" && cnStatus === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED'), "the Final CN control is required only when Paid will post a CN Working Shared request");
+    assert.ok(dialogSource.includes("needsFinalCn && ("), "the upload control renders only for that case");
   }
 
   console.log("CN Request tests passed");

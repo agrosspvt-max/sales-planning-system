@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import { ZodError } from "zod";
 import { Prisma, Role } from "@prisma/client";
 import type { AuthContext } from "@/lib/http";
 import { combineDailyWorkRows } from "@/lib/daily-work";
@@ -21,7 +22,7 @@ import { dailyWorkServiceInfrastructureMocks } from "./service-test-mocks";
 
 /* ------------------------------- In-memory DailyWorkEntry store + Prisma fake ------------------------------- */
 
-interface DW { id: string; officerId: string; dealerId: string; workDate: string; batchId?: string; section: string; todaysPlan: string | null; todaysActual: string | null; entryType: string; schemeId: string | null; status: string }
+interface DW { id: string; officerId: string; dealerId: string; workDate: string; batchId?: string; section: string; todaysPlan: string | null; todaysActual: string | null; entryType: string; schemeId: string | null; paymentMode?: string | null; status: string }
 
 // Authoritative per-dealer sales input for the CURRENT month, mirroring getMonthly → buildMonthlyDealers:
 // each product line has a monthly `plan` cell (a QUANTITY in PACK_SIZE/TOTAL_QUANTITY mode) priced at `rate`,
@@ -67,7 +68,7 @@ function makeFake(opts: FakeOpts) {
       const report = text.includes("status\" IN ('PLAN_SUBMITTED'");
       return store.filter((r) => r.officerId === officerId && r.section === section && r.workDate === workDate
         && (report ? r.batchId !== currentBatchId && ["PLAN_SUBMITTED", "FINALIZED", "SUBMITTED"].includes(r.status) : r.batchId === currentBatchId && r.status === "DRAFT"))
-        .map((r) => ({ id: r.id, batchId: r.batchId, dealerId: r.dealerId, rowKey: r.dealerId, typedDealerName: null, marketName: null, todaysPlan: r.todaysPlan, todaysActual: r.todaysActual, resultStatus: null, entryType: r.entryType, schemeId: r.schemeId, status: r.status }));
+        .map((r) => ({ id: r.id, batchId: r.batchId, dealerId: r.dealerId, rowKey: r.dealerId, typedDealerName: null, marketName: null, todaysPlan: r.todaysPlan, todaysActual: r.todaysActual, resultStatus: null, entryType: r.entryType, schemeId: r.schemeId, paymentMode: r.paymentMode ?? null, status: r.status }));
     }
     // DELETE replace-set: [officerId, section, workDate, ...keepRowKeys]  (rowKey == dealerId for Sales/Recovery)
     if (text.startsWith('DELETE FROM "DailyWorkEntry"')) {
@@ -80,15 +81,16 @@ function makeFake(opts: FakeOpts) {
     // INSERT ... ON CONFLICT DO UPDATE (upsert). Columns now: (id, officerId, dealerId, rowKey, workDate,
     // section, todaysPlan, entryType, schemeId, ...). `todaysPlan` is a bound `?` or the literal NULL.
     if (text.startsWith('INSERT INTO "DailyWorkEntry"')) {
-      const planIsNull = /, NULL, \?, \?, 'DRAFT'/.test(text); // todaysPlan slot rendered as literal NULL
+      const planIsNull = /, NULL, \?, \?(?:, \?)?, 'DRAFT'/.test(text); // todaysPlan slot rendered as literal NULL
       const id = v[0] as string, officerId = v[1] as string, dealerId = v[2] as string /* rowKey = v[3] == dealerId */, workDate = v[4] as string, batchId = v[5] as string, section = v[6] as string;
       let i = 7;
       const todaysPlan = planIsNull ? null : String(v[i++] as number);
       const entryType = v[i++] as string;
       const schemeId = (v[i++] as string | null) ?? null;
+      const paymentMode = text.includes('"schemeId", "paymentMode"') ? v[i++] as string | null : undefined;
       const existing = store.find((r) => r.officerId === officerId && r.workDate === workDate && r.batchId === batchId && r.section === section && r.dealerId === dealerId);
-      if (existing) { existing.todaysPlan = todaysPlan; existing.entryType = entryType; existing.schemeId = schemeId; }
-      else store.push({ id, officerId, dealerId, workDate, batchId, section, todaysPlan, todaysActual: null, entryType, schemeId, status: "DRAFT" });
+      if (existing) { existing.todaysPlan = todaysPlan; existing.entryType = entryType; existing.schemeId = schemeId; if (text.includes('"paymentMode" = EXCLUDED."paymentMode"')) existing.paymentMode = paymentMode; }
+      else store.push({ id, officerId, dealerId, workDate, batchId, section, todaysPlan, todaysActual: null, entryType, schemeId, ...(paymentMode !== undefined ? { paymentMode } : {}), status: "DRAFT" });
       return 1;
     }
     // UPDATE ... SET status='SUBMITTED'
@@ -362,6 +364,42 @@ async function main() {
     assert.equal(mixed.monthlyPlan, 200);
     assert.equal(mixed.pending, 150);
     assert.equal(mixed.todaysPlan, 20);
+  }
+
+  // Recovery Payment Mode is optional row metadata, using the same Save Draft/autosave endpoint.
+  {
+    const f = makeFake({ assignedDealerIds: ["d1", "d2"], dealers });
+    const svc = loadService(f, { assignedDealerIds: ["d1", "d2"] });
+    for (const paymentMode of ["CHEQUE", "UPI", "NEFT_RTGS", "CASH"]) {
+      await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode }] });
+      assert.equal(f.store()[0].paymentMode, paymentMode, "canonical mode is stored");
+      const reopened = await svc.getDailyWork(SO, "RECOVERY", DATE);
+      assert.equal(reopened.dealers[0].paymentMode, paymentMode, "mode survives draft reload");
+      assert.equal(reopened.dealers[0].todaysPlan, 30000, "plan amount is unchanged");
+    }
+    const before = f.store();
+    for (const paymentMode of ["CARD", "cash", "", 1, {}]) {
+      await assert.rejects(() => svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", paymentMode }] }), (err) => err instanceof ZodError);
+      assert.deepEqual(f.store(), before, "invalid metadata never reaches writes");
+    }
+    // Older clients may omit the new field without clearing a previously saved choice.
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000 }] });
+    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[0].paymentMode, "CASH");
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode: null }, { dealerId: "d2" }] });
+    assert.equal(f.store()[0].paymentMode, null, "the empty selection explicitly clears metadata");
+    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[1].paymentMode, null, "old/unselected rows load blank");
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode: "UPI" }, { dealerId: "d2" }] });
+    f.freezeCurrent("so1", DATE);
+    const report = await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT");
+    assert.equal(report.dealers[0].paymentMode, "UPI", "frozen batch retains Payment Mode");
+    await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: report.dealers[0].entryId, todaysActual: 25000 }] });
+    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT")).dealers[0].paymentMode, "UPI", "Save Actuals preserves plan metadata");
+    // Extra Recovery fields are stripped from Sales just like other unknown fields.
+    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 100, paymentMode: "CASH" }] });
+    const sales = (await svc.getDailyWork(SO, "SALES", DATE)).dealers[0];
+    assert.equal("paymentMode" in sales, false, "Sales DTO remains unchanged");
+    assert.equal(f.store().find((r) => r.section === "SALES")!.paymentMode, undefined, "Sales stores no Payment Mode");
+    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT")).dealers[0].paymentMode, "UPI", "separate batches/sections retain their metadata");
   }
 
   // 3) Save Draft persists rows; 4) unauthorized dealer rejected.

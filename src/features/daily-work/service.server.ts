@@ -26,7 +26,8 @@ import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction
 import {
   currentBusinessDate, monthNameForDate, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
-  MANDATORY_SECTIONS, SectionStatus,
+  MANDATORY_SECTIONS, SectionStatus, RECOVERY_PAYMENT_MODES,
+  type RecoveryPaymentMode,
   type DailyWorkSection, type DailyWorkType, type DailyWorkDealerRow,
   type SectionDataPresence, type MandatorySection, type SectionStatusCounts,
 } from "@/lib/daily-work";
@@ -43,7 +44,7 @@ import {
  *   - Sales schemes                       → runningSchemes(ctx) (OPEN schemes in the officer's group)
  *   - Recovery schemes                    → the existing Scheme Follow-up/payment financial scope, per dealer
  *   - Dealer scope                        → getCurrentDealerIds(officerId) (SO's assigned dealers)
- * Only the daily plan/actual/type/scheme-ref live in DailyWorkEntry, accessed via raw SQL (the generated
+ * Only the daily plan/actual/type/scheme-ref and optional Recovery payment mode live in DailyWorkEntry, accessed via raw SQL (the generated
  * Prisma client does not yet expose DailyWorkEntry in this environment). Pending and the combined row are
  * derived at read time — never stored.
  */
@@ -71,6 +72,9 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     entryType: z.enum(["REGULAR", "SCHEME"], invalidOption).optional().default("REGULAR"),
     schemeId: z.string().min(1, L["daily_work.placeholder.select_scheme"]).optional().nullable(),
   });
+  const recoveryRowSchema = rowSchema.extend({
+    paymentMode: z.enum(RECOVERY_PAYMENT_MODES, invalidOption).nullable().optional(),
+  });
   const appointmentRowSchema = z.object({
     rowId: z.string().min(1, L["daily_work.validation.invalid_option"]),
     dealerName: z.string().trim().max(200, L["daily_work.validation.dealer_name_length"]),
@@ -84,7 +88,10 @@ function dailyWorkSchemas(L: ResolvedLabels) {
   const wholeCount = z.coerce.number().int(L["daily_work.validation.whole_number"]).min(0, L["daily_work.validation.not_negative"]).max(100000, L["daily_work.validation.whole_number"]);
   const maxRows = <T extends z.ZodTypeAny>(schema: T) => z.array(schema).max(500, L["daily_work.validation.too_many_rows"]);
   return {
-    save: z.object({ section: z.enum(SECTIONS, invalidOption), workDate: dateStr, rows: maxRows(rowSchema) }),
+    save: z.discriminatedUnion("section", [
+      z.object({ section: z.literal("SALES"), workDate: dateStr, rows: maxRows(rowSchema) }),
+      z.object({ section: z.literal("RECOVERY"), workDate: dateStr, rows: maxRows(recoveryRowSchema) }),
+    ], invalidOption),
     actual: z.object({ section: z.enum(SECTIONS, invalidOption), workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), todaysActual: money })) }),
     appointmentSave: z.object({ workDate: dateStr, rows: maxRows(appointmentRowSchema) }),
     appointmentStatus: z.object({ workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), status: z.enum(["APPOINTED", "NOT_APPOINTED"], invalidOption) })) }),
@@ -147,6 +154,7 @@ export interface DailyWorkDealerDto {
   todaysPlan: number | null; // officer-entered
   todaysActual: number | null; // manual actual (post-submit)
   entryType: DailyWorkType;
+  paymentMode?: RecoveryPaymentMode | null; // exposed only for Recovery; legacy/unselected rows are null
   schemeId: string | null;
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
 }
@@ -415,13 +423,14 @@ async function plannedSchemesByDealer(officerId: string): Promise<Map<string, Pl
 interface DailyRow {
   id: string; batchId: string; dealerId: string | null; rowKey: string; typedDealerName: string | null; marketName: string | null;
   todaysPlan: string | null; todaysActual: string | null; resultStatus: string | null; entryType: string; schemeId: string | null; status: string;
+  paymentMode: RecoveryPaymentMode | null;
 }
 /** Current editable rows for PLAN, or every frozen immutable batch row for REPORT. */
 async function loadDailyRows(officerId: string, section: DailyWorkSection, workDate: string, mode: DailyWorkMode): Promise<DailyRow[]> {
   const { day } = await readBatchContext(officerId, workDate);
   const rows = await prisma.$queryRaw<DailyRow[]>(Prisma.sql`
     SELECT "id", "batchId", "dealerId", "rowKey", "typedDealerName", "marketName",
-           "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "resultStatus", "entryType", "schemeId", "status"
+           "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "resultStatus", "entryType", "schemeId", "status", "paymentMode"
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "section" = ${section} AND "workDate" = ${workDate}::date
       AND ${mode === "PLAN"
@@ -502,6 +511,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
         todaysPlan: r.todaysPlan == null ? null : num(r.todaysPlan),
         todaysActual: r.todaysActual == null ? null : num(r.todaysActual),
         entryType: (r.entryType as DailyWorkType) ?? "REGULAR",
+        ...(section === "RECOVERY" ? { paymentMode: r.paymentMode ?? null } : {}),
         schemeId: r.schemeId,
         status: (r.status as DailyWorkDealerDto["status"]) ?? "DRAFT",
       };
@@ -607,13 +617,16 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
     for (const r of rows) {
       const todaysPlan = r.todaysPlan == null ? Prisma.sql`NULL` : Prisma.sql`${r.todaysPlan}`;
       const schemeId = r.entryType === "SCHEME" ? r.schemeId! : null;
+      const isRecovery = section === "RECOVERY";
+      // Missing (older client) preserves an existing choice; explicit null clears the optional selection.
+      const paymentMode = isRecovery && "paymentMode" in r ? r.paymentMode : undefined;
       // Upsert on the unique (officer, workDate, section, rowKey). For SALES/RECOVERY rowKey == dealerId, so
       // duplicate protection is unchanged. Keep existing todaysActual + SUBMITTED status on conflict.
       await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId","status","createdAt","updatedAt")
-        VALUES (${randomUUID()}, ${officerId}, ${r.dealerId}, ${r.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, ${todaysPlan}, ${r.entryType}, ${schemeId}, 'DRAFT', NOW(), NOW())
+        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId"${isRecovery ? Prisma.sql`, "paymentMode"` : Prisma.empty},"status","createdAt","updatedAt")
+        VALUES (${randomUUID()}, ${officerId}, ${r.dealerId}, ${r.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, ${todaysPlan}, ${r.entryType}, ${schemeId}${isRecovery ? Prisma.sql`, ${paymentMode ?? null}` : Prisma.empty}, 'DRAFT', NOW(), NOW())
         ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
-        DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId", "updatedAt" = NOW()`);
+        DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId"${isRecovery && paymentMode !== undefined ? Prisma.sql`, "paymentMode" = EXCLUDED."paymentMode"` : Prisma.empty}, "updatedAt" = NOW()`);
     }
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Saved ${rows.length} daily ${section.toLowerCase()} row(s)` }, tx);
     return { count: rows.length };

@@ -230,7 +230,7 @@ export function isCnRequestView(value: string | null | undefined): value is CnRe
 }
 
 /** Identifiers for the row "⋮" action menu on the CN Requests table. */
-export type CnActionMenuItemId = "VIEW_DETAILS" | "DOWNLOAD_CN_WORKING";
+export type CnActionMenuItemId = "VIEW_DETAILS" | "DOWNLOAD_CN_WORKING" | "DOWNLOAD_FINAL_CN";
 
 export interface CnActionMenuItem {
   id: CnActionMenuItemId;
@@ -249,6 +249,8 @@ export function cnActionMenuItems(opts: {
   section: "submitted-rejected" | "accepted";
   view: CnRequestView;
   hasWorking: boolean;
+  /** A Final CN exists (uploaded when Paid was verified). Adds its own download; CN Working keeps its own item. */
+  hasFinalCn?: boolean;
 }): CnActionMenuItem[] {
   const items: CnActionMenuItem[] = [
     { id: "VIEW_DETAILS", labelKey: "cn_requests.action.view_details", enabled: true },
@@ -259,6 +261,9 @@ export function cnActionMenuItems(opts: {
       labelKey: opts.view === "posted-in-ledger" ? "cn_requests.action.download_cn" : "cn_requests.action.download_cn_workaround",
       enabled: opts.hasWorking,
     });
+    if (opts.hasFinalCn) {
+      items.push({ id: "DOWNLOAD_FINAL_CN", labelKey: "cn_requests.action.download_final_cn", enabled: true });
+    }
   }
   return items;
 }

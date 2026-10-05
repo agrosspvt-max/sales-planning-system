@@ -6,7 +6,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, Send, Lock } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { currentBusinessDate } from "@/lib/daily-work";
+import { RecoveryPaymentModeField } from "./recovery-payment-mode";
+import { type RecoveryPaymentMode, currentBusinessDate } from "@/lib/daily-work";
 import { formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,7 +32,7 @@ interface TeamSummary {
 interface TeamPayload { from: string; to: string; summary: TeamSummary; rows: TeamRow[] }
 
 interface ReviewDto { rating: number; reviewerId: string; reviewerName: string; reviewedAt: string }
-interface DealerRow { dealerId: string; dealerName: string; todaysPlan: number | null; todaysActual: number | null }
+interface DealerRow { dealerId: string; dealerName: string; todaysPlan: number | null; todaysActual: number | null; paymentMode?: RecoveryPaymentMode | null }
 interface ApptRow { rowId: string; dealerName: string; marketName: string; status: string | null }
 interface ConvRow { dealerId: string; schemeId: string; dealerName: string; schemeName: string; todaysPlan: number | null; achievability: string | null }
 interface SummaryDto { dealerVisits: number; newPartyVisits: number; others: string; visitsEntered: boolean }
@@ -191,7 +192,7 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
             <p className="text-sm text-muted-foreground">{data.officerName} · {workDate}</p>
 
             <DealerSection title={L.sales} rows={data.sales.dealers} />
-            <DealerSection title={L.recovery} rows={data.recovery.dealers} />
+            <DealerSection title={L.recovery} rows={data.recovery.dealers} recovery />
 
             <ReadSection title={L.appointment}>
               {data.appointment.rows.length === 0 ? dash : (
@@ -258,7 +259,7 @@ function ReadSection({ title, children }: { title: string; children: React.React
   );
 }
 
-function DealerSection({ title, rows }: { title: string; rows: DealerRow[] }) {
+function DealerSection({ title, rows, recovery = false }: { title: string; rows: DealerRow[]; recovery?: boolean }) {
   return (
     <ReadSection title={title}>
       {rows.length === 0 ? dash : (
@@ -268,6 +269,7 @@ function DealerSection({ title, rows }: { title: string; rows: DealerRow[] }) {
               <span><DealerName id={r.dealerId} name={r.dealerName} /></span>
               <span className="text-muted-foreground tabular-nums">
                 {r.todaysPlan == null ? "—" : formatCurrency(r.todaysPlan)}
+                {recovery && <> · <RecoveryPaymentModeField value={r.paymentMode ?? null} /></>}
                 {r.todaysActual != null ? ` · ${formatCurrency(r.todaysActual)}` : ""}
               </span>
             </li>

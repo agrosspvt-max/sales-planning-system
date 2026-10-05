@@ -6,7 +6,10 @@ import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { currentBusinessDate } from "@/lib/daily-work";
-import { paymentStatusLabel, type CnPaymentStatusValue } from "@/lib/cn-request";
+import {
+  CN_REQUEST_STATUSES, CN_WORKING_MAX_BYTES, CN_WORKING_PDF_MIME, CN_WORKING_XLSX_MIME,
+  paymentStatusLabel, type CnPaymentStatusValue,
+} from "@/lib/cn-request";
 import { formatSchemeCurrency } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,6 +59,10 @@ export function CnPaymentDialog({ requestId, onClose, onChanged }: { requestId: 
     admin: useLabel("cn_requests.payment.admin"), soReported: useLabel("cn_requests.payment.so_reported"), system: useLabel("cn_requests.payment.system"),
     paidSuffix: useLabel("cn_requests.payment.paid_suffix"), remainingSuffix: useLabel("cn_requests.payment.remaining_suffix"), recordedBy: useLabel("cn_requests.payment.recorded_by"),
     unavailable: useLabel("cn_requests.payment.unavailable"), verifyHelp: useLabel("cn_requests.payment.verify_help"),
+    finalCnDocument: useLabel("cn_requests.payment.final_cn_document"), chooseFile: useLabel("cn_requests.acceptance.choose_file"),
+    selected: useLabel("cn_requests.acceptance.selected"), fileHelp: useLabel("cn_requests.acceptance.file_help"),
+    finalCnRequired: useLabel("cn_requests.validation.final_cn_required"), finalCnTooLarge: useLabel("cn_requests.validation.final_cn_too_large"),
+    finalCnFileType: useLabel("cn_requests.validation.final_cn_file_type"),
     taskUnscheduled: useLabel("cn_requests.payment.task_unscheduled"), taskScheduled: useLabel("cn_requests.payment.task_scheduled"), taskCompleted: useLabel("cn_requests.payment.task_completed"),
   };
 
@@ -114,7 +121,7 @@ export function CnPaymentDialog({ requestId, onClose, onChanged }: { requestId: 
             {data.canUpdate && <SalesOfficerReportForm data={data} requestId={requestId} labels={L} onSaved={refresh} />}
 
             {/* Admin verifies / overrides (authoritative → green). No date fields; the SO schedules any new task. */}
-            {data.canVerify && <AdminVerifyForm requestId={requestId} labels={L} onSaved={refresh} />}
+            {data.canVerify && <AdminVerifyForm requestId={requestId} cnStatus={data.cnStatus} labels={L} onSaved={refresh} />}
           </div>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.close}</Button></DialogFooter>
@@ -128,6 +135,8 @@ type PaymentLabels = {
   pending: string; notPaid: string; partialPaid: string; paid: string; selectStatus: string; selectVerifiedStatus: string;
   saveStatus: string; saving: string; verifying: string; adminVerified: string; admin: string; soReported: string; system: string;
   verifyHelp: string;
+  finalCnDocument: string; chooseFile: string; selected: string; fileHelp: string;
+  finalCnRequired: string; finalCnTooLarge: string; finalCnFileType: string;
 };
 
 /** SO PAYMENT REPORT — provisional. Reports Paid / Partial Paid / Not Paid with dates on the active task. */
@@ -171,20 +180,33 @@ function SalesOfficerReportForm({ data, requestId, labels, onSaved }: { data: Pa
 }
 
 /** ADMIN VERIFICATION — authoritative. Admin picks only the status (+ Amount Paid for Partial); never dates. */
-function AdminVerifyForm({ requestId, labels, onSaved }: { requestId: string; labels: PaymentLabels; onSaved: (next: PaymentDetail) => void }) {
+function AdminVerifyForm({ requestId, cnStatus, labels, onSaved }: { requestId: string; cnStatus: string; labels: PaymentLabels; onSaved: (next: PaymentDetail) => void }) {
   const canPost = useAdminPermission("cnRequests", "post");
   const [status, setStatus] = useState<CnPaymentStatusValue | "">("");
   const [amountPaid, setAmountPaid] = useState("");
   const [requestKey, setRequestKey] = useState(() => crypto.randomUUID());
+  const [finalCn, setFinalCn] = useState<File | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const submittingRef = useRef(false);
+  // Paid on a CN Working Shared request posts it to the ledger and therefore needs the Final CN document.
+  const needsFinalCn = status === "PAID" && cnStatus === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED;
 
   const verify = useMutation({
-    mutationFn: () => api.post<PaymentDetail>(`/api/cn-requests/${requestId}/verify`, {
-      status, amountPaid: amountPaid || undefined, requestKey,
-    }),
+    mutationFn: async () => {
+      if (!needsFinalCn) {
+        return api.post<PaymentDetail>(`/api/cn-requests/${requestId}/verify`, { status, amountPaid: amountPaid || undefined, requestKey });
+      }
+      const form = new FormData();
+      form.append("status", status);
+      form.append("requestKey", requestKey);
+      if (finalCn) form.append("file", finalCn);
+      const response = await fetch(`/api/cn-requests/${requestId}/verify`, { method: "POST", body: form });
+      const body = await response.json() as PaymentDetail & { error?: string };
+      if (!response.ok) throw new Error(body.error ?? labels.finalCnRequired);
+      return body as PaymentDetail;
+    },
     onSuccess: (next) => {
-      setStatus(""); setAmountPaid(""); setRequestKey(crypto.randomUUID()); setFormError(null);
+      setStatus(""); setAmountPaid(""); setFinalCn(null); setRequestKey(crypto.randomUUID()); setFormError(null);
       onSaved(next);
     },
     onError: (e) => setFormError((e as Error).message),
@@ -193,6 +215,13 @@ function AdminVerifyForm({ requestId, labels, onSaved }: { requestId: string; la
 
   const submit = () => {
     if (submittingRef.current || !status) return;
+    if (needsFinalCn) {
+      const type = finalCn?.type;
+      const error = !finalCn ? labels.finalCnRequired
+        : finalCn.size > CN_WORKING_MAX_BYTES ? labels.finalCnTooLarge
+          : type !== CN_WORKING_PDF_MIME && type !== CN_WORKING_XLSX_MIME ? labels.finalCnFileType : null;
+      if (error) { setFormError(error); return; }
+    }
     submittingRef.current = true;
     verify.mutate();
   };
@@ -207,6 +236,27 @@ function AdminVerifyForm({ requestId, labels, onSaved }: { requestId: string; la
         value={status}
         onChange={(e) => { setStatus(e.target.value as CnPaymentStatusValue | ""); setFormError(null); }}
       />
+      {needsFinalCn && (
+        <div className="space-y-1">
+          <Label>{labels.finalCnDocument} *</Label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" asChild>
+              <label className={verify.isPending ? "pointer-events-none opacity-50" : "cursor-pointer"}>
+                {labels.chooseFile}
+                <input
+                  className="sr-only"
+                  type="file"
+                  disabled={verify.isPending}
+                  accept=".pdf,.xlsx,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  onChange={(event) => { setFinalCn(event.target.files?.[0] ?? null); setFormError(null); }}
+                />
+              </label>
+            </Button>
+            {finalCn && <span className="text-sm text-muted-foreground">{labels.selected}: {finalCn.name}</span>}
+          </div>
+          <p className="text-xs text-muted-foreground">{labels.fileHelp}</p>
+        </div>
+      )}
       {status === "PARTIAL_PAID" && <div className="space-y-1"><Label>{labels.amountPaid} *</Label><Input type="number" min="0.01" step="0.01" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} required /></div>}
       {formError && <p className="text-sm text-destructive">{formError}</p>}
       <Button disabled={!status || verify.isPending} onClick={submit}>{verify.isPending ? labels.verifying : labels.verify}</Button>

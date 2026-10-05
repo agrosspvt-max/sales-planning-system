@@ -111,19 +111,38 @@ export interface CnWorkingUpload {
   buffer: Buffer;
 }
 
+/** CN Working and Final CN share the same security rules; only the user-facing messages differ. */
+const CN_DOCUMENT_MESSAGES = {
+  working: {
+    required: "cn_requests.validation.working_required", tooLarge: "cn_requests.validation.working_too_large",
+    filename: "cn_requests.validation.working_filename_invalid", fileType: "cn_requests.validation.working_file_type",
+    contentType: "cn_requests.validation.working_content_type",
+  },
+  final: {
+    required: "cn_requests.validation.final_cn_required", tooLarge: "cn_requests.validation.final_cn_too_large",
+    filename: "cn_requests.validation.final_cn_filename_invalid", fileType: "cn_requests.validation.final_cn_file_type",
+    contentType: "cn_requests.validation.final_cn_content_type",
+  },
+} as const;
+
 function validateCnWorking(upload: CnWorkingUpload | null | undefined, L: ResolvedLabels): CnWorkingUpload {
-  if (!upload || upload.buffer.length === 0) throw new ApiError(422, L["cn_requests.validation.working_required"]);
-  if (upload.buffer.length > CN_WORKING_MAX_BYTES) throw new ApiError(422, L["cn_requests.validation.working_too_large"]);
+  return validateCnDocument(upload, L, "working");
+}
+
+function validateCnDocument(upload: CnWorkingUpload | null | undefined, L: ResolvedLabels, kind: keyof typeof CN_DOCUMENT_MESSAGES): CnWorkingUpload {
+  const M = CN_DOCUMENT_MESSAGES[kind];
+  if (!upload || upload.buffer.length === 0) throw new ApiError(422, L[M.required]);
+  if (upload.buffer.length > CN_WORKING_MAX_BYTES) throw new ApiError(422, L[M.tooLarge]);
   const fileName = upload.name.trim();
-  if (!fileName || fileName.length > 255) throw new ApiError(422, L["cn_requests.validation.working_filename_invalid"]);
+  if (!fileName || fileName.length > 255) throw new ApiError(422, L[M.filename]);
   const extension = fileName.toLowerCase().match(/(\.[^.]+)$/)?.[1] ?? "";
   const isPdf = extension === ".pdf" && upload.type === CN_WORKING_PDF_MIME;
   const isXlsx = extension === ".xlsx" && upload.type === CN_WORKING_XLSX_MIME;
-  if (!isPdf && !isXlsx) throw new ApiError(422, L["cn_requests.validation.working_file_type"]);
+  if (!isPdf && !isXlsx) throw new ApiError(422, L[M.fileType]);
   const hasPdfSignature = upload.buffer.subarray(0, 5).toString("ascii") === "%PDF-";
   const hasZipSignature = upload.buffer.length >= 4 && upload.buffer[0] === 0x50 && upload.buffer[1] === 0x4b && upload.buffer[2] === 0x03 && upload.buffer[3] === 0x04;
   if ((isPdf && !hasPdfSignature) || (isXlsx && !hasZipSignature)) {
-    throw new ApiError(422, L["cn_requests.validation.working_content_type"]);
+    throw new ApiError(422, L[M.contentType]);
   }
   return { ...upload, name: fileName };
 }
@@ -157,13 +176,14 @@ export interface CnRequestRow {
   cnExpiryDays: number | null;
   expiryDate: string | null;
   cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null;
+  finalCn: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; // null until Paid is verified
   remarks: string | null;
   createdAt: string;
   days: number | null;
 }
 
 type RawRow = {
-  id: string; dealerId: string; cnType: string; amount: unknown; postedAmount: unknown; paymentStatus: string | null; paymentOriginalAmount: unknown; paymentOutstandingAmount: unknown; paymentTrackingMode: string | null; paymentVerified?: boolean; officerId: string; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; cnExpiryDays: number | null; cnWorkingFileName: string | null; cnWorkingMimeType: string | null; cnWorkingFileSize: number | null; cnWorkingUploadedAt: Date | null; remarks: string | null; createdAt: Date;
+  id: string; dealerId: string; cnType: string; amount: unknown; postedAmount: unknown; paymentStatus: string | null; paymentOriginalAmount: unknown; paymentOutstandingAmount: unknown; paymentTrackingMode: string | null; paymentVerified?: boolean; officerId: string; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; cnExpiryDays: number | null; cnWorkingFileName: string | null; cnWorkingMimeType: string | null; cnWorkingFileSize: number | null; cnWorkingUploadedAt: Date | null; finalCnFileName?: string | null; finalCnMimeType?: string | null; finalCnFileSize?: number | null; finalCnUploadedAt?: Date | null; remarks: string | null; createdAt: Date;
   acceptedAt: Date | null; rejectedAt: Date | null; postedAt: Date | null;
   dealer: { name: string };
   officer: { name: string; territory: string | null; group: { name: string } | null };
@@ -201,6 +221,12 @@ function toRow(r: RawRow): CnRequestRow {
       fileSize: r.cnWorkingFileSize,
       uploadedAt: r.cnWorkingUploadedAt?.toISOString() ?? null,
     } : null,
+    finalCn: r.finalCnFileName && r.finalCnMimeType && r.finalCnFileSize != null ? {
+      fileName: r.finalCnFileName,
+      mimeType: r.finalCnMimeType,
+      fileSize: r.finalCnFileSize,
+      uploadedAt: r.finalCnUploadedAt?.toISOString() ?? null,
+    } : null,
     remarks: r.remarks,
     createdAt: r.createdAt.toISOString(),
     days: cnRequestAgeDays(r),
@@ -210,7 +236,8 @@ const ROW_SELECT = {
   id: true, dealerId: true, cnType: true, amount: true, postedAmount: true, paymentStatus: true, paymentOriginalAmount: true, paymentOutstandingAmount: true, paymentTrackingMode: true, officerId: true, status: true,
   details: true, rejectionReason: true, rejectionReasonDetails: true, acceptanceReason: true,
   acceptanceReasonDetails: true, cnExpiryDays: true, cnWorkingFileName: true, cnWorkingMimeType: true, cnWorkingFileSize: true,
-  cnWorkingUploadedAt: true, remarks: true, createdAt: true, acceptedAt: true, rejectedAt: true, postedAt: true,
+  cnWorkingUploadedAt: true, finalCnFileName: true, finalCnMimeType: true, finalCnFileSize: true, finalCnUploadedAt: true,
+  remarks: true, createdAt: true, acceptedAt: true, rejectedAt: true, postedAt: true,
   dealer: { select: { name: true } },
   officer: { select: { name: true, territory: true, group: { select: { name: true } } } },
 } as const;
@@ -414,13 +441,14 @@ type CnPostingRequest = {
   cnWorkingMimeType: string | null;
 };
 
-type CnWorkingDocumentData = {
-  cnWorkingDocument?: string;
-  cnWorkingFileName?: string;
-  cnWorkingMimeType?: string;
-  cnWorkingFileSize?: number;
-  cnWorkingUploadedById?: string;
-  cnWorkingUploadedAt?: Date;
+/** Final CN fields written in the same update that posts the CN; the CN Working columns are never part of it. */
+type CnFinalDocumentData = {
+  finalCnDocument?: string;
+  finalCnFileName?: string;
+  finalCnMimeType?: string;
+  finalCnFileSize?: number;
+  finalCnUploadedById?: string;
+  finalCnUploadedAt?: Date;
 };
 
 /** The single Accepted → Posted in Ledger transition, shared by manual posting and Paid verification. */
@@ -431,7 +459,7 @@ async function postAcceptedCnRequestInTransaction(
   transitionAt: Date,
   adminId: string,
   L: ResolvedLabels,
-  documentData: CnWorkingDocumentData = {},
+  finalCn: CnFinalDocumentData = {},
 ): Promise<{ posted: boolean; documentName: string | null }> {
   if (request.status === CN_REQUEST_STATUSES.POSTED_IN_LEDGER) {
     return { posted: false, documentName: request.cnWorkingFileName };
@@ -443,8 +471,7 @@ async function postAcceptedCnRequestInTransaction(
     throw new ApiError(422, L["cn_requests.validation.posted_amount_invalid"]);
   }
   const hasExistingDocument = !!request.cnWorkingDocument && !!request.cnWorkingFileName && !!request.cnWorkingMimeType;
-  const hasReplacementDocument = !!documentData.cnWorkingDocument && !!documentData.cnWorkingFileName && !!documentData.cnWorkingMimeType;
-  if (!hasExistingDocument && !hasReplacementDocument) {
+  if (!hasExistingDocument) {
     throw new ApiError(422, L["cn_requests.validation.working_required"]);
   }
 
@@ -455,11 +482,11 @@ async function postAcceptedCnRequestInTransaction(
       postedAmount,
       postedAt: transitionAt,
       actedByAdminId: adminId,
-      ...documentData,
+      ...finalCn,
     },
   });
   if (transition.count === 0) throw new ApiError(409, L["cn_requests.error.request_changed"]);
-  return { posted: true, documentName: documentData.cnWorkingFileName ?? request.cnWorkingFileName };
+  return { posted: true, documentName: request.cnWorkingFileName };
 }
 
 /** Admin acceptance/posting stores its authoritative amount, payment start/task, document and status atomically. */
@@ -499,39 +526,30 @@ export async function acceptCnRequest(
       select: { id: true, status: true, cnWorkingDocument: true, cnWorkingFileName: true, cnWorkingMimeType: true },
     });
     if (!request) throw new ApiError(404, L["cn_requests.error.not_found"]);
-    const postingExisting = request.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED && !isNotPosted;
+    // Only a SUBMITTED request can be accepted here. There is no standalone "post" of an already-accepted CN: Posted in
+    // Ledger is reached only by direct acceptance (below) or by Payment Status → Verify Payment → Paid (verifyCnPayment).
     const acceptingSubmitted = request.status === CN_REQUEST_STATUSES.SUBMITTED;
     if (acceptingSubmitted) assertAdminPermission(ctx, "cnRequests", "approve");
     if (!isNotPosted) assertAdminPermission(ctx, "cnRequests", "post");
-    if (!acceptingSubmitted && !postingExisting) {
+    if (!acceptingSubmitted) {
       throw new ApiError(409, L["cn_requests.error.process_state"]);
     }
-    const hasExistingDocument = !!request.cnWorkingDocument && !!request.cnWorkingFileName && !!request.cnWorkingMimeType;
-    if ((!postingExisting || !hasExistingDocument) && !upload) throw new ApiError(422, L["cn_requests.validation.working_required"]);
+    if (!upload) throw new ApiError(422, L["cn_requests.validation.working_required"]);
 
-    if (postingExisting) {
-      const result = await postAcceptedCnRequestInTransaction(
-        tx,
-        request,
-        parsed.data.postedAmount!,
-        transitionAt,
-        ctx.userId,
-        L,
-        documentData,
-      );
-      return result.documentName;
-    }
-
+    // Direct "Accepted, Posted in Ledger" lands in the same final state as Verify Payment → Paid: Paid, verified,
+    // nothing outstanding, on the PAYMENT_V1 tracking mode, with one PAID payment event (created below).
+    const directPosted = !isNotPosted;
     const transitionData = {
       status: parsed.data.status,
       acceptanceReason,
       acceptanceReasonDetails,
       cnExpiryDays: isNotPosted ? parsed.data.cnExpiryDays! : null,
       postedAmount: isNotPosted ? null : parsed.data.postedAmount!,
-      paymentStatus: paymentPending ? "Pending" : undefined,
-      paymentOriginalAmount: paymentPending ? parsed.data.outstandingAmount! : undefined,
-      paymentOutstandingAmount: paymentPending ? parsed.data.outstandingAmount! : undefined,
-      paymentTrackingMode: isNotPosted ? (paymentPending ? "PAYMENT_V1" : "NONE") : undefined,
+      paymentStatus: paymentPending ? "Pending" : directPosted ? paymentStatusLabel("PAID") : undefined,
+      paymentOriginalAmount: paymentPending ? parsed.data.outstandingAmount! : directPosted ? parsed.data.postedAmount! : undefined,
+      paymentOutstandingAmount: paymentPending ? parsed.data.outstandingAmount! : directPosted ? 0 : undefined,
+      paymentTrackingMode: isNotPosted ? (paymentPending ? "PAYMENT_V1" : "NONE") : "PAYMENT_V1",
+      paymentVerified: directPosted ? true : undefined,
       actedByAdminId: ctx.userId,
       acceptedAt: transitionAt,
       postedAt: isNotPosted ? null : transitionAt,
@@ -558,6 +576,23 @@ export async function acceptCnRequest(
         },
       });
     }
+    if (directPosted) {
+      // Same payment-history shape as an Admin-verified Paid (see verifyCnPayment): PAID, settles the whole amount, no task.
+      await tx.cnPaymentEvent.create({
+        data: {
+          cnRequestId: id,
+          status: "PAID",
+          eventDate: businessDateValue(transitionAt, L["cn_requests.error.business_date"]),
+          outstandingBefore: parsed.data.postedAmount!,
+          outstandingAfter: 0,
+          taskStatus: null,
+          taskRescheduled: false,
+          source: "ADMIN_VERIFY",
+          requestKey: `acceptance:${id}`,
+          recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
+        },
+      });
+    }
     return upload?.name ?? request.cnWorkingFileName;
   });
 
@@ -569,7 +604,7 @@ export async function acceptCnRequest(
     action: "UPDATE",
     entity: "cnRequest",
     entityId: id,
-    summary: `CN Request ${isNotPosted ? "accepted, not posted" : "accepted, posted in ledger"}${reasonSummary}${paymentPending ? `; Outstanding Amount: ${parsed.data.outstandingAmount}` : ""}${isNotPosted ? `; CN Expiry: ${parsed.data.cnExpiryDays} days` : `; Posted Amount: ${parsed.data.postedAmount}`}; CN working: ${documentName}`,
+    summary: `CN Request ${isNotPosted ? "accepted, not posted" : "accepted, posted in ledger"}${reasonSummary}${paymentPending ? `; Outstanding Amount: ${parsed.data.outstandingAmount}` : ""}${isNotPosted ? `; CN Expiry: ${parsed.data.cnExpiryDays} days` : `; Posted Amount: ${parsed.data.postedAmount}; Payment Status: Paid (verified)`}; CN working: ${documentName}`,
   });
   return { status: parsed.data.status };
 }
@@ -596,6 +631,32 @@ export async function getCnWorkingDocument(ctx: AuthContext, id: string): Promis
     buffer: Buffer.from(match[2], "base64"),
     fileName: request.cnWorkingFileName,
     mimeType: request.cnWorkingMimeType,
+  };
+}
+
+/** Final CN download: identical officer-scope rule to the CN Working download, but reads only the Final CN columns. */
+export async function getCnFinalDocument(ctx: AuthContext, id: string): Promise<{
+  buffer: Buffer;
+  fileName: string;
+  mimeType: string;
+}> {
+  const L = await getResolvedLabels();
+  const request = await prisma.cnRequest.findUnique({
+    where: { id },
+    select: { officerId: true, finalCnDocument: true, finalCnFileName: true, finalCnMimeType: true },
+  });
+  if (!request) throw new ApiError(404, L["cn_requests.error.not_found"]);
+  const scope = await getOfficerScope(ctx);
+  if (!scope.all && !scope.ids.includes(request.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_access_final"]);
+  if (!request.finalCnDocument || !request.finalCnFileName || !request.finalCnMimeType) {
+    throw new ApiError(404, L["cn_requests.error.final_unavailable"]);
+  }
+  const match = /^data:([^;,]+);base64,([\s\S]+)$/.exec(request.finalCnDocument);
+  if (!match || match[1] !== request.finalCnMimeType) throw new ApiError(500, L["cn_requests.error.final_unavailable"]);
+  return {
+    buffer: Buffer.from(match[2], "base64"),
+    fileName: request.finalCnFileName,
+    mimeType: request.finalCnMimeType,
   };
 }
 
@@ -845,7 +906,7 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
  * ledger through the same transition used by manual posting. The SO's original report stays immutable in
  * history; a separate ADMIN_VERIFY event records the Admin decision.
  */
-export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown): Promise<CnPaymentDetailDto> {
+export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown, rawFinalCn?: CnWorkingUpload | null): Promise<CnPaymentDetailDto> {
   assertAdminPermission(ctx, "cnRequests", "verifyPayment");
   const L = await getResolvedLabels();
   if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["cn_requests.error.admin_verify_only"]);
@@ -859,7 +920,12 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
     return getCnPaymentDetail(ctx, id);
   }
 
-  let postingResult: { idempotent: boolean; posted: boolean; postedAmount: number | null; documentName: string | null };
+  // Final CN document: only meaningful for Paid. Its file rules are checked before any write; whether it is REQUIRED
+  // depends on the locked request state (it is required exactly when this Paid will post an accepted CN) and is
+  // enforced inside the transaction below.
+  const finalCnUpload = data.status === "PAID" && rawFinalCn ? validateCnDocument(rawFinalCn, L, "final") : null;
+
+  let postingResult: { idempotent: boolean; posted: boolean; postedAmount: number | null; documentName: string | null; finalCnName: string | null };
   try {
     postingResult = await prisma.$transaction(async (tx) => {
       // Serialize verification for one CN. This also lets a concurrent duplicate recheck its request key only
@@ -897,13 +963,18 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
       `);
       if (eventState?.requestKeyCnRequestId) {
         if (eventState.requestKeyCnRequestId !== id) throw new ApiError(409, L["cn_requests.error.verification_key_used"]);
-        return { idempotent: true, posted: false, postedAmount: null, documentName: null };
+        return { idempotent: true, posted: false, postedAmount: null, documentName: null, finalCnName: null };
       }
       if (request.paymentTrackingMode !== "PAYMENT_V1" || request.paymentOutstandingAmount == null) {
         throw new ApiError(409, L["cn_requests.error.payment_tracking_inactive"]);
       }
       if (request.paymentStatus == null || request.paymentStatus === "Pending") {
         throw new ApiError(409, L["cn_requests.error.no_report_to_verify"]);
+      }
+      // Verifying Paid on a CN Working Shared request posts it, so the Final CN is mandatory. Throwing here, before
+      // any write, leaves the payment state, events, CN Working document and CN status exactly as they were.
+      if (data.status === "PAID" && request.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED && !finalCnUpload) {
+        throw new ApiError(422, L["cn_requests.validation.final_cn_required"]);
       }
       // Authoritative base = the outstanding BEFORE the current status was applied.
       const base = eventState?.latestOutstandingBefore != null
@@ -933,7 +1004,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
       // A second request may carry a different key (another tab/client). Once the same authoritative decision
       // has committed, treat it as the same operation rather than creating duplicate history or posting work.
       if (request.paymentVerified && agree) {
-        return { idempotent: true, posted: false, postedAmount: null, documentName: null };
+        return { idempotent: true, posted: false, postedAmount: null, documentName: null, finalCnName: null };
       }
 
       const transitionAt = new Date();
@@ -974,9 +1045,18 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
           recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
         },
       });
-      if (data.status !== "PAID") return { idempotent: false, posted: false, postedAmount: null, documentName: null };
+      if (data.status !== "PAID") return { idempotent: false, posted: false, postedAmount: null, documentName: null, finalCnName: null };
 
       const postedAmount = Number(request.paymentOriginalAmount);
+      // The Final CN is written by the very update that posts the CN, so both succeed or neither does.
+      const finalCn: CnFinalDocumentData = finalCnUpload ? {
+        finalCnDocument: `data:${finalCnUpload.type};base64,${finalCnUpload.buffer.toString("base64")}`,
+        finalCnFileName: finalCnUpload.name,
+        finalCnMimeType: finalCnUpload.type,
+        finalCnFileSize: finalCnUpload.buffer.length,
+        finalCnUploadedById: ctx.userId,
+        finalCnUploadedAt: transitionAt,
+      } : {};
       const posting = await postAcceptedCnRequestInTransaction(
         tx,
         request,
@@ -984,8 +1064,9 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
         transitionAt,
         ctx.userId,
         L,
+        finalCn,
       );
-      return { idempotent: false, ...posting, postedAmount };
+      return { idempotent: false, ...posting, postedAmount, finalCnName: posting.posted ? finalCnUpload?.name ?? null : null };
     }, { timeout: 15_000 });
   } catch (error) {
     // A request key is globally unique. If two different CNs race with the same key, or the database detects
@@ -1004,7 +1085,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
   if (postingResult.idempotent) return getCnPaymentDetail(ctx, id);
   await writeAudit({
     userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequestPayment", entityId: id,
-    summary: `CN payment verified as ${data.status}`,
+    summary: `CN payment verified as ${data.status}${postingResult.finalCnName ? `; Final CN document: ${postingResult.finalCnName}` : ""}`,
   });
   if (postingResult.posted) {
     await writeAudit({
@@ -1012,7 +1093,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
       action: "UPDATE",
       entity: "cnRequest",
       entityId: id,
-      summary: `CN Request accepted, posted in ledger; Posted Amount: ${postingResult.postedAmount}; CN working: ${postingResult.documentName}`,
+      summary: `CN Request accepted, posted in ledger; Posted Amount: ${postingResult.postedAmount}; CN working: ${postingResult.documentName}${postingResult.finalCnName ? `; Final CN: ${postingResult.finalCnName}` : ""}`,
     });
   }
   return getCnPaymentDetail(ctx, id);

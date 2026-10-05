@@ -15,6 +15,9 @@ import { MONTH_NAMES } from "./season-months";
 
 export type DailyWorkSection = "SALES" | "RECOVERY" | "APPOINTMENT" | "SCHEME_CONVERSION";
 export type DailyWorkType = "REGULAR" | "SCHEME";
+/** Optional Recovery-row metadata; never an actual receipt or financial instruction. */
+export const RECOVERY_PAYMENT_MODES = ["CHEQUE", "UPI", "NEFT_RTGS", "CASH"] as const;
+export type RecoveryPaymentMode = typeof RECOVERY_PAYMENT_MODES[number];
 /** Post-submit appointment result. */
 export type AppointmentStatus = "APPOINTED" | "NOT_APPOINTED";
 /** Post-submit scheme-conversion achievability (was today's planned conversion achieved?). */

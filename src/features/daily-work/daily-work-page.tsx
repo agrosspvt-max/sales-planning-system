@@ -24,13 +24,14 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { useLabel } from "@/features/labels/label-ui";
 import { useDailyAutosave } from "./use-daily-autosave";
 import { DailyWorkFieldset } from "./daily-work-fieldset";
+import { MonthlyRecoveryPlanHeader, RecoveryPaymentModeField } from "./recovery-payment-mode";
 import { AdminDailyWorkViewer } from "./admin-daily-work-viewer";
 import { CnRequestDetailDialog } from "@/features/cn-requests/cn-request-detail-dialog";
 import { isCnSundayDateKey } from "@/lib/cn-request";
 import {
   combineDailyWorkRows, combineAppointmentRows, combineConversionRows, rowTaskType,
   currentBusinessDate, dailyWorkShowsResults, visibleDailyWorkRows, DEFAULT_DAILY_WORK_VIEW, DailyWorkView,
-  type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
+  type RecoveryPaymentMode, type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
 } from "@/lib/daily-work";
 
 /* --------------------------------- Types (mirror the service DTO) --------------------------------- */
@@ -40,6 +41,7 @@ interface DealerDto {
   entryId: string; batchId: string;
   dealerId: string; dealerName: string; monthlyPlan: number; actual: number; pending: number;
   todaysPlan: number | null; todaysActual: number | null; entryType: DailyWorkType; schemeId: string | null;
+  paymentMode?: RecoveryPaymentMode | null;
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
 }
 interface CnTask {
@@ -61,6 +63,7 @@ interface EditRow {
   entryId: string; batchId: string;
   dealerId: string; dealerName: string; monthlyPlan: number; actual: number; pending: number;
   todaysPlan: string; entryType: DailyWorkType; schemeId: string; todaysActual: string;
+  paymentMode: RecoveryPaymentMode | null;
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
 }
 
@@ -492,7 +495,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
         entryId: d.entryId, batchId: d.batchId,
         dealerId: d.dealerId, dealerName: d.dealerName, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending,
         todaysPlan: d.todaysPlan == null ? "" : String(d.todaysPlan),
-        entryType: d.entryType, schemeId: d.schemeId ?? "",
+        entryType: d.entryType, schemeId: d.schemeId ?? "", paymentMode: d.paymentMode ?? null,
         todaysActual: d.todaysActual == null ? "" : String(d.todaysActual),
         status: d.status,
       })),
@@ -512,6 +515,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     pending: useLabel("col.pending"),
     todaysPlan: useLabel("daily_work.col.todays_plan"),
     type: useLabel(isSales ? "daily_work.col.sales_type" : "daily_work.col.recovery_type"),
+    paymentMode: useLabel("daily_work.col.payment_mode"),
     actual: useLabel(isSales ? "daily_work.col.todays_sales" : "daily_work.col.todays_recovery"),
     regular: useLabel("daily_work.type.regular"),
     scheme: useLabel("daily_work.type.scheme"),
@@ -566,7 +570,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.taskTypeNone };
 
   const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", section, workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
-  const payloadRows = () => rows.map((r) => ({ dealerId: r.dealerId, todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null }));
+  const payloadRows = () => rows.map((r) => ({ dealerId: r.dealerId, todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null, ...(!isSales ? { paymentMode: r.paymentMode } : {}) }));
 
   // AUTOSAVE — persist the current Daily Plan draft through the existing section save endpoint (current editable
   // batch, same authorization). Status is refreshed so the progress bar tracks saved data; section rows are NOT
@@ -612,24 +616,39 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   const addDealer = (dealerId: string) => {
     const d = available.find((x) => x.id === dealerId);
     if (!d) return;
-    setRows((rs) => [...rs, { entryId: `new-${d.id}`, batchId: "", dealerId: d.id, dealerName: d.name, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending, todaysPlan: "", entryType: "REGULAR", schemeId: "", todaysActual: "", status: "NEW" }]);
+    setRows((rs) => [...rs, { entryId: `new-${d.id}`, batchId: "", dealerId: d.id, dealerName: d.name, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending, todaysPlan: "", entryType: "REGULAR", schemeId: "", paymentMode: null, todaysActual: "", status: "NEW" }]);
   };
 
-  const columnCount = 5 + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0);
+  const columnCount = 5 + (isSales ? 0 : 1) + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0);
+  const compactRecovery = !isSales && view === DailyWorkView.PLAN;
 
   if (isLoading) return <Skeleton className="h-64 w-full" />;
 
   return (
     <div className="space-y-4">
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table className={cn("table-fixed", showResults ? "min-w-[1008px]" : "min-w-[928px]")}>
+        <Table className={cn("table-fixed", compactRecovery
+          ? "min-w-[928px] [&_th]:w-auto [&_th]:px-2 [&_input]:ml-auto [&_input]:w-28 [&_select]:w-28"
+          : isSales ? (showResults ? "min-w-[1008px]" : "min-w-[928px]") : (showResults ? "min-w-[1152px]" : "min-w-[1072px]"))}>
+          {/* Recovery Plan: Dealer absorbs the remaining width; all three row layers share these columns. */}
+          {compactRecovery && <colgroup>
+            <col />
+            <col className="w-[72px]" />
+            <col className="w-28" />
+            <col className="w-24" />
+            <col className="w-[120px]" />
+            <col className="w-[120px]" />
+            <col className="w-[120px]" />
+            <col className="w-28" />
+          </colgroup>}
           <TableHeader>
             <TableRow>
               <TableHead className="w-60">{L.dealer}</TableHead>
               {showTaskType && <TableHead className="w-32">{L.taskType}</TableHead>}
-              <TableHead className="w-44 text-right">{L.plan}</TableHead>
+              <TableHead className="w-44 text-right">{isSales ? L.plan : <MonthlyRecoveryPlanHeader label={L.plan} />}</TableHead>
               <TableHead className="w-32 text-right">{L.pending}</TableHead>
               <TableHead className="w-36 text-right">{L.todaysPlan}</TableHead>
+              {!isSales && <TableHead className="w-36">{L.paymentMode}</TableHead>}
               <TableHead className="w-44">{L.type}</TableHead>
               {showResults && <TableHead className="w-36 text-right">{L.actual}</TableHead>}
               {view === DailyWorkView.PLAN && <TableHead className="w-16" />}
@@ -643,6 +662,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
               <TableCell className="text-right tabular-nums">{money(combined.monthlyPlan)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(combined.pending)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(combined.todaysPlan)}</TableCell>
+              {!isSales && <TableCell>{L.none}</TableCell>}
               <TableCell>{L.none}</TableCell>
               {showResults && <TableCell className="text-right tabular-nums">{money(combined.todaysActual)}</TableCell>}
               {view === DailyWorkView.PLAN && <TableCell />}
@@ -660,7 +680,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                 const rowAutoTasks = (data?.materializedCnTasks ?? []).filter((task) => task.dealerId === r.dealerId);
                 return (
                   <TableRow data-dealer-id={r.dealerId} key={r.entryId}>
-                    <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
+                    <TableCell className={cn("font-medium", compactRecovery && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
                     {/* Task Type — derived from the authoritative Auto Task contribution link (Daily Plan only). */}
                     {showTaskType && <TableCell>{taskTypeText(rowTaskTypeOf(r.dealerId), taskTypeL)}</TableCell>}
                     {/* Monthly plan + pending are SOURCED and non-editable. */}
@@ -670,6 +690,13 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                     <TableCell className="p-1 text-right">
                       <Input type="number" min={0} className="h-8 w-full text-right" placeholder="0" value={r.todaysPlan} disabled={busy || submitted} onChange={(e) => update(i, { todaysPlan: e.target.value })} />
                     </TableCell>
+                    {!isSales && <TableCell className="p-1">
+                      <RecoveryPaymentModeField
+                        value={r.paymentMode}
+                        disabled={busy || locked}
+                        onChange={submitted ? undefined : (paymentMode) => update(i, { paymentMode })}
+                      />
+                    </TableCell>}
                     {/* Scheme Recovery uses the dealer's existing enrolled/verified scheme-payment scope. */}
                     <TableCell className="p-1">
                       <div className="flex flex-col gap-1">
@@ -702,7 +729,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                     </TableCell>}
                     {view === DailyWorkView.PLAN && <TableCell className="text-right">
                       {!submitted && (
-                        <div className="flex items-center justify-end gap-1">
+                        <div className={cn("flex items-center justify-end gap-1", compactRecovery && "flex-wrap")}>
                           {!isSales && rowAutoTasks.length > 0 && (() => {
                             const unconfirmed = rowAutoTasks.filter((task) => !task.confirmed);
                             return unconfirmed.length > 0 ? (

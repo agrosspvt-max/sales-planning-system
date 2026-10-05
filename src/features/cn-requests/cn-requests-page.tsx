@@ -8,7 +8,7 @@ import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Plus, Check, Eye, FileText, Download, MoreVertical } from "lucide-react";
+import { Plus, Eye, FileText, Download, MoreVertical } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -52,7 +52,7 @@ import { CnRequestDetailDialog } from "./cn-request-detail-dialog";
 
 interface CnRequest {
   id: string; dealerId: string; partyName: string; cnType: string; amount: number | null; postedAmount: number | null; paymentStatus: string | null; paymentVerified: boolean; paymentOriginalAmount: number | null; paymentOutstandingAmount: number | null; paymentTrackingMode: string | null;
-  officerId: string; employeeName: string; state: string | null; territory: string | null; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; cnExpiryDays: number | null; expiryDate: string | null; cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; remarks: string | null; createdAt: string; days: number | null;
+  officerId: string; employeeName: string; state: string | null; territory: string | null; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; cnExpiryDays: number | null; expiryDate: string | null; cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; finalCn?: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; remarks: string | null; createdAt: string; days: number | null;
 }
 interface DealerOpt { id: string; name: string }
 interface OfficerOpt { id: string; name: string }
@@ -71,7 +71,6 @@ const businessDate = (s: string) => new Date(`${s}T00:00:00`).toLocaleDateString
 export function CnRequestsPage({ role, userId }: { role: Role; userId: string }) {
   const allowAccept = useAdminPermission("cnRequests", "approve");
   const allowReject = useAdminPermission("cnRequests", "reject");
-  const allowPost = useAdminPermission("cnRequests", "post");
   const qc = useQueryClient();
   const isOfficer = role === Role.SALES_OFFICER;
   const isManager = role === Role.REGIONAL_MANAGER;
@@ -92,7 +91,6 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     postedInLedger: useLabel("cn_requests.view.posted_in_ledger"),
     returnedFromLedger: useLabel("cn_requests.status.returned_from_ledger"),
     reject: useLabel("cn_requests.action.reject"),
-    postInLedger: useLabel("cn_requests.action.post_in_ledger"),
     rejectionTitle: useLabel("cn_requests.rejection.title"),
     reason: useLabel("cn_requests.rejection.reason"),
     selectReason: useLabel("cn_requests.rejection.select_reason"),
@@ -124,6 +122,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     colAction: useLabel("cn_requests.col.action"),
     viewDetails: useLabel("cn_requests.action.view_details"),
     downloadCnWorkaround: useLabel("cn_requests.action.download_cn_workaround"),
+    downloadFinalCn: useLabel("cn_requests.action.download_final_cn"),
     downloadCn: useLabel("cn_requests.action.download_cn"),
     createNewRequest: useLabel("cn_requests.action.create_new_request"),
     cancel: useLabel("cn_requests.action.cancel"),
@@ -239,18 +238,17 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     onError: (error) => setAcceptError((error as Error).message),
   });
 
-  // RM retains team rejection. Super Admin alone accepts and performs explicit posting.
+  // RM retains team rejection. Super Admin alone accepts (including direct Accepted, Posted in Ledger).
   const canReject = (r: CnRequest) =>
     (isManager && r.status === CN_REQUEST_STATUSES.SUBMITTED && r.officerId !== userId) ||
     (isAdmin && allowReject && r.status === CN_REQUEST_STATUSES.SUBMITTED);
   const canAccept = (r: CnRequest) => isAdmin && allowAccept && r.status === CN_REQUEST_STATUSES.SUBMITTED;
-  const canPost = (r: CnRequest) => isAdmin && allowPost && r.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED;
   const showExpires = view === "accepted-not-posted";
   // Amount and Payment Status are intentionally shown only in the Accepted section.
   const showAmountPayment = section === "accepted";
   // Employee Name / State / Territory are redundant in the SO's own view (fixed by their profile).
   const showProfileColumns = !isOfficer;
-  // Approval remains a Submitted / Rejected workflow column; Accepted keeps posting in the Action menu.
+  // Approval remains a Submitted / Rejected workflow column; Accepted rows are completed through Payment Status.
   const showApproval = !isOfficer && section === "submitted-rejected";
   const columnCount = 5 + (showAmountPayment ? 2 : 0) + (showProfileColumns ? 3 : 0) + (showExpires ? 1 : 0) + (showApproval ? 1 : 0);
 
@@ -357,8 +355,6 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
                       view={view}
                       labels={labels}
                       onViewDetails={() => setDetail(r)}
-                      onPostInLedger={canPost(r) ? () => { setAcceptError(null); setAcceptTarget({ request: r, status: "POSTED_IN_LEDGER" }); } : undefined}
-                      posting={acceptMut.isPending}
                     />
                   </TableCell>
                 </TableRow>
@@ -903,26 +899,26 @@ function PaymentStatusPill({ status, verified, labels, onClick }: { status: stri
  * modal). In the Accepted section it also offers a download of the Admin-uploaded CN Working attachment via the
  * existing server-side download route (/api/cn-requests/:id/working?download=1) — labelled "Download CN Workaround"
  * for Accepted / Not Posted and "Download CN" for Posted in Ledger. The item is disabled when no attachment exists.
- * Admin also retains the existing manual Post in Ledger action here because Accepted tables have no Approval column.
+ * There is no manual Post in Ledger action: a CN reaches Posted in Ledger only through "Accepted, Posted in Ledger" at
+ * acceptance or through Payment Status → Verify Payment → Paid.
  */
-function CnActionMenu({ request, section, view, labels, onViewDetails, onPostInLedger, posting }: {
+function CnActionMenu({ request, section, view, labels, onViewDetails }: {
   request: CnRequest;
   section: "submitted-rejected" | "accepted";
   view: CnRequestView;
-  labels: { viewDetails: string; downloadCnWorkaround: string; downloadCn: string; postInLedger: string; colAction: string };
+  labels: { viewDetails: string; downloadCnWorkaround: string; downloadCn: string; downloadFinalCn: string; colAction: string };
   onViewDetails: () => void;
-  onPostInLedger?: () => void;
-  posting: boolean;
 }) {
-  const items = cnActionMenuItems({ section, view, hasWorking: request.cnWorking != null });
+  const items = cnActionMenuItems({ section, view, hasWorking: request.cnWorking != null, hasFinalCn: request.finalCn != null });
   const labelFor: Record<string, string> = {
     "cn_requests.action.view_details": labels.viewDetails,
     "cn_requests.action.download_cn_workaround": labels.downloadCnWorkaround,
     "cn_requests.action.download_cn": labels.downloadCn,
+    "cn_requests.action.download_final_cn": labels.downloadFinalCn,
   };
-  const downloadWorking = () => {
+  const downloadDocument = (endpoint: "working" | "final-cn") => () => {
     const a = document.createElement("a");
-    a.href = `/api/cn-requests/${request.id}/working?download=1`;
+    a.href = `/api/cn-requests/${request.id}/${endpoint}?download=1`;
     a.rel = "noreferrer";
     document.body.appendChild(a);
     a.click();
@@ -938,13 +934,8 @@ function CnActionMenu({ request, section, view, labels, onViewDetails, onPostInL
           item.id === "VIEW_DETAILS" ? (
             <DropdownMenuItem key={item.id} onSelect={onViewDetails}><Eye className="h-4 w-4" /> {labelFor[item.labelKey]}</DropdownMenuItem>
           ) : (
-            <DropdownMenuItem key={item.id} disabled={!item.enabled} onSelect={downloadWorking}><Download className="h-4 w-4" /> {labelFor[item.labelKey]}</DropdownMenuItem>
+            <DropdownMenuItem key={item.id} disabled={!item.enabled} onSelect={downloadDocument(item.id === "DOWNLOAD_FINAL_CN" ? "final-cn" : "working")}><Download className="h-4 w-4" /> {labelFor[item.labelKey]}</DropdownMenuItem>
           ),
-        )}
-        {onPostInLedger && (
-          <DropdownMenuItem disabled={posting} onSelect={onPostInLedger}>
-            <Check className="h-4 w-4" /> {labels.postInLedger}
-          </DropdownMenuItem>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

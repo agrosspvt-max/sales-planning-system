@@ -23,6 +23,7 @@ export interface CnRequestDetailData {
   status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null;
   acceptanceReason: string | null; acceptanceReasonDetails: string | null; remarks: string | null; createdAt: string;
   cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null;
+  finalCn?: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null;
 }
 
 const STATUS_VARIANT: Record<string, "secondary" | "default" | "success" | "destructive" | "muted"> = {
@@ -52,6 +53,7 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
     details: useLabel("cn_requests.field.details"), acceptanceReason: useLabel("cn_requests.acceptance.reason"),
     paymentPending: useLabel("cn_requests.acceptance.payment_pending"), other: useLabel("cn_requests.rejection.other"),
     otherReason: useLabel("cn_requests.rejection.other_reason"), cnWorking: useLabel("cn_requests.acceptance.cn_working"),
+    finalCn: useLabel("cn_requests.acceptance.final_cn"),
     view: useLabel("cn_requests.acceptance.view"), download: useLabel("cn_requests.acceptance.download"),
     reason: useLabel("cn_requests.rejection.reason"), billingCondition: useLabel("cn_requests.rejection.billing_condition_not_met"),
     paymentCondition: useLabel("cn_requests.rejection.payment_condition_not_met"), remarks: useLabel("cn_requests.field.remarks"),
@@ -109,6 +111,13 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
                 <span className="max-w-52 truncate" title={request.cnWorking.fileName}>{request.cnWorking.fileName}</span>
                 {request.cnWorking.mimeType === CN_WORKING_PDF_MIME && <Button variant="ghost" size="sm" asChild><a href={`/api/cn-requests/${request.id}/working`} target="_blank" rel="noreferrer"><Eye className="h-4 w-4" /> {L.view}</a></Button>}
                 <Button variant="ghost" size="sm" asChild><a href={`/api/cn-requests/${request.id}/working?download=1`}><Download className="h-4 w-4" /> {L.download}</a></Button>
+              </span>} />
+            )}
+            {request.finalCn && (
+              <Row label={L.finalCn} value={<span className="flex flex-wrap items-center justify-end gap-1">
+                <span className="max-w-52 truncate" title={request.finalCn.fileName}>{request.finalCn.fileName}</span>
+                {request.finalCn.mimeType === CN_WORKING_PDF_MIME && <Button variant="ghost" size="sm" asChild><a href={`/api/cn-requests/${request.id}/final-cn`} target="_blank" rel="noreferrer"><Eye className="h-4 w-4" /> {L.view}</a></Button>}
+                <Button variant="ghost" size="sm" asChild><a href={`/api/cn-requests/${request.id}/final-cn?download=1`}><Download className="h-4 w-4" /> {L.download}</a></Button>
               </span>} />
             )}
             {rejectionReason && <Row label={L.reason} value={rejectionReason} />}

@@ -765,6 +765,14 @@ model CnRequest {
   cnWorkingFileSize           Int?
   cnWorkingUploadedById       String?
   cnWorkingUploadedAt         DateTime?
+  // Final CN document: uploaded with an Admin-verified Paid on a CN Working Shared request. Stored separately and never
+  // overwrites the CN Working document above. NULL for every other request (including direct Accepted, Posted in Ledger).
+  finalCnDocument             String? // database-backed base64 data URL
+  finalCnFileName             String?
+  finalCnMimeType             String?
+  finalCnFileSize             Int?
+  finalCnUploadedById         String?
+  finalCnUploadedAt           DateTime?
   status                      String           @default("SUBMITTED") // SUBMITTED | REJECTED | ACCEPTED_NOT_POSTED | POSTED_IN_LEDGER; legacy ACCEPTED/APPROVED
   remarks                     String? // legacy free-text rejection note; retained for historical rows
   actedByRmId                 String? // RM who accepted/rejected
@@ -888,6 +896,7 @@ model DailyWorkEntry {
   // (Scheme Conversion achievability). Never auto-derived.
   resultStatus         String?
   entryType            String           @default("REGULAR") // REGULAR | SCHEME (Sales only)
+  paymentMode          String? // Recovery only: CHEQUE | UPI | NEFT_RTGS | CASH; NULL means unselected/legacy
   schemeId             String? // planned Scheme reference for SCHEME_CONVERSION (and SCHEME-type Sales); never free text
   // SUMMARY section (one row per batch): planned Visits plus a free-text note. Never dealer/row-scoped.
   dealerVisits         Int? // Visits section — planned dealer visits for the day (NULL until the Visits section is saved)

@@ -8,7 +8,7 @@ import { api, ApiRequestError } from "@/lib/api-client";
 import { cn, formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import {
   combineAppointmentRows, combineConversionRows, combineDailyWorkRows, currentBusinessDate, rowTaskType,
-  type AppointmentRow, type ConversionRow, type DailyWorkDealerRow, type DailyWorkType,
+  type AppointmentRow, type ConversionRow, type DailyWorkDealerRow, type DailyWorkType, type RecoveryPaymentMode,
 } from "@/lib/daily-work";
 import { useLabel } from "@/features/labels/label-ui";
 import { PageHeader } from "@/components/layout/page-header";
@@ -18,6 +18,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DailyWorkFieldset } from "./daily-work-fieldset";
+import { MonthlyRecoveryPlanHeader, RecoveryPaymentModeField } from "./recovery-payment-mode";
 
 type Section = "SALES" | "RECOVERY" | "APPOINTMENT" | "SCHEME_CONVERSION" | "VISITS" | "OTHERS";
 
@@ -27,6 +28,7 @@ interface OfficerOption extends Option { groupId: string | null }
 interface DealerRow {
   entryId: string; dealerId: string; dealerName: string; monthlyPlan: number; pending: number;
   todaysPlan: number | null; todaysActual: number | null; entryType: DailyWorkType;
+  paymentMode?: RecoveryPaymentMode | null;
 }
 interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds: string[] }
 interface AppointmentPayload {
@@ -172,6 +174,7 @@ function AdminDealerReport({ section, data }: { section: "SALES" | "RECOVERY"; d
     plan: useLabel(section === "SALES" ? "daily_work.col.monthly_sales_plan" : "daily_work.col.monthly_recovery_plan"),
     pending: useLabel("col.pending"), today: useLabel("daily_work.col.todays_plan"),
     type: useLabel(section === "SALES" ? "daily_work.col.sales_type" : "daily_work.col.recovery_type"),
+    paymentMode: useLabel("daily_work.col.payment_mode"),
     actual: useLabel(section === "SALES" ? "daily_work.col.todays_sales" : "daily_work.col.todays_recovery"),
     regular: useLabel("daily_work.type.regular"), scheme: useLabel("daily_work.type.scheme"),
   };
@@ -179,11 +182,11 @@ function AdminDealerReport({ section, data }: { section: "SALES" | "RECOVERY"; d
   const autoEntries = new Set(data.autoTaskEntryIds);
   const task = (row: DealerRow) => rowTaskType(autoEntries.has(row.entryId)) === "AUTO" ? L.auto : L.manual;
   const type = (value: DailyWorkType) => value === "SCHEME" ? L.scheme : L.regular;
-  return <div className="overflow-auto rounded-lg border bg-background"><Table className="min-w-[960px] table-fixed"><TableHeader><TableRow>
-    <TableHead className="w-60">{L.dealer}</TableHead><TableHead className="w-32">{L.task}</TableHead><TableHead className="w-44 text-right">{L.plan}</TableHead><TableHead className="w-32 text-right">{L.pending}</TableHead><TableHead className="w-36 text-right">{L.today}</TableHead><TableHead className="w-44">{L.type}</TableHead><TableHead className="w-36 text-right">{L.actual}</TableHead>
+  return <div className="overflow-auto rounded-lg border bg-background"><Table className={cn("table-fixed", section === "RECOVERY" ? "min-w-[1104px]" : "min-w-[960px]")}><TableHeader><TableRow>
+    <TableHead className="w-60">{L.dealer}</TableHead><TableHead className="w-32">{L.task}</TableHead><TableHead className="w-44 text-right">{section === "RECOVERY" ? <MonthlyRecoveryPlanHeader label={L.plan} /> : L.plan}</TableHead><TableHead className="w-32 text-right">{L.pending}</TableHead><TableHead className="w-36 text-right">{L.today}</TableHead>{section === "RECOVERY" && <TableHead className="w-36">{L.paymentMode}</TableHead>}<TableHead className="w-44">{L.type}</TableHead><TableHead className="w-36 text-right">{L.actual}</TableHead>
   </TableRow></TableHeader><TableBody>
-    <TableRow className="border-b-2 bg-muted/40 font-semibold"><TableCell>{combined.dealerLabel}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.pending)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysPlan)}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysActual)}</TableCell></TableRow>
-    {data.dealers.map((row) => <TableRow data-dealer-id={row.dealerId} key={row.entryId}><TableCell className="font-medium"><DealerName id={row.dealerId} name={row.dealerName} /></TableCell><TableCell>{task(row)}</TableCell><TableCell className="text-right tabular-nums">{money(row.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(row.pending)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan == null ? dash : money(row.todaysPlan)}</TableCell><TableCell>{type(row.entryType)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysActual == null ? dash : money(row.todaysActual)}</TableCell></TableRow>)}
+    <TableRow className="border-b-2 bg-muted/40 font-semibold"><TableCell>{combined.dealerLabel}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.pending)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysPlan)}</TableCell>{section === "RECOVERY" && <TableCell>{L.none}</TableCell>}<TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysActual)}</TableCell></TableRow>
+    {data.dealers.map((row) => <TableRow data-dealer-id={row.dealerId} key={row.entryId}><TableCell className="font-medium"><DealerName id={row.dealerId} name={row.dealerName} /></TableCell><TableCell>{task(row)}</TableCell><TableCell className="text-right tabular-nums">{money(row.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(row.pending)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan == null ? dash : money(row.todaysPlan)}</TableCell>{section === "RECOVERY" && <TableCell><RecoveryPaymentModeField value={row.paymentMode ?? null} /></TableCell>}<TableCell>{type(row.entryType)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysActual == null ? dash : money(row.todaysActual)}</TableCell></TableRow>)}
   </TableBody></Table></div>;
 }
 

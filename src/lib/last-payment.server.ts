@@ -4,8 +4,8 @@ import type { Prisma } from "@prisma/client";
 import { latestReceiptAsOf, type ReceiptPoint } from "./last-payment";
 
 type ReadClient = Pick<Prisma.TransactionClient, "$queryRaw" | "lastPaymentReceipt">;
-/** Batched, informational sources only. Legacy regular pairs retain precedence on equal dates;
- * individual history ties use stable import/source order, matching the selector's first-on-tie rule. */
+/** Batched, informational sources only: stored per-plan pairs (tagged "snapshot") + every individual receipt of the
+ * active imports. The selector sums the individual receipts on the winning date; the snapshot is the fallback only. */
 export async function loadLastPaymentPoints(
   dealerIds: string[],
   throughDate: Date,
@@ -18,7 +18,8 @@ export async function loadLastPaymentPoints(
     FROM "RecoveryPlanDealer" WHERE "dealerId" = ANY(${dealerIds}) AND "lastReceiptDate" IS NOT NULL`;
   for (const r of legacy) {
     const list = points.get(r.dealerId) ?? [];
-    list.push({ date: r.date.slice(0, 10), amount: r.amount == null ? 0 : Number(r.amount) });
+    // A stored per-plan summary of receipts — tagged so the selector never adds it to the individual receipts below.
+    list.push({ date: r.date.slice(0, 10), amount: r.amount == null ? 0 : Number(r.amount), kind: "snapshot" });
     points.set(r.dealerId, list);
   }
   const history = await db.lastPaymentReceipt.findMany({

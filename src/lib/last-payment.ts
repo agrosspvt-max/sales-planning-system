@@ -15,22 +15,37 @@ export function lastPaymentMonthEnd(month: MonthIdentity): Date | null {
 export interface ReceiptPoint {
   /** Receipt date as "YYYY-MM-DD" (lexicographically comparable). */
   date: string;
-  /** Credit Amount from THAT SAME receipt row. */
+  /** Credit Amount of this receipt (for a "snapshot": of the stored per-plan Last Payment, see `kind`). */
   amount: number;
+  /**
+   * "snapshot" marks a stored per-plan Last Payment pair (RecoveryPlanDealer.lastReceipt*). It SUMMARISES receipts
+   * that are normally also present as individual receipts, so it must never be added to them. Anything else is an
+   * individual receipt.
+   */
+  kind?: "snapshot";
 }
 
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
 /**
- * The latest receipt on or before `cutoff` (both "YYYY-MM-DD").
+ * The dealer's Last Payment as of `cutoff` (both "YYYY-MM-DD").
  *   - Receipts AFTER the supplied as-of boundary are ignored.
- *   - The newest qualifying receipt wins; ties on date keep the first encountered (deterministic for stable input).
- *   - Date and amount are always returned together from the same point.
+ *   - DATE: the newest qualifying date wins (unchanged).
+ *   - AMOUNT: the SUM of every individual receipt on that selected date — several receipts on the same day are one
+ *     payment day. Receipts on any other (older) date never contribute, however large they are.
+ *   - A stored snapshot on that date is only a summary of those receipts, so it is used only when no individual
+ *     receipt exists on the date (then, as before, the first encountered snapshot is used — never summed).
  * Returns null when the dealer has no receipt on or before the cutoff (→ the existing empty state).
  */
 export function latestReceiptAsOf(points: readonly ReceiptPoint[], cutoff: string): ReceiptPoint | null {
-  let best: ReceiptPoint | null = null;
+  let latest: string | null = null;
   for (const p of points) {
     if (!p || !p.date || p.date > cutoff) continue;
-    if (best === null || p.date > best.date) best = p;
+    if (latest === null || p.date > latest) latest = p.date;
   }
-  return best;
+  if (latest === null) return null;
+  const onDate = points.filter((p) => p && p.date === latest);
+  const receipts = onDate.filter((p) => p.kind !== "snapshot");
+  if (receipts.length) return { date: latest, amount: round2(receipts.reduce((sum, p) => sum + p.amount, 0)) };
+  return { date: latest, amount: onDate[0].amount };
 }

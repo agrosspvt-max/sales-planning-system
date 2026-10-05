@@ -27,6 +27,7 @@ import {
   Upload,
   PackageCheck,
   Wallet,
+  Receipt,
   type LucideIcon,
 } from "lucide-react";
 
@@ -90,6 +91,8 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Dealer Tags", href: "/dealer-tags", icon: Tags, roles: ALL_ROLES, group: "Requests" },
   { label: "My Account", href: "/account", icon: Users, roles: ALL_ROLES, group: "Insights" },
   { label: "Reports", href: "/reports", icon: BarChart3, roles: ALL_ROLES, group: "Insights" },
+  // Last Payment Report — read-only; the same Last Payment Recovery Planning shows, scoped server-side per role.
+  { label: "Last Payment Report", href: "/reports/last-payment", icon: Receipt, roles: ALL_ROLES, group: "Insights" },
   { label: "Announcements", href: "/announcements", icon: Megaphone, roles: ALL_ROLES, group: "Insights" },
   {
     label: "Audit Logs",

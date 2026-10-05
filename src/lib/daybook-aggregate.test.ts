@@ -147,4 +147,42 @@ test("8) Last Payment does not alter the receipt/srCr aggregation used by recove
   assert.equal(withReceipts.get("d1")!.srCr, 0);
 });
 
+// 9) Same-day Receipts: the Last Payment DATE is the latest dated Receipt (unchanged); the AMOUNT is the sum of the
+// Receipts on that date only — older dates, CN/SR and undated Receipts never contribute.
+test("9) several Receipts on the latest date → their SUM; older dates excluded", () => {
+  const agg = aggregateDaybookByDealer([
+    receipt("d1", "2026-10-05", 20000), receipt("d1", "2026-10-05", 15000), receipt("d1", "2026-10-05", 10000),
+    receipt("d1", "2026-10-03", 50000),
+  ]);
+  const a = agg.get("d1")!;
+  assert.equal(iso(a.lastReceiptDate), "2026-10-05");
+  assert.equal(a.lastReceiptAmount, 45000, "20,000 + 15,000 + 10,000 — not 10,000, 20,000, 50,000 or 95,000");
+  assert.equal(a.receipt, 95000, "the receipt total used by recovery figures is untouched");
+});
+test("10) latest date with a smaller total than an older date still wins", () => {
+  const a = aggregateDaybookByDealer([receipt("d1", "2026-10-05", 20000), receipt("d1", "2026-10-05", 10000), receipt("d1", "2026-10-03", 100000)]).get("d1")!;
+  assert.equal(iso(a.lastReceiptDate), "2026-10-05");
+  assert.equal(a.lastReceiptAmount, 30000);
+});
+test("11) the sum is order-independent and ignores CN/SR/other and undated rows", () => {
+  const rows = [
+    receipt("d1", "2026-10-05", 20000), srcr("d1", "2026-10-05", 7000), other("d1", "2026-10-05", 9000),
+    receipt("d1", null, 12345), receipt("d1", "2026-10-05", 15000), receipt("d1", "2026-10-04", 1),
+  ];
+  for (const ordered of [rows, [...rows].reverse()]) {
+    const a = aggregateDaybookByDealer(ordered).get("d1")!;
+    assert.equal(iso(a.lastReceiptDate), "2026-10-05");
+    assert.equal(a.lastReceiptAmount, 35000, "only the dated Receipts of that day");
+  }
+});
+test("12) a single Receipt, and a dealer with only undated Receipts, are unchanged", () => {
+  assert.equal(aggregateDaybookByDealer([receipt("d1", "2026-10-05", 20000)]).get("d1")!.lastReceiptAmount, 20000);
+  const undated = aggregateDaybookByDealer([receipt("d1", null, 5000)]).get("d1")!;
+  assert.equal(undated.lastReceiptDate, null); assert.equal(undated.lastReceiptAmount, null);
+});
+test("13) dealers are summed independently", () => {
+  const agg = aggregateDaybookByDealer([receipt("d1", "2026-10-05", 1), receipt("d2", "2026-10-05", 10), receipt("d1", "2026-10-05", 2), receipt("d2", "2026-10-05", 20)]);
+  assert.deepEqual([agg.get("d1")!.lastReceiptAmount, agg.get("d2")!.lastReceiptAmount], [3, 30]);
+});
+
 console.log(`\n${passed} daybook-aggregate tests passed`);

@@ -123,9 +123,61 @@ test("unresolved identities never infer a year from name, order or cutoff", () =
     assert.equal(lastPaymentMonthEnd(legacy), null);
   }
 });
-test("equal-date receipts still select one amount with existing first-on-tie precedence", () => {
-  const existing = { date: "2026-04-30", amount: 100 };
-  assert.deepEqual(forMonth([existing, { date: existing.date, amount: 999 }], 4, 2026), existing);
+
+/* ---- Same-day aggregation: the DATE is chosen exactly as before; the AMOUNT is the sum of that date's receipts ---- */
+const AS_OF = "2026-10-31";
+test("S1) one receipt on the latest date → amount unchanged", () => {
+  assert.deepEqual(latestReceiptAsOf([{ date: "2026-10-05", amount: 20000 }], AS_OF), { date: "2026-10-05", amount: 20000 });
+});
+test("S2) two receipts on the latest date → summed", () => {
+  assert.deepEqual(latestReceiptAsOf([{ date: "2026-10-05", amount: 20000 }, { date: "2026-10-05", amount: 15000 }], AS_OF), { date: "2026-10-05", amount: 35000 });
+});
+test("S3) three or more receipts on the latest date → all summed (the ₹20,000 + ₹15,000 + ₹10,000 example)", () => {
+  const pts = [
+    { date: "2026-10-05", amount: 20000 }, { date: "2026-10-05", amount: 15000 }, { date: "2026-10-05", amount: 10000 },
+    { date: "2026-10-03", amount: 50000 },
+  ];
+  assert.deepEqual(latestReceiptAsOf(pts, AS_OF), { date: "2026-10-05", amount: 45000 });
+  assert.deepEqual(latestReceiptAsOf([...pts].reverse(), AS_OF), { date: "2026-10-05", amount: 45000 }, "order-independent");
+});
+test("S4) receipts on older dates are NEVER included", () => {
+  const pts = [{ date: "2026-10-05", amount: 20000 }, { date: "2026-10-05", amount: 15000 }, { date: "2026-10-04", amount: 50000 }];
+  assert.deepEqual(latestReceiptAsOf(pts, AS_OF), { date: "2026-10-05", amount: 35000 }, "₹35,000, not ₹85,000");
+});
+test("S5) the latest date wins even when an older date has a larger total", () => {
+  const pts = [{ date: "2026-10-05", amount: 20000 }, { date: "2026-10-05", amount: 10000 }, { date: "2026-10-03", amount: 100000 }];
+  assert.deepEqual(latestReceiptAsOf(pts, AS_OF), { date: "2026-10-05", amount: 30000 });
+});
+test("S6) no eligible receipt → null, unchanged", () => {
+  assert.equal(latestReceiptAsOf([], AS_OF), null);
+  assert.equal(latestReceiptAsOf([{ date: "2026-11-02", amount: 5 }, { date: "2026-11-02", amount: 6 }], AS_OF), null, "receipts after the as-of date are not eligible");
+});
+test("S7) date selection is unchanged: receipts after the cutoff never leak into the sum", () => {
+  const pts = [{ date: "2026-10-05", amount: 1 }, { date: "2026-10-05", amount: 2 }, { date: "2026-10-20", amount: 400 }, { date: "2026-10-20", amount: 500 }];
+  assert.deepEqual(latestReceiptAsOf(pts, "2026-10-10"), { date: "2026-10-05", amount: 3 });
+  assert.deepEqual(latestReceiptAsOf(pts, "2026-10-31"), { date: "2026-10-20", amount: 900 });
+});
+test("S8) month-end carry-forward still works with same-day sums", () => {
+  const pts = [{ date: "2026-04-12", amount: 6000 }, { date: "2026-04-12", amount: 4000 }];
+  for (let month = 4; month <= 8; month++) assert.deepEqual(forMonth(pts, month, 2026), { date: "2026-04-12", amount: 10000 });
+  assert.equal(forMonth(pts, 3, 2026), null);
+});
+test("S9) decimal amounts sum without floating drift", () => {
+  assert.deepEqual(latestReceiptAsOf([{ date: "2026-10-05", amount: 0.1 }, { date: "2026-10-05", amount: 0.2 }], AS_OF), { date: "2026-10-05", amount: 0.3 });
+});
+test("S10) a stored per-plan snapshot is NOT added to the individual receipts it summarises", () => {
+  const snapshot = { date: "2026-10-05", amount: 35000, kind: "snapshot" as const };
+  const receipts = [{ date: "2026-10-05", amount: 20000 }, { date: "2026-10-05", amount: 15000 }];
+  assert.deepEqual(latestReceiptAsOf([snapshot, ...receipts], AS_OF), { date: "2026-10-05", amount: 35000 }, "not 70,000");
+  assert.deepEqual(latestReceiptAsOf([...receipts, snapshot], AS_OF), { date: "2026-10-05", amount: 35000 });
+});
+test("S11) with no individual receipts on the date, the snapshot is used as before (first one, never summed)", () => {
+  const a = { date: "2026-10-05", amount: 100, kind: "snapshot" as const }, b = { date: "2026-10-05", amount: 999, kind: "snapshot" as const };
+  assert.deepEqual(latestReceiptAsOf([a, b], AS_OF), { date: "2026-10-05", amount: 100 });
+});
+test("S12) a newer snapshot date beats older individual receipts (date selection is unchanged)", () => {
+  const pts = [{ date: "2026-10-01", amount: 500 }, { date: "2026-10-01", amount: 500 }, { date: "2026-10-04", amount: 70, kind: "snapshot" as const }];
+  assert.deepEqual(latestReceiptAsOf(pts, AS_OF), { date: "2026-10-04", amount: 70 });
 });
 
 console.log(`\n${passed} last-payment tests passed`);

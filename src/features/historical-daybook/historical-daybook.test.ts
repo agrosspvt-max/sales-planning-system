@@ -71,7 +71,8 @@ async function run() {
     ["2025-06-30", "2025-05-10", 10000],
     ["2025-07-31", "2025-07-15", 20000],
     ["2025-11-30", "2025-07-15", 20000],
-    ["2025-12-31", "2025-12-10", 15000],
+    // R3 + R4: two distinct ₹15,000 receipts on the selected date are now totalled (Last Payment = that day's sum).
+    ["2025-12-31", "2025-12-10", 30000],
   ] as const)
     assert.deepEqual(latestReceiptAsOf(points, cutoff), { date: expectedDate, amount });
   assert.throws(

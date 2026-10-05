@@ -54,6 +54,8 @@ export function testLoader(overrides: Record<string, unknown>) {
       Set,
       Math,
       Buffer,
+      URL,
+      URLSearchParams,
       process,
     });
     cache.set(file, mod.exports);

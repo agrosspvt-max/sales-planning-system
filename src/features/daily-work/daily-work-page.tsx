@@ -96,9 +96,10 @@ function useRegisterSaveDraft(active: boolean, handle: SaveDraftHandle): void {
   useEffect(() => {
     if (!register || !active) return;
     register(registeredHandle);
-    // No cleanup-to-null on value change (would flicker the button); the next mounted section overwrites it, and
-    // the toolbar only renders in PLAN view where a section is always mounted.
+    // No cleanup-to-null on value change (would flicker the button); the next mounted section overwrites it.
   }, [register, active, registeredHandle]);
+  // On unmount only (section / Plan↔Report switch) drop the handle so the toolbar never flushes a disposed controller.
+  useEffect(() => () => register?.(null), [register]);
 }
 
 /* ---- Section completion status (progress bar + No Plan + submit gate) ---- */
@@ -235,7 +236,7 @@ function OwnerDailyWorkPage() {
             <DailyWorkActions workDate={workDate} section={section} draft={draftHandle} />
           )}
           {view === DailyWorkView.REPORT && dayStatus?.hasSubmittedWork && (
-            <DailyReportProgress workDate={workDate} />
+            <DailyReportProgress workDate={workDate} draft={draftHandle} />
           )}
         </div>
       </DailyWorkFieldset>
@@ -345,12 +346,13 @@ function DailyWorkActions({ workDate, section, draft }: { workDate: string; sect
 }
 
 /** The existing single Daily Report submission action, rendered in the Plan Type toolbar. */
-function DailyReportProgress({ workDate }: { workDate: string }) {
+function DailyReportProgress({ workDate, draft }: { workDate: string; draft: SaveDraftHandle | null }) {
   const qc = useQueryClient();
   const { data } = useDailyStatus(workDate);
   const [ratingOpen, setRatingOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = useLabel("daily_work.action.submit_report");
+  const L = { saveDraft: useLabel("daily_work.action.save_draft"), saving: useLabel("daily_work.state.saving"), saved: useLabel("daily_work.state.saved"), failed: useLabel("daily_work.state.save_failed") };
   const submitMut = useMutation({
     mutationFn: (selfRating: number) => api.post("/api/daily-work/submit-report", { workDate, selfRating }),
     onSuccess: () => { setError(null); setRatingOpen(false); qc.invalidateQueries({ queryKey: ["daily-work"] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); },
@@ -359,9 +361,18 @@ function DailyReportProgress({ workDate }: { workDate: string }) {
   if (!data || data.isFinalized) return null;
   return (
     <div className="flex flex-col items-end gap-1">
-      <Button size="sm" disabled={!data.canSubmitReport || submitMut.isPending} onClick={() => { setError(null); setRatingOpen(true); }}>
-        <Send className="h-4 w-4" /> {submit}
-      </Button>
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {/* Report actuals autosave through the same engine as Daily Plan; this flushes any pending edit (it never submits). */}
+        <Button variant="outline" size="sm" disabled={!draft || draft.saving} onClick={() => { void draft?.flush(); }}>
+          <Save className="h-4 w-4" /> {draft?.saving ? L.saving : L.saveDraft}
+        </Button>
+        <Button size="sm" disabled={!data.canSubmitReport || submitMut.isPending} onClick={() => { setError(null); setRatingOpen(true); }}>
+          <Send className="h-4 w-4" /> {submit}
+        </Button>
+      </div>
+      {draft && (draft.failed || (!draft.saving && draft.savedAt)) && (
+        <p role="status" className={cn("text-xs", draft.failed ? "text-destructive" : "text-muted-foreground")}>{draft.failed ? L.failed : L.saved}</p>
+      )}
       {error && !ratingOpen && <p className="text-xs text-destructive">{error}</p>}
       {ratingOpen && <SelfRatingModal pending={submitMut.isPending} serverError={error} onCancel={() => { setError(null); setRatingOpen(false); }} onConfirm={(rating) => submitMut.mutate(rating)} />}
     </div>
@@ -578,9 +589,15 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   // AUTOSAVE — persist the current Daily Plan draft through the existing section save endpoint (current editable
   // batch, same authorization). Status is refreshed so the progress bar tracks saved data; section rows are NOT
   // refetched, so in-progress edits are never clobbered mid-typing.
-  const draftKey = JSON.stringify(payloadRows());
-  const autosave = useDailyAutosave(draftKey, view === DailyWorkView.PLAN && !locked, async () => {
-    await api.post("/api/daily-work/save", { section, workDate, rows: payloadRows() });
+  // Daily Report: the SAME autosave engine persists today's actuals on the already-submitted entries through the existing
+  // /actual endpoint (it only updates actuals; it never finalizes the day). Plan keeps its own payload/endpoint.
+  const isReport = view === DailyWorkView.REPORT;
+  const actualEntries = () => visibleRows.filter((r) => r.todaysActual.trim() !== "").map((r) => ({ entryId: r.entryId, todaysActual: numOr0(r.todaysActual) }));
+  const autosaveEnabled = isReport ? canEnterActual && !locked : view === DailyWorkView.PLAN && !locked;
+  const draftKey = isReport ? `R|${JSON.stringify(actualEntries())}` : JSON.stringify(payloadRows());
+  const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
+    if (isReport) { const entries = actualEntries(); if (entries.length > 0) await api.post("/api/daily-work/actual", { section, workDate, entries }); }
+    else await api.post("/api/daily-work/save", { section, workDate, rows: payloadRows() });
     setError(null);
     qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
   }, { onConflict: () => { qc.invalidateQueries({ queryKey: ["daily-work", section, workDate] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); } });
@@ -593,13 +610,8 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     hydratedRef.current = true;
   }, [data, draftKey, autosave]);
   // Publish this section's Save Draft (its own autosave flush/state) to the Plan Type toolbar.
-  useRegisterSaveDraft(view === DailyWorkView.PLAN && !locked, { flush: autosave.flush, saving: autosave.saving, failed: autosave.failed, savedAt: autosave.savedAt });
+  useRegisterSaveDraft(autosaveEnabled, { flush: autosave.flush, saving: autosave.saving, failed: autosave.failed, savedAt: autosave.savedAt });
 
-  const actualMut = useMutation({
-    mutationFn: () => api.post("/api/daily-work/actual", { section, workDate, entries: visibleRows.filter((r) => r.todaysActual.trim() !== "").map((r) => ({ entryId: r.entryId, todaysActual: numOr0(r.todaysActual) })) }),
-    onSuccess: () => { setError(null); invalidate(); },
-    onError: (e) => setError((e as Error).message),
-  });
   // Explicit Auto Task confirmation. Confirms every still-unconfirmed materialized task for the dealer row in one
   // click; each call is server-idempotent and never completes the underlying payment task.
   const confirmMut = useMutation({
@@ -611,7 +623,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     onSuccess: () => { setError(null); invalidate(); },
     onError: (e) => setError((e as Error).message),
   });
-  const busy = actualMut.isPending || confirmMut.isPending;
+  const busy = confirmMut.isPending;
 
   const update = (i: number, patch: Partial<EditRow>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const updateEntry = (entryId: string, patch: Partial<EditRow>) => setRows((rs) => rs.map((r) => (r.entryId === entryId ? { ...r, ...patch } : r)));
@@ -771,14 +783,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {/* Save Draft moved to the Plan Type toolbar (via useRegisterSaveDraft). Today's-actuals stays here (Report). */}
-      {view === DailyWorkView.REPORT && canEnterActual && visibleRows.length > 0 && (
-        <div className="flex justify-end">
-          <Button variant="default" onClick={() => { setError(null); actualMut.mutate(); }} disabled={busy || locked}>
-            {actualMut.isPending ? L.saving : L.saveActuals}
-          </Button>
-        </div>
-      )}
+      {/* Save Draft + save status live in the Plan Type toolbar (via useRegisterSaveDraft) in both Plan and Report. */}
 
       {addOpen && (
         <AddDealerDialog
@@ -975,12 +980,15 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   // Dealer Appointment has no Auto Task source, so every row is Manual (derived, not fabricated).
   const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.none };
 
-  const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", "APPOINTMENT", workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
   const payloadRows = () => rows.filter((r) => r.dealerName.trim() !== "").map((r) => ({ rowId: r.rowId, dealerName: r.dealerName, marketName: r.marketName }));
 
-  const draftKey = JSON.stringify(payloadRows());
-  const autosave = useDailyAutosave(draftKey, view === DailyWorkView.PLAN && !locked, async () => {
-    await api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, rows: payloadRows() });
+  const isReport = view === DailyWorkView.REPORT;
+  const statusEntries = () => visibleRows.filter((r) => r.status !== "").map((r) => ({ entryId: r.entryId, status: r.status }));
+  const autosaveEnabled = isReport ? canEnterStatus && !locked : view === DailyWorkView.PLAN && !locked;
+  const draftKey = isReport ? `R|${JSON.stringify(statusEntries())}` : JSON.stringify(payloadRows());
+  const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
+    if (isReport) { const entries = statusEntries(); if (entries.length > 0) await api.post("/api/daily-work/actual", { section: "APPOINTMENT", workDate, entries }); }
+    else await api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, rows: payloadRows() });
     setError(null);
     qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
   }, { onConflict: () => { qc.invalidateQueries({ queryKey: ["daily-work", "APPOINTMENT", workDate] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); } });
@@ -990,12 +998,8 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
     autosave.hydrate(draftKey);
     hydratedRef.current = true;
   }, [data, draftKey, autosave]);
-  useRegisterSaveDraft(view === DailyWorkView.PLAN && !locked, { flush: autosave.flush, saving: autosave.saving, failed: autosave.failed, savedAt: autosave.savedAt });
-  const statusMut = useMutation({
-    mutationFn: () => api.post("/api/daily-work/actual", { section: "APPOINTMENT", workDate, entries: visibleRows.filter((r) => r.status !== "").map((r) => ({ entryId: r.entryId, status: r.status })) }),
-    onSuccess: () => { setError(null); invalidate(); }, onError: (e) => setError((e as Error).message),
-  });
-  const busy = statusMut.isPending;
+  useRegisterSaveDraft(autosaveEnabled, { flush: autosave.flush, saving: autosave.saving, failed: autosave.failed, savedAt: autosave.savedAt });
+  const busy = false; // autosave never disables the inputs mid-edit
 
   const update = (i: number, patch: Partial<ApptEditRow>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const updateRow = (entryId: string, patch: Partial<ApptEditRow>) => setRows((rs) => rs.map((r) => (r.entryId === entryId ? { ...r, ...patch } : r)));
@@ -1069,16 +1073,12 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {/* Save Draft moved to the Plan Type toolbar; Add Row stays here for PLAN, Save Actuals for Report. */}
-      {view === DailyWorkView.PLAN ? (
+      {/* Save Draft + save status live in the Plan Type toolbar (Plan and Report); Add Row stays here for PLAN. */}
+      {view === DailyWorkView.PLAN && (
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" onClick={addRow} disabled={busy || locked}><Plus className="h-4 w-4" /> {L.addRow}</Button>
         </div>
-      ) : canEnterStatus && visibleRows.length > 0 ? (
-        <div className="flex justify-end">
-          <Button onClick={() => { setError(null); statusMut.mutate(); }} disabled={busy || locked}>{statusMut.isPending ? L.saving : L.saveActuals}</Button>
-        </div>
-      ) : null}
+      )}
     </div>
   );
 }
@@ -1375,15 +1375,31 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
     enterVisits: useLabel("daily_work.validation.enter_visit_actuals"),
   };
 
-  const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", "SUMMARY", workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
   // Save only the focused tab's fields: VISITS writes the visit columns (so an explicit 0 becomes real data),
   // OTHERS writes only the note — so an Others-only save never marks the Visits section "filled".
   const body = () => ({ section: "SUMMARY", workDate, focus, dealerVisits: numOr0(dealerVisits), newPartyVisits: numOr0(newPartyVisits), others });
   // Autosave only the currently-focused fields (Visits columns OR the Others note), so an Others edit never
   // marks Visits "filled" and vice-versa. Baseline is re-hydrated on focus/data change (see effects above).
-  const draftKey = focus === "VISITS" ? `V|${dealerVisits}|${newPartyVisits}` : `O|${others}`;
-  const autosave = useDailyAutosave(draftKey, view === DailyWorkView.PLAN && !locked, async () => {
-    await api.post("/api/daily-work/save", body());
+  const reportVisitBatches = (data?.batches ?? []).filter((batch) => {
+    const noPlan = new Set((batch.noPlanSections ?? "").split(",").filter(Boolean));
+    return !noPlan.has("VISITS");
+  });
+  // Daily Report: a batch's two actual counts are saved together once BOTH are entered (same rule as before), through
+  // the existing /actual endpoint — it only stores actuals and never finalizes the day.
+  const isReport = view === DailyWorkView.REPORT;
+  const visitEntries = () => reportVisitBatches.flatMap((batch) => {
+    const actual = visitActuals[batch.entryId];
+    return actual && actual.dealer !== "" && actual.newParty !== "" ? [{ entryId: batch.entryId, actualDealerVisits: numOr0(actual.dealer), actualNewPartyVisits: numOr0(actual.newParty) }] : [];
+  });
+  // Plan: autosave only the currently-focused fields (Visits columns OR the Others note), so an Others edit never
+  // marks Visits "filled" and vice-versa. Baseline is re-hydrated on focus/data change (see effects above).
+  // Report: Visits actuals only (Others is read-only in the report).
+  const reportEditable = isReport && focus === "VISITS" && reportVisitBatches.length > 0;
+  const autosaveEnabled = isReport ? reportEditable && !locked : view === DailyWorkView.PLAN && !locked;
+  const draftKey = isReport ? `R|${JSON.stringify(visitEntries())}` : focus === "VISITS" ? `V|${dealerVisits}|${newPartyVisits}` : `O|${others}`;
+  const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
+    if (isReport) { const entries = visitEntries(); if (entries.length > 0) await api.post("/api/daily-work/actual", { section: "VISITS", workDate, entries }); }
+    else await api.post("/api/daily-work/save", body());
     setError(null);
     qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
   }, { onConflict: () => { qc.invalidateQueries({ queryKey: ["daily-work", "SUMMARY", workDate] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); } });
@@ -1393,28 +1409,8 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
     autosave.hydrate(draftKey);
     hydratedRef.current = true;
   }, [data, draftKey, autosave]);
-  useRegisterSaveDraft(view === DailyWorkView.PLAN && !locked, { flush: autosave.flush, saving: autosave.saving, failed: autosave.failed, savedAt: autosave.savedAt });
-  const reportVisitBatches = (data?.batches ?? []).filter((batch) => {
-    const noPlan = new Set((batch.noPlanSections ?? "").split(",").filter(Boolean));
-    return !noPlan.has("VISITS");
-  });
-  const actualMut = useMutation({
-    mutationFn: () => {
-      const entries = reportVisitBatches.flatMap((batch) => {
-        const actual = visitActuals[batch.entryId];
-        return actual?.dealer !== "" && actual?.newParty !== "" ? [{
-          entryId: batch.entryId,
-          actualDealerVisits: numOr0(actual.dealer),
-          actualNewPartyVisits: numOr0(actual.newParty),
-        }] : [];
-      });
-      if (entries.length === 0) throw new Error(L.enterVisits);
-      return api.post("/api/daily-work/actual", { section: "VISITS", workDate, entries });
-    },
-    onSuccess: () => { setError(null); invalidate(); },
-    onError: (e) => setError((e as Error).message),
-  });
-  const busy = actualMut.isPending;
+  useRegisterSaveDraft(autosaveEnabled, { flush: autosave.flush, saving: autosave.saving, failed: autosave.failed, savedAt: autosave.savedAt });
+  const busy = false; // autosave never disables the inputs mid-edit
   // Whole-number-only inputs: block decimals/negatives at the field, backed by server validation.
   const onNumber = (set: (s: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => { const v = e.target.value; if (v === "" || /^\d+$/.test(v)) set(v); };
 
@@ -1478,12 +1474,7 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {/* Save Draft moved to the Plan Type toolbar. */}
-      {view === DailyWorkView.REPORT && focus === "VISITS" && reportVisitBatches.length > 0 && (
-        <div className="flex justify-end">
-          <Button onClick={() => { setError(null); actualMut.mutate(); }} disabled={busy || locked}>{actualMut.isPending ? L.saving : L.saveActuals}</Button>
-        </div>
-      )}
+      {/* Save Draft + save status live in the Plan Type toolbar. */}
     </div>
   );
 }

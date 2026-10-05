@@ -263,6 +263,12 @@ async function main() {
   const readyStatus = await svc.getDailyStatus(SO, DATE);
   assert.equal(readyStatus.canSubmitReport, true);
 
+  // Saving Daily Report actuals (what Report autosave posts) never finalizes: the day is still OPEN, unrated and unlocked.
+  assert.equal(fake.currentDay().status, "OPEN", "actuals saves leave the day OPEN");
+  assert.equal(fake.currentDay().selfRating, null, "no self-rating is created by actuals saves");
+  assert.equal(fake.currentDay().finalizedAt, null, "no finalization timestamp from actuals saves");
+  assert.ok(fake.entries.filter((row) => row.workDate === DATE && row.status !== "DRAFT").every((row) => row.status === "PLAN_SUBMITTED"), "submitted rows are not FINALIZED by actuals saves");
+
   // Self Rating belongs only to final report submission. Finalization is once-only and locks every mutation.
   await expectStatus(() => svc.submitDailyReport(SO, { workDate: DATE }), 422, "final rating required");
   const finalized = await svc.submitDailyReport(SO, { workDate: DATE, selfRating: 8 });

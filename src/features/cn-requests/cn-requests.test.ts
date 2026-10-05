@@ -1607,6 +1607,55 @@ async function main() {
     }), 409);
     const pendingDetail = await pendingService.getCnPaymentDetail(ADMIN, pendingId);
     assert.equal(pendingDetail.canVerify, false, "Pending has nothing to verify yet");
+    // Who gets the payment-report controls on an Accepted / Not Posted CN with Payment Status Pending: ONLY the owning
+    // Sales Officer (the active task is SCHEDULED by acceptance). RM / Admin / other SOs see the dialog read-only and
+    // cannot report — visibility is not permission.
+    const RM_VIEWER: AuthContext = { userId: "rm-1", role: Role.REGIONAL_MANAGER, username: "rm", groupId: "g1" };
+    assert.equal(pendingDetail.canUpdate, false, "Admin never gets the SO report form");
+    assert.equal((await pendingService.getCnPaymentDetail(SO, pendingId)).canUpdate, true, "the owning SO gets Paid / Partial Paid / Not Paid");
+    assert.equal((await pendingService.getCnPaymentDetail(RM_VIEWER, pendingId)).canUpdate, false, "RM can view but not report");
+    assert.equal((await pendingService.getCnPaymentDetail(RM_VIEWER, pendingId)).canVerify, false, "RM cannot verify");
+    await expectStatus(() => pendingService.getCnPaymentDetail(OTHER_SO, pendingId), 403);
+    await expectStatus(() => pendingService.updateCnPayment(RM_VIEWER, pendingId, { status: "NOT_PAID", followUpDate: "2026-09-24", requestKey: "rm-cannot-report" }), 403);
+    await expectStatus(() => pendingService.updateCnPayment(ADMIN, pendingId, { status: "NOT_PAID", followUpDate: "2026-09-24", requestKey: "admin-cannot-report" }), 403);
+
+    // OWNERSHIP rule: the owner (stored officerId) who is a Sales Officer OR Regional Manager reports payment — for every
+    // CN type, with identical options. Creator/approver/viewer play no part; Admin verification is a separate step.
+    const RM_OWNER: AuthContext = { userId: "rm-1", role: Role.REGIONAL_MANAGER, username: "rm", groupId: "g1" };
+    const OTHER_RM: AuthContext = { userId: "rm-2", role: Role.REGIONAL_MANAGER, username: "rm2", groupId: "g2" };
+    for (const [ownerId, owner, cnType] of [["so-1", SO, "Damage"], ["rm-1", RM_OWNER, "Damage"], ["rm-1", RM_OWNER, "Demo"], ["so-1", SO, "Freight"]] as const) {
+      const ownStore = makeStore();
+      const ownId = ownStore.seed("SUBMITTED", `cn-own-${ownerId}-${cnType}`, ownerId, {}, cnType);
+      const ownService = loadService(ownStore.prisma);
+      await ownService.acceptCnRequest(ADMIN, ownId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 120000 }, PDF_UPLOAD);
+      const own = ownStore.rows[0]!;
+      const day = ownStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
+      const label = `${ownerId}/${cnType}`;
+      assert.equal((await ownService.getCnPaymentDetail(owner, ownId)).canUpdate, true, `${label}: the owner gets the report controls`);
+      // Not the owner → read-only and rejected by the backend, whatever their role.
+      const others = [RM_OWNER, OTHER_RM, SO, OTHER_SO, ADMIN].filter((u) => u.userId !== ownerId);
+      for (const other of others) {
+        const detail = await ownService.getCnPaymentDetail(other, ownId).catch(() => null); // out-of-scope viewers are refused outright
+        if (detail) assert.equal(detail.canUpdate, false, `${label}: ${other.userId} is read-only`);
+        await expectStatus(() => ownService.updateCnPayment(other, ownId, { status: "NOT_PAID", followUpDate: day, taskId: ownStore.paymentEvents[0]!.id, requestKey: `deny-${label}-${other.userId}` }), 403);
+      }
+      assert.equal(ownStore.paymentEvents.length, 1, `${label}: rejected attempts created no events`);
+      // Not Paid → Partial Paid → Paid, the same events/outstanding for owners of any role and CN type.
+      await ownService.updateCnPayment(owner, ownId, { status: "NOT_PAID", followUpDate: day, taskId: ownStore.paymentEvents[0]!.id, requestKey: `np-${label}` });
+      assert.deepEqual([own.paymentStatus, own.paymentOutstandingAmount], ["Not Paid", 120000], `${label}: Not Paid keeps the outstanding`);
+      await ownService.updateCnPayment(owner, ownId, { status: "PARTIAL_PAID", amountPaid: 40000, paymentDate: day, followUpDate: day, taskId: ownStore.paymentEvents[1]!.id, requestKey: `pp-${label}` });
+      assert.deepEqual([own.paymentStatus, own.paymentOutstandingAmount], ["Partial Paid", 80000], `${label}: Partial Paid reduces the outstanding`);
+      await ownService.updateCnPayment(owner, ownId, { status: "PAID", paymentDate: day, taskId: ownStore.paymentEvents[2]!.id, requestKey: `pd-${label}` });
+      assert.deepEqual([own.paymentStatus, own.paymentOutstandingAmount, own.paymentVerified], ["Paid", 0, false], `${label}: Paid is only a provisional report`);
+      assert.deepEqual(ownStore.paymentEvents.map((e) => [e.status, e.source]), [["PENDING", "ACCEPTANCE"], ["NOT_PAID", "SO_UPDATE"], ["PARTIAL_PAID", "SO_UPDATE"], ["PAID", "SO_UPDATE"]], `${label}: the same payment history as before`);
+      assert.equal(own.status, "ACCEPTED_NOT_POSTED", `${label}: reporting Paid does not post the CN`);
+      // Admin verification is unchanged: Paid on CN Working Shared still needs the Final CN document.
+      await expectStatus(() => ownService.verifyCnPayment(owner, ownId, { status: "PAID", requestKey: `ov-${label}` }, FINAL_CN_UPLOAD), 403);
+      await assert.rejects(() => ownService.verifyCnPayment(ADMIN, ownId, { status: "PAID", requestKey: `av0-${label}` }), (e: unknown) => [409, 422].includes((e as TestApiError).status));
+      assert.equal(own.status, "ACCEPTED_NOT_POSTED", `${label}: no Final CN → still not posted`);
+      await ownService.verifyCnPayment(ADMIN, ownId, { status: "PAID", requestKey: `av1-${label}` }, FINAL_CN_UPLOAD);
+      assert.equal(own.status, "POSTED_IN_LEDGER", `${label}: Admin-verified Paid + Final CN posts it`);
+    }
     assert.equal(verifyStore.transactionTimeouts.at(-1), 15_000, "Admin verification uses only its scoped 15-second transaction timeout");
   }
 

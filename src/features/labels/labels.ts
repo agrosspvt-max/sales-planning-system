@@ -320,7 +320,7 @@ export const DEFAULT_LABELS = {
   "cn_requests.error.cannot_access_payment": "You cannot access this CN payment",
   "cn_requests.error.payment_tracking_unavailable": "Payment tracking is not available for this CN Request",
   "cn_requests.error.payment_key_used": "That payment update key is already in use",
-  "cn_requests.error.owning_officer_payment": "Only the owning Sales Officer can report a CN payment",
+  "cn_requests.error.owning_officer_payment": "Only the owner of this CN request (Sales Officer or Regional Manager) can report a CN payment",
   "cn_requests.error.payment_tracking_inactive": "Payment tracking is not active for this CN Request",
   "cn_requests.error.recovery_task_inactive": "This Recovery task is no longer active",
   "cn_requests.error.schedule_task_first": "Schedule and open the active Recovery task before updating its payment status",

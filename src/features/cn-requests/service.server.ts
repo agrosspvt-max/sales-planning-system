@@ -691,6 +691,15 @@ export interface CnPaymentDetailDto {
   }>;
 }
 
+/**
+ * Who may REPORT a payment: the request's OWNER (`officerId`) when they are a Sales Officer or a Regional Manager.
+ * Ownership is the stored `officerId` — never who created, approved or is viewing the request — and no CN type matters.
+ * Admin verification (verifyCnPayment) is a separate, authoritative action and is unaffected.
+ */
+function canReportCnPayment(ctx: AuthContext, officerId: string): boolean {
+  return (ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER) && ctx.userId === officerId;
+}
+
 async function assertCnPaymentAccess(ctx: AuthContext, officerId: string, L: ResolvedLabels): Promise<void> {
   const scope = await getOfficerScope(ctx);
   if (!scope.all && !scope.ids.includes(officerId)) throw new ApiError(403, L["cn_requests.error.cannot_access_payment"]);
@@ -747,7 +756,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
     currentOutstandingAmount: outstanding,
     expiryDate: request.acceptedAt ? cnRequestExpiryDateKey(request.acceptedAt, request.cnExpiryDays) : null,
     // SO reports a payment on the active SCHEDULED task; Admin verifies once the SO has reported a status.
-    canUpdate: ctx.role === Role.SALES_OFFICER && ctx.userId === request.officerId && activeTask?.taskStatus === "SCHEDULED",
+    canUpdate: canReportCnPayment(ctx, request.officerId) && activeTask?.taskStatus === "SCHEDULED",
     canVerify: isAdmin && hasAdminPermission(ctx, "cnRequests", "verifyPayment") && request.paymentStatus != null && request.paymentStatus !== "Pending",
     paymentVerified: verifiedRow?.paymentVerified ?? false,
     isAdmin,
@@ -801,8 +810,8 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
       },
     });
     if (!request) throw new ApiError(404, L["cn_requests.error.not_found"]);
-    // SO report is Sales-Officer-only; Admin uses verifyCnPayment (a separate, authoritative action).
-    if (!(ctx.role === Role.SALES_OFFICER && ctx.userId === request.officerId)) {
+    // Only the request's owner (Sales Officer or Regional Manager) reports; Admin uses verifyCnPayment (a separate, authoritative action).
+    if (!canReportCnPayment(ctx, request.officerId)) {
       throw new ApiError(403, L["cn_requests.error.owning_officer_payment"]);
     }
     if (request.paymentTrackingMode !== "PAYMENT_V1" || request.paymentOriginalAmount == null || request.paymentOutstandingAmount == null) {

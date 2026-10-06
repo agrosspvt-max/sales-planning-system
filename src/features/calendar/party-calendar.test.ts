@@ -76,6 +76,8 @@ function makeFake(opts: { party: PartyRow[]; conv: ConvRow[]; scope: Scope }) {
       },
     },
     calendarNote: { findMany: async () => [] },
+    calendarEntry: { findMany: async () => [] }, // Calendar entries (Task / Meeting / Reminder / Other) are covered by calendar-entries.test.ts
+    dealer: { findMany: async () => [] },
     user: { findMany: async () => [] },
   };
   return prisma;
@@ -96,6 +98,7 @@ function loadCalendarServer(prisma: object, scope: Scope) {
     "@/lib/scope": {
       getOfficerScope: async () => scope,
       assertOfficerInScope: async () => {},
+      getCurrentDealerIds: async () => [],
     },
     "@/lib/recovery-config": { getCalendarEnabled: async () => true },
     // Use the REAL calendar lib (projection + ranges) so we test the true integration.

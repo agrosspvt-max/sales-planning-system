@@ -4,12 +4,13 @@ import { readFileSync } from "node:fs";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Role } from "@prisma/client";
+import * as realDailyWork from "@/lib/daily-work";
 import type { AuthContext } from "@/lib/http";
 import { TestApiError, testLoader } from "@/features/dealer-tags/test-loader";
 import { navForRole } from "@/features/navigation/nav";
 import { resolveNavState } from "@/features/navigation/nav-state";
 import {
-  applyPaymentAging, buildPaymentAging, calendarDaysBetween, daysSincePayment, matchesPaymentAging, parseAgingDays, parseLastPaymentReportParams,
+  DAYBOOK_UPLOAD_AUDIT_ENTITY, DAYBOOK_UPLOAD_AUDIT_PREFIX, applyFilterStep, formatLastUpdate, applyPaymentAging, applyReportFilters, buildPaymentAging, cascadedFilterOptions, pruneReportFilters, reportFilterOptions, sameReportFilters, type ReportFilterable, calendarDaysBetween, daysSincePayment, matchesPaymentAging, parseAgingDays, parseLastPaymentReportParams,
   parsePaymentAging, paymentAgingLabel, paymentAgingToParams, sortByDays, type PaymentAgingFilter,
 } from "@/lib/last-payment-report";
 import { lastPaymentMonthEnd } from "@/lib/last-payment";
@@ -27,10 +28,11 @@ const openAssignments: Record<string, string[]> = {
   "d-a": ["arjun"], "d-b": ["sunil"], "d-c": ["chhitranjan"], "d-d": ["rahul"], "d-e": ["rm-1"], "d-h": ["arjun", "rahul"], "d-i": ["arjun"],
 };
 const dealers = [
-  { id: "d-a", name: "Alpha Traders", isActive: true }, { id: "d-b", name: "Beta Stores", isActive: true },
-  { id: "d-c", name: "Gamma Agro", isActive: true }, { id: "d-d", name: "Delta Outside", isActive: true },
-  { id: "d-e", name: "Epsilon RM Dealer", isActive: true }, { id: "d-f", name: "Zeta Unassigned", isActive: true },
-  { id: "d-h", name: "Eta Reassigned", isActive: true }, { id: "d-i", name: "Iota Inactive", isActive: false },
+  // `status` = the existing Dealer.status (the report's dataset keeps its existing isActive gate, so INACTIVE dealers stay out).
+  { id: "d-a", name: "Alpha Traders", isActive: true, status: "ACTIVE" }, { id: "d-b", name: "Beta Stores", isActive: true, status: "ACTIVE" },
+  { id: "d-c", name: "Gamma Agro", isActive: true, status: "DEFAULTER" }, { id: "d-d", name: "Delta Outside", isActive: true, status: "ACTIVE" },
+  { id: "d-e", name: "Epsilon RM Dealer", isActive: true, status: "PENDING" }, { id: "d-f", name: "Zeta Unassigned", isActive: true, status: "ACTIVE" },
+  { id: "d-h", name: "Eta Reassigned", isActive: true, status: "ACTIVE" }, { id: "d-i", name: "Iota Inactive", isActive: false, status: "INACTIVE" },
 ];
 // Legacy per-plan snapshot (RecoveryPlanDealer.lastReceipt*) and the individual receipt history (LastPaymentReceipt).
 const legacy = [
@@ -54,6 +56,10 @@ const ctx = (userId: string, role: Role): AuthContext => ({ userId, username: us
 const admin = ctx("admin", Role.SUPER_ADMIN), rm = ctx("rm-1", Role.REGIONAL_MANAGER), so = ctx("arjun", Role.SALES_OFFICER);
 const currentOwner = (dealerId: string) => openAssignments[dealerId]?.at(-1);
 
+// Day Book upload records the "Last Update" indicator reads. The fake exposes ONLY find* — any write would throw.
+let audits: { entity: string; summary: string | null; createdAt: Date }[] = [];
+let imports: { createdAt: Date }[] = [];
+const newest = <T extends { createdAt: Date }>(rows: T[]) => [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ?? null;
 let queries = { legacy: 0, history: 0, dealers: 0 };
 let lookedUp: string[] = []; // the dealer ids the (single) Last Payment lookup was asked about
 const prisma = {
@@ -67,6 +73,11 @@ const prisma = {
   user: { findMany: async ({ where }: { where: { id: { in: string[] } } }) => where.id.in.filter((id) => id in officers).map((id) => ({ id, name: officers[id].name, territory: officers[id].territory, group: { name: officers[id].group } })) },
   // `loadLastPaymentPoints` calls these tagged-template / findMany APIs — the REAL helper runs against this fake.
   $queryRaw: async (_strings: unknown, dealerIds: string[]) => { queries.legacy++; lookedUp = dealerIds; return legacy.filter((r) => dealerIds.includes(r.dealerId)); },
+  auditLog: {
+    findFirst: async ({ where }: { where: { entity: string; summary: { startsWith: string } } }) =>
+      newest(audits.filter((a) => a.entity === where.entity && (a.summary ?? "").startsWith(where.summary.startsWith))),
+  },
+  lastPaymentImport: { findFirst: async () => newest(imports) },
   lastPaymentReceipt: {
     findMany: async ({ where }: { where: { dealerId: { in: string[] }; receiptDate: { lte: Date } } }) => {
       queries.history++;
@@ -75,15 +86,23 @@ const prisma = {
     },
   },
 };
-const load = testLoader({
+let exportCtx: AuthContext = admin0();
+function admin0(): AuthContext { return { userId: "admin", username: "admin", role: Role.SUPER_ADMIN, groupId: null } as AuthContext; }
+// Minimal NextResponse so the REAL export route handler can run: it records status, headers and (JSON | binary) body.
+class FakeNextResponse { constructor(public body: unknown, public init: { status?: number; headers?: Record<string, string> } = {}) {} get status() { return this.init.status ?? 200; } static json(body: unknown, init: { status?: number } = {}) { return new FakeNextResponse(body, init); } }
+const overrides = {
   "@/lib/prisma": { prisma },
-  "@/lib/http": { ApiError: TestApiError },
+  "@/lib/http": { ApiError: TestApiError, requireAuth: async () => exportCtx },
+  "next/server": { NextResponse: FakeNextResponse },
+  // The export route has no `today` argument, so pin the business date to the fixture's TODAY (a Date argument still converts normally).
+  "@/lib/daily-work": { ...realDailyWork, currentBusinessDate: (d?: Date) => (d ? realDailyWork.currentBusinessDate(d) : TODAY) },
   "@/lib/scope": {
     getOfficerScope: async (c: AuthContext) => { const ids = scopeIds[c.userId]; return ids === "all" ? { all: true, ids: [] } : { all: false, ids }; },
     getCurrentOwnerByDealer: async (ids: string[]) => new Map(ids.filter((id) => currentOwner(id)).map((id) => [id, currentOwner(id)!])),
   },
   "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map([["d-b", "Beta Alias"]]) }, // display name = alias ?? name
-});
+};
+const load = testLoader(overrides);
 const report = load<typeof import("./last-payment-report.server")>("src/features/reports/last-payment-report.server.ts");
 const recoverySource = load<typeof import("@/lib/last-payment.server")>("src/lib/last-payment.server.ts"); // the exact helper Recovery Planning calls
 const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
@@ -96,7 +115,7 @@ async function service() {
   const byId = Object.fromEntries(adminReport.items.map((r) => [r.dealerId, r]));
 
   // 3, 16 — dealer information comes from the authoritative sources: dealer (alias-preferred name) + CURRENT owner.
-  assert.deepEqual(plain(byId["d-a"]), { dealerId: "d-a", party: "Alpha Traders", state: "MP", territory: "BHOPAL", salesOfficer: "Arjun Yadav", lastPaymentDate: "2026-10-02", amount: 50000, days: 3 });
+  assert.deepEqual(plain(byId["d-a"]), { dealerId: "d-a", party: "Alpha Traders", status: "ACTIVE", state: "MP", territory: "BHOPAL", salesOfficer: "Arjun Yadav", lastPaymentDate: "2026-10-02", amount: 50000, days: 3 });
   assert.equal(byId["d-b"].party, "Beta Alias", "alias-preferred display name");
   assert.deepEqual([byId["d-c"].state, byId["d-c"].territory, byId["d-c"].salesOfficer], ["MP", "INDORE", "Chhitranjan"]);
   assert.deepEqual([byId["d-h"].salesOfficer, byId["d-h"].state], ["Rahul Patidar", "UP"], "a reassigned dealer reports its CURRENT owner");
@@ -196,7 +215,9 @@ async function filters() {
   assert.deepEqual(rowsOf(await f(admin, { officer: ["arjun", "sunil"] })), ["d-a", "d-b"], "Sales Officer OR");
   // 10 — different filters AND together.
   assert.deepEqual(rowsOf(await f(admin, { state: ["MP", "CG"], officer: ["arjun", "sunil"] })), ["d-a", "d-b"]);
-  assert.deepEqual(rowsOf(await f(admin, { state: ["CG"], officer: ["arjun"] })), [], "never OR across different filters");
+  // Cascading: arjun is an MP officer, so under State = CG his selection is incompatible and is cleared (the table is not left empty).
+  assert.deepEqual(rowsOf(await f(admin, { state: ["CG"], officer: ["arjun"] })), ["d-b"], "State = CG: the incompatible officer is dropped, CG dealers remain");
+  assert.deepEqual(rowsOf(await f(admin, { state: ["MP"], territory: ["INDORE"], officer: ["arjun"] })), ["d-c"], "MP + INDORE: arjun (BHOPAL) does not fit and is cleared → INDORE dealers");
   assert.deepEqual(rowsOf(await f(admin, { party: ["d-a", "d-b", "d-c"], state: ["MP"], territory: ["BHOPAL", "INDORE"], officer: ["arjun", "chhitranjan"] })), ["d-a", "d-c"], "all four combine");
   // 11 — clearing restores the unfiltered state.
   assert.deepEqual(rowsOf(await f(admin, { state: [], officer: [] })), rowsOf(unfiltered));
@@ -239,7 +260,8 @@ async function filters() {
   assert.deepEqual(values(rmOpts.state), ["CG", "MP"]);
   assert.deepEqual(values(rmOpts.territory), ["BHOPAL", "HQ", "INDORE", "RAIPUR"]);
   assert.deepEqual(values(rmOpts.party), ["d-a", "d-b", "d-c", "d-e"], "RM Party options: only RM-scope dealers (not the reassigned or other-team ones)");
-  assert.deepEqual(plain((await f(rm, { state: ["MP"] }, { search: "agro" })).options), plain(rmOpts), "options stay stable while filtering/searching");
+  assert.deepEqual(plain((await f(rm, {}, { search: "agro" })).options), plain(rmOpts), "search text does not shape the options (only the other column filters do)");
+  assert.deepEqual(plain((await f(rm, { state: ["MP"] }, { search: "agro" })).options), plain((await f(rm, { state: ["MP"] })).options), "…and neither does search under an active filter");
   const soOpts = (await run(so)).options;
   assert.deepEqual([values(soOpts.party), values(soOpts.officer), values(soOpts.state)], [["d-a"], ["arjun"], ["MP"]], "SO options: only their own");
 
@@ -365,6 +387,402 @@ async function paymentAging() {
   assert.deepEqual(applyPaymentAging([{ days: 5 }, { days: null }, { days: 50 }], gt(10)), [{ days: 50 }]);
 }
 
+/* ---------------------------------- cascading (dependent) filters ---------------------------------- */
+async function cascading() {
+  const R = (dealerId: string, party: string, state: string, territory: string, officer: string, status = "ACTIVE"): ReportFilterable => ({ dealerId, party, status, state, territory, salesOfficer: officer, salesOfficerId: officer.toLowerCase() });
+  const rows: ReportFilterable[] = [
+    R("p1", "Alpha", "UP", "LUCKNOW", "Vinay"), R("p2", "Bravo", "UP", "LUCKNOW", "Vinay"), R("p3", "Charlie", "UP", "LUCKNOW", "Santosh"),
+    R("p4", "Delta", "UP", "GORAKHPUR", "Vinay"), R("p5", "Echo", "UP", "GORAKHPUR", "Deepak"), R("p6", "Foxtrot", "UP", "BARABANKI", "Deepak"),
+    R("p7", "Golf", "MP", "BHOPAL", "Arjun"), R("p8", "Hotel", "MP", "INDORE", "Chhitranjan"), R("p9", "India", "CG", "RAIPUR", "Sunil"),
+  ];
+  const labels = (o: { label: string }[]) => o.map((x) => x.label).sort();
+  const opts = (filters: Record<string, string[]>) => cascadedFilterOptions(rows, pruneReportFilters(rows, filters));
+  const same = (actual: unknown, expected: unknown, message: string) => assert.deepEqual(JSON.parse(JSON.stringify(actual)), expected, message);
+
+  // Initial: every dropdown spans the whole authorized dataset.
+  same(labels(opts({}).state), ["CG", "MP", "UP"], "initial states");
+  same(opts({}), JSON.parse(JSON.stringify(reportFilterOptions(rows))), "no filter == the plain option lists");
+  // 1–3 — State = UP narrows Territory, Sales Officer and Party; all filters stay present.
+  same(labels(opts({ state: ["UP"] }).territory), ["BARABANKI", "GORAKHPUR", "LUCKNOW"], "UP territories only");
+  same(labels(opts({ state: ["UP"] }).officer), ["Deepak", "Santosh", "Vinay"], "UP officers only");
+  same(labels(opts({ state: ["UP"] }).party), ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"], "UP dealers only");
+  assert.deepEqual(Object.keys(opts({ state: ["UP"] })).sort(), ["officer", "party", "state", "status", "territory"], "no filter disappears");
+  same(labels(opts({ state: ["UP"] }).state), ["CG", "MP", "UP"], "a column's own options are not narrowed by itself (more values can be added)");
+  // 4–5 — State + Territory narrows Sales Officer and Party.
+  same(labels(opts({ state: ["UP"], territory: ["LUCKNOW"] }).officer), ["Santosh", "Vinay"], "UP + LUCKNOW officers");
+  same(labels(opts({ state: ["UP"], territory: ["LUCKNOW"] }).party), ["Alpha", "Bravo", "Charlie"], "UP + LUCKNOW dealers");
+  // 6–7 — State + Sales Officer narrows Territory and Party (the other direction).
+  same(labels(opts({ state: ["UP"], officer: ["vinay"] }).territory), ["GORAKHPUR", "LUCKNOW"], "Vinay's UP territories");
+  same(labels(opts({ state: ["UP"], officer: ["vinay"] }).party), ["Alpha", "Bravo", "Delta"], "Vinay's UP dealers");
+  // 8 — all three.
+  same(labels(opts({ state: ["UP"], territory: ["LUCKNOW"], officer: ["vinay"] }).party), ["Alpha", "Bravo"], "UP + LUCKNOW + Vinay → exactly those dealers");
+  // Narrowing works in every direction: a Territory alone narrows State, Sales Officer alone narrows Territory.
+  same(labels(opts({ territory: ["BHOPAL"] }).state), ["MP"], "Territory narrows State");
+  same(labels(opts({ officer: ["deepak"] }).territory), ["BARABANKI", "GORAKHPUR"], "Sales Officer narrows Territory");
+  same(labels(opts({ party: ["p5"] }).officer), ["Deepak"], "a selected Party narrows the other filters to its own values");
+  // 9 — changing State clears incompatible Territory / Officer / Party; compatible ones survive.
+  same(pruneReportFilters(rows, { state: ["MP"], territory: ["LUCKNOW"], officer: ["vinay"], party: ["p1"] }), {  state: ["MP"] }, "State = MP clears the UP selections");
+  same(pruneReportFilters(rows, { state: ["UP"], territory: ["LUCKNOW", "BHOPAL"], officer: ["vinay"] }), { state: ["UP"], territory: ["LUCKNOW"], officer: ["vinay"] }, "only the incompatible value is dropped");
+  same(pruneReportFilters(rows, { state: ["UP"], territory: ["GORAKHPUR"], officer: ["santosh"] }), { state: ["UP"], territory: ["GORAKHPUR"] }, "Santosh has no GORAKHPUR dealers → cleared");
+  same(pruneReportFilters(rows, { state: ["UP", "MP"], territory: ["BHOPAL"] }), { state: ["UP", "MP"], territory: ["BHOPAL"] }, "OR within a column keeps compatible values");
+  // 10 — clearing a filter expands the dependent options again.
+  same(labels(opts({ state: ["UP"], territory: ["LUCKNOW"] }).party), ["Alpha", "Bravo", "Charlie"], "UP + LUCKNOW dealers (before clearing)");
+  same(labels(opts({ state: ["UP"] }).party), ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"], "Territory = All → UP still applies, options expand back to all UP");
+  same(labels(opts({}).party).length, 9, "State = All → the full authorized dataset");
+  // Hostile / unknown values are NOT silently dropped into "no filter": they stay and match nothing.
+  same(pruneReportFilters(rows, { officer: ["not-in-scope"] }), { officer: ["not-in-scope"] }, "unknown values are kept (→ empty result, never a widened one)");
+  assert.equal(applyReportFilters(rows, pruneReportFilters(rows, { officer: ["not-in-scope"] })).length, 0);
+  assert.ok(sameReportFilters({ state: ["UP"], territory: [] }, { state: ["UP"] }) && !sameReportFilters({ state: ["UP"] }, { state: ["MP"] }));
+
+  // Service level — real dataset, scope and the existing Last Payment values.
+  const filtersOf = async (c: AuthContext, filter: Record<string, string[]>, over = {}) => run(c, { filters: filter, ...over });
+  const mp = await filtersOf(admin, { state: ["MP"] });
+  assert.deepEqual(labels(mp.options.territory), ["BHOPAL", "HQ", "INDORE"], "State = MP → MP territories only (no UP/CG)");
+  assert.deepEqual(mp.options.officer.map((o) => o.value).sort(), ["arjun", "chhitranjan", "rm-1"], "State = MP → MP officers only");
+  assert.deepEqual(mp.options.party.map((o) => o.value).sort(), ["d-a", "d-c", "d-e"], "State = MP → MP dealers only");
+  const stale = await filtersOf(admin, { state: ["MP"], territory: ["LUCKNOW"], officer: ["rahul"], party: ["d-d"] });
+  assert.deepEqual(plain(stale.appliedFilters), { state: ["MP"] }, "the incompatible UP selections are reported as cleared");
+  assert.deepEqual(ids(stale.items), ["d-a", "d-c", "d-e"], "the table shows exactly the applied filters (MP), not an empty stale combination");
+  assert.deepEqual(plain((await filtersOf(admin, { state: ["MP"], territory: ["INDORE"] })).appliedFilters), { state: ["MP"], territory: ["INDORE"] });
+  // Payment Aging + cascade: State = MP AND officer = arjun AND Days > 0 → only arjun's d-a (Days 3).
+  assert.deepEqual(ids((await filtersOf(admin, { state: ["MP"], officer: ["arjun"] }, { paymentAging: { operator: "gt", value: 0 } })).items), ["d-a"], "State + Sales Officer + Days > 0");
+  assert.deepEqual(ids((await filtersOf(admin, { state: ["MP"], officer: ["arjun"] }, { paymentAging: { operator: "gt", value: 3 } })).items), [], "…and Days > 3 excludes it (aging is just another AND filter)");
+  assert.deepEqual(plain((await filtersOf(admin, { state: ["MP"] }, { paymentAging: { operator: "gt", value: 99 } })).options.party.map((o: { value: string }) => o.value).sort()), ["d-a", "d-c", "d-e"], "Payment Aging does not shape the options");
+  // Days sorting happens AFTER filtering and is unchanged.
+  const asc = (await filtersOf(admin, { state: ["MP"] }, { sort: "days_asc" })).items, desc = (await filtersOf(admin, { state: ["MP"] }, { sort: "days_desc" })).items;
+  assert.deepEqual(asc.map((r) => r.days), [3, 20, null]); assert.deepEqual(desc.map((r) => r.days), [20, 3, null]);
+  // Role scope: the options and the rows never reach outside the caller's authorized dealers.
+  const rmAll = await run(rm);
+  for (const key of ["state", "territory", "officer", "party"] as const) {
+    for (const o of rmAll.options[key]) assert.ok(!["UP", "LUCKNOW", "rahul", "d-d", "d-h"].includes(o.value), `RM option ${key}:${o.value} is in scope`);
+  }
+  assert.deepEqual((await filtersOf(rm, { state: ["MP"] })).options.officer.map((o) => o.value).sort(), ["arjun", "chhitranjan", "rm-1"], "RM cascade stays inside the RM's team");
+  const rmUp = await filtersOf(rm, { state: ["UP"] });
+  assert.deepEqual(ids(rmUp.items), [], "an RM cannot reach UP (another team) through the State filter");
+  assert.deepEqual(rmUp.options.party.map((o) => o.value), [], "…nor see UP options");
+  const soUp = await filtersOf(so, { state: ["MP"], officer: ["arjun"] });
+  assert.deepEqual(ids(soUp.items), ["d-a"]); assert.deepEqual(soUp.options.officer.map((o) => o.value), ["arjun"], "SO sees only themselves");
+  // Last Payment values are untouched by cascading.
+  const before = Object.fromEntries((await run(admin)).items.map((r) => [r.dealerId, r]));
+  for (const row of (await filtersOf(admin, { state: ["MP"], territory: ["BHOPAL"] })).items) assert.deepEqual(plain(row), plain(before[row.dealerId]), `${row.dealerId} unchanged`);
+  // Page wiring: all four filters stay visible; the page adopts the server's applied (pruned) selections.
+  const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
+  assert.ok(page.includes("sameReportFilters(cleaned, pending)") && page.includes("setPending(cleaned)") && page.includes("!optionsQuery.isPlaceholderData"), "an invalid child selection is cleared from the PENDING state");
+  assert.equal((page.match(/<ColumnFilterHeader/g) ?? []).length, 1, "the four filters are still rendered (one mapped header), never hidden");
+}
+
+/* ---------------------------------- Status column + cascading Status filter ---------------------------------- */
+async function statusFilter() {
+  const R = (dealerId: string, party: string, state: string, territory: string, officer: string, status: string): ReportFilterable => ({ dealerId, party, status, state, territory, salesOfficer: officer, salesOfficerId: officer.toLowerCase() });
+  const rows: ReportFilterable[] = [
+    R("p1", "Alpha", "UP", "LUCKNOW", "Vinay", "ACTIVE"), R("p2", "Bravo", "UP", "LUCKNOW", "Vinay", "DEFAULTER"), R("p3", "Charlie", "UP", "LUCKNOW", "Santosh", "ACTIVE"),
+    R("p4", "Delta", "UP", "GORAKHPUR", "Vinay", "PENDING"), R("p5", "Echo", "UP", "GORAKHPUR", "Deepak", "ACTIVE"), R("p6", "Foxtrot", "UP", "BARABANKI", "Deepak", "ACTIVE"),
+    R("p7", "Golf", "MP", "BHOPAL", "Arjun", "DEFAULTER"), R("p8", "Hotel", "MP", "INDORE", "Chhitranjan", "ACTIVE"),
+  ];
+  const labels = (o: { label: string }[]) => o.map((x) => x.label).sort();
+  const j = (x: unknown) => JSON.parse(JSON.stringify(x));
+  const opts = (filters: Record<string, string[]>) => cascadedFilterOptions(rows, pruneReportFilters(rows, filters));
+
+  // The Status options are the statuses ACTUALLY present (existing Dealer.status values, shown with their normal labels) — nothing hard-coded.
+  assert.deepEqual(labels(opts({}).status), ["Active", "Defaulter", "Pending"], "only statuses present in the dataset (no Inactive: none of these dealers has it)");
+  assert.deepEqual(opts({}).status.map((o) => o.value).sort(), ["ACTIVE", "DEFAULTER", "PENDING"], "values are the stored statuses");
+  // 3–4 — State + Status narrows Territory / Sales Officer / Party.
+  assert.deepEqual(j(labels(opts({ state: ["UP"], status: ["ACTIVE"] }).territory)), ["BARABANKI", "GORAKHPUR", "LUCKNOW"], "UP + Active territories");
+  assert.deepEqual(j(labels(opts({ state: ["UP"], status: ["DEFAULTER"] }).territory)), ["LUCKNOW"], "UP + Defaulter → only LUCKNOW");
+  assert.deepEqual(j(labels(opts({ state: ["UP"], status: ["ACTIVE"] }).officer)), ["Deepak", "Santosh", "Vinay"]);
+  assert.deepEqual(j(labels(opts({ state: ["UP"], status: ["PENDING"] }).officer)), ["Vinay"], "UP + Pending → only Vinay");
+  assert.deepEqual(j(labels(opts({ state: ["UP"], status: ["ACTIVE"] }).party)), ["Alpha", "Charlie", "Echo", "Foxtrot"], "UP + Active dealers only");
+  // 5 — Territory + Status narrows Sales Officer and Party.
+  assert.deepEqual(j(labels(opts({ state: ["UP"], territory: ["LUCKNOW"], status: ["ACTIVE"] }).officer)), ["Santosh", "Vinay"]);
+  assert.deepEqual(j(labels(opts({ state: ["UP"], territory: ["LUCKNOW"], status: ["ACTIVE"] }).party)), ["Alpha", "Charlie"], "UP + LUCKNOW + Active");
+  assert.deepEqual(j(labels(opts({ state: ["UP"], territory: ["LUCKNOW"], status: ["DEFAULTER"] }).officer)), ["Vinay"]);
+  // 6 — Sales Officer + Status narrows Party (and a Sales Officer narrows the Status options themselves).
+  assert.deepEqual(j(labels(opts({ officer: ["vinay"], status: ["ACTIVE"] }).party)), ["Alpha"], "Vinay + Active");
+  assert.deepEqual(j(labels(opts({ officer: ["vinay"] }).status)), ["Active", "Defaulter", "Pending"], "statuses represented in Vinay's dealers");
+  assert.deepEqual(j(labels(opts({ officer: ["deepak"] }).status)), ["Active"], "Deepak only has Active dealers");
+  assert.deepEqual(j(labels(opts({ territory: ["BHOPAL"] }).status)), ["Defaulter"], "Territory narrows Status");
+  assert.deepEqual(j(labels(opts({ state: ["MP"] }).status)), ["Active", "Defaulter"], "State narrows Status");
+  // 7 — clearing Status expands the dependent options again.
+  assert.deepEqual(j(labels(opts({ state: ["UP"] }).party)).length, 6, "Status = All → every UP dealer");
+  // 8 — changing State clears incompatible Status / Territory / SO / Party.
+  assert.deepEqual(j(pruneReportFilters(rows, { state: ["MP"], status: ["PENDING"], territory: ["LUCKNOW"], officer: ["vinay"], party: ["p1"] })), { state: ["MP"] }, "MP has no Pending dealers, and the UP selections are all dropped");
+  assert.deepEqual(j(pruneReportFilters(rows, { state: ["MP"], status: ["DEFAULTER"], territory: ["BHOPAL"], officer: ["arjun"], party: ["p7"] })), { state: ["MP"], territory: ["BHOPAL"], officer: ["arjun"], status: ["DEFAULTER"], party: ["p7"] }, "a fully compatible selection survives");
+  assert.deepEqual(j(pruneReportFilters(rows, { state: ["UP"], officer: ["vinay"], status: ["ACTIVE", "PENDING"] })), { state: ["UP"], officer: ["vinay"], status: ["ACTIVE", "PENDING"] });
+  assert.deepEqual(j(pruneReportFilters(rows, { officer: ["deepak"], status: ["DEFAULTER"] })), { officer: ["deepak"] }, "Deepak has no Defaulter dealers → the Status is cleared");
+
+  // Service level — real dataset, scope, search, aging, sorting.
+  const f = async (c: AuthContext, filter: Record<string, string[]>, over = {}) => run(c, { filters: filter, ...over });
+  const all = await run(admin);
+  const byId = Object.fromEntries(all.items.map((r) => [r.dealerId, r]));
+  // 1 — the column carries each dealer's CURRENT Dealer.status.
+  assert.deepEqual(Object.fromEntries(all.items.map((r) => [r.dealerId, r.status])), { "d-a": "ACTIVE", "d-b": "ACTIVE", "d-c": "DEFAULTER", "d-d": "ACTIVE", "d-e": "PENDING", "d-f": "ACTIVE", "d-h": "ACTIVE" });
+  dealers.find((d) => d.id === "d-c")!.status = "ACTIVE"; // master data changes → the report follows (no cached copy)
+  assert.equal((await run(admin)).items.find((r) => r.dealerId === "d-c")!.status, "ACTIVE", "reflects the dealer's current status");
+  dealers.find((d) => d.id === "d-c")!.status = "DEFAULTER";
+  // 2 — the filter itself (OR within, AND across).
+  assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"] })).items), ["d-a", "d-b", "d-d", "d-f", "d-h"]);
+  assert.deepEqual(ids((await f(admin, { status: ["DEFAULTER", "PENDING"] })).items), ["d-c", "d-e"], "Status OR");
+  assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"], state: ["MP"] })).items), ["d-a"], "Status AND State");
+  assert.deepEqual(ids((await f(admin, { status: ["INACTIVE"] })).items), [], "Inactive dealers are outside this report's existing dataset");
+  // 3 — Status participates in the cascade on the real dataset.
+  const mpActive = await f(admin, { state: ["MP"], status: ["ACTIVE"] });
+  assert.deepEqual(mpActive.options.territory.map((o) => o.value).sort(), ["BHOPAL"], "State + Status → territories");
+  assert.deepEqual(mpActive.options.officer.map((o) => o.value), ["arjun"]); assert.deepEqual(mpActive.options.party.map((o) => o.value), ["d-a"]);
+  assert.deepEqual(labels((await f(admin, { state: ["MP"] })).options.status), ["Active", "Defaulter", "Pending"], "State narrows the Status options");
+  assert.deepEqual(labels((await f(admin, { officer: ["chhitranjan"] })).options.status), ["Defaulter"], "Sales Officer narrows the Status options");
+  // 8/9 — State change clears the incompatible Status / Territory.
+  const cleared = await f(admin, { state: ["CG"], status: ["DEFAULTER"], territory: ["INDORE"] });
+  assert.deepEqual(plain(cleared.appliedFilters), { state: ["CG"] }, "CG has no Defaulter dealers and no INDORE");
+  assert.deepEqual(ids(cleared.items), ["d-b"], "the table shows exactly the applied filters");
+  // 10 — Party search + Status.
+  assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"] }, { search: "alpha" })).items), ["d-a"], "Status AND search");
+  assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"] }, { search: "agro" })).items), [], "Gamma Agro is a Defaulter → excluded by Status");
+  assert.deepEqual(ids((await f(admin, { status: ["DEFAULTER"] }, { search: "agro" })).items), ["d-c"]);
+  // 11 — Payment Aging + Status (Days: d-b 0, d-a 3, d-d 4, d-c 20).
+  assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"] }, { paymentAging: { operator: "gt", value: 0 } })).items), ["d-a", "d-d"]);
+  assert.deepEqual(ids((await f(admin, { status: ["DEFAULTER"] }, { paymentAging: { operator: "gt", value: 0 } })).items), ["d-c"]);
+  assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"], state: ["MP"] }, { paymentAging: { operator: "gt", value: 3 } })).items), [], "State + Status + Days > 3");
+  // 12 — Days sorting after filtering, unchanged (payment-less dealers stay last).
+  assert.deepEqual((await f(admin, { status: ["ACTIVE"] }, { sort: "days_asc" })).items.map((r) => r.days), [0, 3, 4, null, null]);
+  assert.deepEqual((await f(admin, { status: ["ACTIVE"] }, { sort: "days_desc" })).items.map((r) => r.days), [4, 3, 0, null, null]);
+  // 13 — scope: the Status column/filter/options obey the caller's scope exactly.
+  assert.deepEqual(labels((await run(rm)).options.status), ["Active", "Defaulter", "Pending"], "RM sees statuses of their own scope");
+  assert.deepEqual(labels((await run(so)).options.status), ["Active"], "a Sales Officer only sees the status of their own dealer");
+  assert.deepEqual(ids((await f(rm, { status: ["ACTIVE"] })).items), ["d-a", "d-b"], "RM + Status stays inside the RM's team (d-d / d-h are another team's)");
+  assert.deepEqual(ids((await f(so, { status: ["PENDING"] })).items), [], "SO cannot reach another officer's Pending dealer");
+  // 14 — Last Payment values untouched.
+  for (const row of (await f(admin, { status: ["ACTIVE"] })).items) assert.deepEqual(plain(row), plain(byId[row.dealerId]), `${row.dealerId}: unchanged`);
+  // URL / API parameter.
+  assert.deepEqual(plain(parseLastPaymentReportParams(new URLSearchParams("status=ACTIVE&status=PENDING&status=ACTIVE")).filters), { status: ["ACTIVE", "PENDING"] });
+  // Layout: Status right after Party; fixed layout with compact widths for the short columns.
+  const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
+  assert.ok(page.indexOf('key: "status"') > page.indexOf('key: "party"') && page.indexOf('key: "status"') < page.indexOf('key: "state"'), "Status sits immediately after Party");
+  assert.ok(page.includes('table-fixed') && /key: "status", label: "Status", width: "w-\d+"/.test(page) && page.includes("w-40 text-right"), "balanced, fixed column widths");
+  // The Sales Officer column was 12rem (w-48) → the empty space before the right-aligned Last Payment Date; it is now compact and the date column was NOT widened.
+  assert.ok(page.includes('key: "officer", label: "Sales Officer", width: "w-36"') && !page.includes('width: "w-48"'), "Sales Officer is compact (9rem)");
+  assert.ok(page.includes('<TableHead className="w-40 text-right">Last Payment Date') && page.includes('key: "territory", label: "Territory", width: "w-40"'), "Last Payment Date / Territory widths unchanged");
+}
+
+/* ---------------------------------- Last Update (latest successful Day Book upload) ---------------------------------- */
+async function lastUpdate() {
+  const stamp = (iso: string) => new Date(iso);
+  const DAYBOOK = (name: string) => `Day Book upload for Season · October (${name}): 12 dealer(s) updated — Receipts ₹1000, SR/CR ₹0`;
+  const lastUpdateOf = async () => (await run(admin)).lastUpdate;
+  // 6 — no upload history at all → handled gracefully.
+  audits = []; imports = [];
+  assert.equal(await lastUpdateOf(), null, "no Day Book has ever been uploaded");
+  assert.equal(formatLastUpdate(null), null);
+  let html = await draw(admin);
+  assert.ok(/data-testid="last-update"[^>]*>Last Update: —</.test(html), "the page shows a dash, not an error");
+  // 1, 2 — the newest successful upload wins (monthly upload records and Historical Day Book imports both count).
+  audits = [{ entity: "recoveryPlan", summary: DAYBOOK("a.xlsx"), createdAt: stamp("2026-10-01T06:00:00Z") }, { entity: "recoveryPlan", summary: DAYBOOK("b.xlsx"), createdAt: stamp("2026-10-03T06:00:00Z") }];
+  imports = [{ createdAt: stamp("2026-10-02T06:00:00Z") }];
+  assert.equal(await lastUpdateOf(), "2026-10-03", "newest of several uploads");
+  audits.push({ entity: "recoveryPlan", summary: DAYBOOK("c.xlsx"), createdAt: stamp("2026-10-06T06:00:00Z") });
+  assert.equal(await lastUpdateOf(), "2026-10-06", "a new upload automatically becomes the Last Update");
+  imports.push({ createdAt: stamp("2026-10-08T06:00:00Z") });
+  assert.equal(await lastUpdateOf(), "2026-10-08", "a Historical Day Book import is a Day Book upload too");
+  // 3 — failed / unrelated attempts leave no upload record (the commit writes its audit entry only after success) → unchanged,
+  //     and look-alike records are ignored.
+  audits.push(
+    { entity: "recoveryPlan", summary: "Recovery plan approved", createdAt: stamp("2026-10-20T06:00:00Z") },
+    { entity: "scheme", summary: DAYBOOK("not-ours.xlsx"), createdAt: stamp("2026-10-21T06:00:00Z") },
+    { entity: "recoveryPlan", summary: null, createdAt: stamp("2026-10-22T06:00:00Z") },
+  );
+  assert.equal(await lastUpdateOf(), "2026-10-08", "failed uploads / other audit entries never move the date");
+  // India calendar date, not UTC and not the browser's: 20:00 UTC on 5 Oct is already 6 Oct in India.
+  audits = [{ entity: "recoveryPlan", summary: DAYBOOK("late.xlsx"), createdAt: stamp("2026-10-05T20:00:00Z") }]; imports = [];
+  assert.equal(await lastUpdateOf(), "2026-10-06", "Asia/Kolkata business date");
+  // 5 — rendered exactly DD/MM/YYYY, read-only text (no input / button / date picker).
+  assert.equal(formatLastUpdate("2026-10-06"), "06/10/2026"); assert.equal(formatLastUpdate("2026-01-09"), "09/01/2026"); assert.equal(formatLastUpdate("garbage"), null);
+  html = await draw(admin);
+  assert.ok(/data-testid="last-update"[^>]*>Last Update: 06\/10\/2026</.test(html), "Last Update: 06/10/2026");
+  // Layout: ONE row — the Search input on the left, the read-only Last Update on the right (not in the page header / table header).
+  const rowStart = html.indexOf("flex flex-wrap items-center justify-between gap-x-4"); const row = html.slice(rowStart, html.indexOf('data-testid="last-update"') + 120);
+  assert.ok(row.indexOf("<input") >= 0 && row.indexOf("<input") < row.indexOf('data-testid="last-update"'), "Search parties… is left of Last Update on the same row");
+  assert.ok(row.includes("Last Update: 06/10/2026") && !/<(button|select|a)\b/.test(row.slice(row.indexOf('data-testid="last-update"'))), "Last Update stays read-only text");
+  assert.ok(!(html.match(/data-slot="actions">([\s\S]*?)<\/div>/) ?? [])[1]?.includes("Last Update"), "no longer in the page header");
+  assert.ok(!/<th[^>]*>[^<]*Last Update/.test(html), "not in the table header");
+  // 4 — read-only: the loader writes nothing and does not touch Day Book data (the fake has no write methods; also check the source).
+  const server = readFileSync("src/features/reports/last-payment-report.server.ts", "utf8");
+  assert.ok(!/\.(create|update|upsert|delete|deleteMany|updateMany|createMany)\(|\$executeRaw/.test(server), "the report service performs no writes");
+  // The indicator is bound to what the Day Book commit really writes — pin that coupling to the source.
+  const recovery = readFileSync("src/features/recovery/service.server.ts", "utf8");
+  const commit = recovery.slice(recovery.indexOf("export async function commitDaybook"));
+  assert.ok(commit.includes('entity: "recoveryPlan"') && commit.includes("summary: `Day Book upload for ") && commit.indexOf("retainRegularReceipts") < commit.indexOf("Day Book upload for "), "the monthly commit writes its audit entry only after a successful commit");
+  assert.equal(DAYBOOK_UPLOAD_AUDIT_PREFIX, "Day Book upload for "); assert.equal(DAYBOOK_UPLOAD_AUDIT_ENTITY, "recoveryPlan");
+  // 7 — everything else is untouched: rows and filters are identical with and without upload history.
+  audits = []; imports = [];
+  const without = await run(admin);
+  audits = [{ entity: "recoveryPlan", summary: DAYBOOK("x.xlsx"), createdAt: stamp("2026-10-06T06:00:00Z") }];
+  const withHistory = await run(admin);
+  assert.deepEqual(plain(withHistory.items), plain(without.items), "Last Payment rows unchanged");
+  assert.deepEqual(plain(withHistory.options), plain(without.options), "filter options unchanged");
+  assert.deepEqual(ids((await run(admin, { filters: { state: ["MP"] }, paymentAging: { operator: "gt", value: 0 } })).items), ["d-a", "d-c"], "filters + Payment Aging unchanged");
+  audits = []; imports = [];
+}
+
+/* ---------------------------------- Excel export (all filtered rows, current state) ---------------------------------- */
+async function exportTests() {
+  const exportRoute = load<{ GET: (req: { nextUrl: { searchParams: URLSearchParams } }) => Promise<FakeNextResponse> }>("src/app/api/reports/last-payment/export/route.ts");
+  // Reads the REAL generated workbook back (ExcelJS): title, Last Update, headers, then one line per exported row.
+  const ExcelJS = (await import("exceljs")).default;
+  type Sheet = { status: number; error?: string; title?: string; meta: string[]; headers: string[]; rows: Record<string, string | number | null>[]; filename?: string; contentType?: string };
+  const exportFile = async (query: string, who: AuthContext = admin): Promise<Sheet> => {
+    exportCtx = who;
+    const res = await exportRoute.GET({ nextUrl: { searchParams: new URLSearchParams(query) } });
+    if (res.status !== 200) return { status: res.status, error: (res.body as { error: string }).error, meta: [], headers: [], rows: [] };
+    const wb = new ExcelJS.Workbook(); await wb.xlsx.load(res.body as unknown as Parameters<typeof wb.xlsx.load>[0]);
+    const ws = wb.worksheets[0]!;
+    const cell = (r: number, c: number) => { const v = ws.getCell(r, c).value; return v == null || v === "" ? null : (v as string | number); };
+    const headerRow = 4; // title (1), Last Update (2), blank (3), headers (4)
+    const headers = Array.from({ length: 8 }, (_, i) => String(cell(headerRow, i + 1)));
+    const rows: Sheet["rows"] = [];
+    for (let r = headerRow + 1; r <= ws.rowCount; r++) rows.push(Object.fromEntries(headers.map((h, i) => [h, cell(r, i + 1)])));
+    return { status: 200, title: String(cell(1, 1)), meta: [String(cell(2, 1))], headers, rows, filename: res.init.headers?.["Content-Disposition"], contentType: res.init.headers?.["Content-Type"] };
+  };
+  const parties = (sheet: Sheet) => sheet.rows.map((r) => r["Party"]).sort();
+  audits = [{ entity: "recoveryPlan", summary: "Day Book upload for Season · October (a.xlsx): 3 dealer(s) updated", createdAt: new Date("2026-10-05T20:00:00Z") }]; imports = [];
+
+  // 1 + 9 + 10 — no filters: every authorized row, the table's columns/order, the existing Last Update, no pagination info.
+  const all = await exportFile("");
+  assert.equal(all.status, 200); assert.match(all.contentType!, /spreadsheetml/); assert.match(all.filename!, /Last_Payment_Report\.xlsx/);
+  assert.equal(all.title, "Last Payment Report");
+  assert.deepEqual(all.meta, ["Last Update: 06/10/2026"], "the SAME Last Update the page shows (Day Book upload date, India date) above the table");
+  assert.deepEqual(all.headers, ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Amount", "Days"], "same columns and order as the UI");
+  assert.equal(all.rows.length, 7, "all authorized dealers");
+  const pageHtml = await draw(admin);
+  assert.deepEqual([...pageHtml.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).slice(0, 8), all.headers, "export headers == UI headers");
+  const a = all.rows.find((r) => r["Party"] === "Alpha Traders")!;
+  assert.deepEqual([a["Status"], a["State"], a["Territory"], a["Sales Officer"], a["Last Payment Date"], a["Amount"], a["Days"]], ["Active", "MP", "BHOPAL", "Arjun Yadav", "02/10/2026", 50000, 3], "display labels, DD/MM/YYYY, numeric amount/days — the page's calculated values");
+  const e = all.rows.find((r) => r["Party"] === "Epsilon RM Dealer")!;
+  assert.deepEqual([e["Status"], e["Last Payment Date"], e["Amount"], e["Days"]], ["Pending", null, null, null], "no payment → blank cells, not zeros");
+  assert.ok(!all.rows.some((r) => Object.values(r).some((v) => /Page \d|Generated/i.test(String(v)))) && !all.meta.some((m) => /Generated|Page /i.test(m)), "no pagination / generation timestamp");
+  assert.equal((await exportFile("")).rows.length, (await run(admin, { pageSize: 200 })).total, "exported count == the report's pre-pagination total");
+
+  // 2–7 — every filter is honoured; combinations are exact intersections.
+  assert.deepEqual(parties(await exportFile("state=MP")), ["Alpha Traders", "Epsilon RM Dealer", "Gamma Agro"], "State");
+  assert.deepEqual(parties(await exportFile("state=MP&territory=INDORE")), ["Gamma Agro"], "State + Territory");
+  assert.deepEqual(parties(await exportFile("state=MP&officer=arjun")), ["Alpha Traders"], "State + Sales Officer");
+  assert.deepEqual(parties(await exportFile("status=PENDING")), ["Epsilon RM Dealer"], "Status");
+  assert.deepEqual(parties(await exportFile("search=agro")), ["Gamma Agro"], "Party search");
+  assert.deepEqual(parties(await exportFile("state=MP&status=ACTIVE&paymentAgingOperator=gt&paymentAgingValue=0")), ["Alpha Traders"], "State + Status + Payment Aging");
+  assert.deepEqual(parties(await exportFile("state=MP&territory=INDORE&search=agro&status=DEFAULTER&officer=chhitranjan")), ["Gamma Agro"], "everything together");
+  assert.deepEqual(parties(await exportFile("state=MP&territory=BHOPAL&officer=chhitranjan")), parties(await exportFile("state=MP&territory=BHOPAL")), "an incompatible Sales Officer is cleared exactly like the table does");
+  // The export always follows the CURRENT selection: clearing a filter and exporting again widens the file.
+  assert.equal((await exportFile("state=MP&territory=INDORE")).rows.length, 1);
+  assert.equal((await exportFile("state=MP")).rows.length, 3, "Territory cleared → expanded result");
+  // Days sort is honoured in the file too.
+  assert.deepEqual((await exportFile("state=MP&sort=days_asc")).rows.map((r) => r["Days"]), [3, 20, null]);
+  assert.deepEqual((await exportFile("state=MP&sort=days_desc")).rows.map((r) => r["Days"]), [20, 3, null]);
+
+  // 8 + 13 — a result that spans several UI pages exports ALL of it; the paged report itself is unchanged.
+  const paged = await run(admin, { pageSize: 3, page: 1 });
+  assert.equal(paged.items.length, 3); assert.equal(paged.total, 7); assert.equal(paged.totalPages, 3);
+  assert.equal((await exportFile("pageSize=3&page=1")).rows.length, 7, "pageSize / page are ignored by the export: all 7, not the 3 on page 1");
+  assert.equal((await exportFile("pageSize=3&page=3")).rows.length, 7, "…and not the last page's 1 row either");
+  assert.deepEqual(plain((await run(admin, { pageSize: 3, page: 3 })).items.length), 1, "the UI still paginates normally");
+
+  // 11 — scope: only what the caller may already see; hostile scope parameters are ignored / match nothing.
+  assert.deepEqual(parties(await exportFile("", rm)), ["Alpha Traders", "Beta Alias", "Epsilon RM Dealer", "Gamma Agro"], "RM: own team only");
+  assert.deepEqual(parties(await exportFile("", so)), ["Alpha Traders"], "SO: own dealers only");
+  assert.deepEqual(parties(await exportFile("officerId=rahul&scope=all&dealerId=d-d", rm)), ["Alpha Traders", "Beta Alias", "Epsilon RM Dealer", "Gamma Agro"], "scope parameters are not accepted");
+  const hostile = await exportFile("officer=rahul&state=UP", rm);
+  assert.equal(hostile.status, 422, "another team's officer/State yields nothing to export — never their rows");
+  // 12 — no matching rows → a clear message instead of a misleading empty file.
+  const none = await exportFile("search=zzzz");
+  assert.equal(none.status, 422); assert.equal(none.error, "No data available to export for the selected filters."); assert.equal(none.title, undefined, "no workbook is produced");
+  // No Day Book history → the file still exports and says Last Update: —.
+  audits = []; imports = [];
+  assert.deepEqual((await exportFile("")).meta, ["Last Update: —"]);
+
+  // Read-only + UI wiring (source level): ONE query builder feeds both the paged table and the export; loading state; no duplicate clicks.
+  const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
+  assert.ok(page.includes("const reportQuery = ") && page.includes("reportQuery({ page: String(page)") && page.includes("/api/reports/last-payment/export?${reportQuery()}"), "export is built from the same query as the table (current state at click time)");
+  assert.ok(page.includes("if (exporting) return;") && page.includes("disabled={exporting || isLoading}") && page.includes('"Exporting…"'), "disabled + loading state, no duplicate requests");
+  assert.ok(page.includes("NO_EXPORT_DATA_MESSAGE") && page.includes("data.total === 0"), "empty result shows the message");
+  const route = readFileSync("src/app/api/reports/last-payment/export/route.ts", "utf8");
+  assert.ok(route.includes("getLastPaymentReportExport(ctx, params)") && !/officerId|scope/i.test(route.replace(/ctx|session scope|scope parameter/g, "")), "same service + session scope, no scope input");
+  const service = readFileSync("src/features/reports/last-payment-report.server.ts", "utf8");
+  assert.equal((service.match(/applyReportFilters\(/g) ?? []).length, 1, "ONE filtering implementation shared by the page and the export");
+  assert.equal(report.getLastPaymentReport.length, 2, "the paged service signature is unchanged");
+}
+
+/* ---------------------------------- explicit "Apply Filters" (pending vs applied) ---------------------------------- */
+async function applyWorkflow() {
+  const query = (url: string) => new URL(url, "http://x").searchParams;
+  // 1–4 — choosing a filter changes only the PENDING selection: the table request keeps the APPLIED filters, the header shows the pending count.
+  for (const [key, label, pendingValue] of [["state", "State", "MP"], ["territory", "Territory", "INDORE"], ["status", "Status", "PENDING"], ["officer", "Sales Officer", "arjun"], ["party", "Party", "d-a"]] as const) {
+    const html = await draw(admin, {}, { 3: { [key]: [pendingValue] } }); // pending = {key}, applied = {} (all)
+    assert.deepEqual(query(requested).getAll(key), [], `${key}: selecting it does NOT change the table request`);
+    assert.ok(html.includes(`${label} (1)`), `${key}: the dropdown shows the pending selection`);
+    assert.deepEqual(query(requestedOptions).getAll(key), [pendingValue], `${key}: …and only the dropdown OPTIONS follow it (options-only request)`);
+    assert.equal(query(requestedOptions).get("optionsOnly"), "1");
+  }
+  // Applied UP, pending MP → the table is still UP until Apply Filters is clicked.
+  await draw(admin, {}, { 3: { state: ["MP"] }, 5: { state: ["UP"] } });
+  assert.deepEqual(query(requested).getAll("state"), ["UP"], "table keeps the APPLIED filter (UP)");
+  assert.deepEqual(query(requestedOptions).getAll("state"), ["MP"], "options cascade from the PENDING selection (MP)");
+  assert.equal(query(requested).get("optionsOnly"), null, "the table request is a normal report request");
+
+  // 5, 8 — Apply Filters applies ALL pending selections at once; a real change resets to page 1; nothing happens without a change.
+  const pending = { state: ["MP"], territory: ["INDORE"], status: ["DEFAULTER"], officer: ["chhitranjan"] };
+  const step = applyFilterStep({ pending, applied: { state: ["UP"] }, page: 3, applying: false });
+  assert.deepEqual(plain(step), { applied: pending, page: 1, applying: true, changed: true }, "all pending selections applied together, page 3 → 1");
+  const idle = applyFilterStep({ pending: { state: ["UP"] }, applied: { state: ["UP"] }, page: 3, applying: false });
+  assert.deepEqual([idle.changed, idle.page, idle.applying], [false, 3, false], "no pending change → no refetch, page untouched");
+  assert.equal(applyFilterStep({ pending: { state: ["UP"] }, applied: { state: ["UP"] }, page: 1, applying: false }).applied.state?.[0], "UP");
+  // 7 — duplicate clicks while applying are ignored.
+  const dup = applyFilterStep({ pending, applied: { state: ["UP"] }, page: 3, applying: true });
+  assert.deepEqual([dup.changed, dup.page, dup.applying], [false, 3, true], "a second click during applying does nothing");
+  // 6 — loading state: spinner + "Applying…", disabled and busy; otherwise "Apply Filters".
+  let html = await draw(admin, {}, { 3: { state: ["MP"] }, 5: { state: ["UP"] }, 6: true });
+  const busy = html.slice(html.indexOf("Applying…") - 700, html.indexOf("Applying…") + 20);
+  assert.ok(html.includes("Applying…") && /disabled=""/.test(busy) && busy.includes('aria-busy="true"') && busy.includes("animate-spin"), "spinner + disabled while applying");
+  html = await draw(admin, {}, { 3: { state: ["MP"] }, 5: { state: ["UP"] } });
+  assert.ok(html.includes("Apply Filters") && !html.includes("Applying…"), "idle label");
+  assert.ok(html.indexOf("Search parties") < html.indexOf("Apply Filters") && html.indexOf("Apply Filters") < html.indexOf("Last Update"), "Apply Filters sits with the search controls");
+  // The current table stays visible while loading (no blank table): placeholder data is kept and the skeleton is first-load only.
+  const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
+  assert.ok(page.includes("placeholderData: keepPreviousData") && page.includes("isLoading ? ("), "previous results stay on screen while the new ones load");
+
+  // 9, 10 — cascading options follow the pending selection (options-only request: no table rows, no receipt lookups) and clear invalid children.
+  const labels = (o: { label: string }[]) => o.map((x) => x.label).sort();
+  queries = { legacy: 0, history: 0, dealers: 0 };
+  const mp = plain(await report.getLastPaymentReportOptions(admin, { state: ["MP"] }));
+  assert.deepEqual(labels(mp.options.territory), ["BHOPAL", "HQ", "INDORE"], "pending State = MP → MP territories only");
+  assert.deepEqual(mp.options.officer.map((o: { value: string }) => o.value).sort(), ["arjun", "chhitranjan", "rm-1"]);
+  assert.deepEqual(plain(mp.appliedFilters), { state: ["MP"] });
+  assert.deepEqual([queries.legacy, queries.history], [0, 0], "no Last Payment lookup for an options-only request");
+  const cleared = plain(await report.getLastPaymentReportOptions(admin, { state: ["MP"], territory: ["LUCKNOW"], officer: ["rahul"], status: ["PENDING"] }));
+  assert.deepEqual(plain(cleared.appliedFilters), { state: ["MP"], status: ["PENDING"] }, "invalid children (UP territory / officer) are cleared; the compatible Status stays");
+  assert.deepEqual(plain((await report.getLastPaymentReportOptions(admin, {})).options), plain((await run(admin)).options), "no selection == the report's own options");
+  // 13 — scope: options for pending selections never reach outside the caller's authorized rows.
+  const rmUp = plain(await report.getLastPaymentReportOptions(rm, { state: ["UP"] }));
+  assert.deepEqual([rmUp.options.party.length, rmUp.options.officer.length], [0, 0], "an RM sees no UP options");
+  assert.ok(!JSON.stringify((await report.getLastPaymentReportOptions(rm, {})).options).includes("rahul"), "no unauthorized officer in the RM's options");
+  assert.deepEqual(plain((await report.getLastPaymentReportOptions(so, {})).options.party.map((o) => o.value)), ["d-a"], "SO: own dealers only");
+  assert.equal(report.getLastPaymentReport.length, 2, "the report service signature is unchanged");
+
+  // 11 — Export uses the APPLIED filters, never the pending ones.
+  const reportQuerySource = page.slice(page.indexOf("const reportQuery = "), page.indexOf("const canExport")).replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.ok(reportQuerySource.includes("applied[key]") && !reportQuerySource.includes("pending"), "the shared query builder reads APPLIED filters only");
+  assert.ok(page.includes("/api/reports/last-payment/export?${reportQuery()}") && page.includes("reportQuery({ page: String(page)"), "export and table both use that builder");
+  // 12 — URL: opened with filters → both pending AND applied start from them; only Apply writes the URL.
+  html = await draw(admin, { filters: { state: ["UP"], status: ["ACTIVE"] } }, {}, "state=UP&status=ACTIVE&profile=x");
+  assert.deepEqual([query(requested).getAll("state"), query(requested).getAll("status")], [["UP"], ["ACTIVE"]], "applied initialised from the URL");
+  assert.deepEqual([query(requestedOptions).getAll("state"), query(requestedOptions).getAll("status")], [["UP"], ["ACTIVE"]], "pending initialised from the URL");
+  assert.ok(html.includes("State (1)") && html.includes("Status (1)"));
+  const onChange = page.slice(page.indexOf("onChange={(next) =>"), page.indexOf("/>", page.indexOf("onChange={(next) =>")));
+  assert.ok(!onChange.includes("replaceState") && page.slice(page.indexOf("const applyFilters")).includes("window.history.replaceState"), "the URL changes on Apply, not on every dropdown click");
+  // Route: options-only is a read-only mode of the same endpoint.
+  const route = readFileSync("src/app/api/reports/last-payment/route.ts", "utf8");
+  assert.ok(route.includes('get("optionsOnly") === "1"') && route.includes("getLastPaymentReportOptions(ctx, params.filters)") && !/officerId|scope\s*=/.test(route.replace(/scope comes from the session/i, "")), "same session scope, no scope input");
+  // 14 — Search, Days sort and Payment Aging stay immediate; calculations/last update unchanged.
+  assert.ok(/onChange=\{\(event\) => \{ setSearch\(event\.target\.value\); setPage\(1\); \}\}/.test(page) && page.includes("setSort(sort === "), "search and Days sort remain immediate");
+  assert.ok(page.includes("formatLastUpdate(data?.lastUpdate)"), "Last Update unchanged");
+}
+
 /* ---------------------------------- sidebar ---------------------------------- */
 function sidebar() {
   for (const role of [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER, Role.SALES_OFFICER]) {
@@ -376,35 +794,38 @@ function sidebar() {
     assert.deepEqual(resolveNavState("/reports/last-payment", items), { activeHref: "/reports/last-payment", activeGroup: "Insights" }, "exactly one active leaf");
     assert.equal(resolveNavState("/reports", items).activeHref, "/reports");
   }
-  assert.ok(navForRole(Role.CUSTOM_ADMIN, true, { reports: ["read"] }).some((n) => n.href === "/reports/last-payment"), "Reports permission grants it");
-  assert.ok(!navForRole(Role.CUSTOM_ADMIN, true, { dashboard: ["read"] }).some((n) => n.href === "/reports/last-payment"), "no Reports permission → no item");
+  assert.ok(navForRole(Role.CUSTOM_ADMIN, true, { lastPaymentReport: ["read"] }).some((n) => n.href === "/reports/last-payment"), "its own permission grants it");
+  assert.ok(!navForRole(Role.CUSTOM_ADMIN, true, { reports: ["read"] }).some((n) => n.href === "/reports/last-payment"), "the Reports permission alone no longer grants it");
+  assert.ok(!navForRole(Role.CUSTOM_ADMIN, true, { dashboard: ["read"] }).some((n) => n.href === "/reports/last-payment"), "no permission → no item");
 }
 
 /* ---------------------------------- rendered page ---------------------------------- */
-let requested = ""; let preset: Record<number, unknown> = {}; let stateCall = 0; let served: unknown = { items: [], total: 0, page: 1, pageSize: 50, totalPages: 1 };
+let requested = ""; let requestedOptions = ""; let urlQuery = ""; let servedOptions: unknown; let preset: Record<number, unknown> = {}; let stateCall = 0; let served: unknown = { items: [], total: 0, page: 1, pageSize: 50, totalPages: 1 };
 const pageLoad = testLoader({
-  react: { ...React, useState: (initial: unknown) => { const i = stateCall++; return [i < 5 && i in preset ? preset[i] : initial, () => {}]; } }, // search, sort, page, filters, aging
-  "@tanstack/react-query": { keepPreviousData: {}, useQuery: ({ queryFn }: { queryFn: () => unknown }) => { void queryFn(); return { data: served, isLoading: false, error: null }; } },
-  "@/lib/api-client": { api: { get: async (url: string) => { requested = url; return {}; } } },
-  "@/components/layout/page-header": { PageHeader: ({ title }: { title: string }) => <h1>{title}</h1> },
+  // useState order: 0 search, 1 sort, 2 page, 3 pending filters, 4 Payment Aging, 5 applied filters, 6 applying
+  react: { ...React, useState: (initial: unknown) => { const i = stateCall++; return [i < 7 && i in preset ? preset[i] : initial, () => {}]; } },
+  "next/navigation": { useSearchParams: () => new URLSearchParams(urlQuery) },
+  "@tanstack/react-query": { keepPreviousData: {}, useQuery: ({ queryKey, queryFn }: { queryKey: unknown[]; queryFn: () => unknown }) => { void queryFn(); return queryKey[0] === "last-payment-report-options" ? { data: servedOptions, isLoading: false, isFetching: false, isPlaceholderData: false, error: null } : { data: served, isLoading: false, isFetching: false, isPlaceholderData: false, error: null }; } },
+  "@/lib/api-client": { api: { get: async (url: string) => { if (url.includes("optionsOnly=1")) requestedOptions = url; else requested = url; return {}; } } },
+  "@/components/layout/page-header": { PageHeader: ({ title, actions }: { title: string; actions?: React.ReactNode }) => <><h1>{title}</h1><div data-slot="actions">{actions}</div></> },
   "@/features/dealers/dealer-name-ui": { DealerName: ({ name }: { name: string }) => <>{name}</>, useDealerMarkers: () => ({}) },
   "@/features/dealers/dealer-table-ui": { DealerTableBody: ({ children }: { children: React.ReactNode }) => <tbody>{children}</tbody> },
 });
 const { LastPaymentReportPage } = pageLoad<typeof import("./last-payment-report-page")>("src/features/reports/last-payment-report-page.tsx");
-const draw = async (c: AuthContext, over = {}, p: Record<number, unknown> = {}) => { served = await run(c, over); preset = p; stateCall = 0; return renderToStaticMarkup(<LastPaymentReportPage />); };
+const draw = async (c: AuthContext, over = {}, p: Record<number, unknown> = {}, url = "") => { served = await run(c, over); servedOptions = undefined; urlQuery = url; preset = p; stateCall = 0; return renderToStaticMarkup(<LastPaymentReportPage />); };
 
 async function page() {
   let html = await draw(admin);
   // 1 — the page renders; columns appear in the required order.
   assert.ok(html.includes("Last Payment Report"));
-  assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()), ["Party", "State", "Territory", "Sales Officer", "Last Payment Date", "Amount", "Days"]);
+  assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()), ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Amount", "Days"]);
   const row = (id: string) => (html.match(new RegExp(`<tr[^>]*data-dealer-id="${id}"[^>]*>(.*?)</tr>`)) ?? [])[1] ?? "";
   const cells = (id: string) => [...row(id).matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim());
   // 3, 6 — formatting conventions: date, ₹ currency, Days.
-  assert.deepEqual(cells("d-a"), ["Alpha Traders", "MP", "BHOPAL", "Arjun Yadav", "2 Oct 2026", "₹50,000", "3"]);
+  assert.deepEqual(cells("d-a"), ["Alpha Traders", "Active", "MP", "BHOPAL", "Arjun Yadav", "2 Oct 2026", "₹50,000", "3"]);
   // 8 — empty representation.
-  assert.deepEqual(cells("d-e"), ["Epsilon RM Dealer", "MP", "HQ", "RM One", "—", "—", "—"]);
-  assert.deepEqual(cells("d-f"), ["Zeta Unassigned", "—", "—", "—", "—", "—", "—"], "a dealer with no owner shows empty values");
+  assert.deepEqual(cells("d-e"), ["Epsilon RM Dealer", "Pending", "MP", "HQ", "RM One", "—", "—", "—"]);
+  assert.deepEqual(cells("d-f"), ["Zeta Unassigned", "Active", "—", "—", "—", "—", "—", "—"], "a dealer with no owner shows empty values");
   // 9, 10 — the clickable Days header with a direction indicator (default: most days first).
   assert.ok(html.includes('aria-label="Sort by Days"') && html.includes('aria-sort="descending"') && html.includes('aria-label="descending"'));
   html = await draw(admin, { sort: "days_asc" }, { 1: "days_asc" });
@@ -416,12 +837,12 @@ async function page() {
   assert.ok((await draw(admin, { search: "zzz" })).includes("No dealers found."));
   // 1–4 — Party / State / Territory / Sales Officer are clickable filters; Last Payment Date and Amount are not; Days sorts.
   html = await draw(admin);
-  assert.deepEqual([...new Set([...html.matchAll(/aria-label="Filter by ([^"]+)"/g)].map((m) => m[1]))], ["Party", "State", "Territory", "Sales Officer", "Payment Aging"]);
+  assert.deepEqual([...new Set([...html.matchAll(/aria-label="Filter by ([^"]+)"/g)].map((m) => m[1]))], ["Party", "Status", "State", "Territory", "Sales Officer", "Payment Aging"]);
   assert.ok(!html.includes("Filter by Last Payment Date") && !html.includes("Filter by Amount") && !html.includes("Filter by Days"));
   assert.ok(/<th[^>]*>Last Payment Date<\/th>/.test(html) || /<th[^>]*text-right[^>]*>Last Payment Date<\/th>/.test(html), "Last Payment Date stays a plain header");
   // 16, 17 — active filters show their count; the Days sort and search state are untouched by them.
   const active = { party: ["d-a", "d-b"], state: ["MP", "CG"], officer: ["arjun"] };
-  html = await draw(admin, { sort: "days_asc", search: "a", filters: active }, { 0: "a", 1: "days_asc", 3: active });
+  html = await draw(admin, { sort: "days_asc", search: "a", filters: active }, { 0: "a", 1: "days_asc", 3: active, 5: active });
   for (const label of ["Party (2)", "State (2)", "Sales Officer (1)"]) assert.ok(html.includes(label), label);
   assert.ok(html.includes("Territory") && !html.includes("Territory ("), "an inactive filter shows no count");
   assert.ok(html.includes('aria-sort="ascending"'), "applying filters does not reset the Days sort");
@@ -429,7 +850,7 @@ async function page() {
   assert.equal(url.searchParams.get("sort"), "days_asc"); assert.equal(url.searchParams.get("search"), "a");
   assert.deepEqual(url.searchParams.getAll("state"), ["MP", "CG"]); assert.deepEqual(url.searchParams.getAll("party"), ["d-a", "d-b"]);
   assert.deepEqual(url.searchParams.getAll("officer"), ["arjun"]); assert.deepEqual(url.searchParams.getAll("territory"), []);
-  html = await draw(admin, { sort: "days_desc", filters: active }, { 1: "days_desc", 3: active });
+  html = await draw(admin, { sort: "days_desc", filters: active }, { 1: "days_desc", 3: active, 5: active });
   assert.ok(html.includes("State (2)") && html.includes('aria-sort="descending"'), "changing the Days sort keeps the filters");
   assert.equal(new URL(requested, "http://x").searchParams.get("sort"), "days_desc");
   assert.deepEqual(new URL(requested, "http://x").searchParams.getAll("state"), ["MP", "CG"]);
@@ -438,10 +859,10 @@ async function page() {
   // page 1); a Days-sort change only flips the sort (and returns to page 1). Neither touches search or the other state.
   const pageSource = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
   const filterHandler = pageSource.slice(pageSource.indexOf("onChange={(next) =>"), pageSource.indexOf("/>", pageSource.indexOf("onChange={(next) =>")));
-  assert.ok(filterHandler.includes("setFilters((current) => ({ ...current, [key]: next }))") && filterHandler.includes("setPage(1)"), "filter change merges into the existing filters");
-  assert.ok(!/setSort|setSearch/.test(filterHandler), "applying a filter never resets the Days sort or search");
+  assert.ok(filterHandler.includes("setPending((current) => ({ ...current, [key]: next }))") && !/setPage|setApplied|setFilters/.test(filterHandler), "choosing a filter only edits the PENDING selection (no refetch, no page change)");
+  assert.ok(!/setSort|setSearch/.test(filterHandler), "choosing a filter never resets the Days sort or search");
   const sortHandler = pageSource.slice(pageSource.indexOf('aria-label="Sort by Days"'), pageSource.indexOf("Days\n"));
-  assert.ok(/setSort\(/.test(sortHandler) && !/setFilters|setSearch/.test(sortHandler), "changing the Days sort never clears filters or search");
+  assert.ok(/setSort\(/.test(sortHandler) && !/setPending|setApplied|setSearch/.test(sortHandler), "changing the Days sort never clears filters or search");
   assert.ok(/onChange=\{\(event\) => \{ setSearch\(event\.target\.value\); setPage\(1\); \}\}/.test(pageSource), "search only edits search");
 
   // Payment Aging — a separate control beside the Days sort: active state shows next to Days; the sort stays as it was.
@@ -454,7 +875,7 @@ async function page() {
   assert.ok(html.includes('aria-label="Sort by Days"'), "the Days sort button remains");
   let u = new URL(requested, "http://x");
   assert.deepEqual([u.searchParams.get("paymentAgingOperator"), u.searchParams.get("paymentAgingValue"), u.searchParams.get("sort")], ["gt", "45", "days_asc"]);
-  html = await draw(admin, { sort: "days_desc", search: "kr", filters: { state: ["CG"] }, paymentAging: { operator: "between", from: 30, to: 60 } }, { 0: "kr", 1: "days_desc", 3: { state: ["CG"] }, 4: { operator: "between", from: 30, to: 60 } });
+  html = await draw(admin, { sort: "days_desc", search: "kr", filters: { state: ["CG"] }, paymentAging: { operator: "between", from: 30, to: 60 } }, { 0: "kr", 1: "days_desc", 3: { state: ["CG"] }, 4: { operator: "between", from: 30, to: 60 }, 5: { state: ["CG"] } });
   assert.ok(html.includes("30–60") && html.includes("State (1)") && html.includes('aria-sort="descending"'), "aging, a column filter and the sort are all shown together");
   u = new URL(requested, "http://x");
   assert.deepEqual([u.searchParams.get("paymentAgingOperator"), u.searchParams.get("paymentAgingFrom"), u.searchParams.get("paymentAgingTo"), u.searchParams.get("paymentAgingValue")], ["between", "30", "60", null]);
@@ -464,8 +885,8 @@ async function page() {
   // handlers: applying/clearing aging only edits aging (+ page 1); sort / search / column filters never touch it.
   assert.ok(/onChange=\{\(next\) => \{ setAging\(next\); setPage\(1\); \}\}/.test(pageSource), "aging change only sets aging and page 1");
   const sortBtn = pageSource.slice(pageSource.indexOf('aria-label="Sort by Days"'), pageSource.indexOf("<PaymentAgingFilterControl"));
-  assert.ok(/setSort\(/.test(sortBtn) && !/setAging|setFilters|setSearch/.test(sortBtn), "sorting never clears aging");
-  assert.ok(!/setSort|setSearch|setFilters/.test(pageSource.slice(pageSource.indexOf("<PaymentAgingFilterControl"), pageSource.indexOf("</TableHead>", pageSource.indexOf("<PaymentAgingFilterControl")))), "applying aging never resets sort / search / filters");
+  assert.ok(/setSort\(/.test(sortBtn) && !/setAging|setPending|setApplied|setSearch/.test(sortBtn), "sorting never clears aging");
+  assert.ok(!/setSort|setSearch|setPending|setApplied/.test(pageSource.slice(pageSource.indexOf("<PaymentAgingFilterControl"), pageSource.indexOf("</TableHead>", pageSource.indexOf("<PaymentAgingFilterControl")))), "applying aging never resets sort / search / filters");
   const control = readFileSync("src/features/reports/payment-aging-filter.tsx", "utf8");
   assert.ok(/buildPaymentAging\(draft\)/.test(control) && /role="alert"/.test(control) && /Less than/.test(control) && /Greater than/.test(control) && /Exactly/.test(control) && /Between/.test(control) && /Apply/.test(control), "operators, validation message and Apply");
 
@@ -489,5 +910,5 @@ function wiring() {
   assert.ok(read("src/app/(dashboard)/reports/page.tsx").includes("<ReportsPage />"));
 }
 
-service().then(() => filters()).then(() => paymentAging()).then(() => { sidebar(); return page(); }).then(() => { wiring(); console.log("last-payment-report.test.tsx — all assertions passed"); })
+service().then(() => filters()).then(() => paymentAging()).then(() => cascading()).then(() => statusFilter()).then(() => lastUpdate()).then(() => exportTests()).then(() => applyWorkflow()).then(() => { sidebar(); return page(); }).then(() => { wiring(); console.log("last-payment-report.test.tsx — all assertions passed"); })
   .catch((error) => { console.error(error); process.exitCode = 1; });

@@ -11,6 +11,8 @@ export const REPORT_DEFAULT_PAGE_SIZE = 50;
 export interface LastPaymentReportRow {
   dealerId: string;
   party: string;
+  /** The dealer's CURRENT master-data status (Dealer.status: PENDING | ACTIVE | INACTIVE | DEFAULTER). */
+  status: string;
   state: string | null;
   territory: string | null;
   salesOfficer: string | null;
@@ -21,6 +23,8 @@ export interface LastPaymentReportRow {
   /** Calendar days from lastPaymentDate to today; null when there is no payment (never invented). */
   days: number | null;
 }
+
+import { dealerStatusLabel } from "./dealer-status";
 
 const DAY_MS = 86_400_000;
 const utcMidnight = (isoDate: string) => Date.parse(`${isoDate.slice(0, 10)}T00:00:00Z`);
@@ -58,14 +62,15 @@ export function matchesParty(party: string, search: string): boolean {
 
 /* ------------------------------ column filters (Party / State / Territory / Sales Officer) ------------------------------ */
 
-export type ReportFilterKey = "party" | "state" | "territory" | "officer";
-export const REPORT_FILTER_KEYS: readonly ReportFilterKey[] = ["party", "state", "territory", "officer"];
+export type ReportFilterKey = "party" | "status" | "state" | "territory" | "officer";
+export const REPORT_FILTER_KEYS: readonly ReportFilterKey[] = ["party", "status", "state", "territory", "officer"];
 export type ReportFilters = Partial<Record<ReportFilterKey, string[]>>;
 
-/** The master-data part of a report row — what the column filters read. Filter values: dealer id, state, territory, officer id. */
+/** The master-data part of a report row — what the column filters read. Filter values: dealer id, status, state, territory, officer id. */
 export interface ReportFilterable {
   dealerId: string;
   party: string;
+  status: string;
   state: string | null;
   territory: string | null;
   salesOfficer: string | null;
@@ -74,7 +79,7 @@ export interface ReportFilterable {
 export type ReportFilterOptions = Record<ReportFilterKey, { value: string; label: string }[]>;
 
 const filterValue = (row: ReportFilterable, key: ReportFilterKey): string =>
-  key === "party" ? row.dealerId : key === "state" ? (row.state ?? "") : key === "territory" ? (row.territory ?? "") : (row.salesOfficerId ?? "");
+  key === "party" ? row.dealerId : key === "status" ? row.status : key === "state" ? (row.state ?? "") : key === "territory" ? (row.territory ?? "") : (row.salesOfficerId ?? "");
 
 /** OR within a column, AND across columns. A row missing a column's value never matches an active filter on it. */
 export function applyReportFilters<T extends ReportFilterable>(rows: readonly T[], filters: ReportFilters): T[] {
@@ -95,6 +100,7 @@ export function reportFilterOptions(rows: readonly ReportFilterable[]): ReportFi
   };
   return {
     party: collect("party", (r) => r.party),
+    status: collect("status", (r) => dealerStatusLabel(r.status)),
     state: collect("state", (r) => r.state),
     territory: collect("territory", (r) => r.territory),
     officer: collect("officer", (r) => r.salesOfficer),
@@ -169,6 +175,114 @@ export function parsePaymentAging(sp: URLSearchParams): PaymentAgingFilter | nul
   if (!operator || !PAYMENT_AGING_OPERATORS.includes(operator)) return null;
   const built = buildPaymentAging({ operator, value: sp.get("paymentAgingValue") ?? "", from: sp.get("paymentAgingFrom") ?? "", to: sp.get("paymentAgingTo") ?? "" });
   return "filter" in built ? built.filter : null;
+}
+
+/* ------------------------------ cascading (dependent) filters ------------------------------ */
+
+/**
+ * Parent → child order used to resolve conflicts: State, then Territory, then Sales Officer, then Status, then Party. A selected value is
+ * judged only against the selections EARLIER in this order, so changing a parent (e.g. State) clears the children that no
+ * longer fit, while a child never knocks out its parent.
+ */
+export const CASCADE_ORDER: readonly ReportFilterKey[] = ["state", "territory", "officer", "status", "party"];
+
+/**
+ * Remove selected values that conflict with the (earlier) selections — e.g. State UP → MP clears Territory LUCKNOW. A value is
+ * dropped only when it EXISTS in the caller's authorized rows yet no row matches it together with the earlier selections.
+ * A value unknown to the authorized rows is deliberately KEPT (it matches nothing → an empty result), so a manipulated
+ * parameter can neither widen the result nor be silently turned into "no filter".
+ */
+export function pruneReportFilters(rows: readonly ReportFilterable[], filters: ReportFilters): ReportFilters {
+  const kept: ReportFilters = {};
+  for (const key of CASCADE_ORDER) {
+    const selected = filters[key] ?? [];
+    if (selected.length === 0) continue;
+    const known = new Set(rows.map((row) => filterValue(row, key)));
+    const compatible = new Set(applyReportFilters(rows, kept).map((row) => filterValue(row, key)));
+    const values = selected.filter((value) => !known.has(value) || compatible.has(value));
+    if (values.length > 0) kept[key] = values;
+  }
+  return kept;
+}
+
+/**
+ * Option lists for the four dropdowns, each derived from the authorized rows that match every OTHER active filter (its own
+ * column is not constrained, so more values can still be added — OR within a column). Nothing is hard-coded; with no active
+ * filter this equals `reportFilterOptions(rows)`. Search text and Payment Aging do not shape the options.
+ */
+export function cascadedFilterOptions(rows: readonly ReportFilterable[], filters: ReportFilters): ReportFilterOptions {
+  const out = {} as ReportFilterOptions;
+  for (const key of REPORT_FILTER_KEYS) {
+    const { [key]: _own, ...others } = filters; // eslint-disable-line @typescript-eslint/no-unused-vars
+    out[key] = reportFilterOptions(applyReportFilters(rows, others))[key];
+  }
+  return out;
+}
+
+/**
+ * "Apply Filters" step (pure; the page calls it). Choosing filters only changes `pending`; the table/export/URL use `applied`, which
+ * moves ONLY here: when pending differs from applied and no apply is already running. A real change resets to page 1; with no pending
+ * change (or while applying) nothing changes — so no needless refetch and no duplicate request.
+ */
+export function applyFilterStep(state: { pending: ReportFilters; applied: ReportFilters; page: number; applying: boolean }):
+  { applied: ReportFilters; page: number; applying: boolean; changed: boolean } {
+  if (state.applying || sameReportFilters(state.pending, state.applied)) return { applied: state.applied, page: state.page, applying: state.applying, changed: false };
+  return { applied: state.pending, page: 1, applying: true, changed: true };
+}
+
+/** Same selections? (order-insensitive per column; an empty column equals a missing one) */
+export function sameReportFilters(a: ReportFilters, b: ReportFilters): boolean {
+  return REPORT_FILTER_KEYS.every((key) => {
+    const x = [...(a[key] ?? [])].sort(), y = [...(b[key] ?? [])].sort();
+    return x.length === y.length && x.every((value, i) => value === y[i]);
+  });
+}
+
+/* ------------------------------ "Last Update" indicator ------------------------------ */
+
+/**
+ * "Last Update" = when the most recent Day Book was successfully uploaded. It is read from the EXISTING upload records
+ * (nothing new is stored): the audit entry the monthly Day Book commit writes only AFTER it succeeds (it also covers an
+ * identical re-upload), and the Last Payment import history (monthly + Historical Day Book). Failed uploads write neither.
+ * The audit entry's identity is fixed here so the loader and the Day Book commit cannot drift apart (a test pins it).
+ */
+export const DAYBOOK_UPLOAD_AUDIT_ENTITY = "recoveryPlan";
+export const DAYBOOK_UPLOAD_AUDIT_PREFIX = "Day Book upload for ";
+
+/** "YYYY-MM-DD" → "DD/MM/YYYY" (no Date object → no timezone can shift the day). Null/invalid → null. */
+export function formatLastUpdate(isoDate: string | null | undefined): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate ?? "");
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : null;
+}
+
+/* ------------------------------ Excel export (same columns, same order, same display values as the table) ------------------------------ */
+
+export const NO_EXPORT_DATA_MESSAGE = "No data available to export for the selected filters.";
+
+export const EXPORT_COLUMNS: readonly { key: string; label: string; format: "text" | "number" | "currency" }[] = [
+  { key: "party", label: "Party", format: "text" },
+  { key: "status", label: "Status", format: "text" },
+  { key: "state", label: "State", format: "text" },
+  { key: "territory", label: "Territory", format: "text" },
+  { key: "salesOfficer", label: "Sales Officer", format: "text" },
+  { key: "lastPaymentDate", label: "Last Payment Date", format: "text" },
+  { key: "amount", label: "Amount", format: "currency" },
+  { key: "days", label: "Days", format: "number" },
+];
+
+/** Report rows → export rows using the ALREADY-CALCULATED values (nothing is recomputed). Missing values are blank cells. */
+export function toExportRows(rows: readonly LastPaymentReportRow[]): ({ id: string } & Record<string, string | number>)[] {
+  return rows.map((r) => ({
+    id: r.dealerId,
+    party: r.party,
+    status: dealerStatusLabel(r.status), // display label: Active / Pending / Defaulter …
+    state: r.state ?? "",
+    territory: r.territory ?? "",
+    salesOfficer: r.salesOfficer ?? "",
+    lastPaymentDate: formatLastUpdate(r.lastPaymentDate) ?? "", // DD/MM/YYYY, like the page
+    amount: r.amount ?? "",
+    days: r.days ?? "",
+  }));
 }
 
 export interface LastPaymentReportParams {

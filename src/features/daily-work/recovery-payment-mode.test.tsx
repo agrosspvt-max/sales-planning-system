@@ -85,6 +85,12 @@ const overrides: Record<string, unknown> = {
       return { hydrate: () => {}, flush: save, saving: false, failed: false, savedAt: null };
     },
   },
+  "@/components/ui/input": {
+    Input: (props: React.InputHTMLAttributes<HTMLInputElement>) => {
+      inputs.push(props as (typeof inputs)[number]);
+      return <input {...props} />;
+    },
+  },
   "@/components/ui/select": {
     NativeSelect: (
       props: React.SelectHTMLAttributes<HTMLSelectElement> & {
@@ -161,90 +167,95 @@ const render = (
     <DailyWorkSection section={section} workDate="2026-10-05" view={view} locked={locked} />,
   );
 
+const inputs: Array<{ value?: string; disabled?: boolean; onChange?: (event: { target: { value: string } }) => void }> = [];
+const paymentSelects = () => selects.filter((select) => select["aria-label"] === "Payment Mode");
+const headings = (html: string) => [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) =>
+  match[1].replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim());
+const paymentHtml = (html: string) => html.match(/<select[^>]*aria-label="Payment Mode"[^>]*>/)?.[0] ?? "";
+const reportRow = (todaysActual: string, paymentMode: RecoveryPaymentMode | null = null) => {
+  rows = [{ ...rows[0], status: "PLAN_SUBMITTED", todaysActual, paymentMode }];
+};
+const actualInput = () => inputs[inputs.length - 1]!;
+
 async function main() {
+  // ---- Daily PLAN: no Payment Mode anywhere (column, control, payload) ----
   let html = render("RECOVERY");
-  const heads = [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) =>
-    match[1]
-      .replace(/<[^>]*>/g, " ")
-      .replace(/&#x27;/g, "'")
-      .replace(/\s+/g, " ")
-      .trim(),
-  );
-  assert.deepEqual(heads, [
-    "Dealer",
-    "Task Type",
-    "Monthly Recovery Plan",
-    "Pending",
-    "Today's Plan",
-    "Payment Mode",
-    "Recovery Type",
-    "",
-  ]);
-  assert.ok(
-    html.includes('Monthly<br/><span class="whitespace-nowrap">Recovery Plan</span>'),
-    "default header breaks after Monthly",
-  );
-  const cells = [...html.matchAll(/<tr\b[^>]*>(.*?)<\/tr>/g)].map(
-    (row) => [...row[1].matchAll(/<t[hd]\b/g)].length,
-  );
-  assert.deepEqual(cells, [8, 8, 8], "header, summary and dealer row have identical column grids");
-  const paymentSelect = selects.find((select) => select["aria-label"] === "Payment Mode")!;
-  assert.deepEqual(
-    Array.from(paymentSelect.options, (option) => option.value),
-    [...RECOVERY_PAYMENT_MODES],
-  );
-  assert.deepEqual(
-    Array.from(paymentSelect.options, (option) => option.label),
-    ["Cheque", "UPI", "NEFT/RTGS", "Cash"],
-  );
-  assert.ok(
-    html.includes('<option value="" selected="">Select...</option>'),
-    "unselected rows stay blank",
-  );
-  assert.match(
-    render("RECOVERY", "PLAN", true),
-    /<select[^>]*aria-label="Payment Mode"[^>]*disabled=""/,
-    "finalized days do not allow editing Payment Mode",
-  );
-  const blankKey = draftKey;
-  paymentSelect.onChange!({ target: { value: "NEFT_RTGS" } });
-  html = render("RECOVERY");
-  assert.notEqual(draftKey, blankKey, "changing mode triggers the existing autosave dirty key");
-  assert.ok(html.includes('<option value="NEFT_RTGS" selected="">NEFT/RTGS</option>'));
+  assert.deepEqual(headings(html), ["Dealer", "Task Type", "Monthly Recovery Plan", "Pending", "Today's Plan", "Recovery Type", ""]);
+  assert.ok(html.includes('Monthly<br/><span class="whitespace-nowrap">Recovery Plan</span>'), "default header breaks after Monthly");
+  const cells = [...html.matchAll(/<tr\b[^>]*>(.*?)<\/tr>/g)].map((row) => [...row[1].matchAll(/<t[hd]\b/g)].length);
+  assert.deepEqual(cells, [7, 7, 7], "header, summary and dealer row share one grid with no empty Payment Mode column");
+  assert.equal(paymentSelects().length, 0, "Plan renders no Payment Mode control");
+  assert.ok(!html.includes("Payment Mode"), "Plan shows no Payment Mode text");
+  rows[0].paymentMode = "CASH"; // a legacy value in state is never displayed or sent from the Plan
   await saveDraft();
   assert.deepEqual(requests.pop(), {
     url: "/api/daily-work/save",
-    payload: {
-      section: "RECOVERY",
-      workDate: "2026-10-05",
-      rows: [
-        {
-          dealerId: "dealer-1",
-          todaysPlan: 500,
-          entryType: "REGULAR",
-          schemeId: null,
-          paymentMode: "NEFT_RTGS",
-        },
-      ],
-    },
-  });
-
+    payload: { section: "RECOVERY", workDate: "2026-10-05", rows: [{ dealerId: "dealer-1", todaysPlan: 500, entryType: "REGULAR", schemeId: null }] },
+  }, "Plan save keeps working and carries no Payment Mode");
+  rows[0].paymentMode = null;
   html = render("SALES");
-  assert.ok(
-    !html.includes("Payment Mode") && !html.includes("NEFT/RTGS"),
-    "Sales renders no Payment Mode",
-  );
+  assert.ok(!html.includes("Payment Mode") && !html.includes("NEFT/RTGS"), "Sales renders no Payment Mode");
   await saveDraft();
-  const salesRequest = requests.pop() as { payload: { rows: Record<string, unknown>[] } };
-  assert.ok(!("paymentMode" in salesRequest.payload.rows[0]), "Sales payload stays unchanged");
+  assert.ok(!("paymentMode" in (requests.pop() as { payload: { rows: Record<string, unknown>[] } }).payload.rows[0]));
 
-  rows[0].status = "PLAN_SUBMITTED";
-  html = render("RECOVERY", "REPORT");
-  assert.ok(
-    html.includes('title="Payment Mode">NEFT/RTGS</span>'),
-    "frozen report displays saved mode read-only",
-  );
-  assert.ok(!html.includes('aria-label="Payment Mode"'), "report cannot edit plan metadata");
+  // ---- Daily REPORT: Payment Mode next to Today's Recovery, driven by the numeric amount ----
+  selects.length = 0; inputs.length = 0;
+  reportRow("", null);
+  html = render("RECOVERY", "REPORT", false);
+  assert.deepEqual(headings(html), ["Dealer", "Monthly Recovery Plan", "Pending", "Today's Plan", "Recovery Type", "Today's Recovery", "Payment Mode"]);
+  assert.deepEqual(Array.from(paymentSelects()[0].options, (o) => o.value), [...RECOVERY_PAYMENT_MODES]);
+  assert.deepEqual(Array.from(paymentSelects()[0].options, (o) => o.label), ["Cheque", "UPI", "NEFT/RTGS", "Cash"]);
+  const reportCells = [...html.matchAll(/<tr\b[^>]*>(.*?)<\/tr>/g)].map((row) => [...row[1].matchAll(/<t[hd]\b/g)].length);
+  assert.deepEqual(reportCells, [7, 7, 7]);
+  assert.ok(html.indexOf("Today&#x27;s Recovery") < html.indexOf("Payment Mode"), "Payment Mode sits after Today's Recovery");
+  for (const [amount, enabled] of [["", false], ["0", false], ["-5", false], ["0.5", true], ["25000", true]] as const) {
+    selects.length = 0; reportRow(amount, "UPI");
+    html = render("RECOVERY", "REPORT", false);
+    assert.equal(/disabled=""/.test(paymentHtml(html)), !enabled, `recovery ${JSON.stringify(amount)} -> Payment Mode ${enabled ? "enabled" : "disabled"}`);
+    assert.equal(html.includes('<option value="UPI" selected="">UPI</option>'), enabled, "a stale mode is never shown against a non-positive recovery");
+  }
+
+  // Selecting each mode persists through the Report autosave call (the existing /actual endpoint) with the amount.
+  for (const mode of RECOVERY_PAYMENT_MODES) {
+    selects.length = 0; reportRow("20000", null);
+    render("RECOVERY", "REPORT", false);
+    paymentSelects()[0].onChange!({ target: { value: mode } });
+    html = render("RECOVERY", "REPORT", false);
+    assert.ok(html.includes(`<option value="${mode}" selected="">`), `${mode} selected`);
+    assert.ok(draftKey.includes(`"paymentMode":"${mode}"`), "the autosave dirty key changes with the mode");
+    await saveDraft();
+    assert.deepEqual(requests.pop(), { url: "/api/daily-work/actual", payload: { section: "RECOVERY", workDate: "2026-10-05", entries: [{ entryId: "entry-1", todaysActual: 20000, paymentMode: mode }] } });
+  }
+  // UPI -> Cash change persists the new value.
+  selects.length = 0; reportRow("20000", "UPI");
+  render("RECOVERY", "REPORT", false);
+  paymentSelects()[0].onChange!({ target: { value: "CASH" } });
+  render("RECOVERY", "REPORT", false);
+  await saveDraft();
+  assert.equal((requests.pop() as { payload: { entries: { paymentMode: string }[] } }).payload.entries[0].paymentMode, "CASH");
+
+  // Changing the amount to 0 or negative CLEARS the mode (state + payload); positive again starts blank.
+  for (const cleared of ["0", "-3"]) {
+    selects.length = 0; inputs.length = 0; reportRow("10000", "UPI");
+    render("RECOVERY", "REPORT", false);
+    actualInput().onChange!({ target: { value: cleared } });
+    html = render("RECOVERY", "REPORT", false);
+    assert.equal(rows[0].paymentMode, null, `recovery ${cleared} cleared the stored mode`);
+    assert.ok(/disabled=""/.test(paymentHtml(html)), "and disabled the control");
+    await saveDraft();
+    assert.equal((requests.pop() as { payload: { entries: { paymentMode: unknown }[] } }).payload.entries[0].paymentMode, null, "cleared mode is persisted as null");
+    actualInput().onChange!({ target: { value: "5000" } });
+    html = render("RECOVERY", "REPORT", false);
+    assert.ok(!/disabled=""/.test(paymentHtml(html)), "positive again re-enables it");
+    assert.equal(rows[0].paymentMode, null, "…starting blank (never guessed)");
+  }
+
+  // Finalized day: the control stays visible but read-only like every other Report field.
+  reportRow("10000", "NEFT_RTGS");
+  html = render("RECOVERY", "REPORT", true);
+  assert.ok(/disabled=""/.test(paymentHtml(html)) && html.includes('<option value="NEFT_RTGS" selected="">NEFT/RTGS</option>'), "finalized Payment Mode is locked");
+
+  rows[0].paymentMode = "NEFT_RTGS";
   const data = {
     dealers: [{ ...rows[0], todaysPlan: 500, todaysActual: 100 }],
     autoTaskEntryIds: [],
@@ -273,9 +284,6 @@ async function main() {
       "Payment Mode",
     ),
   );
-  rows[0].paymentMode = null;
-  html = render("RECOVERY", "REPORT");
-  assert.ok(html.includes('title="Payment Mode">—</span>'), "legacy report metadata remains empty");
   assert.equal(labelMeta("daily_work.col.payment_mode").module, "Daily Work");
   console.log("recovery-payment-mode.test.tsx — all assertions passed");
 }

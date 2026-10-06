@@ -20,6 +20,7 @@ import {
   MANDATORY_SECTIONS, SectionStatus, type SectionDataPresence,
   rowTaskType, combineTaskType, type TaskType,
   DailyWorkView, DEFAULT_DAILY_WORK_VIEW, dailyWorkShowsResults, visibleDailyWorkRows,
+  paymentModeApplies, paymentModeForActual,
 } from "./daily-work";
 import { DEFAULT_LABELS, labelCatalog, resolveLabels } from "@/features/labels/labels";
 
@@ -335,7 +336,7 @@ test("combined rows render neutral labels for dealer-level fields while individu
 
   const appointment = section("function AppointmentSection(", "function ConversionSection(");
   assert.match(appointment, /<TableCell>\{combined\.dealerLabel\}<\/TableCell>\s*\{showTaskType && <TableCell>\{L\.none\}<\/TableCell>}\s*<TableCell>\{L\.none\}<\/TableCell>/, "Task Type and Market summaries are neutral");
-  assert.match(appointment, /taskTypeText\(rowTaskType\(false\), taskTypeL\)/, "individual appointment Task Type stays Manual");
+  assert.match(appointment, /taskTypeText\(rowTaskType\(false, \(data\?\.calendarEntryIds \?\? \[\]\)\.includes\(r\.entryId\)\), taskTypeL\)/, "individual appointment Task Type is Calendar (from a Calendar task) or Manual");
 
   const conversion = section("function ConversionSection(", "function SummarySection(");
   assert.match(conversion, /<TableCell>\{combined\.dealerLabel\}<\/TableCell>\s*\{showTaskType && <TableCell>\{L\.none\}<\/TableCell>}\s*<TableCell>\{L\.none\}<\/TableCell>/, "Task Type and Scheme summaries are neutral");
@@ -382,6 +383,24 @@ test("Daily Plan and Daily Report labels are registered in the existing label sy
   assert.equal(DEFAULT_LABELS["daily_work.view.report"], "Daily Report");
   assert.ok(labelCatalog({}).some((entry) => entry.key === "daily_work.view.plan"));
   assert.ok(labelCatalog({}).some((entry) => entry.key === "daily_work.view.report"));
+});
+
+/* ---------- Payment Mode follows the ACTUAL recovery amount (Daily Report) ---------- */
+test("Payment Mode applies only to a positive numeric Today's Recovery", () => {
+  for (const v of [25000, "25000", 0.01, "0.5"]) assert.equal(paymentModeApplies(v), true, String(v));
+  for (const v of [0, "0", -1, "-5", "", "  ", null, undefined, "abc", NaN, Infinity * -1]) assert.equal(paymentModeApplies(v), false, String(v));
+  assert.equal(paymentModeApplies("₹25,000"), false, "a formatted currency string is never treated as the amount");
+});
+test("Payment Mode is kept for a positive recovery and cleared otherwise", () => {
+  assert.equal(paymentModeForActual(10000, "UPI"), "UPI");
+  assert.equal(paymentModeForActual(10000, null), null);
+  for (const v of [0, "0", -5, "", null]) assert.equal(paymentModeForActual(v, "CASH"), null, String(v));
+});
+test("Daily Plan source never wires Payment Mode", () => {
+  const page = readFileSync(resolve("src/features/daily-work/daily-work-page.tsx"), "utf8");
+  assert.doesNotMatch(page, /paymentMode: r\.paymentMode \}/, "the Plan payload carries no Payment Mode");
+  const service = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
+  assert.doesNotMatch(service, /recoveryRowSchema/, "no Recovery-specific Plan schema with Payment Mode");
 });
 
 console.log(`\n${passed} daily-work helper tests passed`);

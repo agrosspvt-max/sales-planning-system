@@ -18,6 +18,19 @@ export type DailyWorkType = "REGULAR" | "SCHEME";
 /** Optional Recovery-row metadata; never an actual receipt or financial instruction. */
 export const RECOVERY_PAYMENT_MODES = ["CHEQUE", "UPI", "NEFT_RTGS", "CASH"] as const;
 export type RecoveryPaymentMode = typeof RECOVERY_PAYMENT_MODES[number];
+
+/**
+ * Payment Mode (Daily REPORT only) says how an ACTUAL recovery was received, so it exists only while Today's Recovery is a
+ * positive amount. `actual` is the numeric value from state (never a formatted string); blank / NaN / <= 0 → not applicable.
+ */
+export function paymentModeApplies(actual: number | string | null | undefined): boolean {
+  const n = typeof actual === "string" ? (actual.trim() === "" ? NaN : Number(actual)) : actual;
+  return typeof n === "number" && Number.isFinite(n) && n > 0;
+}
+/** The Payment Mode to keep for a recovery amount: the choice while the amount is positive, otherwise none (cleared). */
+export function paymentModeForActual(actual: number | string | null | undefined, mode: RecoveryPaymentMode | null): RecoveryPaymentMode | null {
+  return paymentModeApplies(actual) ? mode : null;
+}
 /** Post-submit appointment result. */
 export type AppointmentStatus = "APPOINTED" | "NOT_APPOINTED";
 /** Post-submit scheme-conversion achievability (was today's planned conversion achieved?). */
@@ -251,15 +264,16 @@ export function combineConversionRows(rows: ConversionRow[], labels?: Pick<Daily
  * Auto Task source/contribution link, never from amounts, names, dates or UI state.
  * ===================================================================================== */
 
-export type TaskType = "AUTO" | "MANUAL";
+export type TaskType = "AUTO" | "CALENDAR" | "MANUAL";
 
 /**
  * A Daily Plan row's Task Type. A row is an Auto Task iff it carries at least one materialized Auto Task
- * contribution (the existing CN → DailyWorkEntry link). A row with only manual data is Manual. A mixed row
- * (manual data + Auto Task contribution) is AUTO because it contains an Auto Task contribution.
+ * contribution (the existing CN → DailyWorkEntry link). A row created from a Calendar Daily Task (the
+ * CalendarEntry → DailyWorkEntry link) is CALENDAR. A row with only manual data is Manual. Precedence for a mixed row:
+ * AUTO (a CN follow-up, which must be confirmed) over CALENDAR over MANUAL.
  */
-export function rowTaskType(hasAutoContribution: boolean): TaskType {
-  return hasAutoContribution ? "AUTO" : "MANUAL";
+export function rowTaskType(hasAutoContribution: boolean, hasCalendarContribution = false): TaskType {
+  return hasAutoContribution ? "AUTO" : hasCalendarContribution ? "CALENDAR" : "MANUAL";
 }
 
 /**

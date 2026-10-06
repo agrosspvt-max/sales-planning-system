@@ -60,6 +60,7 @@ model User {
   schemePlanQuantitySplits SchemePlanQuantitySplit[]   @relation("SchemePlanQuantitySplitCreatedBy")
   schemeUploadBatches      SchemeUploadBatch[]         @relation("SchemeUploadBatches")
   calendarNotes            CalendarNote[]              @relation("CalendarNoteOwner")
+  calendarEntries          CalendarEntry[]             @relation("CalendarEntryOwner")
   partyPlans               PartyPlan[]                 @relation("PartyPlanOfficer")
   dailyWorkEntries         DailyWorkEntry[]            @relation("DailyWorkOfficer")
   dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
@@ -1089,16 +1090,16 @@ model RmAssignment {
 
 /// Immutable audit trail of create/update/deactivate actions.
 model AuditLog {
-  id        String   @id @default(cuid())
-  userId    String
-  action    String
-  entity    String
-  entityId  String?
-  summary   String?
+  id               String   @id @default(cuid())
+  userId           String
+  action           String
+  entity           String
+  entityId         String?
+  summary          String?
   /// Title at the time of the action; null for legacy records (never backfilled).
   actorDesignation String?
-  createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id])
+  createdAt        DateTime @default(now())
+  user             User     @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([entity])
@@ -1119,6 +1120,39 @@ model CalendarNote {
 
   @@index([ownerId, date])
   @@index([date])
+}
+
+/// A Calendar entry created from the date dialog: TASK (a Daily Work task), MEETING, REMINDER or OTHER. The owner is the
+/// creator/responsible user (always the caller). CalendarNote above is untouched (existing notes keep working).
+/// A TASK is the SOURCE of a Daily Work row: when due it is materialized ONCE into the owner's current editable Daily Work
+/// batch (`dailyWorkEntryId` + `materializedAt` are set atomically with the claim, so it can never duplicate) and shows
+/// there with Task Type "Calendar". Task payload columns mirror the Daily Work entry they become.
+model CalendarEntry {
+  id                    String    @id @default(cuid())
+  ownerId               String
+  date                  DateTime  @db.Date // the day it is pinned to (date-only)
+  kind                  String // TASK | MEETING | REMINDER | OTHER
+  text                  String? // MEETING / REMINDER / OTHER details; OTHERS task text
+  taskSection           String? // TASK only: SALES | RECOVERY | APPOINTMENT | VISITS | OTHERS (the active Daily Work sections)
+  dealerId              String? // SALES / RECOVERY
+  amount                Decimal?  @db.Decimal(14, 2) // SALES / RECOVERY today's plan
+  entryType             String? // REGULAR | SCHEME (SALES / RECOVERY)
+  schemeId              String?
+  paymentMode           String? // RECOVERY only
+  typedDealerName       String? // APPOINTMENT
+  marketName            String? // APPOINTMENT
+  dealerVisits          Int? // VISITS
+  newPartyVisits        Int? // VISITS
+  dailyWorkEntryId      String? // the Daily Work row this task became (null until materialized)
+  dailyWorkContribution Decimal?  @db.Decimal(14, 2)
+  materializedAt        DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  owner                 User      @relation("CalendarEntryOwner", fields: [ownerId], references: [id])
+
+  @@index([ownerId, date])
+  @@index([date])
+  @@index([dailyWorkEntryId])
 }
 
 /// Field-level history of Super-Admin corrections to APPROVED plans (Admin Override / Edit Mode).

@@ -71,7 +71,12 @@ function makeFake(init: Partial<Store> = {}) {
         : [];
     }
     // Empty section rows used by the consolidated read-only detail.
-    if (text.startsWith('SELECT "id", "batchId", "dealerId", "rowKey"')) return [];
+    if (text.startsWith('SELECT "id", "batchId", "dealerId", "rowKey"')) {
+      // One submitted Recovery row carrying a (legacy, plan-time) Payment Mode for every officer, so views can prove who may see it.
+      return v[1] === "RECOVERY"
+        ? [{ id: `rec-${v[0]}`, batchId: "b1", dealerId: "d1", rowKey: "d1", typedDealerName: null, marketName: null, todaysPlan: "5000", todaysActual: "4000", resultStatus: null, entryType: "REGULAR", schemeId: null, status: "PLAN_SUBMITTED", paymentMode: "UPI" }]
+        : [];
+    }
     if (text.startsWith('SELECT "id", "batchId", "dealerVisits"')) return [];
     if (text.startsWith('SELECT "section", "batchId"')) return [];
     if (text.startsWith('SELECT "section", COUNT(*)')) return [];
@@ -309,7 +314,10 @@ async function main() {
       assert.equal(d.reportSubmitted, false, "report not submitted");
       assert.equal(d.selfRating, null, "no self-rating before the report");
       assert.equal(d.review, null, "no RM rating before the report");
+      assert.ok(d.recovery.dealers.length > 0 && d.recovery.dealers.every((row) => !("paymentMode" in row)), "a plan-only day never presents Payment Mode");
     }
+    // A submitted report DOES show the actual Payment Mode recorded in the Daily Report.
+    assert.equal((await svc.getDailyWorkReviewDetail(RM1, "so1", DATE)).recovery.dealers[0].paymentMode, "UPI");
     // The default (Admin Daily Report viewer, other callers) is unchanged: still the finalized report only.
     await expectStatus(() => svc.getDailyWorkReviewDetail(RM1, "so2", DATE), 409, "plan-only is not a submitted report by default");
     await expectStatus(() => svc.getAdminDailyWorkView(ADMIN, { workDate: DATE, groupId: "g1", officerId: "so2" }), 409, "Admin report viewer unchanged");

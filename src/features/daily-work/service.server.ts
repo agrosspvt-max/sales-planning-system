@@ -23,6 +23,7 @@ import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
+import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
 import {
   currentBusinessDate, monthNameForDate, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
@@ -72,9 +73,6 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     entryType: z.enum(["REGULAR", "SCHEME"], invalidOption).optional().default("REGULAR"),
     schemeId: z.string().min(1, L["daily_work.placeholder.select_scheme"]).optional().nullable(),
   });
-  const recoveryRowSchema = rowSchema.extend({
-    paymentMode: z.enum(RECOVERY_PAYMENT_MODES, invalidOption).nullable().optional(),
-  });
   const appointmentRowSchema = z.object({
     rowId: z.string().min(1, L["daily_work.validation.invalid_option"]),
     dealerName: z.string().trim().max(200, L["daily_work.validation.dealer_name_length"]),
@@ -90,9 +88,13 @@ function dailyWorkSchemas(L: ResolvedLabels) {
   return {
     save: z.discriminatedUnion("section", [
       z.object({ section: z.literal("SALES"), workDate: dateStr, rows: maxRows(rowSchema) }),
-      z.object({ section: z.literal("RECOVERY"), workDate: dateStr, rows: maxRows(recoveryRowSchema) }),
+      z.object({ section: z.literal("RECOVERY"), workDate: dateStr, rows: maxRows(rowSchema) }),
     ], invalidOption),
-    actual: z.object({ section: z.enum(SECTIONS, invalidOption), workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), todaysActual: money })) }),
+    actual: z.object({ section: z.enum(SECTIONS, invalidOption), workDate: dateStr, entries: maxRows(z.object({
+      entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), todaysActual: money,
+      // Recovery Daily Report only: HOW the actual recovery was received. Absent = leave the stored value alone.
+      paymentMode: z.enum(RECOVERY_PAYMENT_MODES, invalidOption).nullable().optional(),
+    })) }),
     appointmentSave: z.object({ workDate: dateStr, rows: maxRows(appointmentRowSchema) }),
     appointmentStatus: z.object({ workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), status: z.enum(["APPOINTED", "NOT_APPOINTED"], invalidOption) })) }),
     conversionSave: z.object({ workDate: dateStr, rows: maxRows(conversionRowSchema) }),
@@ -154,7 +156,7 @@ export interface DailyWorkDealerDto {
   todaysPlan: number | null; // officer-entered
   todaysActual: number | null; // manual actual (post-submit)
   entryType: DailyWorkType;
-  paymentMode?: RecoveryPaymentMode | null; // exposed only for Recovery; legacy/unselected rows are null
+  paymentMode?: RecoveryPaymentMode | null; // Recovery Daily REPORT only (the ACTUAL receipt mode); never part of the Daily Plan
   schemeId: string | null;
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
 }
@@ -171,6 +173,7 @@ export interface DailyWorkPayload {
   cnTasks: CnTaskDto[]; // Recovery: CN follow-up tasks (Accepted, Not Posted) the SO scheduled on this date
   materializedCnTasks: CnTaskDto[]; // current editable Recovery-row tasks; exposed only for exact rescheduling
   autoTaskEntryIds: string[]; // historical/current contribution links used only to display each row's Task Type
+  calendarEntryIds: string[]; // rows created from a Calendar Daily Task → Task Type "Calendar"
   dealers: DailyWorkDealerDto[];
 }
 
@@ -191,6 +194,7 @@ export interface AppointmentPayload {
   workDate: string;
   canEnterStatus: boolean; // frozen report rows expose the Appointed/Not Appointed selector
   rows: AppointmentRowDto[];
+  calendarEntryIds: string[]; // rows created from a Calendar Daily Task → Task Type "Calendar"
 }
 
 /* ---- Scheme Conversion DTOs ---- */
@@ -256,6 +260,14 @@ async function resolveReadOfficer(ctx: AuthContext, target?: string): Promise<st
 }
 
 type DailyWorkMode = "PLAN" | "REPORT";
+
+/**
+ * Calendar Daily Tasks due TODAY enter the owner's current editable batch when the owner opens Daily Work (plan view,
+ * own data, today only — never a report/historical/admin read). Idempotent and independent of CN Auto Tasks.
+ */
+async function materializeCalendarForRead(ctx: AuthContext, officerId: string, workDate: string, mode: DailyWorkMode): Promise<void> {
+  if (mode === "PLAN" && officerId === ctx.userId && workDate === currentBusinessDate()) await materializeDueCalendarTasks(ctx);
+}
 const parseDailyWorkMode = (value?: string): DailyWorkMode => value === "REPORT" ? "REPORT" : "PLAN";
 
 /** Validate every dealerId is within the officer's permitted scope (assigned dealers). */
@@ -473,6 +485,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     await materializeDueDailyWorkTasks(ctx);
   }
 
+  await materializeCalendarForRead(ctx, officerId, workDate, mode);
   const [{ map: figures, monthName }, dailyRows, assignedIds, schemes, recoverySchemes, cnTasks] = await Promise.all([
     sourcedFigures(ctx, officerId, section, workDate),
     loadDailyRows(officerId, section, workDate, mode),
@@ -511,7 +524,8 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
         todaysPlan: r.todaysPlan == null ? null : num(r.todaysPlan),
         todaysActual: r.todaysActual == null ? null : num(r.todaysActual),
         entryType: (r.entryType as DailyWorkType) ?? "REGULAR",
-        ...(section === "RECOVERY" ? { paymentMode: r.paymentMode ?? null } : {}),
+        // Daily Report is the only source of truth: the Daily Plan never reads or shows Payment Mode.
+        ...(section === "RECOVERY" && mode === "REPORT" ? { paymentMode: r.paymentMode ?? null } : {}),
         schemeId: r.schemeId,
         status: (r.status as DailyWorkDealerDto["status"]) ?? "DRAFT",
       };
@@ -531,6 +545,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
   const materializedCnTasks = section === "RECOVERY" && mode === "PLAN"
     ? await materializedCnTasksForEntries(officerId, dailyRows.map((row) => row.id))
     : [];
+  const calendarEntryIds = await calendarLinkedEntryIds(dailyRows.map((row) => row.id));
   const autoTaskEntryIds = section === "RECOVERY" && mode === "REPORT"
     ? await autoTaskEntryIdsForReport(officerId, dailyRows.map((row) => row.id))
     : [];
@@ -546,6 +561,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     cnTasks,
     materializedCnTasks,
     autoTaskEntryIds,
+    calendarEntryIds,
     dealers,
   };
 }
@@ -617,16 +633,13 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
     for (const r of rows) {
       const todaysPlan = r.todaysPlan == null ? Prisma.sql`NULL` : Prisma.sql`${r.todaysPlan}`;
       const schemeId = r.entryType === "SCHEME" ? r.schemeId! : null;
-      const isRecovery = section === "RECOVERY";
-      // Missing (older client) preserves an existing choice; explicit null clears the optional selection.
-      const paymentMode = isRecovery && "paymentMode" in r ? r.paymentMode : undefined;
       // Upsert on the unique (officer, workDate, section, rowKey). For SALES/RECOVERY rowKey == dealerId, so
       // duplicate protection is unchanged. Keep existing todaysActual + SUBMITTED status on conflict.
       await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId"${isRecovery ? Prisma.sql`, "paymentMode"` : Prisma.empty},"status","createdAt","updatedAt")
-        VALUES (${randomUUID()}, ${officerId}, ${r.dealerId}, ${r.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, ${todaysPlan}, ${r.entryType}, ${schemeId}${isRecovery ? Prisma.sql`, ${paymentMode ?? null}` : Prisma.empty}, 'DRAFT', NOW(), NOW())
+        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId","status","createdAt","updatedAt")
+        VALUES (${randomUUID()}, ${officerId}, ${r.dealerId}, ${r.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, ${todaysPlan}, ${r.entryType}, ${schemeId}, 'DRAFT', NOW(), NOW())
         ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
-        DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId"${isRecovery && paymentMode !== undefined ? Prisma.sql`, "paymentMode" = EXCLUDED."paymentMode"` : Prisma.empty}, "updatedAt" = NOW()`);
+        DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId", "updatedAt" = NOW()`);
     }
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Saved ${rows.length} daily ${section.toLowerCase()} row(s)` }, tx);
     return { count: rows.length };
@@ -661,8 +674,11 @@ export async function enterDailyActual(ctx: AuthContext, raw: unknown): Promise<
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     let count = 0;
     for (const e of entries) {
+      // Payment Mode describes a RECEIVED amount: no recovery (<= 0) means no mode, whatever the client sent. Otherwise an explicit
+      // value (or explicit null) is stored; an absent key (older client / Sales) leaves the stored value untouched.
+      const mode = section !== "RECOVERY" ? undefined : e.todaysActual <= 0 ? null : "paymentMode" in e ? e.paymentMode ?? null : undefined;
       const n = await tx.$executeRaw(Prisma.sql`
-        UPDATE "DailyWorkEntry" SET "todaysActual" = ${e.todaysActual}, "updatedAt" = NOW()
+        UPDATE "DailyWorkEntry" SET "todaysActual" = ${e.todaysActual}${mode !== undefined ? Prisma.sql`, "paymentMode" = ${mode}` : Prisma.empty}, "updatedAt" = NOW()
         WHERE "id" = ${e.entryId} AND "officerId" = ${officerId} AND "section" = ${section}
           AND "workDate" = ${workDate}::date AND "batchId" <> ${day.currentBatchId} AND "status" = 'PLAN_SUBMITTED'`);
       count += Number(n);
@@ -691,7 +707,9 @@ export function combineDailyWork(dealers: DailyWorkDealerDto[]) {
 export async function getDailyAppointment(ctx: AuthContext, rawDate?: string, targetOfficerId?: string, rawMode?: string): Promise<AppointmentPayload> {
   await assertReadRole(ctx, targetOfficerId);
   const workDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate ?? "") ? rawDate! : currentBusinessDate();
-  const entries = await loadDailyRows(await resolveReadOfficer(ctx, targetOfficerId), "APPOINTMENT", workDate, parseDailyWorkMode(rawMode));
+  const apptOfficerId = await resolveReadOfficer(ctx, targetOfficerId);
+  await materializeCalendarForRead(ctx, apptOfficerId, workDate, parseDailyWorkMode(rawMode));
+  const entries = await loadDailyRows(apptOfficerId, "APPOINTMENT", workDate, parseDailyWorkMode(rawMode));
   const rows: AppointmentRowDto[] = entries.map((r) => ({
     entryId: r.id,
     batchId: r.batchId,
@@ -703,7 +721,7 @@ export async function getDailyAppointment(ctx: AuthContext, rawDate?: string, ta
     status: (r.resultStatus as "APPOINTED" | "NOT_APPOINTED" | null) ?? null,
     rowStatus: (r.status as AppointmentRowDto["rowStatus"]) ?? "DRAFT",
   }));
-  return { section: "APPOINTMENT", workDate, canEnterStatus: parseDailyWorkMode(rawMode) === "REPORT" && rows.some((r) => r.rowStatus !== "DRAFT"), rows };
+  return { section: "APPOINTMENT", workDate, canEnterStatus: parseDailyWorkMode(rawMode) === "REPORT" && rows.some((r) => r.rowStatus !== "DRAFT"), rows, calendarEntryIds: await calendarLinkedEntryIds(entries.map((r) => r.id)) };
 }
 
 /** Persist the officer's Dealer Appointment rows for a date as DRAFT (replace-set, atomic). Dealer is required. */
@@ -938,6 +956,7 @@ export async function getDailySummary(ctx: AuthContext, rawDate?: string, target
   const workDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate ?? "") ? rawDate! : currentBusinessDate();
   const officerId = await resolveReadOfficer(ctx, targetOfficerId);
   const mode = parseDailyWorkMode(rawMode);
+  await materializeCalendarForRead(ctx, officerId, workDate, mode);
   const { day } = await readBatchContext(officerId, workDate);
   const rows = await prisma.$queryRaw<{ id: string; batchId: string; dealerVisits: number | null; newPartyVisits: number | null; actualDealerVisits: number | null; actualNewPartyVisits: number | null; others: string | null; noPlanSections: string | null; status: string }[]>(Prisma.sql`
     SELECT "id", "batchId", "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "others", "noPlanSections", "status"
@@ -1130,17 +1149,18 @@ export interface DailyStatusPayload {
 interface ReportEntryState {
   section: string; batchId: string; todaysActual: string | null; resultStatus: string | null;
   dealerVisits: number | null; newPartyVisits: number | null;
-  actualDealerVisits: number | null; actualNewPartyVisits: number | null; noPlanSections: string | null;
+  actualDealerVisits: number | null; actualNewPartyVisits: number | null; noPlanSections: string | null; paymentMode: string | null;
 }
 
 async function reportCompletion(db: DbClient, officerId: string, workDate: string, currentBatchId: string) {
   const rows = await db.$queryRaw<ReportEntryState[]>(Prisma.sql`
     SELECT "section", "batchId", "todaysActual"::text AS "todaysActual", "resultStatus",
-      "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "noPlanSections"
+      "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "noPlanSections", "paymentMode"
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date
       AND "batchId" <> ${currentBatchId} AND "status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
       AND (${SCHEME_CONVERSION_ENABLED}::boolean OR "section" <> 'SCHEME_CONVERSION')`);
+  let paymentModeMissing = false;
   const required = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, false]));
   const complete = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, true]));
   for (const row of rows) {
@@ -1148,6 +1168,8 @@ async function reportCompletion(db: DbClient, officerId: string, workDate: strin
       const section = row.section as MandatorySection;
       required.set(section, true);
       if (row.todaysActual == null) complete.set(section, false);
+      // A received recovery amount must say how it was received (a recovery of 0 needs no mode).
+      if (section === "RECOVERY" && row.todaysActual != null && Number(row.todaysActual) > 0 && row.paymentMode == null) paymentModeMissing = true;
     } else if (row.section === "APPOINTMENT") {
       required.set("APPOINTMENT", true);
       if (row.resultStatus == null) complete.set("APPOINTMENT", false);
@@ -1164,7 +1186,7 @@ async function reportCompletion(db: DbClient, officerId: string, workDate: strin
     }
   }
   const sections = MANDATORY_SECTIONS.map((section) => ({ section, required: required.get(section) ?? false, complete: !(required.get(section) ?? false) || (complete.get(section) ?? false) }));
-  return { hasBatches: rows.length > 0, sections, complete: rows.length > 0 && sections.every((section) => section.complete) };
+  return { hasBatches: rows.length > 0, paymentModeMissing, sections, complete: rows.length > 0 && sections.every((section) => section.complete) };
 }
 
 /**
@@ -1176,6 +1198,7 @@ export async function getDailyStatus(ctx: AuthContext, rawDate?: string, targetO
   await assertReadRole(ctx, targetOfficerId);
   const workDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate ?? "") ? rawDate! : currentBusinessDate();
   const officerId = await resolveReadOfficer(ctx, targetOfficerId);
+  await materializeCalendarForRead(ctx, officerId, workDate, "PLAN"); // the status (progress bar) must see Calendar tasks too
   const { day } = await readBatchContext(officerId, workDate);
   const [data, noPlanSet, report, autoTasksEnabled] = await Promise.all([
     sectionDataPresence(officerId, workDate, day.currentBatchId),
@@ -1307,6 +1330,7 @@ export async function submitDailyReport(ctx: AuthContext, raw: unknown): Promise
         .map((section) => sectionLabels[section.section]);
       throw new ApiError(422, formatLabel(L["daily_work.validation.complete_report"], { sections: incomplete.join(", ") }));
     }
+    if (report.paymentModeMissing) throw new ApiError(422, L["daily_work.validation.payment_mode_required"]);
     await tx.$executeRaw(Prisma.sql`
       UPDATE "DailyWorkDay" SET "status" = 'FINALIZED', "selfRating" = ${selfRating}, "finalizedAt" = NOW(), "updatedAt" = NOW()
       WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "status" = 'OPEN'`);
@@ -1507,7 +1531,10 @@ export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: s
     officerId,
     officerName: officer?.name ?? "—",
     workDate,
-    sales, recovery, appointment, conversion, summary,
+    sales,
+    // Payment Mode is a Daily REPORT value: a plan-only day must never present a (legacy) planned mode as an actual receipt.
+    recovery: reportSubmitted ? recovery : { ...recovery, dealers: recovery.dealers.map(({ paymentMode: _paymentMode, ...dealer }) => dealer) },
+    appointment, conversion, summary,
     // Never invent report-only values for a plan-only day.
     selfRating: reportSubmitted ? status.selfRating : null, reportSections: status.reportSections,
     review: reportSubmitted ? review : null,

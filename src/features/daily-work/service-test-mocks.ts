@@ -42,6 +42,11 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
       materializeDueDailyWorkTasksInTransaction: async () => ({ materializedTasks: 0, affectedDealers: 0, finalized: false }),
       autoTasksApplyToRole: (role: string) => role === "SALES_OFFICER" || role === "REGIONAL_MANAGER", // mirrors the real rule (asserted in auto-task-materialization.test.ts)
     },
+    // Calendar Daily Task materialization needs its own DB-backed test (calendar-task-materialization.test.ts); here it is inert.
+    "./calendar-task-materialization.server": {
+      materializeDueCalendarTasks: async () => ({ materialized: 0 }),
+      calendarLinkedEntryIds: async () => [],
+    },
     // The Auto Tasks visibility flag defaults OFF; a stub keeps status reads DB-double-free.
     "@/lib/recovery-config": {
       getAutoTasksEnabled: async () => false,

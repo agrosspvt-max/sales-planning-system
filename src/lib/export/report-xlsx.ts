@@ -14,7 +14,7 @@ const NUM_FMT: Record<CellFormat, string | undefined> = {
  * consumes the same ReportPayload the report logic produces, so CSV/PDF exporters
  * can be added later without changing the report service.
  */
-export async function buildReportXlsx(payload: ReportPayload): Promise<Buffer> {
+export async function buildReportXlsx(payload: ReportPayload, options: { metaLines?: string[] } = {}): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = "Sales Planning System";
   wb.created = new Date();
@@ -29,16 +29,16 @@ export async function buildReportXlsx(payload: ReportPayload): Promise<Buffer> {
   titleCell.value = payload.title;
   titleCell.font = { bold: true, size: 14 };
 
-  // Metadata lines
-  merge(2);
-  ws.getCell(2, 1).value = `Season: ${payload.meta.seasonName || "—"}`;
-  merge(3);
-  ws.getCell(3, 1).value = `Generated: ${new Date().toLocaleString("en-IN")}`;
-  merge(4);
-  ws.getCell(4, 1).value =
-    payload.meta.filters.length > 0 ? `Filters: ${payload.meta.filters.join("; ")}` : "Filters: none";
+  // Metadata lines. Default (every existing report): Season / Generated / Filters. A caller may supply its own lines instead
+  // (e.g. the Last Payment Report shows only "Last Update: DD/MM/YYYY" — no generation timestamp).
+  const metaLines = options.metaLines ?? [
+    `Season: ${payload.meta.seasonName || "—"}`,
+    `Generated: ${new Date().toLocaleString("en-IN")}`,
+    payload.meta.filters.length > 0 ? `Filters: ${payload.meta.filters.join("; ")}` : "Filters: none",
+  ];
+  metaLines.forEach((line, i) => { merge(2 + i); ws.getCell(2 + i, 1).value = line; });
 
-  const headerRow = 6;
+  const headerRow = metaLines.length + 3; // title, the meta lines, one blank row, then the header (6 for the default 3 lines)
 
   // Header
   payload.columns.forEach((c, i) => {

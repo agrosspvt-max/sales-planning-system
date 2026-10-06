@@ -26,6 +26,8 @@ export const ADMIN_MODULES = [
   { id: "dealerTags", label: "Dealer Tags", group: "Requests", href: "/dealer-tags", actions: ["read", "assign", "revoke", "approve", "reject"] },
   { id: "performance", label: "Performance", group: "Insights", href: "/performance", actions: ["read", "attendance"] },
   { id: "reports", label: "Reports", group: "Insights", href: "/reports", actions: ["read", "export"] },
+  // Its own module (the longest-href match in moduleForPage wins over "/reports"), so it can be granted/revoked independently of Reports.
+  { id: "lastPaymentReport", label: "Last Payment Report", group: "Insights", href: "/reports/last-payment", actions: ["read", "export"] },
   { id: "announcements", label: "Announcements", group: "Insights", href: "/announcements", actions: READ },
   { id: "audit", label: "Audit Logs", group: "Insights", href: "/audit", actions: READ },
   { id: "products", label: "Product Master", group: "Master Data", href: "/masters/products", actions: [...CRUD, "merge"] },

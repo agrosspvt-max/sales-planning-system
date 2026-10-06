@@ -13,13 +13,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
 import { dateKey, groupEventsByOfficer, type ConversionEvent, type ConversionStatus, type PartyAppointmentEvent } from "@/lib/calendar";
-import type { CalendarPayload, CalendarNoteDto } from "@/features/calendar/calendar.server";
+import type { CalendarPayload, CalendarNoteDto, CalendarEntryDto, CalendarEntryKind } from "@/features/calendar/calendar.server";
 
 const STATUS_META: Record<ConversionStatus, { key: LabelKey; variant: "muted" | "secondary" | "default" | "success" | "warning" | "destructive" }> = {
   PLANNED: { key: "calendar.status.planned", variant: "muted" },
@@ -48,6 +49,11 @@ function StatusBadge({ status, label }: { status: ConversionStatus; label: strin
   return <Badge variant={STATUS_META[status].variant}>{label}</Badge>;
 }
 
+/** Static dot colours per entry kind (literal classes so Tailwind keeps them). */
+const ENTRY_DOT: Record<CalendarEntryKind, string> = { TASK: "bg-primary", MEETING: "bg-success", REMINDER: "bg-warning", OTHER: "bg-muted-foreground" };
+/** The `L` property holding each kind's visible label. */
+const KIND_LABEL_PROP: Record<CalendarEntryKind, string> = { TASK: "kindTask", MEETING: "kindMeeting", REMINDER: "kindReminder", OTHER: "kindOther" };
+
 export function CalendarView({ role }: { role: Role; userId: string }) {
   const taggedFirst = useTaggedDealersFirst();
   const qc = useQueryClient();
@@ -55,6 +61,9 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
   const todayKey = dateKey(today)!;
   const [cursor, setCursor] = useState({ year: today.getUTCFullYear(), month: today.getUTCMonth() + 1 });
   const [officerId, setOfficerId] = useState("");
+  const [groupId, setGroupId] = useState("");
+  // Regional Manager: My Calendar (own) is the default; Team Calendar widens to the RM's existing team scope (server-enforced).
+  const [view, setView] = useState<"mine" | "team">("mine");
   const [openDate, setOpenDate] = useState<string | null>(null);
 
   // Labels
@@ -80,12 +89,55 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
     schemes: useLabel("calendar.schemes"),
     partyAppointment: useLabel("calendar.party_appointment"),
     market: useLabel("calendar.market"),
+    myCalendar: useLabel("calendar.my_calendar"),
+    teamCalendar: useLabel("calendar.team_calendar"),
+    allStates: useLabel("calendar.all_states"),
+    salesOfficer: useLabel("calendar.sales_officer"),
+    addTask: useLabel("calendar.add_task"),
+    addMeeting: useLabel("calendar.add_meeting"),
+    addReminder: useLabel("calendar.add_reminder"),
+    addOther: useLabel("calendar.add_other"),
+    kindTask: useLabel("calendar.kind.task"),
+    kindMeeting: useLabel("calendar.kind.meeting"),
+    kindReminder: useLabel("calendar.kind.reminder"),
+    kindOther: useLabel("calendar.kind.other"),
+    addedBy: useLabel("calendar.added_by"),
+    taskType: useLabel("calendar.task_type"),
+    dealer: useLabel("calendar.dealer"),
+    selectDealer: useLabel("calendar.select_dealer"),
+    amount: useLabel("calendar.amount"),
+    paymentMode: useLabel("calendar.payment_mode"),
+    dealerName: useLabel("calendar.dealer_name"),
+    marketName: useLabel("calendar.market_name"),
+    dealerVisits: useLabel("calendar.dealer_visits"),
+    newPartyVisits: useLabel("calendar.new_party_visits"),
+    details: useLabel("calendar.details"),
+    meetingPlaceholder: useLabel("calendar.meeting_placeholder"),
+    reminderPlaceholder: useLabel("calendar.reminder_placeholder"),
+    otherPlaceholder: useLabel("calendar.other_placeholder"),
+    taskDetailsPlaceholder: useLabel("calendar.task_details_placeholder"),
+    save: useLabel("calendar.save"),
+    delete: useLabel("calendar.delete"),
+    inDailyWork: useLabel("calendar.in_daily_work"),
+    taskPastDate: useLabel("calendar.task_past_date"),
+    noDealers: useLabel("calendar.no_dealers"),
+    secSALES: useLabel("daily_work.section.sales"),
+    secRECOVERY: useLabel("daily_work.section.recovery"),
+    secAPPOINTMENT: useLabel("daily_work.section.appointment"),
+    secVISITS: useLabel("daily_work.section.visits"),
+    secOTHERS: useLabel("daily_work.section.others"),
+    pmCHEQUE: useLabel("daily_work.payment_mode.cheque"),
+    pmUPI: useLabel("daily_work.payment_mode.upi"),
+    pmNEFT_RTGS: useLabel("daily_work.payment_mode.neft_rtgs"),
+    pmCASH: useLabel("daily_work.payment_mode.cash"),
   };
 
   const params = new URLSearchParams({ year: String(cursor.year), month: String(cursor.month) });
   if (officerId) params.set("officerId", officerId);
+  if (groupId) params.set("groupId", groupId);
+  if (role === Role.REGIONAL_MANAGER) params.set("view", view);
   const { data, isLoading } = useQuery<CalendarPayload>({
-    queryKey: ["calendar", cursor.year, cursor.month, officerId],
+    queryKey: ["calendar", cursor.year, cursor.month, officerId, groupId, view],
     queryFn: () => api.get(`/api/calendar?${params.toString()}`),
   });
 
@@ -97,6 +149,11 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
   const notesByDate = useMemo(() => {
     const m = new Map<string, CalendarNoteDto[]>();
     for (const n of data?.notes ?? []) { const a = m.get(n.dateKey) ?? []; a.push(n); m.set(n.dateKey, a); }
+    return m;
+  }, [data]);
+  const entriesByDate = useMemo(() => {
+    const m = new Map<string, CalendarEntryDto[]>();
+    for (const e of data?.entries ?? []) { const a = m.get(e.dateKey) ?? []; a.push(e); m.set(e.dateKey, a); }
     return m;
   }, [data]);
   const partyEventsByDate = useMemo(() => {
@@ -120,7 +177,8 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
   const step = (delta: number) => setCursor((c) => { const m = c.month + delta; return { year: c.year + Math.floor((m - 1) / 12), month: ((m - 1 + 12) % 12) + 1 }; });
   const goToday = () => setCursor({ year: today.getUTCFullYear(), month: today.getUTCMonth() + 1 });
 
-  const officers = data?.officers ?? [];
+  const officers = (data?.officers ?? []).filter((o) => !groupId || o.groupId === groupId); // State narrows the Sales Officer list
+  const states = data?.states ?? [];
   const canFilter = data?.canFilterOfficers ?? false;
   const groupByOfficer = canFilter && !officerId; // Admin/RM global view groups by officer
 
@@ -129,7 +187,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
       <PageHeader
         crumbs={[{ label: "Planning" }, { label: L.title }]}
         title={L.title}
-        subtitle={role === Role.SALES_OFFICER ? "Your scheme conversion dates and personal notes." : "Team scheme conversion dates (by Sales Officer) and your notes."}
+        subtitle={role === Role.SALES_OFFICER ? "Your scheme conversion dates, tasks, meetings, reminders and notes." : "Scheme conversion dates, tasks, meetings, reminders and notes — yours and your team's."}
       />
 
       {/* Toolbar: month nav + Today + (Admin/RM) officer filter */}
@@ -140,14 +198,35 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
           <Button variant="outline" size="sm" onClick={() => step(1)} aria-label={L.next}><ChevronRight className="h-4 w-4" /></Button>
           <Button variant="outline" size="sm" onClick={goToday}>{L.today}</Button>
         </div>
-        {canFilter && (
-          <NativeSelect
-            className="w-56"
-            value={officerId}
-            onChange={(e) => setOfficerId(e.target.value)}
-            options={[{ value: "", label: L.allOfficers }, ...officers.map((o) => ({ value: o.id, label: o.name }))]}
-          />
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {role === Role.REGIONAL_MANAGER && (
+            <div className="inline-flex rounded-md border bg-background p-0.5 text-sm" role="group" aria-label="Calendar view">
+              {([["mine", L.myCalendar], ["team", L.teamCalendar]] as const).map(([value, label]) => (
+                <button
+                  key={value} type="button"
+                  onClick={() => { setView(value); setOfficerId(""); setGroupId(""); }}
+                  className={cn("rounded px-3 py-1 font-medium", view === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
+                >{label}</button>
+              ))}
+            </div>
+          )}
+          {canFilter && (
+            <>
+              <NativeSelect
+                className="w-40" aria-label={L.allStates}
+                value={groupId}
+                onChange={(e) => { setGroupId(e.target.value); setOfficerId(""); }}
+                options={[{ value: "", label: L.allStates }, ...states.map((st) => ({ value: st.id, label: st.name }))]}
+              />
+              <NativeSelect
+                className="w-64" aria-label={L.salesOfficer}
+                value={officerId}
+                onChange={(e) => setOfficerId(e.target.value)}
+                options={[{ value: "", label: L.allOfficers }, ...officers.map((o) => ({ value: o.id, label: `${o.name} — ${o.roleLabel}` }))]}
+              />
+            </>
+          )}
+        </div>
       </div>
 
       {/* Month grid */}
@@ -164,8 +243,10 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
               const evs = taggedFirst(eventsByDate.get(dk) ?? [], (e) => e.dealerId);
               const partyEvs = partyEventsByDate.get(dk) ?? [];
               const notes = notesByDate.get(dk) ?? [];
-              const totalEvs = evs.length + partyEvs.length;
+              const dayEntries = entriesByDate.get(dk) ?? [];
+              const totalEvs = evs.length + partyEvs.length + dayEntries.length;
               const shownParty = partyEvs.slice(0, Math.max(0, 2 - evs.length));
+              const shownEntries = dayEntries.slice(0, Math.max(0, 2 - evs.length - shownParty.length));
               const isToday = dk === todayKey;
               return (
                 <button
@@ -194,6 +275,12 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
                         <span className="truncate">{groupByOfficer ? e.salesOfficerName : e.partyName}</span>
                       </div>
                     ))}
+                    {shownEntries.map((e) => (
+                      <div key={e.id} className="flex items-center gap-1 truncate rounded bg-muted/60 px-1 py-0.5 text-[11px] leading-tight">
+                        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", ENTRY_DOT[e.kind])} />
+                        <span className="truncate">{groupByOfficer ? `${e.ownerName} · ${(L as Record<string, string>)[KIND_LABEL_PROP[e.kind]]}` : (L as Record<string, string>)[KIND_LABEL_PROP[e.kind]]}</span>
+                      </div>
+                    ))}
                     {totalEvs > 2 && <div className="px-1 text-[11px] text-muted-foreground">+{totalEvs - 2} more</div>}
                   </div>
                 </button>
@@ -210,6 +297,9 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
           events={taggedFirst(eventsByDate.get(openDate) ?? [], (e) => e.dealerId)}
           partyEvents={partyEventsByDate.get(openDate) ?? []}
           notes={notesByDate.get(openDate) ?? []}
+          entries={entriesByDate.get(openDate) ?? []}
+          payload={data}
+          role={role}
           groupByOfficer={groupByOfficer}
           labels={L}
           onClose={() => setOpenDate(null)}
@@ -222,18 +312,35 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
 
 type Labels = Record<string, string>;
 
-function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, groupByOfficer, labels: L, onClose, onChanged }: {
-  dateKey: string; title: string; events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[];
-  groupByOfficer: boolean; labels: Labels; onClose: () => void; onChanged: () => void;
+function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entries, payload, role, groupByOfficer, labels: L, onClose, onChanged }: {
+  dateKey: string; title: string; events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[]; entries: CalendarEntryDto[];
+  payload: CalendarPayload | undefined; role: Role; groupByOfficer: boolean; labels: Labels; onClose: () => void; onChanged: () => void;
 }) {
   const groups = groupByOfficer ? groupEventsByOfficer(events) : null;
   const partyGroups = groupByOfficer ? groupEventsByOfficer(partyEvents) : null;
+  const [adding, setAdding] = useState<CalendarEntryKind | null>(null);
+  const canTask = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
+  const isPast = dk < dateKey(new Date())!;
+  const actions: { kind: CalendarEntryKind; label: string; disabled?: boolean; hint?: string }[] = [
+    ...(canTask ? [{ kind: "TASK" as const, label: L.addTask, disabled: isPast, hint: isPast ? L.taskPastDate : undefined }] : []),
+    { kind: "MEETING", label: L.addMeeting }, { kind: "REMINDER", label: L.addReminder }, { kind: "OTHER", label: L.addOther },
+  ];
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <div className="space-y-4">
-          {events.length === 0 && partyEvents.length === 0 && notes.length === 0 && <p className="text-sm text-muted-foreground">{L.noEvents}</p>}
+          {/* Four clear actions; each opens its own small form below (no immediate text box). */}
+          <div className="grid grid-cols-2 gap-2">
+            {actions.map((a) => (
+              <Button key={a.kind} variant={adding === a.kind ? "default" : "outline"} size="sm" disabled={a.disabled} title={a.hint} onClick={() => setAdding(adding === a.kind ? null : a.kind)}>
+                <Plus className="h-4 w-4" /> {a.label}
+              </Button>
+            ))}
+          </div>
+          {adding && <AddEntryForm kind={adding} dateKey={dk} payload={payload} labels={L} onCancel={() => setAdding(null)} onSaved={() => { setAdding(null); onChanged(); }} />}
+
+          {events.length === 0 && partyEvents.length === 0 && notes.length === 0 && entries.length === 0 && <p className="text-sm text-muted-foreground">{L.noEvents}</p>}
 
           {groups
             ? groups.map((g) => (
@@ -254,11 +361,143 @@ function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, grou
               ))
             : partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} />)}
 
+          {entries.map((e) => <EntryCard key={e.id} e={e} labels={L} onChanged={onChanged} />)}
+
+          {/* Existing notes keep working (view / edit / delete); new entries are added through the four actions above. */}
           <NotesSection dateKey={dk} notes={notes} labels={L} onChanged={onChanged} />
         </div>
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.cancel}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** One Calendar entry: what it is, the details, and WHO ADDED IT (important in Team / Admin views). */
+function EntryCard({ e, labels: L, onChanged }: { e: CalendarEntryDto; labels: Labels; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(e.text ?? "");
+  const update = useMutation({ mutationFn: () => api.patch(`/api/calendar/entries/${e.id}`, { text: text.trim() }), onSuccess: () => { setEditing(false); onChanged(); }, onError: (err) => alert((err as Error).message) });
+  const remove = useMutation({ mutationFn: () => api.del(`/api/calendar/entries/${e.id}`), onSuccess: onChanged, onError: (err) => alert((err as Error).message) });
+  const t = e.task;
+  return (
+    <div className="rounded-md border bg-card p-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <span className={cn("h-2 w-2 rounded-full", ENTRY_DOT[e.kind])} />
+          {L[KIND_LABEL_PROP[e.kind]]}{t ? ` — ${L[`sec${t.section}`] ?? t.section}` : ""}
+        </span>
+        <div className="flex items-center gap-1">
+          {e.materialized && <Badge variant="success">{L.inDailyWork}</Badge>}
+          {e.canEdit && !editing && <Button variant="ghost" size="sm" title={L.editNote} onClick={() => { setEditing(true); setText(e.text ?? ""); }}><Pencil className="h-3.5 w-3.5" /></Button>}
+          {e.canDelete && <Button variant="ghost" size="sm" title={L.delete} onClick={() => remove.mutate()}><Trash2 className="h-3.5 w-3.5" /></Button>}
+        </div>
+      </div>
+      {t ? (
+        <div className="space-y-0.5 text-sm">
+          {t.dealerName && <div className="font-medium"><DealerName id={t.dealerId ?? ""} name={t.dealerName} />{t.amount != null ? ` — ${formatCurrency(t.amount)}` : ""}</div>}
+          {t.paymentMode && <div className="text-muted-foreground">{L.paymentMode}: {L[`pm${t.paymentMode}`] ?? t.paymentMode}</div>}
+          {t.typedDealerName && <div className="font-medium">{t.typedDealerName}{t.marketName ? ` · ${t.marketName}` : ""}</div>}
+          {(t.dealerVisits != null || t.newPartyVisits != null) && <div>{L.dealerVisits}: {t.dealerVisits ?? 0} · {L.newPartyVisits}: {t.newPartyVisits ?? 0}</div>}
+          {e.text && <p className="whitespace-pre-wrap">{e.text}</p>}
+        </div>
+      ) : editing ? (
+        <div className="space-y-2">
+          <Textarea value={text} onChange={(ev) => setText(ev.target.value)} rows={3} maxLength={2000} />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEditing(false)}>{L.cancel}</Button>
+            <Button size="sm" disabled={!text.trim() || update.isPending} onClick={() => update.mutate()}>{L.save}</Button>
+          </div>
+        </div>
+      ) : (
+        <p className="whitespace-pre-wrap text-sm">{e.text}</p>
+      )}
+      <div className="mt-1 text-xs text-muted-foreground">{L.addedBy}: {e.ownerName} ({e.ownerRoleLabel}){e.ownerState ? ` · ${e.ownerState}` : ""}</div>
+    </div>
+  );
+}
+
+/** The form for one of the four actions. A Daily Task reuses the Daily Work section fields; the rest are a text box. */
+function AddEntryForm({ kind, dateKey: dk, payload, labels: L, onCancel, onSaved }: {
+  kind: CalendarEntryKind; dateKey: string; payload: CalendarPayload | undefined; labels: Labels; onCancel: () => void; onSaved: () => void;
+}) {
+  const sections = payload?.taskSections ?? [];
+  const [section, setSection] = useState(sections[0] ?? "SALES");
+  const [dealerId, setDealerId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [paymentMode, setPaymentMode] = useState("");
+  const [dealerName, setDealerName] = useState("");
+  const [marketName, setMarketName] = useState("");
+  const [dealerVisits, setDealerVisits] = useState("");
+  const [newPartyVisits, setNewPartyVisits] = useState("");
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const dealers = payload?.myDealers ?? [];
+
+  const body = () => kind !== "TASK" ? { kind, date: dk, text: text.trim() } : {
+    kind, date: dk, section,
+    ...(section === "SALES" || section === "RECOVERY" ? { dealerId, amount: amount === "" ? undefined : Number(amount), ...(section === "RECOVERY" && paymentMode ? { paymentMode } : {}) } : {}),
+    ...(section === "APPOINTMENT" ? { dealerName: dealerName.trim(), marketName: marketName.trim() } : {}),
+    ...(section === "VISITS" ? { dealerVisits: dealerVisits === "" ? 0 : Number(dealerVisits), newPartyVisits: newPartyVisits === "" ? 0 : Number(newPartyVisits) } : {}),
+    ...(section === "OTHERS" ? { text: text.trim() } : {}),
+  };
+  const valid = kind !== "TASK" ? text.trim() !== ""
+    : section === "SALES" || section === "RECOVERY" ? dealerId !== "" && Number(amount) > 0
+      : section === "APPOINTMENT" ? dealerName.trim() !== ""
+        : section === "VISITS" ? Number(dealerVisits || 0) + Number(newPartyVisits || 0) > 0
+          : text.trim() !== "";
+  const save = useMutation({ mutationFn: () => api.post("/api/calendar/entries", body()), onSuccess: onSaved, onError: (e) => setError((e as Error).message) });
+  const whole = (set: (v: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => { const v = e.target.value; if (v === "" || /^\d+$/.test(v)) set(v); };
+  const placeholder = kind === "MEETING" ? L.meetingPlaceholder : kind === "REMINDER" ? L.reminderPlaceholder : L.otherPlaceholder;
+
+  return (
+    <div className="space-y-3 rounded-md border bg-card p-3">
+      {kind === "TASK" ? (
+        <>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">{L.taskType}</label>
+            <NativeSelect value={section} onChange={(e) => { setSection(e.target.value); setError(null); }} options={sections.map((x) => ({ value: x, label: L[`sec${x}`] ?? x }))} />
+          </div>
+          {(section === "SALES" || section === "RECOVERY") && (
+            <>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">{L.dealer}</label>
+                <NativeSelect dealerOptions value={dealerId} onChange={(e) => setDealerId(e.target.value)} placeholder={dealers.length === 0 ? L.noDealers : L.selectDealer} options={dealers.map((d) => ({ value: d.id, label: d.name }))} />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">{L.amount}</label>
+                <Input type="number" min="0" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+              </div>
+              {section === "RECOVERY" && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">{L.paymentMode}</label>
+                  <NativeSelect value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)} placeholder="—" options={(payload?.paymentModes ?? []).map((m) => ({ value: m, label: L[`pm${m}`] ?? m }))} />
+                </div>
+              )}
+            </>
+          )}
+          {section === "APPOINTMENT" && (
+            <>
+              <Input placeholder={L.dealerName} value={dealerName} onChange={(e) => setDealerName(e.target.value)} maxLength={200} />
+              <Input placeholder={L.marketName} value={marketName} onChange={(e) => setMarketName(e.target.value)} maxLength={200} />
+            </>
+          )}
+          {section === "VISITS" && (
+            <>
+              <div className="space-y-1"><label className="text-xs font-medium text-muted-foreground">{L.dealerVisits}</label><Input inputMode="numeric" value={dealerVisits} onChange={whole(setDealerVisits)} placeholder="0" /></div>
+              <div className="space-y-1"><label className="text-xs font-medium text-muted-foreground">{L.newPartyVisits}</label><Input inputMode="numeric" value={newPartyVisits} onChange={whole(setNewPartyVisits)} placeholder="0" /></div>
+            </>
+          )}
+          {section === "OTHERS" && <Textarea rows={3} maxLength={2000} value={text} onChange={(e) => setText(e.target.value)} placeholder={L.taskDetailsPlaceholder} />}
+        </>
+      ) : (
+        <Textarea rows={3} maxLength={2000} value={text} onChange={(e) => setText(e.target.value)} placeholder={placeholder} autoFocus />
+      )}
+      {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={onCancel}>{L.cancel}</Button>
+        <Button size="sm" disabled={!valid || save.isPending} onClick={() => { setError(null); save.mutate(); }}>{L.save}</Button>
+      </div>
+    </div>
   );
 }
 
@@ -297,13 +536,10 @@ function ConversionCard({ e, labels: L }: { e: ConversionEvent; labels: Labels }
   );
 }
 
-function NotesSection({ dateKey: dk, notes, labels: L, onChanged }: { dateKey: string; notes: CalendarNoteDto[]; labels: Labels; onChanged: () => void }) {
-  const [adding, setAdding] = useState(false);
-  const [text, setText] = useState("");
+function NotesSection({ notes, labels: L, onChanged }: { dateKey: string; notes: CalendarNoteDto[]; labels: Labels; onChanged: () => void }) {
   const [editId, setEditId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
 
-  const create = useMutation({ mutationFn: () => api.post("/api/calendar/notes", { date: dk, text: text.trim() }), onSuccess: () => { setAdding(false); setText(""); onChanged(); }, onError: (e) => alert((e as Error).message) });
   const update = useMutation({ mutationFn: (v: { id: string }) => api.patch(`/api/calendar/notes/${v.id}`, { text: editText.trim() }), onSuccess: () => { setEditId(null); setEditText(""); onChanged(); }, onError: (e) => alert((e as Error).message) });
   const remove = useMutation({ mutationFn: (id: string) => api.del(`/api/calendar/notes/${id}`), onSuccess: onChanged, onError: (e) => alert((e as Error).message) });
 
@@ -334,17 +570,6 @@ function NotesSection({ dateKey: dk, notes, labels: L, onChanged }: { dateKey: s
         </div>
       ))}
 
-      {adding ? (
-        <div className="space-y-2 rounded-md border bg-card p-3">
-          <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} maxLength={2000} placeholder={L.notePlaceholder} autoFocus />
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => { setAdding(false); setText(""); }}>{L.cancel}</Button>
-            <Button size="sm" disabled={!text.trim() || create.isPending} onClick={() => create.mutate()}>{L.saveNote}</Button>
-          </div>
-        </div>
-      ) : (
-        <Button variant="outline" size="sm" onClick={() => setAdding(true)}><Plus className="h-4 w-4" /> {L.addNote}</Button>
-      )}
     </div>
   );
 }

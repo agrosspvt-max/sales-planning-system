@@ -87,10 +87,10 @@ function makeFake(opts: FakeOpts) {
       const todaysPlan = planIsNull ? null : String(v[i++] as number);
       const entryType = v[i++] as string;
       const schemeId = (v[i++] as string | null) ?? null;
-      const paymentMode = text.includes('"schemeId", "paymentMode"') ? v[i++] as string | null : undefined;
+      if (text.includes('"paymentMode"')) throw new Error("Daily Plan save must never write paymentMode");
       const existing = store.find((r) => r.officerId === officerId && r.workDate === workDate && r.batchId === batchId && r.section === section && r.dealerId === dealerId);
-      if (existing) { existing.todaysPlan = todaysPlan; existing.entryType = entryType; existing.schemeId = schemeId; if (text.includes('"paymentMode" = EXCLUDED."paymentMode"')) existing.paymentMode = paymentMode; }
-      else store.push({ id, officerId, dealerId, workDate, batchId, section, todaysPlan, todaysActual: null, entryType, schemeId, ...(paymentMode !== undefined ? { paymentMode } : {}), status: "DRAFT" });
+      if (existing) { existing.todaysPlan = todaysPlan; existing.entryType = entryType; existing.schemeId = schemeId; }
+      else store.push({ id, officerId, dealerId, workDate, batchId, section, todaysPlan, todaysActual: null, entryType, schemeId, status: "DRAFT" });
       return 1;
     }
     // UPDATE ... SET status='SUBMITTED'
@@ -102,9 +102,11 @@ function makeFake(opts: FakeOpts) {
     }
     // UPDATE ... SET todaysActual = ? (post-submit)
     if (text.startsWith('UPDATE "DailyWorkEntry" SET "todaysActual"')) {
-      const actual = v[0] as number, entryId = v[1] as string, officerId = v[2] as string, section = v[3] as string, workDate = v[4] as string, currentBatchId = v[5] as string;
+      const withMode = text.includes('"paymentMode" = ');
+      const actual = v[0] as number, mode = withMode ? v[1] as string | null : undefined, o = withMode ? 2 : 1;
+      const entryId = v[o] as string, officerId = v[o + 1] as string, section = v[o + 2] as string, workDate = v[o + 3] as string, currentBatchId = v[o + 4] as string;
       let n = 0;
-      for (const r of store) if (r.id === entryId && r.officerId === officerId && r.section === section && r.workDate === workDate && r.batchId !== currentBatchId && r.status === "PLAN_SUBMITTED") { r.todaysActual = String(actual); n++; }
+      for (const r of store) if (r.id === entryId && r.officerId === officerId && r.section === section && r.workDate === workDate && r.batchId !== currentBatchId && r.status === "PLAN_SUBMITTED") { r.todaysActual = String(actual); if (mode !== undefined) r.paymentMode = mode; n++; }
       return n;
     }
     throw new Error("Unhandled raw SQL: " + text);
@@ -366,40 +368,53 @@ async function main() {
     assert.equal(mixed.todaysPlan, 20);
   }
 
-  // Recovery Payment Mode is optional row metadata, using the same Save Draft/autosave endpoint.
+  // Recovery Payment Mode belongs to the Daily REPORT (how the ACTUAL recovery was received); the Daily Plan never writes/reads it.
   {
     const f = makeFake({ assignedDealerIds: ["d1", "d2"], dealers });
     const svc = loadService(f, { assignedDealerIds: ["d1", "d2"] });
-    for (const paymentMode of ["CHEQUE", "UPI", "NEFT_RTGS", "CASH"]) {
-      await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode }] });
-      assert.equal(f.store()[0].paymentMode, paymentMode, "canonical mode is stored");
-      const reopened = await svc.getDailyWork(SO, "RECOVERY", DATE);
-      assert.equal(reopened.dealers[0].paymentMode, paymentMode, "mode survives draft reload");
-      assert.equal(reopened.dealers[0].todaysPlan, 30000, "plan amount is unchanged");
-    }
-    const before = f.store();
-    for (const paymentMode of ["CARD", "cash", "", 1, {}]) {
-      await assert.rejects(() => svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", paymentMode }] }), (err) => err instanceof ZodError);
-      assert.deepEqual(f.store(), before, "invalid metadata never reaches writes");
-    }
-    // Older clients may omit the new field without clearing a previously saved choice.
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000 }] });
-    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[0].paymentMode, "CASH");
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode: null }, { dealerId: "d2" }] });
-    assert.equal(f.store()[0].paymentMode, null, "the empty selection explicitly clears metadata");
-    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[1].paymentMode, null, "old/unselected rows load blank");
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode: "UPI" }, { dealerId: "d2" }] });
+    // Plan: a paymentMode sent by an older client is ignored (stripped), never stored, never returned.
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode: "CASH" }, { dealerId: "d2", todaysPlan: 5000 }] });
+    assert.equal(f.store()[0].paymentMode, undefined, "Daily Plan save stores no Payment Mode");
+    assert.equal("paymentMode" in (await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[0], false, "Daily Plan read has no Payment Mode");
+    // A legacy plan-time value already in the database is never shown on the Plan, and a re-save leaves it alone.
+    f.store()[0].paymentMode = "UPI";
+    assert.equal("paymentMode" in (await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[0], false, "legacy value is not displayed in Plan");
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 31000 }, { dealerId: "d2", todaysPlan: 5000 }] });
+    assert.equal(f.store()[0].todaysPlan, "31000", "Plan save still works");
+    f.store()[0].paymentMode = undefined;
     f.freezeCurrent("so1", DATE);
-    const report = await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT");
-    assert.equal(report.dealers[0].paymentMode, "UPI", "frozen batch retains Payment Mode");
-    await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: report.dealers[0].entryId, todaysActual: 25000 }] });
-    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT")).dealers[0].paymentMode, "UPI", "Save Actuals preserves plan metadata");
-    // Extra Recovery fields are stripped from Sales just like other unknown fields.
-    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 100, paymentMode: "CASH" }] });
-    const sales = (await svc.getDailyWork(SO, "SALES", DATE)).dealers[0];
-    assert.equal("paymentMode" in sales, false, "Sales DTO remains unchanged");
-    assert.equal(f.store().find((r) => r.section === "SALES")!.paymentMode, undefined, "Sales stores no Payment Mode");
-    assert.equal((await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT")).dealers[0].paymentMode, "UPI", "separate batches/sections retain their metadata");
+    const entry = async (i: number) => (await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT")).dealers[i];
+    const d1 = (await entry(0)).entryId;
+    assert.equal((await entry(0)).paymentMode, null, "records without a Payment Mode load as blank");
+    // Each canonical mode persists with a positive recovery; changing it persists the new one.
+    for (const paymentMode of ["CHEQUE", "UPI", "NEFT_RTGS", "CASH", "UPI"]) {
+      await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 25000, paymentMode }] });
+      assert.equal((await entry(0)).paymentMode, paymentMode, "mode persists");
+      assert.equal((await entry(0)).todaysActual, 25000, "amount persists together with the mode");
+    }
+    // Absent key leaves the stored mode; invalid values never reach writes.
+    await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 26000 }] });
+    assert.equal((await entry(0)).paymentMode, "UPI", "an older client omitting the field keeps the saved mode");
+    const before = JSON.stringify(f.store());
+    for (const paymentMode of ["CARD", "cash", "", 1, {}]) {
+      await assert.rejects(() => svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 1, paymentMode }] }), (err) => err instanceof ZodError);
+      assert.equal(JSON.stringify(f.store()), before, "invalid mode never reaches writes");
+    }
+    // Recovery becoming 0 clears the mode server-side (even if the client still sends one).
+    await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 0, paymentMode: "CASH" }] });
+    assert.equal((await entry(0)).paymentMode, null, "zero recovery clears Payment Mode");
+    assert.equal((await entry(0)).todaysActual, 0);
+    // Negative recovery is rejected by the existing amount rule and changes nothing.
+    await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 9000, paymentMode: "CASH" }] });
+    await assert.rejects(() => svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: -5, paymentMode: null }] }), (err) => err instanceof ZodError);
+    assert.equal((await entry(0)).paymentMode, "CASH", "rejected negative leaves state untouched");
+    // Positive again starts from the explicit choice only — nothing is guessed.
+    await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 0 }] });
+    await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 5000 }] });
+    assert.equal((await entry(0)).paymentMode, null, "0 -> positive starts blank");
+    // Sales actuals never carry a Payment Mode.
+    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 100 }] });
+    assert.equal("paymentMode" in (await svc.getDailyWork(SO, "SALES", DATE)).dealers[0], false, "Sales DTO remains unchanged");
   }
 
   // 3) Save Draft persists rows; 4) unauthorized dealer rejected.

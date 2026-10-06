@@ -212,7 +212,30 @@ async function expectStatus(fn: () => Promise<unknown>, status: number, label: s
   catch (error) { assert.equal((error as { status?: number }).status, status, `${label}: ${(error as Error).message}`); }
 }
 
+/** A one-day scenario: Sales plan submitted + a submitted Recovery row with this ACTUAL amount / Payment Mode, then final submit. */
+async function submitReportWithRecovery(actual: string, paymentMode: string | null) {
+  const f = makeFake();
+  const svc = loadService(f.prisma);
+  await svc.setDailyNoPlan(SO, { workDate: DATE, section: "RECOVERY", noPlan: true });
+  f.addPlan({ salesPlan: 100 });
+  const batchId = f.currentDay().currentBatchId;
+  await svc.submitDailyWorkDay(SO, { workDate: DATE });
+  const sales = f.entries.find((row) => row.section === "SALES")!;
+  f.entries.push({ ...sales, id: "rec-1", section: "RECOVERY", rowKey: "d1", todaysPlan: "5000", todaysActual: actual, paymentMode, batchId, status: "PLAN_SUBMITTED" } as typeof sales);
+  await svc.enterDailyActual(SO, { section: "SALES", workDate: DATE, entries: [{ entryId: sales.id, todaysActual: 90 }] });
+  return { f, run: () => svc.submitDailyReport(SO, { workDate: DATE, selfRating: 7 }) };
+}
+
 async function main() {
+  // Payment Mode rule at final submission: a RECEIVED recovery (> 0) needs a mode; 0 / negative never does.
+  {
+    const blank = await submitReportWithRecovery("25000", null);
+    await assert.rejects(blank.run, (error: Error & { status?: number }) => error.status === 422 && error.message === "Select Payment Mode for recovery amount.");
+    assert.equal(blank.f.currentDay().status, "OPEN", "a positive recovery without Payment Mode is not finalized");
+    for (const mode of ["CHEQUE", "UPI", "NEFT_RTGS", "CASH"]) assert.equal((await (await submitReportWithRecovery("25000", mode)).run()).ok, true, `positive recovery + ${mode} submits`);
+    assert.equal((await (await submitReportWithRecovery("0", null)).run()).ok, true, "zero recovery submits without a Payment Mode");
+    assert.equal((await (await submitReportWithRecovery("-5", null)).run()).ok, true, "a negative recovery never requires a Payment Mode");
+  }
   const fake = makeFake();
   const svc = loadService(fake.prisma);
 

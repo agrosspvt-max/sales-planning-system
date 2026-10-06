@@ -23,6 +23,7 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
     return modules[resource] ? [modules[resource], read ? "read" : p.endsWith("/status") ? "delete" : writeAction(method)] : null;
   }
   if (p === "audit") return ["audit", "read"];
+  if (p === "reports/last-payment" || p.startsWith("reports/last-payment/")) return ["lastPaymentReport", p.endsWith("/export") ? "export" : "read"];
   if (p.startsWith("reports")) return ["reports", p.endsWith("/export") ? "export" : "read"];
   if (p.startsWith("calendar")) return ["calendar", read ? "read" : writeAction(method)];
   if (p === "labels") return ["labels", "update"];

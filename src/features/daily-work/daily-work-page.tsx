@@ -31,7 +31,7 @@ import { isCnSundayDateKey } from "@/lib/cn-request";
 import {
   combineDailyWorkRows, combineAppointmentRows, combineConversionRows, rowTaskType,
   currentBusinessDate, dailyWorkShowsResults, visibleDailyWorkRows, DEFAULT_DAILY_WORK_VIEW, DailyWorkView,
-  type RecoveryPaymentMode, type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
+  type RecoveryPaymentMode, paymentModeApplies, paymentModeForActual, type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
   MANDATORY_SECTIONS, resolveDailyWorkSection,
 } from "@/lib/daily-work";
 
@@ -56,6 +56,8 @@ interface Payload {
   section: "SALES" | "RECOVERY"; workDate: string; monthName: string | null; canEnterActual: boolean;
   availableDealers: AvailableDealer[]; applicableSchemes: SchemeOption[];
   applicableSchemesByDealer: Record<string, SchemeOption[]>; cnTasks?: CnTask[]; materializedCnTasks?: CnTask[]; dealers: DealerDto[];
+  /** Daily Work entry ids that came from a Calendar Daily Task (Task Type "Calendar"). */
+  calendarEntryIds?: string[];
 }
 interface AvailableDealer { id: string; name: string; monthlyPlan: number; actual: number; pending: number }
 
@@ -72,9 +74,9 @@ const money = (n: number) => formatCurrency(n);
 const numOr0 = (s: string) => { const n = Number(s); return Number.isFinite(n) ? n : 0; };
 
 /** Shared Task Type cell text for individual Daily Plan rows. */
-interface TaskTypeLabels { auto: string; manual: string; none: string }
+interface TaskTypeLabels { auto: string; manual: string; none: string; calendar: string }
 const taskTypeText = (value: TaskType | null, L: TaskTypeLabels): string =>
-  value === "AUTO" ? L.auto : value === "MANUAL" ? L.manual : L.none;
+  value === "AUTO" ? L.auto : value === "CALENDAR" ? L.calendar : value === "MANUAL" ? L.manual : L.none;
 
 /**
  * The active section's Save Draft handle, lifted to the page so the button can live in the Plan Type toolbar
@@ -553,6 +555,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     autoTaskConfirmed: useLabel("daily_work.state.auto_task_confirmed"),
     taskType: useLabel("daily_work.col.task_type"),
     taskTypeAuto: useLabel("daily_work.task_type.auto"),
+    taskTypeCalendar: useLabel("daily_work.task_type.calendar"),
     taskTypeManual: useLabel("daily_work.task_type.manual"),
     taskTypeNone: useLabel("daily_work.combined.none"),
   };
@@ -580,11 +583,16 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   // (the existing CN → DailyWorkEntry link exposed as materializedCnTasks). Sales never has an Auto Task source.
   const showTaskType = view === DailyWorkView.PLAN;
   const autoDealerIds = useMemo(() => new Set((data?.materializedCnTasks ?? []).map((t) => t.dealerId)), [data?.materializedCnTasks]);
-  const rowTaskTypeOf = (dealerId: string): TaskType => rowTaskType(autoDealerIds.has(dealerId));
-  const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.taskTypeNone };
+  // A row created from a Calendar Daily Task (CalendarEntry → DailyWorkEntry link) shows Task Type "Calendar".
+  const calendarDealerIds = useMemo(() => {
+    const ids = new Set(data?.calendarEntryIds ?? []);
+    return new Set((data?.dealers ?? []).filter((d) => ids.has(d.entryId)).map((d) => d.dealerId));
+  }, [data?.calendarEntryIds, data?.dealers]);
+  const rowTaskTypeOf = (dealerId: string): TaskType => rowTaskType(autoDealerIds.has(dealerId), calendarDealerIds.has(dealerId));
+  const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.taskTypeNone, calendar: L.taskTypeCalendar };
 
   const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", section, workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
-  const payloadRows = () => rows.map((r) => ({ dealerId: r.dealerId, todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null, ...(!isSales ? { paymentMode: r.paymentMode } : {}) }));
+  const payloadRows = () => rows.map((r) => ({ dealerId: r.dealerId, todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null }));
 
   // AUTOSAVE — persist the current Daily Plan draft through the existing section save endpoint (current editable
   // batch, same authorization). Status is refreshed so the progress bar tracks saved data; section rows are NOT
@@ -592,7 +600,11 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   // Daily Report: the SAME autosave engine persists today's actuals on the already-submitted entries through the existing
   // /actual endpoint (it only updates actuals; it never finalizes the day). Plan keeps its own payload/endpoint.
   const isReport = view === DailyWorkView.REPORT;
-  const actualEntries = () => visibleRows.filter((r) => r.todaysActual.trim() !== "").map((r) => ({ entryId: r.entryId, todaysActual: numOr0(r.todaysActual) }));
+  // Recovery also carries the actual Payment Mode (null whenever Today's Recovery is not a positive amount) in the SAME call.
+  const actualEntries = () => visibleRows.filter((r) => r.todaysActual.trim() !== "").map((r) => ({
+    entryId: r.entryId, todaysActual: numOr0(r.todaysActual),
+    ...(!isSales ? { paymentMode: paymentModeForActual(r.todaysActual, r.paymentMode) } : {}),
+  }));
   const autosaveEnabled = isReport ? canEnterActual && !locked : view === DailyWorkView.PLAN && !locked;
   const draftKey = isReport ? `R|${JSON.stringify(actualEntries())}` : JSON.stringify(payloadRows());
   const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
@@ -634,7 +646,8 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     setRows((rs) => [...rs, { entryId: `new-${d.id}`, batchId: "", dealerId: d.id, dealerName: d.name, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending, todaysPlan: "", entryType: "REGULAR", schemeId: "", paymentMode: null, todaysActual: "", status: "NEW" }]);
   };
 
-  const columnCount = 5 + (isSales ? 0 : 1) + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0);
+  const showPaymentMode = !isSales && showResults;
+  const columnCount = 5 + (showPaymentMode ? 1 : 0) + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0);
   const compactRecovery = !isSales && view === DailyWorkView.PLAN;
 
   if (isLoading) return <Skeleton className="h-64 w-full" />;
@@ -653,7 +666,6 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
             <col className="w-24" />
             <col className="w-[120px]" />
             <col className="w-[120px]" />
-            <col className="w-[120px]" />
             <col className="w-28" />
           </colgroup>}
           <TableHeader>
@@ -663,9 +675,9 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
               <TableHead className="w-44 text-right">{isSales ? L.plan : <MonthlyRecoveryPlanHeader label={L.plan} />}</TableHead>
               <TableHead className="w-32 text-right">{L.pending}</TableHead>
               <TableHead className="w-36 text-right">{L.todaysPlan}</TableHead>
-              {!isSales && <TableHead className="w-36">{L.paymentMode}</TableHead>}
               <TableHead className="w-44">{L.type}</TableHead>
               {showResults && <TableHead className="w-36 text-right">{L.actual}</TableHead>}
+              {showPaymentMode && <TableHead className="w-36">{L.paymentMode}</TableHead>}
               {view === DailyWorkView.PLAN && <TableHead className="w-16" />}
             </TableRow>
           </TableHeader>
@@ -677,9 +689,9 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
               <TableCell className="text-right tabular-nums">{money(combined.monthlyPlan)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(combined.pending)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(combined.todaysPlan)}</TableCell>
-              {!isSales && <TableCell>{L.none}</TableCell>}
               <TableCell>{L.none}</TableCell>
               {showResults && <TableCell className="text-right tabular-nums">{money(combined.todaysActual)}</TableCell>}
+              {showPaymentMode && <TableCell>{L.none}</TableCell>}
               {view === DailyWorkView.PLAN && <TableCell />}
             </TableRow>
 
@@ -705,13 +717,6 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                     <TableCell className="p-1 text-right">
                       <Input type="number" min={0} className="h-8 w-full text-right" placeholder="0" value={r.todaysPlan} disabled={busy || submitted} onChange={(e) => update(i, { todaysPlan: e.target.value })} />
                     </TableCell>
-                    {!isSales && <TableCell className="p-1">
-                      <RecoveryPaymentModeField
-                        value={r.paymentMode}
-                        disabled={busy || locked}
-                        onChange={submitted ? undefined : (paymentMode) => update(i, { paymentMode })}
-                      />
-                    </TableCell>}
                     {/* Scheme Recovery uses the dealer's existing enrolled/verified scheme-payment scope. */}
                     <TableCell className="p-1">
                       <div className="flex flex-col gap-1">
@@ -740,7 +745,15 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                     </TableCell>
                     {/* Today's Sales/Recovery belongs to Daily Report and remains post-submit only. */}
                     {showResults && <TableCell className="p-1 text-right">
-                      <Input type="number" min={0} className="h-8 w-full text-right" placeholder="0" value={r.todaysActual} disabled={busy || locked} onChange={(e) => updateEntry(r.entryId, { todaysActual: e.target.value })} />
+                      <Input type="number" min={0} className="h-8 w-full text-right" placeholder="0" value={r.todaysActual} disabled={busy || locked} onChange={(e) => updateEntry(r.entryId, { todaysActual: e.target.value, paymentMode: paymentModeForActual(e.target.value, r.paymentMode) })} />
+                    </TableCell>}
+                    {/* Payment Mode — HOW the actual recovery was received. Only selectable while Today's Recovery > 0; cleared otherwise. */}
+                    {showPaymentMode && <TableCell className="p-1">
+                      <RecoveryPaymentModeField
+                        value={paymentModeForActual(r.todaysActual, r.paymentMode)}
+                        disabled={busy || locked || !paymentModeApplies(r.todaysActual)}
+                        onChange={(paymentMode) => updateEntry(r.entryId, { paymentMode })}
+                      />
                     </TableCell>}
                     {view === DailyWorkView.PLAN && <TableCell className="text-right">
                       {!submitted && (
@@ -921,7 +934,7 @@ function AddDealerDialog({ available, labels, onAdd, onClose }: {
 /* ==================================== SECTION 3 — Dealer Appointment ==================================== */
 
 interface ApptRowDto { entryId: string; batchId: string; rowId: string; dealerName: string; marketName: string; monthlyPlan: null; pending: null; status: "APPOINTED" | "NOT_APPOINTED" | null; rowStatus: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" }
-interface ApptPayload { section: "APPOINTMENT"; workDate: string; canEnterStatus: boolean; rows: ApptRowDto[] }
+interface ApptPayload { section: "APPOINTMENT"; workDate: string; canEnterStatus: boolean; rows: ApptRowDto[]; calendarEntryIds?: string[] }
 interface ApptEditRow { entryId: string; batchId: string; rowId: string; dealerName: string; marketName: string; status: "APPOINTED" | "NOT_APPOINTED" | ""; rowStatus: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW" }
 
 let apptSeq = 0;
@@ -962,7 +975,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
     marketPlaceholder: useLabel("daily_work.placeholder.market"), selectStatus: useLabel("daily_work.placeholder.select_status"),
     noSubmittedSection: useLabel("daily_work.report.no_submitted_section"),
     taskType: useLabel("daily_work.col.task_type"),
-    taskTypeAuto: useLabel("daily_work.task_type.auto"), taskTypeManual: useLabel("daily_work.task_type.manual"),
+    taskTypeAuto: useLabel("daily_work.task_type.auto"), taskTypeManual: useLabel("daily_work.task_type.manual"), taskTypeCalendar: useLabel("daily_work.task_type.calendar"),
   };
 
   const showResults = dailyWorkShowsResults(view);
@@ -978,7 +991,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   }, [visibleRows, L.dealer, L.dealers, L.market, L.markets]);
 
   // Dealer Appointment has no Auto Task source, so every row is Manual (derived, not fabricated).
-  const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.none };
+  const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.none, calendar: L.taskTypeCalendar };
 
   const payloadRows = () => rows.filter((r) => r.dealerName.trim() !== "").map((r) => ({ rowId: r.rowId, dealerName: r.dealerName, marketName: r.marketName }));
 
@@ -1043,8 +1056,8 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
               return (
                 <TableRow key={r.entryId}>
                   <TableCell className="p-1"><Input className="h-8 w-full" placeholder={L.dealerName} value={r.dealerName} disabled={busy || submitted} onChange={(e) => update(i, { dealerName: e.target.value })} /></TableCell>
-                  {/* Task Type — Dealer Appointment has no Auto Task source, so rows are Manual. */}
-                  {showTaskType && <TableCell>{taskTypeText(rowTaskType(false), taskTypeL)}</TableCell>}
+                  {/* Task Type — Dealer Appointment has no Auto Task source: a row is Calendar (from a Calendar Daily Task) or Manual. */}
+                  {showTaskType && <TableCell>{taskTypeText(rowTaskType(false, (data?.calendarEntryIds ?? []).includes(r.entryId)), taskTypeL)}</TableCell>}
                   <TableCell className="p-1"><Input className="h-8 w-full" placeholder={L.marketPlaceholder} value={r.marketName} disabled={busy || submitted} onChange={(e) => update(i, { marketName: e.target.value })} /></TableCell>
                   {/* Monthly Dealer Plan + Pending — placeholders (Dealer Planning not built yet). */}
                   <TableCell className="text-right text-muted-foreground">{L.none}</TableCell>
@@ -1133,7 +1146,7 @@ function ConversionSection({ workDate, view, locked }: { workDate: string; view:
     empty: useLabel("daily_work.empty.scheme_conversion"),
     noSubmittedSection: useLabel("daily_work.report.no_submitted_section"),
     taskType: useLabel("daily_work.col.task_type"),
-    taskTypeAuto: useLabel("daily_work.task_type.auto"), taskTypeManual: useLabel("daily_work.task_type.manual"),
+    taskTypeAuto: useLabel("daily_work.task_type.auto"), taskTypeManual: useLabel("daily_work.task_type.manual"), taskTypeCalendar: useLabel("daily_work.task_type.calendar"),
   };
 
   const showResults = dailyWorkShowsResults(view);
@@ -1149,7 +1162,7 @@ function ConversionSection({ workDate, view, locked }: { workDate: string; view:
   }, [visibleRows, L.dealer, L.dealers]);
 
   // Scheme Conversion has no Auto Task source, so every row is Manual (derived, not fabricated).
-  const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.none };
+  const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.none, calendar: L.taskTypeCalendar };
 
   const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", "SCHEME_CONVERSION", workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
   const payloadRows = () => rows.map((r) => ({ dealerId: r.dealerId, schemeId: r.schemeId, todaysPlan: numOr0(r.todaysPlan) }));

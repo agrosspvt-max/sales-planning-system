@@ -4,7 +4,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { Role } from "@prisma/client";
 import { testLoader } from "@/features/dealer-tags/test-loader";
-import { ADMIN_MODULES, hasAdminPermission, mayEnterPage, isAdministrativeRole, accountLandingPage, type AdminPermissions } from "./permissions";
+import { ADMIN_MODULES, hasAdminPermission, mayEnterPage, moduleForPage, isAdministrativeRole, accountLandingPage, type AdminPermissions } from "./permissions";
 import { assertApiAccess, apiPermission } from "./route-permissions";
 import { NAV_ITEMS, navForRole } from "@/features/navigation/nav";
 import { can, ROLE_LABELS } from "@/lib/rbac";
@@ -73,6 +73,56 @@ async function main() {
     const all = custom(Object.fromEntries(ADMIN_MODULES.map(m => [m.id, [...m.actions]])));
     assert.equal(mayEnterPage(all, item.href), true, `Catalogue covers real navigation: ${item.href}`);
   }
+  // ---- Permission catalogue vs the real sidebar (single source: ADMIN_MODULES drives the Account Management tree, the sidebar and the guards) ----
+  // Drift guard: every sidebar leaf is either a delegatable module with exactly that page, or is deliberately NOT delegatable.
+  const NON_DELEGATABLE: Record<string, string> = {
+    "/account-management": "owner-only", "/account": "every user's own password page", "/team-performance": "RM-only role workflow",
+    "/planning/create": "aggregate entry; shown when any planning module is granted",
+  };
+  for (const item of NAV_ITEMS.flatMap((i) => i.children ?? [i])) {
+    if (NON_DELEGATABLE[item.href]) continue;
+    const entry = ADMIN_MODULES.find((m) => m.id === moduleForPage(item.href));
+    assert.ok(entry && entry.href === item.href, `sidebar item "${item.label}" (${item.href}) has its OWN permission entry in Account Management`);
+  }
+  assert.equal(ADMIN_MODULES.some((m) => (m.href as string) === "/account-management" || (m.id as string) === "accountManagement"), false, "Account Management stays owner-only: never in the catalogue");
+  // Last Payment Report is a real permission entry with its meaningful actions, in the Insights group next to Reports.
+  const lpr = ADMIN_MODULES.find((m) => m.id === "lastPaymentReport")!;
+  assert.deepEqual([lpr.label, lpr.group, lpr.href, [...lpr.actions]], ["Last Payment Report", "Insights", "/reports/last-payment", ["read", "export"]]);
+  assert.equal(new Set(ADMIN_MODULES.map((m) => m.id)).size, ADMIN_MODULES.length, "module ids are unique");
+  const ui = readFileSync("src/features/accounts/accounts-page.tsx", "utf8");
+  assert.ok(ui.includes("ADMIN_MODULES.filter(m => m.group === group)") && ui.includes("setPermissions(Object.fromEntries(ADMIN_MODULES.map(m => [m.id, [...m.actions]])))") && ui.includes("onClick={() => setPermissions({})}"), "the permission tree, Select All and Clear All are all derived from ADMIN_MODULES");
+  assert.ok(Object.keys(Object.fromEntries(ADMIN_MODULES.map((m) => [m.id, [...m.actions]]))).includes("lastPaymentReport"), "Select All includes it");
+  assert.ok(!ADMIN_MODULES.filter((m) => m.actions.length === 1).some((m) => m.id === "lastPaymentReport") && ui.includes('m.actions.length === 1 && <span'), "view-only modules show 'View only'; Last Payment Report has a real Export action");
+  // Sidebar ← permission: granting shows it, revoking hides it; Reports is independent in both directions.
+  const lprNav = (permissions: AdminPermissions) => navForRole(Role.CUSTOM_ADMIN, true, permissions).some((n) => n.href === "/reports/last-payment");
+  assert.equal(lprNav({ lastPaymentReport: ["read"] }), true, "granted → in the sidebar");
+  assert.equal(lprNav({}), false, "revoked → hidden");
+  assert.equal(lprNav({ reports: ["read", "export"] }), false, "Reports alone does not reveal Last Payment Report");
+  assert.equal(navForRole(Role.CUSTOM_ADMIN, true, { lastPaymentReport: ["read"] }).some((n) => n.href === "/reports"), false, "…and Last Payment Report alone does not reveal Reports");
+  // Route/API authorization ← permission (the sidebar is never the only guard).
+  assert.equal(mayEnterPage(custom(), "/reports/last-payment"), false, "direct URL without permission is denied");
+  assert.equal(mayEnterPage(custom({ reports: ["read", "export"] }), "/reports/last-payment"), false, "…even with Reports");
+  assert.equal(mayEnterPage(custom({ lastPaymentReport: ["read"] }), "/reports/last-payment"), true, "direct URL with permission works");
+  assert.equal(mayEnterPage(custom({ lastPaymentReport: ["read"] }), "/reports"), false);
+  assert.deepEqual(apiPermission("/api/reports/last-payment", "GET"), ["lastPaymentReport", "read"]);
+  assert.deepEqual(apiPermission("/api/reports/last-payment/export", "GET"), ["lastPaymentReport", "export"]);
+  assert.deepEqual(apiPermission("/api/reports/export", "GET"), ["reports", "export"], "the general Reports export is unchanged");
+  deny(() => assertApiAccess(custom({ reports: ["read", "export"] }), "/api/reports/last-payment", "GET"));
+  deny(() => assertApiAccess(custom({ reports: ["read", "export"] }), "/api/reports/last-payment/export", "GET"));
+  assertApiAccess(custom({ lastPaymentReport: ["read"] }), "/api/reports/last-payment", "GET");
+  deny(() => assertApiAccess(custom({ lastPaymentReport: ["read"] }), "/api/reports/last-payment/export", "GET"));
+  assertApiAccess(custom({ lastPaymentReport: ["read", "export"] }), "/api/reports/last-payment/export", "GET");
+  // Existing assignments are preserved verbatim (no auto-grant): an account that already has a set of permissions keeps exactly that set.
+  const existing: AdminPermissions = { reports: ["read", "export"], cnRequests: ["read"] };
+  assert.equal(hasAdminPermission(custom(existing), "lastPaymentReport"), false, "no silent elevation for existing accounts");
+  assert.equal(hasAdminPermission(custom(existing), "reports", "export"), true);
+  assert.equal(hasAdminPermission(custom(existing), "cnRequests", "read"), true);
+  // Other roles are unaffected: SO / RM / Super Admin keep their role-based access to the page and the API.
+  for (const role of [Role.SALES_OFFICER, Role.REGIONAL_MANAGER, Role.SUPER_ADMIN]) {
+    assert.equal(mayEnterPage({ role }, "/reports/last-payment"), true, `${role} page`);
+    assertApiAccess({ role }, "/api/reports/last-payment/export", "GET");
+    assert.equal(navForRole(role).some((n) => n.href === "/reports/last-payment"), true, `${role} sidebar`);
+  }
   // Every real endpoint/method is classified or explicitly closed to delegated accounts.
   let routes = 0;
   function scan(dir: string) {
@@ -106,6 +156,11 @@ async function main() {
   await assert.rejects(account.requireAccountOwner(root), e => (e as { status: number }).status === 403);
   const input = { name: "  Rahul  ", username: "Controller", password: "local-test-only", designation: "Operations Head", isActive: true, permissions: { cnRequests: ["read", "approve"] } };
   assert.equal(account.createAccountSchema.parse(input).username, "controller");
+  // Account service: the new permission validates like every other (read required before export; unknown actions rejected).
+  const base = { name: "Rahul", username: "controller", password: "local-test-only", designation: "Ops", isActive: true };
+  assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "export"] } }).success, true);
+  assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["export"] } }).success, false, "export needs module access");
+  assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "delete"] } }).success, false, "no invented actions");
   for (const bad of [{ ...input, designation: " " }, { ...input, password: "" }, { ...input, role: "SUPER_ADMIN" }, { ...input, permissions: { accountManagement: ["read"] } }, { ...input, permissions: { cnRequests: ["approve"] } }]) {
     assert.equal(account.createAccountSchema.safeParse(bad).success, false);
   }

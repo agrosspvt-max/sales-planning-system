@@ -911,6 +911,7 @@ export const DEFAULT_LABELS = {
   "daily_work.review.reviewer_only": "Only a Regional Manager can review a Sales Officer's Daily Work.",
   "daily_work.review.invalid_officer": "That Sales Officer is not in your team.",
   "daily_work.review.not_submitted": "This Daily Work has not been submitted yet.",
+  "daily_work.review.report_not_submitted": "Daily Report has not been submitted yet.",
   "daily_work.review.already_reviewed": "This Daily Work has already been reviewed.",
   "daily_work.review.rating_required": "Please select a rating from 1 to 10.",
   // Phase 3 — Admin company-wide Performance dashboard (read-only)

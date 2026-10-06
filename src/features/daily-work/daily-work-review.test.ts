@@ -30,10 +30,11 @@ interface Store {
   submitted: Set<string>; // officerIds with a SUBMITTED day (for DATE)
   self: Map<string, number | null>; // officerId → selfRating
   reviews: Map<string, { rating: number; reviewerId: string }>; // officerId → review (for DATE)
+  planOnly: Set<string>; // officerIds whose Daily PLAN was submitted (planSubmittedAt) but whose report is not finalized
 }
 
 function makeFake(init: Partial<Store> = {}) {
-  const store: Store = { submitted: init.submitted ?? new Set(), self: init.self ?? new Map(), reviews: init.reviews ?? new Map() };
+  const store: Store = { submitted: init.submitted ?? new Set(), self: init.self ?? new Map(), reviews: init.reviews ?? new Map(), planOnly: init.planOnly ?? new Set() };
   const norm = (a: unknown, rest: unknown[]): Prisma.Sql => (Array.isArray(a) ? Prisma.sql(a as unknown as TemplateStringsArray, ...rest) : (a as Prisma.Sql));
 
   function runRaw(sql: Prisma.Sql): unknown {
@@ -57,8 +58,14 @@ function makeFake(init: Partial<Store> = {}) {
     if (text.startsWith('SELECT EXISTS(') && text.includes('"DailyWorkDay"')) {
       return [{ submitted: store.submitted.has(v[0] as string) }];
     }
+    // isDailyWorkPlanSubmitted(officerId): the plan milestone lives on DailyWorkEntry.planSubmittedAt (finalized days keep it too).
+    if (text.startsWith('SELECT EXISTS(') && text.includes('"planSubmittedAt" IS NOT NULL')) {
+      const id = v[0] as string;
+      return [{ submitted: store.planOnly.has(id) || store.submitted.has(id) }];
+    }
     if (text.startsWith('SELECT "currentBatchId", "status", "selfRating", "finalizedAt"')) {
       const officerId = v[0] as string;
+      if (store.planOnly.has(officerId)) return [{ currentBatchId: `open:${officerId}`, status: "OPEN", selfRating: null, finalizedAt: null }];
       return store.submitted.has(officerId)
         ? [{ currentBatchId: `locked:${officerId}:${v[1] as string}`, status: "FINALIZED", selfRating: store.self.get(officerId) ?? null, finalizedAt: new Date("2026-09-27T10:00:00.000Z") }]
         : [];
@@ -289,6 +296,48 @@ async function main() {
     await expectStatus(() => svc.getDailyWorkReviewDetail(RM2, "so1", DATE), 403, "unrelated RM cannot view detail");
     // Detail for an unsubmitted officer is 409 before any section read.
     await expectStatus(() => svc.getDailyWorkReviewDetail(RM1, "so2", DATE), 409, "unsubmitted detail rejected");
+  }
+
+  // 10b) PLAN-ONLY days (Daily Plan submitted, Daily Report not yet): Performance → View opens the submitted plan, shows no
+  //      fabricated report values, and the RM still cannot rate until the report is finalized.
+  {
+    const f = makeFake({ planOnly: new Set(["so2"]), submitted: new Set(["so1"]), self: new Map([["so1", 8]]), reviews: new Map([["so1", { rating: 9, reviewerId: "rm1" }]]) });
+    const svc = loadService(f.prisma);
+    // The Performance route opts in: plan-only is viewable by the RM and by Admin.
+    for (const viewer of [RM1, ADMIN]) {
+      const d = await svc.getDailyWorkReviewDetail(viewer, "so2", DATE, { allowPlanOnly: true });
+      assert.equal(d.reportSubmitted, false, "report not submitted");
+      assert.equal(d.selfRating, null, "no self-rating before the report");
+      assert.equal(d.review, null, "no RM rating before the report");
+    }
+    // The default (Admin Daily Report viewer, other callers) is unchanged: still the finalized report only.
+    await expectStatus(() => svc.getDailyWorkReviewDetail(RM1, "so2", DATE), 409, "plan-only is not a submitted report by default");
+    await expectStatus(() => svc.getAdminDailyWorkView(ADMIN, { workDate: DATE, groupId: "g1", officerId: "so2" }), 409, "Admin report viewer unchanged");
+    // No plan at all → still 409 even with the opt-in.
+    await expectStatus(() => loadService(makeFake().prisma).getDailyWorkReviewDetail(RM1, "so2", DATE, { allowPlanOnly: true }), 409, "nothing submitted → nothing to view");
+    // Scope is unchanged: an unrelated RM is forbidden, and an unrelated SO cannot open it either.
+    await expectStatus(() => svc.getDailyWorkReviewDetail(RM2, "so2", DATE, { allowPlanOnly: true }), 403, "scope unchanged");
+    assert.equal((await svc.getDailyWorkReviewDetail(SO1, "so1", DATE, { allowPlanOnly: true })).reportSubmitted, true);
+    // Rating is still blocked until the report is finalized, and nothing was written.
+    await expectStatus(() => svc.createDailyWorkReview(RM1, { officerId: "so2", workDate: DATE, rating: 7 }), 409, "RM cannot rate a plan-only day");
+    assert.equal(f.store.reviews.has("so2"), false);
+    // Once the report is finalized the existing full review is unchanged (self-rating + RM rating).
+    f.store.planOnly.delete("so2"); f.store.submitted.add("so2"); f.store.self.set("so2", 6);
+    const full = await svc.getDailyWorkReviewDetail(RM1, "so2", DATE, { allowPlanOnly: true });
+    assert.equal(full.reportSubmitted, true); assert.equal(full.selfRating, 6);
+    assert.equal((await svc.createDailyWorkReview(RM1, { officerId: "so2", workDate: DATE, rating: 7 })).rating, 7, "existing rating flow after the report");
+    const fullSO1 = await svc.getDailyWorkReviewDetail(RM1, "so1", DATE, { allowPlanOnly: true });
+    assert.equal(fullSO1.review?.rating, 9, "existing review still returned for a finalized day");
+  }
+  // UI/route wiring: View is offered once the PLAN is submitted; the dialog hides rating on a plan-only day.
+  {
+    const read = (p: string) => readFileSync(p, "utf8");
+    const team = read("src/features/daily-work/team-performance-page.tsx");
+    assert.ok(team.includes("{r.submitted ? (") && !team.includes("{r.reportSubmittedAt ? ("), "RM Team Performance offers View from Plan Submission");
+    assert.ok(/data\.reportSubmitted/.test(team) && team.includes("<RmReviewPanel") && team.includes("L.reportPending"), "plan-only dialog shows the notice and no rating panel");
+    assert.ok(read("src/app/api/daily-work/review/route.ts").includes("{ allowPlanOnly: true }"), "only the review route opts in");
+    const perf = read("src/features/daily-work/performance-page.tsx");
+    assert.ok(perf.includes("{r.submitted ? (") && perf.includes("timeText(r.planSubmittedAt)") && perf.includes("timeText(r.reportSubmittedAt)"), "Performance: separate Plan/Report columns, View on plan submission");
   }
 
   // ===================== Phase 3 — Admin company-wide performance =====================

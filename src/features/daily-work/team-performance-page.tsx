@@ -23,6 +23,7 @@ import { useLabel } from "@/features/labels/label-ui";
 
 interface TeamRow {
   officerId: string; officerName: string; date: string;
+  submitted: boolean; // the Daily Plan was submitted → there is something to view
   reportSubmittedAt: string | null; selfRating: number | null; rmRating: number | null;
 }
 interface TeamSummary {
@@ -40,7 +41,7 @@ interface ReviewDetail {
   officerId: string; officerName: string; workDate: string;
   sales: { dealers: DealerRow[] }; recovery: { dealers: DealerRow[] };
   appointment: { rows: ApptRow[] }; conversion: { rows: ConvRow[] };
-  summary: SummaryDto; selfRating: number | null; review: ReviewDto | null;
+  summary: SummaryDto; selfRating: number | null; review: ReviewDto | null; reportSubmitted: boolean;
 }
 
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
@@ -130,7 +131,7 @@ export function TeamPerformancePage() {
                   <TableCell className="tabular-nums">{r.selfRating == null ? dash : ratingText(r.selfRating)}</TableCell>
                   <TableCell className="tabular-nums">{r.rmRating == null ? dash : ratingText(r.rmRating)}</TableCell>
                   <TableCell className="text-right">
-                    {r.reportSubmittedAt ? (
+                    {r.submitted ? (
                       <Button size="sm" variant="outline" onClick={() => setOpenOfficer({ officerId: r.officerId, date: r.date })}><Eye className="h-4 w-4" /> {L.view}</Button>
                     ) : dash}
                   </TableCell>
@@ -172,6 +173,7 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
     visits: useLabel("daily_work.section.visits"),
     others: useLabel("daily_work.section.others"),
     selfRating: useLabel("daily_work.review.self_rating"),
+    reportPending: useLabel("daily_work.review.report_not_submitted"),
     close: useLabel("daily_work.action.cancel"),
   };
   const { data, isLoading, error } = useQuery<ReviewDetail>({
@@ -232,7 +234,10 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
               <span className="font-medium tabular-nums">{ratingText(data.selfRating)}</span>
             </div>
 
-            <RmReviewPanel
+            {/* Plan-only day: the report (actuals, self-rating) does not exist yet, so there is nothing to rate. */}
+            {!data.reportSubmitted ? (
+              <p className="rounded-lg border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">{L.reportPending}</p>
+            ) : <RmReviewPanel
               officerId={officerId}
               workDate={workDate}
               review={data.review}
@@ -241,7 +246,7 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
                 qc.invalidateQueries({ queryKey: ["team-review", officerId, workDate] });
                 qc.invalidateQueries({ queryKey: ["team-performance"] });
               }}
-            />
+            />}
           </div>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.close}</Button></DialogFooter>

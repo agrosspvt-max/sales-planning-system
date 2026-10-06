@@ -1441,6 +1441,16 @@ async function isDailyWorkSubmitted(officerId: string, workDate: string): Promis
   return rows[0]?.submitted ?? false;
 }
 
+/** Plan Submission milestone: Submit Daily Work stamps `planSubmittedAt` on the day's frozen entries (the same source Performance shows). */
+async function isDailyWorkPlanSubmitted(officerId: string, workDate: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<{ submitted: boolean }[]>(Prisma.sql`
+    SELECT EXISTS(
+      SELECT 1 FROM "DailyWorkEntry"
+      WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "planSubmittedAt" IS NOT NULL
+    ) AS "submitted"`);
+  return rows[0]?.submitted ?? false;
+}
+
 export interface DailyWorkReviewDetailPayload {
   officerId: string;
   officerName: string;
@@ -1452,6 +1462,8 @@ export interface DailyWorkReviewDetailPayload {
   summary: DailySummaryPayload;
   selfRating: number | null;
   review: DailyWorkReviewDto | null;
+  /** false → only the Daily Plan has been submitted: no actuals, self-rating or RM rating exist, and rating is not allowed. */
+  reportSubmitted: boolean;
   reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
 }
 
@@ -1460,7 +1472,7 @@ export interface DailyWorkReviewDetailPayload {
  * existing section getters (scope-checked via resolveReadOfficer) — no duplicate data logic — plus the SO's
  * self-rating and any existing RM review. Read-only: no editing/submission is possible through this path.
  */
-export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: string, rawDate?: string): Promise<DailyWorkReviewDetailPayload> {
+export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: string, rawDate?: string, opts: { allowPlanOnly?: boolean } = {}): Promise<DailyWorkReviewDetailPayload> {
   const L = await getResolvedLabels();
   const officerId = (rawOfficerId ?? "").trim();
   if (!officerId) throw new ApiError(422, L["daily_work.review.invalid_officer"]);
@@ -1470,7 +1482,10 @@ export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: s
     await assertOfficerInScope(ctx, officerId); // RM's team / Admin scope; else 403
   }
   const workDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate ?? "") ? rawDate! : currentBusinessDate();
-  if (!(await isDailyWorkSubmitted(officerId, workDate))) throw new ApiError(409, L["daily_work.review.not_submitted"]);
+  // The Daily Report (finalized day) gives the full review. With `allowPlanOnly` (Performance → View) a day whose Daily Plan
+  // was submitted but whose report was not is also viewable — as the submitted plan only. Rating is still report-only.
+  const reportSubmitted = await isDailyWorkSubmitted(officerId, workDate);
+  if (!reportSubmitted && !(opts.allowPlanOnly && await isDailyWorkPlanSubmitted(officerId, workDate))) throw new ApiError(409, L["daily_work.review.not_submitted"]);
 
   const [officer, sales, recovery, appointment, conversion, summary, status, review] = await Promise.all([
     prisma.user.findUnique({ where: { id: officerId }, select: { name: true } }),
@@ -1487,8 +1502,10 @@ export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: s
     officerName: officer?.name ?? "—",
     workDate,
     sales, recovery, appointment, conversion, summary,
-    selfRating: status.selfRating, reportSections: status.reportSections,
-    review,
+    // Never invent report-only values for a plan-only day.
+    selfRating: reportSubmitted ? status.selfRating : null, reportSections: status.reportSections,
+    review: reportSubmitted ? review : null,
+    reportSubmitted,
   };
 }
 

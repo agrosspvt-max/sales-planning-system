@@ -260,6 +260,25 @@ async function main() {
     assert.equal(empty.selfRating, null); assert.equal(empty.rmRating, null);
   }
 
+  // 7b) The three milestones: nothing → plan only → plan + report. View ("submitted") follows the PLAN, not the report.
+  {
+    const plan = TS("2026-09-28T09:15:00.000Z");
+    const report = TS("2026-09-28T18:30:00.000Z");
+    const f = makeFake({
+      plans: new Map([["so1|2026-09-28", plan], ["so1|2026-09-29", plan]]),
+      days: new Map([["so1|2026-09-29", { finalizedAt: report, selfRating: 9 }]]),
+    });
+    const svc = loadService(f.prisma);
+    const rows = (await svc.getDailyPerformance(SO1, RANGE)).rows;
+    const by = (d: string) => rows.find((r) => r.date === d)!;
+    const none = by("2026-09-27"), planOnly = by("2026-09-28"), both = by("2026-09-29");
+    assert.deepEqual([none.planSubmittedAt, none.reportSubmittedAt, none.submitted], [null, null, false], "before anything: — / — / no View");
+    assert.deepEqual([planOnly.planSubmittedAt, planOnly.reportSubmittedAt, planOnly.submitted], [plan.toISOString(), null, true], "plan submitted: timestamp / — / View");
+    assert.deepEqual([planOnly.selfRating, planOnly.rmRating], [null, null], "no fabricated ratings on a plan-only day");
+    assert.deepEqual([both.planSubmittedAt, both.reportSubmittedAt, both.submitted], [plan.toISOString(), report.toISOString(), true], "report submitted: both timestamps / View");
+    assert.equal(both.selfRating, 9);
+  }
+
   // 8) Averages exclude missing ratings (never 0); self-rating only when finalized.
   {
     const f = makeFake({

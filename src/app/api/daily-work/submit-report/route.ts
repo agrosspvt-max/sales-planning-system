@@ -1,12 +1,13 @@
 import { type NextRequest } from "next/server";
 import { handle, ok, requireAuth } from "@/lib/http";
 import { submitDailyReport } from "@/features/daily-work/service.server";
-import { currentBusinessDate } from "@/lib/daily-work";
+import { resolveReportDate } from "@/lib/daily-work";
 
-// POST /api/daily-work/submit-report — final once-per-business-day report submission + Self Rating.
+// POST /api/daily-work/submit-report — final once-per-day report submission + Self Rating (today, or yesterday until its 12:00 PM deadline).
 export async function POST(req: NextRequest) {
   return handle(async () => {
     const auth = await requireAuth();
-    return ok(await submitDailyReport(auth, { ...await req.json(), workDate: currentBusinessDate() }));
+    const raw = await req.json();
+    return ok(await submitDailyReport(auth, { ...raw, workDate: resolveReportDate(raw?.workDate) }));
   });
 }

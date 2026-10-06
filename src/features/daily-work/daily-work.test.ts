@@ -206,6 +206,8 @@ function loadService(fake: { prisma: object; getMonthly: () => Promise<unknown>;
 
 const SO: AuthContext = { userId: "so1", role: Role.SALES_OFFICER, username: "so1", groupId: "g1" } as AuthContext;
 const DATE = "2026-09-21";
+// Reports for DATE are submitted the same day: pin the business clock inside that report window (deadline = next day 12:00 IST).
+(localRequire(resolve("src/lib", "daily-work.ts")) as typeof import("@/lib/daily-work")).dailyWorkClock.now = () => new Date("2026-09-21T15:00:00+05:30");
 
 async function expectStatus(fn: () => Promise<unknown>, status: number, label: string) {
   try { await fn(); assert.fail(`${label}: expected ${status} but succeeded`); }

@@ -94,9 +94,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
     allStates: useLabel("calendar.all_states"),
     salesOfficer: useLabel("calendar.sales_officer"),
     addTask: useLabel("calendar.add_task"),
-    addMeeting: useLabel("calendar.add_meeting"),
     addReminder: useLabel("calendar.add_reminder"),
-    addOther: useLabel("calendar.add_other"),
     kindTask: useLabel("calendar.kind.task"),
     kindMeeting: useLabel("calendar.kind.meeting"),
     kindReminder: useLabel("calendar.kind.reminder"),
@@ -112,9 +110,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
     dealerVisits: useLabel("calendar.dealer_visits"),
     newPartyVisits: useLabel("calendar.new_party_visits"),
     details: useLabel("calendar.details"),
-    meetingPlaceholder: useLabel("calendar.meeting_placeholder"),
     reminderPlaceholder: useLabel("calendar.reminder_placeholder"),
-    otherPlaceholder: useLabel("calendar.other_placeholder"),
     taskDetailsPlaceholder: useLabel("calendar.task_details_placeholder"),
     save: useLabel("calendar.save"),
     delete: useLabel("calendar.delete"),
@@ -323,14 +319,14 @@ function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entr
   const isPast = dk < dateKey(new Date())!;
   const actions: { kind: CalendarEntryKind; label: string; disabled?: boolean; hint?: string }[] = [
     ...(canTask ? [{ kind: "TASK" as const, label: L.addTask, disabled: isPast, hint: isPast ? L.taskPastDate : undefined }] : []),
-    { kind: "MEETING", label: L.addMeeting }, { kind: "REMINDER", label: L.addReminder }, { kind: "OTHER", label: L.addOther },
+    { kind: "REMINDER", label: L.addReminder },
   ];
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <div className="space-y-4">
-          {/* Four clear actions; each opens its own small form below (no immediate text box). */}
+          {/* Two clear actions (Add Daily Task for SO/RM, Add Reminder for all); each opens its own small form below (no immediate text box). */}
           <div className="grid grid-cols-2 gap-2">
             {actions.map((a) => (
               <Button key={a.kind} variant={adding === a.kind ? "default" : "outline"} size="sm" disabled={a.disabled} title={a.hint} onClick={() => setAdding(adding === a.kind ? null : a.kind)}>
@@ -447,7 +443,7 @@ function AddEntryForm({ kind, dateKey: dk, payload, labels: L, onCancel, onSaved
           : text.trim() !== "";
   const save = useMutation({ mutationFn: () => api.post("/api/calendar/entries", body()), onSuccess: onSaved, onError: (e) => setError((e as Error).message) });
   const whole = (set: (v: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => { const v = e.target.value; if (v === "" || /^\d+$/.test(v)) set(v); };
-  const placeholder = kind === "MEETING" ? L.meetingPlaceholder : kind === "REMINDER" ? L.reminderPlaceholder : L.otherPlaceholder;
+  const placeholder = L.reminderPlaceholder;
 
   return (
     <div className="space-y-3 rounded-md border bg-card p-3">

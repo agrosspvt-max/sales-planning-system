@@ -4,8 +4,11 @@
  * The value is the canonical value persisted by the API/database contract; the label is what the user sees.
  * Price difference retains its existing CD domain value. Freight is canonical end-to-end (legacy FRAT is
  * normalized only while historical data is being migrated).
+ *
+ * "Damage/Expiry" replaces the former "Damage". New requests store "Damage/Expiry"; historical rows that still hold "Damage"
+ * are NOT rewritten — they are read through canonicalCnType, so they display and behave as Damage/Expiry.
  */
-export const CN_TYPE_VALUES = ["CD", "Freight", "Scheme", "Demo", "Damage"] as const;
+export const CN_TYPE_VALUES = ["CD", "Freight", "Scheme", "Demo", "Damage/Expiry", "Other"] as const;
 export type CnType = (typeof CN_TYPE_VALUES)[number];
 
 export const CN_TYPE_OPTIONS: { value: CnType; label: string }[] = [
@@ -13,7 +16,8 @@ export const CN_TYPE_OPTIONS: { value: CnType; label: string }[] = [
   { value: "Freight", label: "Freight" },
   { value: "Scheme", label: "Scheme" },
   { value: "Demo", label: "Demo" },
-  { value: "Damage", label: "Damage" },
+  { value: "Damage/Expiry", label: "Damage/Expiry" },
+  { value: "Other", label: "Other" },
 ];
 
 export interface CnTypeLabels {
@@ -21,7 +25,8 @@ export interface CnTypeLabels {
   freight: string;
   scheme: string;
   demo: string;
-  damage: string;
+  damageExpiry: string;
+  other: string;
 }
 
 /** Display-only CN Type terminology. Canonical values sent to and stored by the API remain unchanged. */
@@ -32,13 +37,19 @@ export function cnTypeLabel(value: string, labels?: CnTypeLabels): string {
   if (canonical === "Freight") return labels.freight;
   if (canonical === "Scheme") return labels.scheme;
   if (canonical === "Demo") return labels.demo;
-  if (canonical === "Damage") return labels.damage;
+  if (canonical === "Damage/Expiry") return labels.damageExpiry;
+  if (canonical === "Other") return labels.other;
   return canonical;
 }
 
-/** Read compatibility during rollout; the migration converts every persisted legacy FRAT row. */
+/**
+ * Read compatibility for legacy persisted values: FRAT (converted by a migration, kept as a safety net) and the former
+ * "Damage" (never migrated — it simply reads as the renamed "Damage/Expiry"). Everything else passes through unchanged.
+ */
 export function canonicalCnType(value: string): string {
-  return value === "FRAT" ? "Freight" : value;
+  if (value === "FRAT") return "Freight";
+  if (value === "Damage") return "Damage/Expiry";
+  return value;
 }
 
 export const CN_PAYMENT_STATUSES = ["Pending", "Not Paid", "Partial Paid", "Paid"] as const;

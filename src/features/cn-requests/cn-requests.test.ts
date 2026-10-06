@@ -46,6 +46,7 @@ import {
   CN_WORKING_REQUIRED_MESSAGE,
   CN_WORKING_XLSX_MIME,
   canonicalCnType,
+  cnTypeLabel,
   cnActionMenuItems,
   cnRequestCurrentDisplayStatus,
   cnRequestAgeDays,
@@ -570,10 +571,12 @@ async function main() {
     "Freight",
     "Scheme",
     "Demo",
-    "Damage",
+    "Damage/Expiry",
+    "Other",
   ]);
   assert.ok(!CN_TYPE_OPTIONS.some((option) => option.label === "DD-Price difference"));
-  assert.deepEqual([...CN_TYPE_VALUES], ["CD", "Freight", "Scheme", "Demo", "Damage"]);
+  assert.deepEqual([...CN_TYPE_VALUES], ["CD", "Freight", "Scheme", "Demo", "Damage/Expiry", "Other"]);
+  assert.ok(!CN_TYPE_VALUES.some((value) => (value as string) === "Damage"), "the old Damage option is no longer offered or accepted for new requests");
   const priceDifference = CN_TYPE_OPTIONS.find((option) => option.label === "Price diff");
   assert.ok(priceDifference);
   assert.equal(priceDifference.value, "CD", "Price diff must retain its existing domain meaning (CD)");
@@ -870,6 +873,64 @@ async function main() {
   assert.equal(historicalRow?.cnType, "Freight");
   assert.equal(historicalRow?.details, null, "historical requests without Details remain readable");
   assert.equal(canonicalCnType("Scheme"), "Scheme", "other CN types remain unchanged");
+
+  /* ---------- Damage/Expiry + Other: same lifecycle as every other CN Type ---------- */
+  {
+    const canonicalState = (row: { status: string; paymentStatus: string | null; paymentVerified?: unknown; paymentTrackingMode?: unknown; postedAmount?: unknown; postedAt?: unknown }) =>
+      ({ status: row.status, paymentStatus: row.paymentStatus, paymentVerified: row.paymentVerified, paymentTrackingMode: row.paymentTrackingMode, postedAmount: row.postedAmount, hasPostedAt: row.postedAt != null });
+    const runLifecycle = async (cnType: string) => {
+      const lifeStore = makeStore();
+      const lifeAudits: Array<{ summary?: string | null }> = [];
+      const lifeService = loadService(lifeStore.prisma, lifeAudits);
+      // Create → submitted (validated by the same schema as every type).
+      const { id } = await lifeService.createCnRequest(SO, { dealerId: "dealer-1", cnType, details: `${cnType} claim` });
+      assert.equal(lifeStore.rows.find((row) => row.id === id)?.cnType, cnType, `${cnType} is stored exactly as chosen`);
+      assert.equal(lifeStore.rows.find((row) => row.id === id)?.status, "SUBMITTED");
+      assert.equal((await lifeService.listCnRequests(ADMIN, "submitted")).find((row) => row.id === id)?.cnType, cnType, "Submitted list shows it");
+      // Accept → CN Working (document stored) → SO reports Paid → Admin verifies Paid with the Final CN → Posted in Ledger.
+      await lifeService.acceptCnRequest(ADMIN, id, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 15000 }, PDF_UPLOAD);
+      assert.equal((await lifeService.listCnRequests(ADMIN, "accepted-not-posted")).find((row) => row.id === id)?.cnType, cnType, "CN Working list shows it");
+      assert.deepEqual((await lifeService.getCnWorkingDocument(SO, id)).buffer, PDF_UPLOAD.buffer, "CN Working document works");
+      assert.equal((await lifeService.getCnPaymentDetail(ADMIN, id)).cnType, cnType, "Payment Status detail shows it");
+      await lifeService.updateCnPayment(SO, id, { status: "PAID", paymentDate: "2026-09-23", taskId: lifeStore.paymentEvents[0]!.id, requestKey: `${cnType}-so-paid` });
+      await lifeService.verifyCnPayment(ADMIN, id, { status: "PAID", requestKey: `${cnType}-verify` }, FINAL_CN_UPLOAD);
+      const posted = (await lifeService.listCnRequests(ADMIN, "posted-in-ledger")).find((row) => row.id === id);
+      assert.equal(posted?.cnType, cnType, "Posted in Ledger list shows it");
+      assert.equal(posted?.status, "POSTED_IN_LEDGER");
+      assert.ok(lifeStore.paymentEvents.length >= 2, "payment events are recorded like any type");
+      return canonicalState(lifeStore.rows.find((row) => row.id === id)!);
+    };
+    const reference = await runLifecycle("Scheme"); // an existing type — the new ones must end in the identical state
+    for (const cnType of ["Damage/Expiry", "Other"]) assert.deepEqual(await runLifecycle(cnType), reference, `${cnType} follows the exact same lifecycle as an existing type`);
+
+    // Reject path.
+    for (const cnType of ["Damage/Expiry", "Other"]) {
+      const rejectStore = makeStore();
+      const rejectService = loadService(rejectStore.prisma);
+      const { id } = await rejectService.createCnRequest(SO, { dealerId: "dealer-1", cnType, details: "x" });
+      await rejectService.actOnCnRequest(ADMIN, id, { action: "reject", reason: "BILLING_CONDITION_NOT_MET" });
+      assert.equal((await rejectService.listCnRequests(ADMIN, "rejected")).find((row) => row.id === id)?.cnType, cnType, `${cnType} appears in Rejected`);
+    }
+
+    // Old "Damage" is not accepted for NEW requests but historical rows keep loading — displayed as the renamed Damage/Expiry, untouched in storage.
+    const legacyStore = makeStore();
+    legacyStore.seed("SUBMITTED", "cn-legacy-damage", "so-1", {}, "Damage");
+    const legacyService = loadService(legacyStore.prisma);
+    await expect422(() => legacyService.createCnRequest(SO, { dealerId: "dealer-1", cnType: "Damage", details: "x" }), "Select a valid CN type");
+    assert.equal((await legacyService.listCnRequests(ADMIN, "submitted"))[0]?.cnType, "Damage/Expiry", "a historical Damage row reads as Damage/Expiry");
+    assert.equal((await legacyService.getCnRequest(ADMIN, "cn-legacy-damage")).cnType, "Damage/Expiry");
+    assert.equal(legacyStore.rows[0]?.cnType, "Damage", "the historical row is never rewritten");
+    assert.equal(canonicalCnType("Damage"), "Damage/Expiry");
+    assert.equal(canonicalCnType("Damage/Expiry"), "Damage/Expiry");
+    assert.equal(canonicalCnType("Other"), "Other");
+    // Display labels (default + configurable) for every type, including legacy Damage.
+    const labelSet = { priceDifference: "Price diff", freight: "Freight", scheme: "Scheme", demo: "Demo", damageExpiry: "Damage/Expiry", other: "Other" };
+    assert.deepEqual(["CD", "Freight", "Scheme", "Demo", "Damage/Expiry", "Other", "Damage"].map((value) => cnTypeLabel(value, labelSet)), ["Price diff", "Freight", "Scheme", "Demo", "Damage/Expiry", "Other", "Damage/Expiry"]);
+    assert.equal(cnTypeLabel("Other"), "Other");
+    // No schema change: cnType is free text validated in the application, so no migration is needed or added.
+    const schema = readFileSync(resolve("prisma/schema.prisma"), "utf8");
+    assert.ok(/cnType\s+String\b/.test(schema) && !/enum\s+CnType/.test(schema));
+  }
   const freightMigration = readFileSync(resolve("prisma/migrations/20260922010000_cn_request_freight_canonical/migration.sql"), "utf8");
   assert.match(freightMigration, /SET "cnType" = 'Freight'/);
   assert.match(freightMigration, /WHERE "cnType" = 'FRAT'/);

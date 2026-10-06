@@ -56,6 +56,70 @@ export function currentBusinessDate(now: Date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
+/** The clock the submission-deadline rules read. Production never replaces it; tests set `now` to pin the moment. */
+export const dailyWorkClock: { now: () => Date } = { now: () => new Date() };
+
+/** The calendar date `days` after/before a YYYY-MM-DD business date (pure calendar arithmetic, no timezone involved). */
+export function addBusinessDays(workDate: string, days: number): string {
+  const d = new Date(`${workDate}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+/** The previous CALENDAR day. Daily Work has no holiday/working-day model, so every calendar day is sequential. */
+export const previousBusinessDate = (workDate: string): string => addBusinessDays(workDate, -1);
+
+/** UTC instant of a wall-clock time in the Daily Work business timezone (offset resolved by `Intl`, never the browser/server zone). */
+function businessWallTimeToUtc(date: string, hour: number, minute: number): Date {
+  const [y, m, d] = date.split("-").map(Number);
+  const wall = Date.UTC(y!, m! - 1, d!, hour, minute);
+  const offsetAt = (instant: number): number => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: DAILY_WORK_TIME_ZONE, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).formatToParts(new Date(instant));
+    const n = (type: string) => Number(parts.find((p) => p.type === type)!.value);
+    return Date.UTC(n("year"), n("month") - 1, n("day"), n("hour"), n("minute"), n("second")) - Math.floor(instant / 1000) * 1000;
+  };
+  const first = wall - offsetAt(wall);
+  return new Date(wall - offsetAt(first));
+}
+
+/** The Daily Report for `workDate` may be submitted until 12:00:00 noon (business timezone) of the FOLLOWING calendar day. */
+export function dailyReportDeadline(workDate: string): Date {
+  return businessWallTimeToUtc(addBusinessDays(workDate, 1), 12, 0);
+}
+/** Noon itself is still allowed; any later instant is past the deadline. */
+export const isReportDeadlinePassed = (workDate: string, now: Date): boolean => now.getTime() > dailyReportDeadline(workDate).getTime();
+
+/**
+ * Server-derived state of the PREVIOUS day's Daily Report (nothing is stored for it — it follows from existing data + the clock):
+ *  NOT_APPLICABLE – the previous day had no submitted Daily Plan, so there is no report to wait for or to miss
+ *  SUBMITTED      – the previous report was submitted (its day is FINALIZED); never becomes Missed
+ *  PENDING        – plan submitted, report not submitted, and the noon deadline has NOT passed → submit it first (blocks today's plan)
+ *  MISSED         – plan submitted, report never submitted and the deadline HAS passed → no longer submittable; today's plan is allowed
+ */
+export type PreviousReportState = "NOT_APPLICABLE" | "SUBMITTED" | "PENDING" | "MISSED";
+export function previousReportState(prev: { planned: boolean; finalized: boolean }, previousDate: string, now: Date): PreviousReportState {
+  if (prev.finalized) return "SUBMITTED";
+  if (!prev.planned) return "NOT_APPLICABLE";
+  return isReportDeadlinePassed(previousDate, now) ? "MISSED" : "PENDING";
+}
+/** Only a report that can STILL be submitted blocks the next plan; a Missed one never does. */
+export const previousReportBlocksPlan = (state: PreviousReportState): boolean => state === "PENDING";
+
+/** A Daily Plan day that was never finalized once its deadline passed — a derived display state, never a stored submission. */
+export const isReportMissed = (workDate: string, planSubmitted: boolean, finalized: boolean, now: Date): boolean =>
+  planSubmitted && !finalized && isReportDeadlinePassed(workDate, now);
+
+/**
+ * The date a Daily Report read/write targets. The Daily Work page works on TODAY, except that yesterday's report stays actionable until
+ * its noon deadline. Anything other than today / yesterday falls back to today (the service still enforces the deadline).
+ */
+export function resolveReportDate(requested: unknown, now: Date = dailyWorkClock.now()): string {
+  const today = currentBusinessDate(now);
+  return typeof requested === "string" && requested === previousBusinessDate(today) ? requested : today;
+}
+
 /** The current calendar month name ("September"), matching how SeasonMonth.name is stored. */
 export function currentMonthName(now: Date = new Date()): string {
   return MONTH_NAMES[now.getMonth()];

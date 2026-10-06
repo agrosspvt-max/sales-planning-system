@@ -70,6 +70,14 @@ function makeFake() {
     const v = sql.values as unknown[];
     if (text.startsWith('SELECT e."dealerId", SUM(t."contribution")')) return [];
 
+    if (text.includes('"previousDayGate"')) {
+      const officerId = v[0] as string, prev = v[1] as string;
+      return [{
+        planned: entries.some((row) => row.officerId === officerId && row.workDate === prev && ["PLAN_SUBMITTED", "FINALIZED"].includes(row.status)),
+        // Honor the SQL: only a FINALIZED day counts when the query filters on it (a day row alone is not a submitted report).
+        finalized: text.includes(`"status" = 'FINALIZED') AS "finalized"`) ? days.get(dayKey(officerId, prev))?.status === "FINALIZED" : days.has(dayKey(officerId, prev)),
+      }];
+    }
     if (text.startsWith('INSERT INTO "DailyWorkDay"')) {
       const officerId = v[1] as string, workDate = v[2] as string, currentBatchId = v[3] as string;
       if (!days.has(dayKey(officerId, workDate))) days.set(dayKey(officerId, workDate), { currentBatchId, status: "OPEN", selfRating: null, finalizedAt: null });
@@ -181,6 +189,7 @@ function makeFake() {
 
 // Mutable so a sub-test can simulate an unconfirmed materialized Auto Task blocking day submission.
 let unconfirmedAutoTasks = 0;
+const materializeCalls: string[] = []; // dates Auto Task materialization ran for during a submit
 let unconfirmedChecks = 0; // how many times the submit gate looked for unconfirmed Auto Tasks
 const localRequire = createRequire(import.meta.url);
 function loadService(prisma: object) {
@@ -189,6 +198,10 @@ function loadService(prisma: object) {
   const exports = {};
   const mocks: Record<string, unknown> = {
     ...dailyWorkServiceInfrastructureMocks(prisma as never),
+    "./auto-task-materialization.server": {
+      ...(dailyWorkServiceInfrastructureMocks(prisma as never)["./auto-task-materialization.server"] as object),
+      materializeDueDailyWorkTasksInTransaction: async (_tx: unknown, _officer: string, workDate: string) => { materializeCalls.push(workDate); return { materializedTasks: 0, affectedDealers: 0, finalized: false }; },
+    },
     "server-only": {}, "@/lib/prisma": { prisma },
     "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], countUnconfirmedMaterializedTasks: async () => { unconfirmedChecks++; return unconfirmedAutoTasks; } },
     "@/lib/http": { ApiError: class extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } } },
@@ -206,6 +219,10 @@ function loadService(prisma: object) {
   return exports as typeof import("./service.server");
 }
 
+const dailyWorkLib = localRequire(resolve("src/lib", "daily-work.ts")) as typeof import("@/lib/daily-work");
+/** Pin the business clock (the service reads `dailyWorkClock`). IST wall time → a fixed instant. */
+const at = (isoWithOffset: string) => { dailyWorkLib.dailyWorkClock.now = () => new Date(isoWithOffset); };
+const PREV = "2026-09-20"; // the calendar day before DATE
 const SO: AuthContext = { userId: OFFICER, role: Role.SALES_OFFICER, username: OFFICER, groupId: "g1" } as AuthContext;
 async function expectStatus(fn: () => Promise<unknown>, status: number, label: string) {
   try { await fn(); assert.fail(`${label}: expected ${status} but succeeded`); }
@@ -226,7 +243,196 @@ async function submitReportWithRecovery(actual: string, paymentMode: string | nu
   return { f, run: () => svc.submitDailyReport(SO, { workDate: DATE, selfRating: 7 }) };
 }
 
+/** A previous-day state for `officer`: a submitted Sales plan with an actual, optionally with the Daily Report already finalized. */
+function givePreviousDay(f: ReturnType<typeof makeFake>, officerId: string, opts: { finalized?: boolean } = {}) {
+  f.days.set(`${officerId}:${PREV}`, { currentBatchId: `fresh-${officerId}`, status: opts.finalized ? "FINALIZED" : "OPEN", selfRating: opts.finalized ? 8 : null, finalizedAt: opts.finalized ? new Date() : null });
+  f.entries.push({
+    id: `prev-${officerId}`, officerId, workDate: PREV, batchId: `frozen-${officerId}`, section: "SALES", rowKey: "d1", dealerId: "d1", typedDealerName: null,
+    todaysPlan: "100", todaysActual: "90", resultStatus: null, entryType: "REGULAR", schemeId: null, dealerVisits: null, newPartyVisits: null,
+    actualDealerVisits: null, actualNewPartyVisits: null, others: null, noPlanSections: null, status: opts.finalized ? "FINALIZED" : "PLAN_SUBMITTED",
+  });
+}
+/** Today's (DATE) plan ready to submit: Recovery marked No Plan + a Sales plan. */
+async function readyToday(f: ReturnType<typeof makeFake>, ctx: AuthContext = SO) {
+  const svc = loadService(f.prisma);
+  await svc.setDailyNoPlan(ctx, { workDate: DATE, section: "RECOVERY", noPlan: true });
+  f.addPlan({ salesPlan: 100 });
+  return svc;
+}
+const planStatuses = (f: ReturnType<typeof makeFake>) => f.entries.filter((row) => row.workDate === DATE).map((row) => row.status);
+const REQUIRED = "Submit the previous day's Daily Report before submitting today's Daily Plan.";
+const TOO_LATE = "The Daily Report can only be submitted until 12:00 PM on the following day. This deadline has passed.";
+async function expectMessage(fn: () => Promise<unknown>, status: number, message: string, label: string) {
+  try { await fn(); assert.fail(`${label}: expected ${status} but succeeded`); }
+  catch (error) { assert.equal((error as { status?: number }).status, status, `${label}: ${(error as Error).message}`); assert.equal((error as Error).message, message, label); }
+}
+
+async function previousDayRules() {
+  // First applicable day: no plan was submitted yesterday → nothing outstanding → normal submission.
+  { at("2026-09-21T10:00:00+05:30"); const f = makeFake(); const svc = await readyToday(f); assert.equal((await svc.submitDailyWorkDay(SO, { workDate: DATE })).ok, true, "first day submits"); }
+
+  // Yesterday's plan was submitted but its report was not (before noon): today's plan is blocked, server-side, with nothing written.
+  {
+    at("2026-09-21T10:00:00+05:30");
+    const f = makeFake(); givePreviousDay(f, OFFICER);
+    const svc = await readyToday(f);
+    const batchBefore = f.currentDay().currentBatchId;
+    await expectMessage(() => svc.submitDailyWorkDay(SO, { workDate: DATE }), 422, REQUIRED, "blocked before noon");
+    assert.deepEqual(planStatuses(f).every((status) => status === "DRAFT"), true, "a rejected submit freezes nothing");
+    assert.equal(f.currentDay().currentBatchId, batchBefore, "and does not rotate the batch");
+    const status = await svc.getDailyStatus(SO, DATE);
+    assert.deepEqual([status.previousReport.state, status.previousReport.date, status.canSubmit], ["PENDING", PREV, false], "the status tells the page why");
+    assert.equal(status.previousReport.deadline, "2026-09-21T06:30:00.000Z", "deadline = 12:00 IST on the following day");
+    // Other actions stay available while blocked (No Plan toggle / reading status are unaffected).
+    await svc.setDailyNoPlan(SO, { workDate: DATE, section: "RECOVERY", noPlan: false });
+    // The report can still be submitted before noon, and that unblocks today's plan.
+    await svc.setDailyNoPlan(SO, { workDate: DATE, section: "RECOVERY", noPlan: true });
+    const prevReport = () => svc.submitDailyReport(SO, { workDate: PREV, selfRating: 7 });
+    at("2026-09-21T11:59:59+05:30");
+    assert.equal((await prevReport()).ok, true, "yesterday's report is accepted before the deadline");
+    assert.equal((await svc.getDailyStatus(SO, DATE)).previousReport.state, "SUBMITTED");
+    assert.equal((await svc.submitDailyWorkDay(SO, { workDate: DATE })).ok, true, "today's plan succeeds once yesterday's report is in");
+  }
+
+  // Submitting yesterday's still-open report never materializes Auto Tasks for that old day (they would be impossible to plan/finalize).
+  {
+    at("2026-09-21T09:00:00+05:30");
+    const RM: AuthContext = { userId: OFFICER, role: Role.REGIONAL_MANAGER, username: OFFICER, groupId: "g1" } as AuthContext;
+    const f = makeFake(); givePreviousDay(f, OFFICER); const svc = loadService(f.prisma);
+    materializeCalls.length = 0;
+    assert.equal((await svc.submitDailyReport(RM, { workDate: PREV, selfRating: 7 })).ok, true);
+    assert.deepEqual(materializeCalls, [], "no Auto Task materialization for the previous day");
+  }
+
+  // The boundary: exactly 12:00:00.000 is still allowed; one millisecond later is rejected.
+  {
+    for (const [time, allowed] of [["2026-09-21T12:00:00.000+05:30", true], ["2026-09-21T12:00:00.001+05:30", false], ["2026-09-21T12:01:00+05:30", false]] as const) {
+      at(time);
+      const f = makeFake(); givePreviousDay(f, OFFICER);
+      const svc = loadService(f.prisma);
+      if (allowed) assert.equal((await svc.submitDailyReport(SO, { workDate: PREV, selfRating: 7 })).ok, true, `${time} accepted`);
+      else await expectMessage(() => svc.submitDailyReport(SO, { workDate: PREV, selfRating: 7 }), 422, TOO_LATE, `${time} rejected`);
+    }
+    // 17: the deadline is business-timezone noon, not UTC noon and not the server's zone.
+    at("2026-09-21T06:29:59Z"); { const f = makeFake(); givePreviousDay(f, OFFICER); assert.equal((await loadService(f.prisma).submitDailyReport(SO, { workDate: PREV, selfRating: 7 })).ok, true, "06:29:59Z = 11:59:59 IST"); }
+    at("2026-09-21T06:30:01Z"); { const f = makeFake(); givePreviousDay(f, OFFICER); await expectMessage(() => loadService(f.prisma).submitDailyReport(SO, { workDate: PREV, selfRating: 7 }), 422, TOO_LATE, "06:30:01Z = 12:00:01 IST"); }
+  }
+
+  // After the deadline the missing report is MISSED (derived, nothing stored): it can no longer be submitted — and today's plan is ALLOWED.
+  {
+    at("2026-09-21T12:01:00+05:30");
+    const f = makeFake(); givePreviousDay(f, OFFICER);
+    // Actuals the user had entered but never submitted must stay exactly as they were.
+    const snapshot = JSON.stringify(f.entries.filter((row) => row.workDate === PREV));
+    const svc = await readyToday(f);
+    const status = await svc.getDailyStatus(SO, DATE);
+    assert.deepEqual([status.previousReport.state, status.canSubmit], ["MISSED", true], "missed previous report no longer blocks today's plan");
+    await expectMessage(() => svc.submitDailyReport(SO, { workDate: PREV, selfRating: 7 }), 422, TOO_LATE, "the missed report cannot be submitted");
+    const prevStatus = await svc.getDailyStatus(SO, PREV);
+    assert.deepEqual([prevStatus.reportMissed, prevStatus.canSubmitReport, prevStatus.isFinalized], [true, false, false], "the old report is Missed, not actionable, not finalized");
+    // Entering/changing the missed day's results is refused too (every report section), so it cannot be completed through the normal flow.
+    const frozen = f.entries.find((row) => row.workDate === PREV)!;
+    await expectMessage(() => svc.enterDailyActual(SO, { section: "SALES", workDate: PREV, entries: [{ entryId: frozen.id, todaysActual: 55 }] }), 422, TOO_LATE, "actuals refused after the deadline");
+    await expectMessage(() => svc.enterVisitsActual(SO, { workDate: PREV, entries: [{ entryId: frozen.id, actualDealerVisits: 1, actualNewPartyVisits: 1 }] }), 422, TOO_LATE, "visits refused");
+    await expectMessage(() => svc.enterAppointmentStatus(SO, { workDate: PREV, entries: [{ entryId: frozen.id, status: "APPOINTED" }] }), 422, TOO_LATE, "appointment refused");
+    // …and the plan goes through normally.
+    assert.equal((await svc.submitDailyWorkDay(SO, { workDate: DATE })).ok, true, "today's plan is allowed");
+    // Missed is NOT a submission: no finalized day, no rating, no timestamp, no review record, data preserved untouched.
+    const day = f.days.get(`${OFFICER}:${PREV}`)!;
+    assert.deepEqual([day.status, day.selfRating, day.finalizedAt], ["OPEN", null, null], "nothing was finalized or rated for the missed day");
+    assert.equal(JSON.stringify(f.entries.filter((row) => row.workDate === PREV)), snapshot, "the missed day's data is preserved as it was (never finalized, never zeroed)");
+    // Still allowed later on; the deadline is about the previous report, not today's plan.
+    at("2026-09-21T23:30:00+05:30");
+    assert.equal((await svc.getDailyStatus(SO, DATE)).previousReport.state, "MISSED");
+    // This day's own report window has not closed: its deadline is noon tomorrow.
+    assert.equal((await svc.getDailyStatus(SO, DATE)).reportDeadlinePassed, false);
+  }
+
+  // No plan on the previous day → nothing to miss: NOT_APPLICABLE both before and after noon.
+  for (const time of ["2026-09-21T10:00:00+05:30", "2026-09-21T15:00:00+05:30"]) {
+    at(time);
+    const f = makeFake(); const svc = await readyToday(f);
+    const status = await svc.getDailyStatus(SO, DATE);
+    assert.deepEqual([status.previousReport.state, status.canSubmit], ["NOT_APPLICABLE", true]);
+    assert.equal((await svc.getDailyStatus(SO, PREV)).reportMissed, false, "a day without a plan is never Missed");
+  }
+
+  // The same Missed / pending behaviour for a Regional Manager and across users.
+  {
+    at("2026-09-21T13:00:00+05:30");
+    const RM: AuthContext = { userId: OFFICER, role: Role.REGIONAL_MANAGER, username: OFFICER, groupId: "g1" } as AuthContext;
+    const f = makeFake(); givePreviousDay(f, OFFICER); givePreviousDay(f, "so2", { finalized: true });
+    const svc = await readyToday(f, RM);
+    assert.equal((await svc.getDailyStatus(RM, DATE)).previousReport.state, "MISSED");
+    assert.equal((await svc.submitDailyWorkDay(RM, { workDate: DATE })).ok, true, "an RM with a missed report can plan today");
+    assert.equal((await svc.getDailyStatus({ ...SO, userId: "so2" } as AuthContext, PREV)).reportMissed, false, "another user's finalized report is never Missed");
+  }
+
+  // Today's plan is NOT subject to the noon cut-off: with yesterday's report in, it can be submitted in the evening.
+  { at("2026-09-21T20:00:00+05:30"); const f = makeFake(); givePreviousDay(f, OFFICER, { finalized: true }); const svc = await readyToday(f); assert.equal((await svc.submitDailyWorkDay(SO, { workDate: DATE })).ok, true); }
+
+  // Already finalized reports are untouched by the deadline (still 409 "submitted once", never rewritten), and never block a plan.
+  {
+    at("2026-09-25T09:00:00+05:30");
+    const f = makeFake(); givePreviousDay(f, OFFICER, { finalized: true });
+    const svc = await readyToday(f);
+    const finalizedAt = f.days.get(`${OFFICER}:${PREV}`)!.finalizedAt;
+    await expectStatus(() => svc.submitDailyReport(SO, { workDate: PREV, selfRating: 5 }), 409, "finalized report is not resubmitted (and not reported as late)");
+    assert.equal(f.days.get(`${OFFICER}:${PREV}`)!.finalizedAt, finalizedAt, "timestamps untouched");
+    assert.equal(f.days.get(`${OFFICER}:${PREV}`)!.selfRating, 8);
+    assert.equal((await svc.submitDailyWorkDay(SO, { workDate: DATE })).ok, true, "a finalized previous report never blocks, however old");
+  }
+
+  // Report status after its own deadline: canSubmitReport is false and the page is told why.
+  {
+    const f = makeFake(); givePreviousDay(f, OFFICER); const svc = loadService(f.prisma);
+    at("2026-09-21T11:00:00+05:30"); assert.equal((await svc.getDailyStatus(SO, PREV)).reportDeadlinePassed, false);
+    at("2026-09-21T12:30:00+05:30"); const late = await svc.getDailyStatus(SO, PREV);
+    assert.deepEqual([late.reportDeadlinePassed, late.canSubmitReport, late.reportDeadline], [true, false, "2026-09-21T06:30:00.000Z"]);
+  }
+
+  // Users never satisfy (or block) each other: another officer's finalized report does not unblock me, and mine does not unblock them.
+  {
+    at("2026-09-21T10:00:00+05:30");
+    const f = makeFake(); givePreviousDay(f, OFFICER); givePreviousDay(f, "so2", { finalized: true });
+    const svc = await readyToday(f);
+    await expectMessage(() => svc.submitDailyWorkDay(SO, { workDate: DATE }), 422, REQUIRED, "another user's report does not count");
+    const status = await svc.getDailyStatus(SO, DATE);
+    assert.equal(status.previousReport.state, "PENDING");
+  }
+
+  // Regional Managers submit Daily Work too: the same rule applies (same service path, RM role).
+  {
+    at("2026-09-21T10:00:00+05:30");
+    const RM: AuthContext = { userId: OFFICER, role: Role.REGIONAL_MANAGER, username: OFFICER, groupId: "g1" } as AuthContext;
+    const f = makeFake(); givePreviousDay(f, OFFICER); const svc = await readyToday(f, RM);
+    await expectMessage(() => svc.submitDailyWorkDay(RM, { workDate: DATE }), 422, REQUIRED, "RM blocked");
+    at("2026-09-21T09:00:00+05:30");
+    assert.equal((await svc.submitDailyReport(RM, { workDate: PREV, selfRating: 6 })).ok, true, "RM submits yesterday's report in time");
+    assert.equal((await svc.submitDailyWorkDay(RM, { workDate: DATE })).ok, true, "RM plan then succeeds");
+  }
+
+  // Auto Task gate is unchanged: with yesterday's report in, an unconfirmed Auto Task still blocks, then confirming lets it through.
+  {
+    at("2026-09-21T10:00:00+05:30");
+    const f = makeFake(); givePreviousDay(f, OFFICER, { finalized: true }); const svc = await readyToday(f);
+    unconfirmedAutoTasks = 1;
+    await expectStatus(() => svc.submitDailyWorkDay(SO, { workDate: DATE }), 422, "unconfirmed Auto Task still blocks");
+    unconfirmedAutoTasks = 0;
+    assert.equal((await svc.submitDailyWorkDay(SO, { workDate: DATE })).ok, true);
+  }
+
+  // Save Draft / No Plan paths do not consult the rule (only Submit does).
+  const source = readFileSync("src/features/daily-work/service.server.ts", "utf8");
+  const between = (from: string, to: string) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+  assert.ok(!between("export async function saveDailyWork(", "export async function submitDailyWork(").includes("previousReportGate"), "Save Draft is not gated");
+  assert.ok(!between("export async function setDailyNoPlan(", "export async function submitDailyWorkDay(").includes("previousReportGate"), "No Plan is not gated");
+}
+
 async function main() {
+  at("2026-09-22T09:00:00+05:30"); // the legacy scenarios below submit DATE's report the next morning, inside its window
+  await previousDayRules();
+  at("2026-09-22T09:00:00+05:30");
   // Payment Mode rule at final submission: a RECEIVED recovery (> 0) needs a mode; 0 / negative never does.
   {
     const blank = await submitReportWithRecovery("25000", null);

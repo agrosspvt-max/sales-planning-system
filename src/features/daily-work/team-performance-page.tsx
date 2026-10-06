@@ -1,13 +1,13 @@
 "use client";
 
-import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, Send, Lock } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { RecoveryPaymentModeField } from "./recovery-payment-mode";
-import { type RecoveryPaymentMode, currentBusinessDate } from "@/lib/daily-work";
+import { type DailyWorkType, type RecoveryPaymentMode, currentBusinessDate, rowTaskType } from "@/lib/daily-work";
 import { formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,13 +33,21 @@ interface TeamSummary {
 interface TeamPayload { from: string; to: string; summary: TeamSummary; rows: TeamRow[] }
 
 interface ReviewDto { rating: number; reviewerId: string; reviewerName: string; reviewedAt: string }
-interface DealerRow { dealerId: string; dealerName: string; todaysPlan: number | null; todaysActual: number | null; paymentMode?: RecoveryPaymentMode | null }
-interface ApptRow { rowId: string; dealerName: string; marketName: string; status: string | null }
+// All of these are the EXISTING Daily Work report values (the review endpoint returns the standard section payloads).
+interface DealerRow {
+  entryId?: string; dealerId: string; dealerName: string; todaysPlan: number | null; todaysActual: number | null;
+  entryType?: DailyWorkType; paymentMode?: RecoveryPaymentMode | null;
+}
+interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds?: string[]; calendarEntryIds?: string[] }
+interface ApptRow { rowId: string; entryId?: string; dealerName: string; marketName: string; status: string | null }
 interface ConvRow { dealerId: string; schemeId: string; dealerName: string; schemeName: string; todaysPlan: number | null; achievability: string | null }
-interface SummaryDto { dealerVisits: number; newPartyVisits: number; others: string; visitsEntered: boolean }
+interface SummaryDto {
+  dealerVisits: number; newPartyVisits: number; others: string; visitsEntered: boolean;
+  actualDealerVisits?: number | null; actualNewPartyVisits?: number | null;
+}
 interface ReviewDetail {
   officerId: string; officerName: string; workDate: string;
-  sales: { dealers: DealerRow[] }; recovery: { dealers: DealerRow[] };
+  sales: DealerPayload; recovery: DealerPayload;
   appointment: { rows: ApptRow[] }; conversion: { rows: ConvRow[] };
   summary: SummaryDto; selfRating: number | null; review: ReviewDto | null; reportSubmitted: boolean;
 }
@@ -183,7 +191,7 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+      <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{L.title}{data ? ` — ${data.officerName}` : ""}</DialogTitle>
         </DialogHeader>
@@ -193,41 +201,12 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
           <div className="space-y-5">
             <p className="text-sm text-muted-foreground">{data.officerName} · {workDate}</p>
 
-            <DealerSection title={L.sales} rows={data.sales.dealers} />
-            <DealerSection title={L.recovery} rows={data.recovery.dealers} recovery />
-
-            <ReadSection title={L.appointment}>
-              {data.appointment.rows.length === 0 ? dash : (
-                <ul className="space-y-1 text-sm">
-                  {data.appointment.rows.map((r) => (
-                    <li key={r.rowId} className="flex justify-between gap-2">
-                      <span>{r.dealerName}{r.marketName ? ` · ${r.marketName}` : ""}</span>
-                      <span className="text-muted-foreground">{r.status ?? "—"}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </ReadSection>
-
-            <ReadSection title={L.conversion}>
-              {data.conversion.rows.length === 0 ? dash : (
-                <ul className="space-y-1 text-sm"><DealerOrder>
-                  {data.conversion.rows.map((r) => (
-                    <li data-dealer-id={r.dealerId} key={`${r.dealerId}:${r.schemeId}`} className="flex justify-between gap-2">
-                      <span><DealerName id={r.dealerId} name={r.dealerName} /> · {r.schemeName}</span>
-                      <span className="text-muted-foreground">{r.todaysPlan ?? 0} · {r.achievability ?? "—"}</span>
-                    </li>
-                  ))}
-                </DealerOrder></ul>
-              )}
-            </ReadSection>
-
-            <ReadSection title={`${L.visits} / ${L.others}`}>
-              <div className="space-y-1 text-sm">
-                <div className="flex justify-between gap-2"><span>{L.visits}</span><span className="text-muted-foreground tabular-nums">{data.summary.visitsEntered ? `${data.summary.dealerVisits} · ${data.summary.newPartyVisits}` : "—"}</span></div>
-                {data.summary.others.trim() !== "" && <div className="text-muted-foreground">{data.summary.others}</div>}
-              </div>
-            </ReadSection>
+            <DealerSection title={L.sales} rows={data.sales.dealers} autoEntryIds={data.sales.autoTaskEntryIds} calendarEntryIds={data.sales.calendarEntryIds} />
+            <DealerSection title={L.recovery} rows={data.recovery.dealers} autoEntryIds={data.recovery.autoTaskEntryIds} calendarEntryIds={data.recovery.calendarEntryIds} recovery />
+            <AppointmentSection title={L.appointment} rows={data.appointment.rows} />
+            <ConversionSection title={L.conversion} rows={data.conversion.rows} />
+            <VisitsSection title={L.visits} summary={data.summary} />
+            <OthersSection title={L.others} text={data.summary.others} />
 
             <div className="flex items-center justify-between rounded-lg border bg-background px-4 py-2.5 text-sm">
               <span className="text-muted-foreground">{L.selfRating}</span>
@@ -255,32 +234,175 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
   );
 }
 
-function ReadSection({ title, children }: { title: string; children: React.ReactNode }) {
+/** A titled block holding either a compact Planned | Actual table or a one-line empty state (never a big blank box). */
+function ReadSection({ title, empty, children }: { title: string; empty?: boolean; children?: React.ReactNode }) {
+  const noData = useLabel("daily_work.review.no_data").replace("{section}", title);
   return (
-    <div>
+    <section data-review-section={title}>
       <h3 className="mb-1.5 text-sm font-semibold">{title}</h3>
-      <div className="rounded border px-3 py-2">{children}</div>
-    </div>
+      {empty ? <p className="rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground">{noData}</p>
+        : <div className="overflow-auto rounded-md border [&_td]:px-3 [&_td]:py-1.5 [&_th]:h-9 [&_th]:px-3">{children}</div>}
+    </section>
   );
 }
 
-function DealerSection({ title, rows, recovery = false }: { title: string; rows: DealerRow[]; recovery?: boolean }) {
+function useReviewColumns() {
+  return {
+    dealer: useLabel("col.dealer"),
+    dealerClient: useLabel("daily_work.col.review_dealer_client"),
+    task: useLabel("daily_work.col.task_type"),
+    planned: useLabel("daily_work.col.review_planned"),
+    actual: useLabel("daily_work.col.review_actual"),
+    metric: useLabel("daily_work.col.review_metric"),
+    item: useLabel("daily_work.col.review_item"),
+    scheme: useLabel("daily_work.col.scheme"),
+    market: useLabel("daily_work.col.market"),
+    paymentMode: useLabel("daily_work.col.payment_mode"),
+    recoveryType: useLabel("daily_work.col.recovery_type"),
+    salesType: useLabel("daily_work.col.sales_type"),
+    regular: useLabel("daily_work.type.regular"),
+    schemeType: useLabel("daily_work.type.scheme"),
+    auto: useLabel("daily_work.task_type.auto"),
+    manual: useLabel("daily_work.task_type.manual"),
+    calendar: useLabel("daily_work.task_type.calendar"),
+    appointed: useLabel("daily_work.status.appointed"),
+    notAppointed: useLabel("daily_work.status.not_appointed"),
+    yes: useLabel("daily_work.achievability.yes"),
+    no: useLabel("daily_work.achievability.no"),
+    dealerVisits: useLabel("daily_work.visits.dealer_visits"),
+    newPartyVisits: useLabel("daily_work.visits.new_party_visits"),
+  };
+}
+
+const money = (v: number | null | undefined) => (v == null ? dash : formatCurrency(v));
+
+/** Sales / Recovery: Planned = Today's Plan (Daily Plan); Actual = Today's Sales/Recovery (Daily Report) — separate columns. */
+export function DealerSection({ title, rows, recovery = false, autoEntryIds = [], calendarEntryIds = [] }: {
+  title: string; rows: DealerRow[]; recovery?: boolean; autoEntryIds?: string[]; calendarEntryIds?: string[];
+}) {
+  const C = useReviewColumns();
+  const auto = new Set(autoEntryIds), calendar = new Set(calendarEntryIds);
+  const taskText = (row: DealerRow) => {
+    const type = rowTaskType(!!row.entryId && auto.has(row.entryId), !!row.entryId && calendar.has(row.entryId));
+    return type === "AUTO" ? C.auto : type === "CALENDAR" ? C.calendar : C.manual;
+  };
+  const typeText = (row: DealerRow) => (row.entryType === "SCHEME" ? C.schemeType : C.regular);
   return (
-    <ReadSection title={title}>
-      {rows.length === 0 ? dash : (
-        <ul className="space-y-1 text-sm"><DealerOrder>
+    <ReadSection title={title} empty={rows.length === 0}>
+      <Table>
+        <TableHeader><TableRow>
+          <TableHead>{C.dealer}</TableHead><TableHead>{C.task}</TableHead>
+          <TableHead className="text-right">{C.planned}</TableHead><TableHead className="text-right">{C.actual}</TableHead>
+          {recovery && <TableHead>{C.paymentMode}</TableHead>}
+          {recovery && <TableHead>{C.recoveryType}</TableHead>}
+        </TableRow></TableHeader>
+        <DealerTableBody>
           {rows.map((r) => (
-            <li data-dealer-id={r.dealerId} key={r.dealerId} className="flex justify-between gap-2">
-              <span><DealerName id={r.dealerId} name={r.dealerName} /></span>
-              <span className="text-muted-foreground tabular-nums">
-                {r.todaysPlan == null ? "—" : formatCurrency(r.todaysPlan)}
-                {recovery && <> · <RecoveryPaymentModeField value={r.paymentMode ?? null} /></>}
-                {r.todaysActual != null ? ` · ${formatCurrency(r.todaysActual)}` : ""}
-              </span>
-            </li>
+            <TableRow data-dealer-id={r.dealerId} key={r.entryId ?? r.dealerId}>
+              <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
+              <TableCell>{taskText(r)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.todaysPlan)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.todaysActual)}</TableCell>
+              {/* Payment Mode is a Daily Report value: it sits with the Actual recovery, never with the plan. */}
+              {recovery && <TableCell><RecoveryPaymentModeField value={r.paymentMode ?? null} /></TableCell>}
+              {recovery && <TableCell>{typeText(r)}</TableCell>}
+            </TableRow>
           ))}
-        </DealerOrder></ul>
-      )}
+        </DealerTableBody>
+      </Table>
+    </ReadSection>
+  );
+}
+
+/** Dealer Appointment: Planned = the planned dealer/client visit (market); Actual = the reported result. */
+export function AppointmentSection({ title, rows }: { title: string; rows: ApptRow[] }) {
+  const C = useReviewColumns();
+  const result = (status: string | null) => status === "APPOINTED" ? C.appointed : status === "NOT_APPOINTED" ? C.notAppointed : dash;
+  return (
+    <ReadSection title={title} empty={rows.length === 0}>
+      <Table>
+        <TableHeader><TableRow><TableHead>{C.dealerClient}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
+        <TableBody>
+          {rows.map((r) => (
+            <TableRow key={r.rowId}>
+              <TableCell className="font-medium">{r.dealerName}</TableCell>
+              <TableCell>{r.marketName ? `${C.market}: ${r.marketName}` : C.planned}</TableCell>
+              <TableCell>{result(r.status)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </ReadSection>
+  );
+}
+
+/** Scheme Conversion: Planned = planned units for today; Actual = the reported achievability. */
+export function ConversionSection({ title, rows }: { title: string; rows: ConvRow[] }) {
+  const C = useReviewColumns();
+  const result = (v: string | null) => v === "YES" ? C.yes : v === "NO" ? C.no : dash;
+  return (
+    <ReadSection title={title} empty={rows.length === 0}>
+      <Table>
+        <TableHeader><TableRow>
+          <TableHead>{C.dealer}</TableHead><TableHead>{C.scheme}</TableHead>
+          <TableHead className="text-right">{C.planned}</TableHead><TableHead>{C.actual}</TableHead>
+        </TableRow></TableHeader>
+        <DealerTableBody>
+          {rows.map((r) => (
+            <TableRow data-dealer-id={r.dealerId} key={`${r.dealerId}:${r.schemeId}`}>
+              <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
+              <TableCell>{r.schemeName}</TableCell>
+              <TableCell className="text-right tabular-nums">{r.todaysPlan ?? 0}</TableCell>
+              <TableCell>{result(r.achievability)}</TableCell>
+            </TableRow>
+          ))}
+        </DealerTableBody>
+      </Table>
+    </ReadSection>
+  );
+}
+
+/** Visits: Planned (Daily Plan counts) vs Actual (Daily Report counts), one metric per row. */
+export function VisitsSection({ title, summary }: { title: string; summary: SummaryDto }) {
+  const C = useReviewColumns();
+  const count = (v: number | null | undefined) => (v == null ? dash : v);
+  const metrics = [
+    { label: C.dealerVisits, planned: summary.dealerVisits, actual: summary.actualDealerVisits },
+    { label: C.newPartyVisits, planned: summary.newPartyVisits, actual: summary.actualNewPartyVisits },
+  ];
+  return (
+    <ReadSection title={title} empty={!summary.visitsEntered}>
+      <Table>
+        <TableHeader><TableRow><TableHead>{C.metric}</TableHead><TableHead className="text-right">{C.planned}</TableHead><TableHead className="text-right">{C.actual}</TableHead></TableRow></TableHeader>
+        <TableBody>
+          {metrics.map((m) => (
+            <TableRow key={m.label}>
+              <TableCell className="font-medium">{m.label}</TableCell>
+              <TableCell className="text-right tabular-nums">{count(m.planned)}</TableCell>
+              <TableCell className="text-right tabular-nums">{count(m.actual)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </ReadSection>
+  );
+}
+
+/** Others: the planned note. Daily Work records no separate actual for Others, so Actual stays "—" (nothing is invented). */
+export function OthersSection({ title, text }: { title: string; text: string }) {
+  const C = useReviewColumns();
+  return (
+    <ReadSection title={title} empty={text.trim() === ""}>
+      <Table>
+        <TableHeader><TableRow><TableHead>{C.item}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
+        <TableBody>
+          <TableRow>
+            <TableCell className="font-medium">{title}</TableCell>
+            <TableCell className="whitespace-pre-wrap">{text}</TableCell>
+            <TableCell>{dash}</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
     </ReadSection>
   );
 }

@@ -155,9 +155,16 @@ const { DailyWorkSection } = loadPresentation<{
 const { AdminDealerReport } = loadPresentation<{
   AdminDealerReport: React.ComponentType<{ section: "SALES" | "RECOVERY"; data: unknown }>;
 }>("src/features/daily-work/admin-daily-work-viewer.tsx", ["AdminDealerReport"]);
-const { DealerSection } = loadPresentation<{
-  DealerSection: React.ComponentType<{ title: string; rows: unknown[]; recovery?: boolean }>;
-}>("src/features/daily-work/team-performance-page.tsx", ["DealerSection"]);
+type Props<T> = React.ComponentType<T>;
+const review = loadPresentation<{
+  DealerSection: Props<{ title: string; rows: unknown[]; recovery?: boolean; autoEntryIds?: string[]; calendarEntryIds?: string[] }>;
+  AppointmentSection: Props<{ title: string; rows: unknown[] }>;
+  ConversionSection: Props<{ title: string; rows: unknown[] }>;
+  VisitsSection: Props<{ title: string; summary: unknown }>;
+  OthersSection: Props<{ title: string; text: string }>;
+}>("src/features/daily-work/team-performance-page.tsx", ["DealerSection", "AppointmentSection", "ConversionSection", "VisitsSection", "OthersSection"]);
+const { DealerSection, AppointmentSection, ConversionSection, VisitsSection, OthersSection } = review;
+const cellsOf = (html: string) => [...html.matchAll(/<tr\b[^>]*>(.*?)<\/tr>/g)].map((row) => [...row[1].matchAll(/<t[hd]\b[^>]*>(.*?)<\/t[hd]>/g)].map((c) => c[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()));
 const render = (
   section: "SALES" | "RECOVERY",
   view: "PLAN" | "REPORT" = "PLAN",
@@ -284,6 +291,68 @@ async function main() {
       "Payment Mode",
     ),
   );
+  // ---- Performance → View review modal: Planned and Actual are always separate columns ----
+  {
+    const sales = [
+      { entryId: "e1", dealerId: "d1", dealerName: "GAURI AGRO", todaysPlan: 40000, todaysActual: 40000 },
+      { entryId: "e2", dealerId: "d2", dealerName: "KISAN MITRA", todaysPlan: 50000, todaysActual: 0 },
+      { entryId: "e3", dealerId: "d3", dealerName: "NEW RATIRAM", todaysPlan: 20000, todaysActual: null },
+    ];
+    const t = cellsOf(renderToStaticMarkup(<DealerSection title="Sales" rows={sales} calendarEntryIds={["e3"]} />));
+    assert.deepEqual(t[0], ["Dealer", "Task Type", "Planned", "Actual"]);
+    assert.deepEqual(t[1], ["GAURI AGRO", "Manual", "₹40,000", "₹40,000"]);
+    assert.deepEqual(t[2], ["KISAN MITRA", "Manual", "₹50,000", "₹0"], "an actual of 0 is shown as ₹0, separate from the plan");
+    assert.deepEqual(t[3], ["NEW RATIRAM", "Calendar", "₹20,000", "—"], "no actual yet -> dash");
+    assert.ok(!renderToStaticMarkup(<DealerSection title="Sales" rows={sales} />).includes("Payment Mode"), "Sales has no Payment Mode");
+    assert.ok(!renderToStaticMarkup(<DealerSection title="Sales" rows={sales} />).includes(" · "), "plan and actual are never merged into one string");
+
+    const recovery = [
+      { entryId: "r1", dealerId: "d1", dealerName: "GAURI AGRO", todaysPlan: 25000, todaysActual: 20000, paymentMode: "UPI", entryType: "REGULAR" },
+      { entryId: "r2", dealerId: "d2", dealerName: "KISAN MITRA", todaysPlan: 5000, todaysActual: 0, paymentMode: null, entryType: "SCHEME" },
+    ];
+    const r = cellsOf(renderToStaticMarkup(<DealerSection title="Recovery" rows={recovery} recovery autoEntryIds={["r2"]} />));
+    assert.deepEqual(r[0], ["Dealer", "Task Type", "Planned", "Actual", "Payment Mode", "Recovery Type"]);
+    assert.deepEqual(r[1], ["GAURI AGRO", "Manual", "₹25,000", "₹20,000", "UPI", "Regular"], "Payment Mode sits with the ACTUAL recovery");
+    assert.deepEqual(r[2], ["KISAN MITRA", "Auto Task", "₹5,000", "₹0", "—", "Scheme"], "Auto Task + no mode against zero recovery");
+
+    const a = cellsOf(renderToStaticMarkup(<AppointmentSection title="Dealer Appointment" rows={[
+      { rowId: "a1", dealerName: "New Client", marketName: "Bhopal", status: "APPOINTED" },
+      { rowId: "a2", dealerName: "Other Client", marketName: "", status: "NOT_APPOINTED" },
+      { rowId: "a3", dealerName: "Pending Client", marketName: "", status: null },
+    ]} />));
+    assert.deepEqual(a[0], ["Dealer / Client", "Planned", "Actual"]);
+    assert.deepEqual([a[1][2], a[2][2], a[3][2]], ["Appointed", "Not Appointed", "—"]);
+
+    const c = cellsOf(renderToStaticMarkup(<ConversionSection title="Scheme Conversion" rows={[
+      { dealerId: "d1", schemeId: "s1", dealerName: "GAURI AGRO", schemeName: "Kharif Scheme", todaysPlan: 2, achievability: "YES" },
+      { dealerId: "d2", schemeId: "s1", dealerName: "KISAN MITRA", schemeName: "Kharif Scheme", todaysPlan: 1, achievability: null },
+    ]} />));
+    assert.deepEqual(c[0], ["Dealer", "Scheme", "Planned", "Actual"]);
+    assert.deepEqual(c[1], ["GAURI AGRO", "Kharif Scheme", "2", "Yes"]);
+    assert.deepEqual(c[2], ["KISAN MITRA", "Kharif Scheme", "1", "—"]);
+
+    const v = cellsOf(renderToStaticMarkup(<VisitsSection title="Visits" summary={{ visitsEntered: true, dealerVisits: 5, newPartyVisits: 2, actualDealerVisits: 4, actualNewPartyVisits: null, others: "" }} />));
+    assert.deepEqual(v, [["Metric", "Planned", "Actual"], ["Dealer Visits", "5", "4"], ["New Party Visits", "2", "—"]]);
+
+    const o = cellsOf(renderToStaticMarkup(<OthersSection title="Others" text="Meet distributor" />));
+    assert.deepEqual(o, [["Item", "Planned", "Actual"], ["Others", "Meet distributor", "—"]]);
+
+    // Empty sections collapse to one compact line (no table, no big blank box).
+    for (const [html, text] of [
+      [renderToStaticMarkup(<DealerSection title="Sales" rows={[]} />), "No Sales data"],
+      [renderToStaticMarkup(<DealerSection title="Recovery" rows={[]} recovery />), "No Recovery data"],
+      [renderToStaticMarkup(<AppointmentSection title="Dealer Appointment" rows={[]} />), "No Dealer Appointment data"],
+      [renderToStaticMarkup(<ConversionSection title="Scheme Conversion" rows={[]} />), "No Scheme Conversion data"],
+      [renderToStaticMarkup(<VisitsSection title="Visits" summary={{ visitsEntered: false, dealerVisits: 0, newPartyVisits: 0, others: "" }} />), "No Visits data"],
+      [renderToStaticMarkup(<OthersSection title="Others" text="  " />), "No Others data"],
+    ] as const) assert.ok(html.includes(text) && !html.includes("<table"), text);
+  }
+  {
+    // The dialog shows all six sections as tables and keeps the self-rating + RM review workflow untouched.
+    const src = readFileSync("src/features/daily-work/team-performance-page.tsx", "utf8");
+    for (const needle of ["<DealerSection title={L.sales}", "<DealerSection title={L.recovery}", "<AppointmentSection", "<ConversionSection", "<VisitsSection", "<OthersSection", "<RmReviewPanel", "L.selfRating", "/api/daily-work/review"]) assert.ok(src.includes(needle), needle);
+    assert.ok(!src.includes('className="flex justify-between gap-2"'), "no scattered text rows remain");
+  }
   assert.equal(labelMeta("daily_work.col.payment_mode").module, "Daily Work");
   console.log("recovery-payment-mode.test.tsx — all assertions passed");
 }

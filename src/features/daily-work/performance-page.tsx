@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useLabel } from "@/features/labels/label-ui";
+import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { DailyWorkReviewDialog } from "./team-performance-page";
 
 type Attendance = "PRESENT" | "ABSENT" | "LEAVE" | "HOLIDAY";
@@ -24,7 +25,7 @@ interface Option { id: string; name: string }
 interface PerfRow {
   officerId: string; officerName: string; groupId: string | null; stateName: string | null; date: string;
   attendance: Attendance; planSubmittedAt: string | null; reportSubmittedAt: string | null;
-  selfRating: number | null; rmRating: number | null; submitted: boolean;
+  selfRating: number | null; rmRating: number | null; submitted: boolean; reportMissed: boolean;
 }
 interface Summary {
   salesOfficers: number; presentDays: number; totalDays: number; submittedPlans: number; submittedReports: number;
@@ -65,13 +66,12 @@ export function PerformancePage({ role }: { role: Role }) {
     colAttendance: useLabel("daily_work.performance.col.attendance"),
     colPlan: useLabel("daily_work.performance.col.plan_submission"),
     colReport: useLabel("daily_work.performance.col.report_submission"),
+    reportMissed: useLabel("daily_work.performance.report_missed"),
     colSelf: useLabel("daily_work.team.col.self_rating"),
     colRm: useLabel("daily_work.team.col.rm_rating"),
     colAction: useLabel("daily_work.team.col.action"),
     view: useLabel("daily_work.team.action.view"),
     empty: useLabel("daily_work.performance.empty"),
-    allRms: useLabel("daily_work.performance.filter.all_rms"),
-    allSalesOfficers: useLabel("daily_work.performance.filter.all_sales_officers"),
     fState: useLabel("daily_work.performance.col.state"),
     allStates: useLabel("daily_work.performance.filter.all_states"),
     officerLabel: useLabel("daily_work.team.col.sales_officer"),
@@ -93,7 +93,7 @@ export function PerformancePage({ role }: { role: Role }) {
   const query = new URLSearchParams({ from, to });
   if (!isSO && officerId) query.set("officerId", officerId);
   if (isAdmin && groupId) query.set("groupId", groupId);
-  const { data, isLoading, isFetching } = useQuery<Payload>({
+  const { data, isLoading } = useQuery<Payload>({
     queryKey: ["performance", role, from, to, officerId, groupId],
     queryFn: () => api.get<Payload>(`/api/daily-work/performance?${query.toString()}`),
   });
@@ -113,6 +113,9 @@ export function PerformancePage({ role }: { role: Role }) {
     setOfficerId("");
   };
 
+  // Single selection through the shared multi-select header: ticking a different person replaces the choice, unticking clears it.
+  const pickOfficer = (next: string[]) => setOfficerId(next.find((id) => id !== officerId) ?? "");
+
   return (
     <div className="space-y-5">
       <PageHeader crumbs={[{ label: L.breadcrumb }, { label: title }]} title={title} />
@@ -124,12 +127,6 @@ export function PerformancePage({ role }: { role: Role }) {
           <div className="space-y-1.5"><Label>{L.fState}</Label>
             <NativeSelect className="w-48" value={groupId} onChange={(e) => changeState(e.target.value)}
               options={[{ value: "", label: L.allStates }, ...(data?.states ?? []).map((s) => ({ value: s.id, label: s.name }))]} />
-          </div>
-        )}
-        {showOfficer && (
-          <div className="space-y-1.5"><Label>{L.officerLabel}</Label>
-            <NativeSelect className="w-52" value={officerId} disabled={isAdmin && isFetching} onChange={(e) => setOfficerId(e.target.value)}
-              options={[{ value: "", label: isAdmin ? L.allSalesOfficers : L.allRms }, ...(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))]} />
           </div>
         )}
       </div>
@@ -155,7 +152,15 @@ export function PerformancePage({ role }: { role: Role }) {
           <TableHeader>
             <TableRow>
               <TableHead>{L.colDate}</TableHead>
-              {showOfficer && <TableHead>{L.colOfficer}</TableHead>}
+              {showOfficer && (
+                <ColumnFilterHeader
+                  label={L.colOfficer}
+                  ariaLabel={L.officerLabel}
+                  options={(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))}
+                  selected={officerId ? [officerId] : []}
+                  onChange={pickOfficer}
+                />
+              )}
               {showState && <TableHead>{L.colState}</TableHead>}
               <TableHead>{L.colAttendance}</TableHead>
               <TableHead>{L.colPlan}</TableHead>
@@ -190,7 +195,9 @@ export function PerformancePage({ role }: { role: Role }) {
                     )}
                   </TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">{timeText(r.planSubmittedAt)}</TableCell>
-                  <TableCell className="whitespace-nowrap tabular-nums">{timeText(r.reportSubmittedAt)}</TableCell>
+                  <TableCell className="whitespace-nowrap tabular-nums">
+                    {r.reportSubmittedAt ? timeText(r.reportSubmittedAt) : r.reportMissed ? <Badge variant="destructive">{L.reportMissed}</Badge> : timeText(null)}
+                  </TableCell>
                   <TableCell className="tabular-nums">{r.selfRating == null ? dash : ratingText(r.selfRating)}</TableCell>
                   <TableCell className="tabular-nums">{r.rmRating == null ? dash : ratingText(r.rmRating)}</TableCell>
                   <TableCell className="text-right">

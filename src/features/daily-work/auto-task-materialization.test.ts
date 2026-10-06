@@ -178,7 +178,7 @@ async function main() {
     }
     const service = readFileSync("src/features/daily-work/service.server.ts", "utf8");
     assert.ok(service.includes("if (autoTasksApplyToRole(ctx.role)) {\n      await materializeDueDailyWorkTasksInTransaction"), "Submit Daily Work: materialize + unconfirmed check only where Auto Tasks apply");
-    assert.ok(service.includes("autoTasksApplyToRole(ctx.role)\n      ? await materializeDueDailyWorkTasksInTransaction"), "Submit Daily Report uses the same rule");
+    assert.ok(service.includes("autoTasksApplyToRole(ctx.role) && workDate === currentBusinessDate(dailyWorkClock.now())\n      ? await materializeDueDailyWorkTasksInTransaction"), "Submit Daily Report uses the same role rule (and only materializes for today's report)");
     assert.ok(/materializeDueDailyWorkTasks\(ctx\)/.test(service), "the Recovery read path still goes through the role-aware entry point");
   }
 

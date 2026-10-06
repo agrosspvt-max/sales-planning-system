@@ -29,6 +29,7 @@ import {
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
   MANDATORY_SECTIONS, SectionStatus, SCHEME_CONVERSION_ENABLED, isDailyWorkSectionEnabled, RECOVERY_PAYMENT_MODES,
   type RecoveryPaymentMode,
+  dailyWorkClock, dailyReportDeadline, isReportDeadlinePassed, isReportMissed, previousBusinessDate, previousReportBlocksPlan, previousReportState, type PreviousReportState,
   type DailyWorkSection, type DailyWorkType, type DailyWorkDealerRow,
   type SectionDataPresence, type MandatorySection, type SectionStatusCounts,
 } from "@/lib/daily-work";
@@ -672,6 +673,7 @@ export async function enterDailyActual(ctx: AuthContext, raw: unknown): Promise<
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    assertReportWindowOpen(workDate, L); // a Missed report (past its noon deadline) is read-only
     let count = 0;
     for (const e of entries) {
       // Payment Mode describes a RECEIVED amount: no recovery (<= 0) means no mode, whatever the client sent. Otherwise an explicit
@@ -775,6 +777,7 @@ export async function enterAppointmentStatus(ctx: AuthContext, raw: unknown): Pr
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    assertReportWindowOpen(workDate, L); // a Missed report (past its noon deadline) is read-only
     let count = 0;
     for (const e of entries) {
       const n = await tx.$executeRaw(Prisma.sql`
@@ -913,6 +916,7 @@ export async function enterConversionAchievability(ctx: AuthContext, raw: unknow
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    assertReportWindowOpen(workDate, L); // a Missed report (past its noon deadline) is read-only
     let count = 0;
     for (const e of entries) {
       const n = await tx.$executeRaw(Prisma.sql`
@@ -1033,6 +1037,7 @@ export async function enterVisitsActual(ctx: AuthContext, raw: unknown): Promise
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    assertReportWindowOpen(workDate, L); // a Missed report (past its noon deadline) is read-only
     let count = 0;
     for (const entry of entries) {
       count += Number(await tx.$executeRaw(Prisma.sql`
@@ -1144,6 +1149,29 @@ export interface DailyStatusPayload {
   reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
   // VISIBILITY-only flag for the "Today's Auto Tasks" block (default OFF). Never gates Auto Task behaviour.
   autoTasksEnabled: boolean;
+  /** The previous calendar day's Daily Report as it gates THIS day's Daily Plan submission (see previousReportState). */
+  previousReport: { date: string; state: PreviousReportState; deadline: string };
+  /** This day's own Daily Report deadline: 12:00 noon of the following day (business timezone). */
+  reportDeadline: string;
+  reportDeadlinePassed: boolean;
+  /** Derived (never stored): this day had a submitted plan, its report was not finalized, and the deadline has passed. */
+  reportMissed: boolean;
+}
+
+/** Report actuals/results of day D can only be entered until D+1 12:00 (business timezone); after that the report is Missed and read-only. */
+function assertReportWindowOpen(workDate: string, L: ResolvedLabels): void {
+  if (isReportDeadlinePassed(workDate, dailyWorkClock.now())) throw new ApiError(422, L["daily_work.validation.report_deadline_passed"]);
+}
+
+/** The previous calendar day's submitted-plan / finalized-report facts for one owner. Keyed on the owner, so nobody can satisfy another's gate. */
+async function previousReportGate(db: DbClient, officerId: string, workDate: string, now: Date): Promise<{ date: string; state: PreviousReportState; deadline: Date }> {
+  const date = previousBusinessDate(workDate);
+  const rows = await db.$queryRaw<{ planned: boolean; finalized: boolean }[]>(Prisma.sql`
+    SELECT EXISTS(SELECT 1 FROM "DailyWorkEntry" WHERE "officerId" = ${officerId} AND "workDate" = ${date}::date AND "planSubmittedAt" IS NOT NULL) AS "planned",
+           EXISTS(SELECT 1 FROM "DailyWorkDay" WHERE "officerId" = ${officerId} AND "workDate" = ${date}::date AND "status" = 'FINALIZED') AS "finalized",
+           'previousDayGate' AS "previousDayGate"`);
+  const row = rows[0] ?? { planned: false, finalized: false };
+  return { date, state: previousReportState(row, date, now), deadline: dailyReportDeadline(date) };
 }
 
 interface ReportEntryState {
@@ -1200,24 +1228,31 @@ export async function getDailyStatus(ctx: AuthContext, rawDate?: string, targetO
   const officerId = await resolveReadOfficer(ctx, targetOfficerId);
   await materializeCalendarForRead(ctx, officerId, workDate, "PLAN"); // the status (progress bar) must see Calendar tasks too
   const { day } = await readBatchContext(officerId, workDate);
-  const [data, noPlanSet, report, autoTasksEnabled] = await Promise.all([
+  const now = dailyWorkClock.now();
+  const [data, noPlanSet, report, autoTasksEnabled, previous] = await Promise.all([
     sectionDataPresence(officerId, workDate, day.currentBatchId),
     loadNoPlanSet(officerId, workDate, day.currentBatchId),
     reportCompletion(prisma, officerId, workDate, day.currentBatchId),
     getAutoTasksEnabled(),
+    previousReportGate(prisma, officerId, workDate, now),
   ]);
+  const reportDeadlinePassed = isReportDeadlinePassed(workDate, now);
   const statuses = computeSectionStatuses(data, noPlanSet);
   return {
     workDate,
     sections: MANDATORY_SECTIONS.map((s) => ({ section: s, status: statuses[s], hasData: data[s] })),
     counts: sectionStatusCounts(statuses),
-    canSubmit: day.status === "OPEN" && canSubmitDailyWork(statuses),
+    canSubmit: day.status === "OPEN" && canSubmitDailyWork(statuses) && !previousReportBlocksPlan(previous.state),
     hasSubmittedWork: report.hasBatches,
-    canSubmitReport: day.status === "OPEN" && report.complete,
+    canSubmitReport: day.status === "OPEN" && report.complete && !reportDeadlinePassed,
     isFinalized: day.status === "FINALIZED",
     selfRating: day.selfRating,
     reportSections: report.sections,
     autoTasksEnabled,
+    previousReport: { date: previous.date, state: previous.state, deadline: previous.deadline.toISOString() },
+    reportDeadline: dailyReportDeadline(workDate).toISOString(),
+    reportDeadlinePassed,
+    reportMissed: isReportMissed(workDate, report.hasBatches, day.status === "FINALIZED", now),
   };
 }
 
@@ -1259,6 +1294,11 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
   await prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    // Strict daily workflow: yesterday's Daily Report must have been submitted before today's Daily Plan can be. Enforced here, in the
+    // locked transaction, so no client can bypass it; a rejection writes nothing (the whole transaction rolls back).
+    const previous = await previousReportGate(tx, officerId, workDate, dailyWorkClock.now());
+    if (previous.state === "PENDING") throw new ApiError(422, L["daily_work.validation.previous_report_required"]);
+    // MISSED (deadline passed, report never submitted) deliberately does NOT block: the user moves on and that day shows "Missed".
     // Auto Tasks apply only to users who are shown them (see autoTasksApplyToRole): the SAME rule as the Recovery read path,
     // so the gate can never reject for a task the user cannot see, confirm or reschedule.
     if (autoTasksApplyToRole(ctx.role)) {
@@ -1307,7 +1347,11 @@ export async function submitDailyReport(ctx: AuthContext, raw: unknown): Promise
   await prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.report_already_submitted"]);
-    const materialized = autoTasksApplyToRole(ctx.role)
+    // The report for day D closes at 12:00 noon on D+1 (business timezone). An already-finalized report was handled above and is unaffected.
+    if (isReportDeadlinePassed(workDate, dailyWorkClock.now())) throw new ApiError(422, L["daily_work.validation.report_deadline_passed"]);
+    // Auto Tasks are materialized only for TODAY's report: submitting yesterday's still-open report must never add tasks to a day that
+    // can no longer be planned (that would make it impossible to finalize). Today's behavior is unchanged.
+    const materialized = autoTasksApplyToRole(ctx.role) && workDate === currentBusinessDate(dailyWorkClock.now())
       ? await materializeDueDailyWorkTasksInTransaction(tx, officerId, workDate, day)
       : { materializedTasks: 0, affectedDealers: 0, finalized: false };
     if (materialized.materializedTasks > 0) {
@@ -1762,6 +1806,8 @@ export interface PerformanceRow {
   selfRating: number | null;
   rmRating: number | null;
   submitted: boolean; // plan submitted that day → detail is openable
+  /** Derived, never stored: plan submitted, report not finalized and the report's noon deadline has passed → shown as "Missed". */
+  reportMissed: boolean;
 }
 export interface PerformanceSummary {
   salesOfficers: number;
@@ -1800,7 +1846,10 @@ const performanceFilterSchema = z.object({
   groupId: z.string().optional(), // State (region) filter — Admin only
 });
 
-/** The authoritative Sales-Officer population for the caller (server-side scope), with group/state names. */
+/** Roles that own Daily Work (and therefore appear in Performance). */
+const DAILY_WORK_OWNER_ROLES = [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] as const;
+
+/** The authoritative Daily Work performer population for the caller (server-side scope), with group/state names. */
 async function performancePopulation(ctx: AuthContext): Promise<{ id: string; name: string; groupId: string | null; groupName: string | null }[]> {
   const select = { id: true, name: true, groupId: true, group: { select: { id: true, name: true } } } as const;
   if (ctx.role === Role.SALES_OFFICER) {
@@ -1814,8 +1863,9 @@ async function performancePopulation(ctx: AuthContext): Promise<{ id: string; na
     const officers = await prisma.user.findMany({ where: { role: Role.SALES_OFFICER, isActive: true, deletedAt: null, id: { in: ids } }, select, orderBy: { name: "asc" } });
     return officers.map((o) => ({ id: o.id, name: o.name, groupId: o.groupId, groupName: o.group?.name ?? null }));
   }
-  // Super Admin — company-wide.
-  const officers = await prisma.user.findMany({ where: { role: Role.SALES_OFFICER, isActive: true, deletedAt: null }, select, orderBy: { name: "asc" } });
+  // Super Admin — company-wide. Daily Work owners are Sales Officers AND Regional Managers (an RM submits Daily Work too),
+  // so both appear. Each user is one row source (unique id), so nobody is double-counted. The RM caller's own scope above is unchanged.
+  const officers = await prisma.user.findMany({ where: { role: { in: [...DAILY_WORK_OWNER_ROLES] }, isActive: true, deletedAt: null }, select, orderBy: { name: "asc" } });
   return officers.map((o) => ({ id: o.id, name: o.name, groupId: o.groupId, groupName: o.group?.name ?? null }));
 }
 
@@ -1883,6 +1933,7 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   const rmMap = new Map(rmRows.map((r) => [cell(r.officerId, dk(r.workDate)), r.rating]));
   const attMap = new Map(attRows.map((r) => [cell(r.officerId, dk(r.workDate)), r.status as AttendanceStatus]));
 
+  const now = dailyWorkClock.now();
   const rows: PerformanceRow[] = [];
   for (const officer of population) {
     for (const date of dates) {
@@ -1903,6 +1954,7 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
         selfRating: finalized && day?.selfRating != null ? day.selfRating : null,
         rmRating: rmMap.get(key) ?? null,
         submitted: plan != null,
+        reportMissed: isReportMissed(date, plan != null, day?.status === "FINALIZED" || finalized != null, now),
       });
     }
   }
@@ -1949,7 +2001,7 @@ export async function setDailyWorkAttendance(ctx: AuthContext, raw: unknown): Pr
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? "Invalid attendance");
   const { officerId, workDate, status } = parsed.data;
   const officer = await prisma.user.findUnique({ where: { id: officerId }, select: { role: true } });
-  if (!officer || officer.role !== Role.SALES_OFFICER) throw new ApiError(422, L["daily_work.performance.invalid_officer"]);
+  if (!officer || !(DAILY_WORK_OWNER_ROLES as readonly Role[]).includes(officer.role)) throw new ApiError(422, L["daily_work.performance.invalid_officer"]);
   await prisma.$executeRaw(Prisma.sql`
     INSERT INTO "DailyWorkAttendance" ("id","officerId","workDate","status","createdAt","updatedAt")
     VALUES (${randomUUID()}, ${officerId}, ${workDate}::date, ${status}, NOW(), NOW())

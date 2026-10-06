@@ -143,6 +143,7 @@ async function loadPartyAppointments(gte: Date, lt: Date, ownerIds: string[] | n
 
 /* ------------------------------ Calendar entries (Daily Task / Meeting / Reminder / Other) ------------------------------ */
 
+/** MEETING / OTHER can no longer be CREATED (see entryInput) but stay readable so any existing entries still display. */
 export const CALENDAR_ENTRY_KINDS = ["TASK", "MEETING", "REMINDER", "OTHER"] as const;
 export type CalendarEntryKind = (typeof CALENDAR_ENTRY_KINDS)[number];
 
@@ -355,9 +356,7 @@ export async function deleteCalendarNote(ctx: AuthContext, id: string): Promise<
 const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "A valid date is required");
 const detailText = z.string().trim().min(1, "Details are required").max(2000);
 const entryInput = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("MEETING"), date: dateStr, text: detailText }),
   z.object({ kind: z.literal("REMINDER"), date: dateStr, text: detailText }),
-  z.object({ kind: z.literal("OTHER"), date: dateStr, text: detailText }),
   z.object({
     kind: z.literal("TASK"), date: dateStr,
     // The task sections are exactly the ACTIVE Daily Work sections (MANDATORY_SECTIONS) — a disabled one is rejected below.

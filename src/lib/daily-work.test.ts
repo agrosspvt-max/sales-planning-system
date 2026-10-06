@@ -21,6 +21,7 @@ import {
   rowTaskType, combineTaskType, type TaskType,
   DailyWorkView, DEFAULT_DAILY_WORK_VIEW, dailyWorkShowsResults, visibleDailyWorkRows,
   paymentModeApplies, paymentModeForActual,
+  addBusinessDays, previousBusinessDate, dailyReportDeadline, isReportDeadlinePassed, previousReportState, previousReportBlocksPlan, isReportMissed, resolveReportDate,
 } from "./daily-work";
 import { DEFAULT_LABELS, labelCatalog, resolveLabels } from "@/features/labels/labels";
 
@@ -47,7 +48,14 @@ test("public Daily Work routes make the current business date authoritative", ()
   const routeRoot = resolve("src/app/api/daily-work");
   for (const path of ["route.ts", "status/route.ts", "save/route.ts", "submit/route.ts", "actual/route.ts", "no-plan/route.ts", "submit-day/route.ts"]) {
     const source = readFileSync(resolve(routeRoot, path), "utf8");
-    assert.match(source, /currentBusinessDate\(\)/, `${path} must use the server business date`);
+    // Plan routes are always today. Report routes (status / section reads / actual) may also target YESTERDAY's still-open report,
+    // but only through resolveReportDate (today or yesterday, nothing else); the service enforces the noon deadline.
+    const reportRoute = ["route.ts", "status/route.ts", "actual/route.ts"].includes(path);
+    assert.match(source, reportRoute ? /currentBusinessDate\(\)|resolveReportDate\(/ : /currentBusinessDate\(\)/, `${path} must use the server business date`);
+  }
+  assert.match(readFileSync(resolve(routeRoot, "submit-report/route.ts"), "utf8"), /resolveReportDate\(/, "report submission may target yesterday's open report");
+  for (const path of ["save/route.ts", "submit/route.ts", "no-plan/route.ts", "submit-day/route.ts"]) {
+    assert.doesNotMatch(readFileSync(resolve(routeRoot, path), "utf8"), /resolveReportDate/, `${path} always works on today`);
   }
 });
 
@@ -401,6 +409,63 @@ test("Daily Plan source never wires Payment Mode", () => {
   assert.doesNotMatch(page, /paymentMode: r\.paymentMode \}/, "the Plan payload carries no Payment Mode");
   const service = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
   assert.doesNotMatch(service, /recoveryRowSchema/, "no Recovery-specific Plan schema with Payment Mode");
+});
+
+/* ---------- Strict daily workflow: previous report gate + noon deadline ---------- */
+test("previous business date is plain calendar arithmetic across month/year boundaries", () => {
+  assert.equal(previousBusinessDate("2026-10-06"), "2026-10-05");
+  assert.equal(previousBusinessDate("2026-10-01"), "2026-09-30");
+  assert.equal(previousBusinessDate("2026-01-01"), "2025-12-31");
+  assert.equal(previousBusinessDate("2024-03-01"), "2024-02-29");
+  assert.equal(addBusinessDays("2026-12-31", 1), "2027-01-01");
+});
+test("the Daily Report deadline is 12:00 noon of the NEXT day in the Daily Work business timezone (IST)", () => {
+  assert.equal(dailyReportDeadline("2026-10-05").toISOString(), "2026-10-06T06:30:00.000Z"); // 12:00 IST = 06:30 UTC
+  assert.equal(dailyReportDeadline("2026-12-31").toISOString(), "2027-01-01T06:30:00.000Z");
+  assert.equal(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(dailyReportDeadline("2026-10-05")), "12:00");
+});
+test("deadline boundary: noon is allowed, anything after is late; earlier days are long past", () => {
+  const d = "2026-10-05";
+  assert.equal(isReportDeadlinePassed(d, new Date("2026-10-06T11:59:59+05:30")), false);
+  assert.equal(isReportDeadlinePassed(d, new Date("2026-10-06T12:00:00.000+05:30")), false, "exactly 12:00:00 is still on time");
+  assert.equal(isReportDeadlinePassed(d, new Date("2026-10-06T12:00:00.001+05:30")), true);
+  assert.equal(isReportDeadlinePassed(d, new Date("2026-10-06T12:01:00+05:30")), true);
+  assert.equal(isReportDeadlinePassed(d, new Date("2026-10-05T23:59:00+05:30")), false, "the same evening is within the window");
+  // Timezone-independent: the same instant expressed in UTC / US time gives the same answer.
+  assert.equal(isReportDeadlinePassed(d, new Date("2026-10-06T06:30:01Z")), true);
+  assert.equal(isReportDeadlinePassed(d, new Date("2026-10-06T01:00:00-05:30")), false);
+});
+test("previous report state: NOT_APPLICABLE / SUBMITTED / PENDING / MISSED — only PENDING blocks today's plan", () => {
+  const prev = "2026-10-05", before = new Date("2026-10-06T10:00:00+05:30"), after = new Date("2026-10-06T12:01:00+05:30");
+  assert.equal(previousReportState({ planned: false, finalized: false }, prev, after), "NOT_APPLICABLE");
+  assert.equal(previousReportState({ planned: false, finalized: false }, prev, before), "NOT_APPLICABLE", "no plan → never pending/missed");
+  assert.equal(previousReportState({ planned: true, finalized: true }, prev, after), "SUBMITTED", "a submitted report never becomes Missed");
+  assert.equal(previousReportState({ planned: true, finalized: false }, prev, before), "PENDING");
+  assert.equal(previousReportState({ planned: true, finalized: false }, prev, new Date("2026-10-06T12:00:00.000+05:30")), "PENDING", "noon itself is still on time");
+  assert.equal(previousReportState({ planned: true, finalized: false }, prev, after), "MISSED");
+  assert.deepEqual((["NOT_APPLICABLE", "SUBMITTED", "PENDING", "MISSED"] as const).map(previousReportBlocksPlan), [false, false, true, false]);
+});
+test("Missed is derived from plan + not finalized + deadline, never stored", () => {
+  const d = "2026-10-05";
+  assert.equal(isReportMissed(d, true, false, new Date("2026-10-06T12:01:00+05:30")), true);
+  assert.equal(isReportMissed(d, true, false, new Date("2026-10-06T11:59:00+05:30")), false, "not Missed before the deadline");
+  assert.equal(isReportMissed(d, true, true, new Date("2026-10-09T09:00:00+05:30")), false, "finalized never Missed");
+  assert.equal(isReportMissed(d, false, false, new Date("2026-10-09T09:00:00+05:30")), false, "no plan → nothing to miss");
+});
+test("report date: today, or yesterday (while its deadline is open); anything else falls back to today", () => {
+  const now = new Date("2026-10-06T10:00:00+05:30");
+  assert.equal(resolveReportDate("2026-10-05", now), "2026-10-05");
+  assert.equal(resolveReportDate("2026-10-06", now), "2026-10-06");
+  for (const other of ["2026-10-04", "2026-10-07", "2025-01-01", "junk", undefined, null, 5]) assert.equal(resolveReportDate(other, now), "2026-10-06");
+  assert.equal(resolveReportDate("2026-10-05", new Date("2026-10-06T23:30:00+05:30")), "2026-10-05", "business date, not UTC");
+});
+test("Submit Daily Work shows why it is blocked, and the Report shows its deadline", () => {
+  const page = readFileSync(resolve("src/features/daily-work/daily-work-page.tsx"), "utf8");
+  assert.match(page, /previousReport\?\.state === "PENDING"/);
+  assert.doesNotMatch(page, /EXPIRED/, "a Missed report shows no blocking message");
+  assert.match(page, /data\.reportDeadlinePassed/);
+  const service = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
+  assert.ok(service.includes("previousReportBlocksPlan(previous.state)"), "canSubmit is also false while blocked (server authoritative)");
 });
 
 console.log(`\n${passed} daily-work helper tests passed`);

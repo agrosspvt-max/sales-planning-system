@@ -147,7 +147,8 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
       freight: useLabel("cn_requests.cn_type.freight"),
       scheme: useLabel("cn_requests.cn_type.scheme"),
       demo: useLabel("cn_requests.cn_type.demo"),
-      damage: useLabel("cn_requests.cn_type.damage"),
+      damageExpiry: useLabel("cn_requests.cn_type.damage_expiry"),
+      other: useLabel("cn_requests.cn_type.other"),
     },
     paymentStatusLabels: {
       pending: useLabel("cn_requests.payment.pending"),
@@ -429,7 +430,7 @@ export function CreateRequestDialog({
     selectParty: useLabel("cn_requests.validation.select_party"), validType: useLabel("cn_requests.validation.valid_type"),
     cnTypes: {
       priceDifference: useLabel("cn_requests.cn_type.price_difference"), freight: useLabel("cn_requests.cn_type.freight"),
-      scheme: useLabel("cn_requests.cn_type.scheme"), demo: useLabel("cn_requests.cn_type.demo"), damage: useLabel("cn_requests.cn_type.damage"),
+      scheme: useLabel("cn_requests.cn_type.scheme"), demo: useLabel("cn_requests.cn_type.demo"), damageExpiry: useLabel("cn_requests.cn_type.damage_expiry"), other: useLabel("cn_requests.cn_type.other"),
     },
   };
   // RM only: "My Dealer" (raise for self) vs "Team" (raise on behalf of a team Sales Officer).
@@ -552,7 +553,7 @@ type CnWorkflowLabels = {
   selected: string; view: string; download: string; confirm: string; cnExpiryDays: string; expires: string; postedAmount: string; outstandingAmount: string;
   cancel: string; close: string; party: string; cnType: string; approxAmount: string; paymentStatus: string;
   employeeName: string; state: string; territory: string; status: string; details: string; remarks: string; submittedAt: string; detailTitle: string;
-  cnTypeLabels: { priceDifference: string; freight: string; scheme: string; demo: string; damage: string };
+  cnTypeLabels: { priceDifference: string; freight: string; scheme: string; demo: string; damageExpiry: string; other: string };
   paymentStatusLabels: { pending: string; notPaid: string; partialPaid: string; paid: string };
   acceptanceFileHelp: string; confirming: string;
   validation: {

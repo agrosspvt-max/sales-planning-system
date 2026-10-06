@@ -81,8 +81,8 @@ function makeFake(init: Partial<Store> = {}) {
     $queryRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest), true),
     $executeRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest), false),
     user: {
-      findMany: async ({ where, select }: { where: { role?: Role; id?: { in: string[] } }; select?: Record<string, unknown> }) =>
-        USERS.filter((u) => (where.role ? u.role === where.role : true)).filter((u) => (where.id?.in ? where.id.in.includes(u.id) : true))
+      findMany: async ({ where, select }: { where: { role?: Role | { in: Role[] }; id?: { in: string[] } }; select?: Record<string, unknown> }) =>
+        USERS.filter((u) => (!where.role ? true : typeof where.role === "object" ? where.role.in.includes(u.role) : u.role === where.role)).filter((u) => (where.id?.in ? where.id.in.includes(u.id) : true))
           .map((u) => { const o: Record<string, unknown> = { id: u.id, name: u.name }; if (select?.groupId) o.groupId = u.groupId; if (select?.group) o.group = u.groupId ? { id: u.groupId, name: GROUP_NAMES[u.groupId] } : null; return o; }),
       findUnique: async ({ where, select }: { where: { id: string }; select?: Record<string, boolean> }) => {
         const u = USERS.find((x) => x.id === where.id); if (!u) return null;
@@ -196,8 +196,8 @@ async function main() {
     const f = makeFake();
     const svc = loadService(f.prisma);
     const p = await svc.getDailyPerformance(ADMIN, RANGE);
-    assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["so1", "so2", "so3", "so4", "so5"]);
-    assert.equal(p.rows.length, 15, "5 officers × 3 days");
+    assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["rm1", "rm2", "so1", "so2", "so3", "so4", "so5"], "Admin sees every Daily Work owner: Sales Officers AND Regional Managers");
+    assert.equal(p.rows.length, 21, "7 performers × 3 days");
     assert.equal(f.store.rawCount, 4, "fixed 4 batched range queries — no N+1");
   }
 
@@ -307,20 +307,20 @@ async function main() {
   {
     const svc = loadService(makeFake().prisma);
     const company = await svc.getDailyPerformance(ADMIN, RANGE);
-    assert.deepEqual(company.officers.map((o) => o.id).sort(), ["so1", "so2", "so3", "so4", "so5"], "All States offers all SOs");
+    assert.deepEqual(company.officers.map((o) => o.id).sort(), ["rm1", "rm2", "so1", "so2", "so3", "so4", "so5"], "All States offers every performer (SOs and RMs)");
 
     const byOfficer = await svc.getDailyPerformance(ADMIN, { ...RANGE, officerId: "so3" });
     assert.deepEqual([...new Set(byOfficer.rows.map((r) => r.officerId))], ["so3"]);
-    assert.deepEqual(byOfficer.officers.map((o) => o.id).sort(), ["so1", "so2", "so3", "so4", "so5"], "All States + specific SO keeps the company-wide option set");
+    assert.deepEqual(byOfficer.officers.map((o) => o.id).sort(), ["rm1", "rm2", "so1", "so2", "so3", "so4", "so5"], "All States + specific SO keeps the company-wide option set");
 
     const mp = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g1" });
-    assert.deepEqual([...new Set(mp.rows.map((r) => r.officerId))].sort(), ["so1", "so2"], "MP + All Sales Officers returns MP only");
-    assert.deepEqual(mp.officers.map((o) => o.id).sort(), ["so1", "so2"], "MP dropdown contains MP SOs only");
+    assert.deepEqual([...new Set(mp.rows.map((r) => r.officerId))].sort(), ["rm1", "so1", "so2"], "MP + All returns MP only (its RM included)");
+    assert.deepEqual(mp.officers.map((o) => o.id).sort(), ["rm1", "so1", "so2"], "MP dropdown contains MP performers only");
 
     const byState = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g2" });
-    assert.deepEqual([...new Set(byState.rows.map((r) => r.officerId))], ["so3"], "State filter → g2 only");
-    assert.equal(byState.summary.salesOfficers, 1);
-    assert.deepEqual(byState.officers.map((o) => o.id), ["so3"], "UP dropdown contains UP SOs only");
+    assert.deepEqual([...new Set(byState.rows.map((r) => r.officerId))].sort(), ["rm2", "so3"], "State filter → g2 only");
+    assert.equal(byState.summary.salesOfficers, 2);
+    assert.deepEqual(byState.officers.map((o) => o.id).sort(), ["rm2", "so3"], "UP dropdown contains UP performers only");
 
     const wb = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g3" });
     assert.deepEqual(wb.officers.map((o) => o.id), ["so4"], "WB dropdown contains WB SOs only");
@@ -339,20 +339,98 @@ async function main() {
     assert.deepEqual([...new Set(rmFilter.rows.map((r) => r.officerId))], ["so2"]);
   }
 
-  // 9b) Admin UI order and dependent-state behavior: Date From, Date To, State, then Sales Officer.
+  // 9b) UI: the Sales Officer COLUMN HEADER is the filter (shared ColumnFilterHeader); State stays above and resets it.
   {
     const page = readFileSync(resolve("src/features/daily-work/performance-page.tsx"), "utf8");
     const fromAt = page.indexOf("<Label>{L.dateFrom}</Label>");
     const toAt = page.indexOf("<Label>{L.dateTo}</Label>");
     const stateAt = page.indexOf("<Label>{L.fState}</Label>");
-    const officerAt = page.indexOf("<Label>{L.officerLabel}</Label>");
-    assert.ok(fromAt < toAt && toAt < stateAt && stateAt < officerAt, "Admin filters render Date From → Date To → State → Sales Officer");
-    assert.ok(page.includes('useLabel("daily_work.performance.filter.all_sales_officers")'), "SO default uses All Sales Officers label");
-    assert.ok(page.includes("isAdmin ? L.allSalesOfficers : L.allRms"), "the terminology change is limited to Admin; RM behavior stays unchanged");
-    assert.ok(page.includes('setGroupId(value);') && page.includes('setOfficerId("");'), "State change resets the selected SO");
-    assert.ok(page.includes("disabled={isAdmin && isFetching}"), "stale SO options are unavailable while the new State scope loads");
-    const labels = localRequire(resolve("src/features/labels", "labels.ts")).DEFAULT_LABELS as Record<string, string>;
-    assert.equal(labels["daily_work.performance.filter.all_sales_officers"], "All Sales Officers");
+    assert.ok(fromAt < toAt && toAt < stateAt, "Date From → Date To → State filters remain");
+    assert.ok(!page.includes("<Label>{L.officerLabel}</Label>"), "the separate Sales Officer dropdown above the table is gone");
+    assert.ok(/<ColumnFilterHeader[^>]*label=\{L\.colOfficer\}/s.test(page), "Sales Officer header is a ColumnFilterHeader");
+    assert.ok(page.includes("options={(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))}"), "options come from the server's scoped list");
+    assert.ok(page.includes("setOfficerId(next.find((id) => id !== officerId) ?? \"\")"), "single selection: a new tick replaces, untick clears");
+    assert.ok(page.includes('setGroupId(value);') && page.includes('setOfficerId("");'), "State change clears the selected person");
+    assert.ok(page.includes("if (!isSO && officerId) query.set(\"officerId\", officerId)") && page.includes("query.set(\"groupId\", groupId)"), "the selection travels to the server with State and the date range");
+    assert.ok(page.includes("const showOfficer = !isSO"), "Sales Officers never get the person filter");
+  }
+
+  // 9c) Regional Managers are Daily Work owners and appear in Performance like Sales Officers.
+  {
+    const plan = TS("2026-09-28T09:15:00.000Z"), report = TS("2026-09-28T18:30:00.000Z");
+    const f = makeFake({
+      plans: new Map([["rm2|2026-09-28", plan], ["so3|2026-09-28", plan], ["rm2|2026-10-09", plan]]),
+      days: new Map([["rm2|2026-09-28", { finalizedAt: report, selfRating: 9 }]]),
+      attendance: new Map([["rm2|2026-09-29", "LEAVE"]]),
+    });
+    const svc = loadService(f.prisma);
+    const all = await svc.getDailyPerformance(ADMIN, RANGE);
+    const rm = (d: string) => all.rows.find((r) => r.officerId === "rm2" && r.date === d)!;
+    assert.deepEqual([rm("2026-09-28").planSubmittedAt, rm("2026-09-28").reportSubmittedAt, rm("2026-09-28").submitted], [plan.toISOString(), report.toISOString(), true], "RM plan + report submission");
+    assert.equal(rm("2026-09-28").selfRating, 9, "RM self rating");
+    assert.equal(rm("2026-09-28").stateName, "UP", "RM state is its group");
+    assert.equal(rm("2026-09-29").attendance, "LEAVE", "RM attendance override");
+    assert.equal(rm("2026-09-27").attendance, "PRESENT", "RM attendance defaults to Present");
+    assert.ok(!all.rows.some((r) => r.officerId === "rm2" && r.date === "2026-10-09"), "RM record outside the date range is excluded");
+    const keys = all.rows.map((r) => `${r.officerId}|${r.date}`);
+    assert.equal(new Set(keys).size, keys.length, "no performer-day is counted twice");
+    assert.equal(all.summary.salesOfficers, 7);
+    assert.equal(all.summary.submittedPlans, 2, "rm2 + so3 on the 28th (the out-of-range plan is not counted)");
+    assert.equal(all.summary.submittedReports, 1);
+    assert.equal(all.summary.averageSelfRating, 9);
+
+    // State + person filters work for an RM exactly like an SO; a person from another State is rejected.
+    const up = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g2" });
+    assert.deepEqual([...new Set(up.rows.map((r) => r.officerId))].sort(), ["rm2", "so3"]);
+    const justRm = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g2", officerId: "rm2" });
+    assert.deepEqual([...new Set(justRm.rows.map((r) => r.officerId))], ["rm2"]);
+    assert.equal(justRm.summary.salesOfficers, 1);
+    assert.equal(justRm.summary.submittedReports, 1, "summary follows the selected person");
+    await expectStatus(() => svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g1", officerId: "rm2" }), 403, "an RM from another State is not selectable");
+
+    // Authorization: an RM caller still sees only the Sales Officers of their own team (never RMs / other teams); an SO only self.
+    const asRm = await svc.getDailyPerformance(RM2, RANGE);
+    assert.deepEqual([...new Set(asRm.rows.map((r) => r.officerId))], ["so3"], "RM sees their team only — unchanged");
+    assert.deepEqual(asRm.officers.map((o) => o.id), ["so3"]);
+    await expectStatus(() => svc.getDailyPerformance(RM2, { ...RANGE, officerId: "rm1" }), 403, "another RM is not exposed through the filter");
+    assert.deepEqual([...new Set((await svc.getDailyPerformance(SO1, RANGE)).rows.map((r) => r.officerId))], ["so1"]);
+
+    // Attendance of an RM can be set by Admin (like an SO) and persists; other roles still cannot.
+    await svc.setDailyWorkAttendance(ADMIN, { officerId: "rm2", workDate: "2026-09-27", status: "ABSENT" });
+    assert.equal((await svc.getDailyPerformance(ADMIN, { ...RANGE, officerId: "rm2" })).rows.find((r) => r.date === "2026-09-27")?.attendance, "ABSENT");
+    await expectStatus(() => svc.setDailyWorkAttendance(RM1, { officerId: "rm1", workDate: "2026-09-27", status: "ABSENT" }), 403, "an RM cannot set attendance");
+    await expectStatus(() => svc.setDailyWorkAttendance(ADMIN, { officerId: "admin", workDate: "2026-09-27", status: "ABSENT" }), 422, "non Daily-Work users are still refused");
+  }
+
+  // 9d) "Missed" is DERIVED: plan submitted + report not finalized + noon deadline passed. Nothing is stored or faked.
+  {
+    const plan = TS("2026-09-28T09:15:00.000Z"), report = TS("2026-09-28T13:00:00.000Z");
+    const lib = localRequire(resolve("src/lib", "daily-work.ts")) as typeof import("@/lib/daily-work");
+    const f = makeFake({
+      plans: new Map([["so1|2026-09-28", plan], ["so1|2026-09-29", plan], ["rm2|2026-09-28", plan], ["so3|2026-09-28", plan]]),
+      days: new Map([["so3|2026-09-28", { finalizedAt: report, selfRating: 8 }]]),
+    });
+    const svc = loadService(f.prisma);
+    const missed = async (id: string, date: string) => (await svc.getDailyPerformance(ADMIN, { from: date, to: date, officerId: id })).rows[0]!;
+    // Before the deadline (29 Sep 12:00 IST) a missing report is still pending, not Missed.
+    lib.dailyWorkClock.now = () => new Date("2026-09-29T11:59:00+05:30");
+    assert.equal((await missed("so1", "2026-09-28")).reportMissed, false, "not Missed before the deadline");
+    lib.dailyWorkClock.now = () => new Date("2026-09-29T12:00:00.000+05:30");
+    assert.equal((await missed("so1", "2026-09-28")).reportMissed, false, "exactly noon is still on time");
+    // After the deadline: Missed — for SOs and RMs alike — with NO fake submission data.
+    lib.dailyWorkClock.now = () => new Date("2026-09-29T12:01:00+05:30");
+    for (const id of ["so1", "rm2"]) {
+      const row = await missed(id, "2026-09-28");
+      assert.equal(row.reportMissed, true, `${id} report is Missed after the deadline`);
+      assert.deepEqual([row.reportSubmittedAt, row.selfRating, row.rmRating, row.planSubmittedAt != null], [null, null, null, true], "no timestamp, no self/RM rating; the plan is unaffected");
+    }
+    const done = await missed("so3", "2026-09-28");
+    assert.deepEqual([done.reportMissed, done.reportSubmittedAt, done.selfRating], [false, report.toISOString(), 8], "a finalized report never becomes Missed");
+    assert.equal((await missed("so1", "2026-09-27")).reportMissed, false, "a day with no plan is never Missed");
+    assert.equal((await missed("so1", "2026-09-29")).reportMissed, false, "today's report is not Missed while its window is open");
+    assert.equal(f.store.days.has("so1|2026-09-28"), false, "no DailyWorkDay / submission record was created for the Missed day");
+    assert.equal(f.store.reviews.size, 0, "no RM review exists for a Missed day");
+    lib.dailyWorkClock.now = () => new Date();
   }
 
   // 10) Detail authorization (403). Success paths are covered by the existing review-detail tests.

@@ -119,11 +119,14 @@ interface StatusPayload {
   selfRating: number | null;
   reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
   autoTasksEnabled: boolean;
+  previousReport?: { date: string; state: "NOT_APPLICABLE" | "SUBMITTED" | "PENDING" | "MISSED"; deadline: string };
+  reportDeadlinePassed?: boolean;
+  reportMissed?: boolean;
 }
 /** Shared status query — every section save/No-Plan invalidates this key so the bar updates immediately. */
 const STATUS_KEY = (workDate: string) => ["daily-work-status", workDate] as const;
 function useDailyStatus(workDate: string) {
-  return useQuery<StatusPayload>({ queryKey: STATUS_KEY(workDate), queryFn: () => api.get<StatusPayload>("/api/daily-work/status") });
+  return useQuery<StatusPayload>({ queryKey: STATUS_KEY(workDate), queryFn: () => api.get<StatusPayload>(`/api/daily-work/status?date=${workDate}`) });
 }
 
 /* ==================================== Page ==================================== */
@@ -147,11 +150,19 @@ function OwnerDailyWorkPage() {
     const timer = window.setInterval(syncBusinessDate, 60_000);
     return () => window.clearInterval(timer);
   }, []);
-  const { data: dayStatus } = useDailyStatus(workDate);
+  const { data: todayStatus } = useDailyStatus(workDate);
   // The server is authoritative; this also closes the brief boundary window if a request crosses midnight.
   useEffect(() => {
-    if (dayStatus?.workDate && dayStatus.workDate !== workDate) setWorkDate(dayStatus.workDate);
-  }, [dayStatus?.workDate, workDate]);
+    if (todayStatus?.workDate && todayStatus.workDate !== workDate) setWorkDate(todayStatus.workDate);
+  }, [todayStatus?.workDate, workDate]);
+  // The Daily Report view works on YESTERDAY's report while it is still submittable (before its 12:00 PM deadline) — it must be
+  // submitted before today's plan. Once it is Missed (or submitted) the page is back on today. Plan view is always today.
+  const previousPending = todayStatus?.previousReport?.state === "PENDING" ? todayStatus.previousReport.date : null;
+  const activeDate = view === DailyWorkView.REPORT && previousPending ? previousPending : workDate;
+  const { data: dayStatus } = useDailyStatus(activeDate);
+  const previousMissed = todayStatus?.previousReport?.state === "MISSED" ? todayStatus.previousReport.date : null;
+  const missedText = useLabel("daily_work.report.missed");
+  const reportForText = useLabel("daily_work.report.for_date");
   const title = useLabel("daily_work.title");
   const planning = useLabel("daily_work.page.breadcrumb_planning");
   const subtitle = useLabel("daily_work.page.subtitle");
@@ -238,7 +249,7 @@ function OwnerDailyWorkPage() {
             <DailyWorkActions workDate={workDate} section={section} draft={draftHandle} />
           )}
           {view === DailyWorkView.REPORT && dayStatus?.hasSubmittedWork && (
-            <DailyReportProgress workDate={workDate} draft={draftHandle} />
+            <DailyReportProgress workDate={activeDate} draft={draftHandle} />
           )}
         </div>
       </DailyWorkFieldset>
@@ -254,6 +265,13 @@ function OwnerDailyWorkPage() {
 
       <DailyWorkFieldset legend={dailyTaskTitle}>
         {/* Day actions live in the Plan Type fieldset; Daily Task starts directly with its content. */}
+        {/* Yesterday's report that was never submitted before its deadline: informational only, it no longer blocks today's plan. */}
+        {previousMissed && (
+          <p role="status" className="rounded-lg border border-dashed px-4 py-2 text-sm text-muted-foreground">{previousMissed}: {missedText}</p>
+        )}
+        {view === DailyWorkView.REPORT && activeDate !== workDate && (
+          <p role="status" className="rounded-lg border bg-muted/30 px-4 py-2 text-sm text-muted-foreground">{reportForText.replace("{date}", activeDate)}</p>
+        )}
         {view === DailyWorkView.REPORT && dayStatus && !dayStatus.hasSubmittedWork && (
           <div className="rounded-lg border bg-muted/30 px-4 py-8 text-center text-sm text-muted-foreground">
             {noSubmittedReport}
@@ -273,14 +291,14 @@ function OwnerDailyWorkPage() {
           view === DailyWorkView.PLAN && dayStatus?.isFinalized && "hidden",
         )}>
           {section === "APPOINTMENT" ? (
-            <AppointmentSection key={`appt-${workDate}-${view}`} workDate={workDate} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <AppointmentSection key={`appt-${activeDate}-${view}`} workDate={activeDate} view={view} locked={dayStatus?.isFinalized ?? false} />
           ) : section === "SCHEME_CONVERSION" ? (
-            <ConversionSection key={`conv-${workDate}-${view}`} workDate={workDate} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <ConversionSection key={`conv-${activeDate}-${view}`} workDate={activeDate} view={view} locked={dayStatus?.isFinalized ?? false} />
           ) : section === "VISITS" || section === "OTHERS" ? (
             // Visits + Others share one SUMMARY record per planning batch; the toggle focuses the visible fields.
-            <SummarySection key={`summary-${workDate}-${view}`} workDate={workDate} focus={section} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <SummarySection key={`summary-${activeDate}-${view}`} workDate={activeDate} focus={section} view={view} locked={dayStatus?.isFinalized ?? false} />
           ) : (
-            <DailyWorkSection key={`${section}-${workDate}-${view}`} section={section} workDate={workDate} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <DailyWorkSection key={`${section}-${activeDate}-${view}`} section={section} workDate={activeDate} view={view} locked={dayStatus?.isFinalized ?? false} />
           )}
         </div>
         {view === DailyWorkView.PLAN && dayStatus?.isFinalized && (
@@ -323,6 +341,7 @@ function DailyWorkActions({ workDate, section, draft }: { workDate: string; sect
     submitting: useLabel("daily_work.state.submitting"),
     saveDraft: useLabel("daily_work.action.save_draft"),
     saving: useLabel("daily_work.state.saving"),
+    previousRequired: useLabel("daily_work.validation.previous_report_required"),
   };
   const submitMut = useMutation({
     mutationFn: () => api.post("/api/daily-work/submit-day", { workDate }),
@@ -342,6 +361,8 @@ function DailyWorkActions({ workDate, section, draft }: { workDate: string; sect
           <Send className="h-4 w-4" /> {submitMut.isPending ? L.submitting : L.submit}
         </Button>
       </div>
+      {/* Why Submit is unavailable: yesterday's report is outstanding (still open) or overdue. The server enforces it too. */}
+      {data.previousReport?.state === "PENDING" && <p role="status" className="max-w-xs text-right text-xs text-muted-foreground">{L.previousRequired}</p>}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
@@ -354,10 +375,12 @@ function DailyReportProgress({ workDate, draft }: { workDate: string; draft: Sav
   const [ratingOpen, setRatingOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = useLabel("daily_work.action.submit_report");
+  const deadlinePassed = useLabel("daily_work.validation.report_deadline_passed");
+  const missed = useLabel("daily_work.report.missed");
   const L = { saveDraft: useLabel("daily_work.action.save_draft"), saving: useLabel("daily_work.state.saving"), saved: useLabel("daily_work.state.saved"), failed: useLabel("daily_work.state.save_failed") };
   const submitMut = useMutation({
     mutationFn: (selfRating: number) => api.post("/api/daily-work/submit-report", { workDate, selfRating }),
-    onSuccess: () => { setError(null); setRatingOpen(false); qc.invalidateQueries({ queryKey: ["daily-work"] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); },
+    onSuccess: () => { setError(null); setRatingOpen(false); qc.invalidateQueries({ queryKey: ["daily-work"] }); qc.invalidateQueries({ queryKey: ["daily-work-status"] }); }, // every status: today's plan gate depends on this report
     onError: (e) => setError((e as Error).message),
   });
   if (!data || data.isFinalized) return null;
@@ -375,6 +398,7 @@ function DailyReportProgress({ workDate, draft }: { workDate: string; draft: Sav
       {draft && (draft.failed || (!draft.saving && draft.savedAt)) && (
         <p role="status" className={cn("text-xs", draft.failed ? "text-destructive" : "text-muted-foreground")}>{draft.failed ? L.failed : L.saved}</p>
       )}
+      {data.reportDeadlinePassed && <p role="alert" className="max-w-xs text-right text-xs text-destructive">{data.reportMissed ? missed : deadlinePassed}</p>}
       {error && !ratingOpen && <p className="text-xs text-destructive">{error}</p>}
       {ratingOpen && <SelfRatingModal pending={submitMut.isPending} serverError={error} onCancel={() => { setError(null); setRatingOpen(false); }} onConfirm={(rating) => submitMut.mutate(rating)} />}
     </div>
@@ -493,7 +517,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
 
   const { data, isLoading } = useQuery<Payload>({
     queryKey: ["daily-work", section, workDate, view],
-    queryFn: () => api.get<Payload>(`/api/daily-work?section=${section}&view=${view}`),
+    queryFn: () => api.get<Payload>(`/api/daily-work?section=${section}&view=${view}&date=${workDate}`),
   });
 
   const [rows, setRows] = useState<EditRow[]>([]);
@@ -944,7 +968,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<ApptPayload>({
     queryKey: ["daily-work", "APPOINTMENT", workDate, view],
-    queryFn: () => api.get<ApptPayload>(`/api/daily-work?section=APPOINTMENT&view=${view}`),
+    queryFn: () => api.get<ApptPayload>(`/api/daily-work?section=APPOINTMENT&view=${view}&date=${workDate}`),
   });
 
   const [rows, setRows] = useState<ApptEditRow[]>([]);
@@ -1108,7 +1132,7 @@ function ConversionSection({ workDate, view, locked }: { workDate: string; view:
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<ConvPayload>({
     queryKey: ["daily-work", "SCHEME_CONVERSION", workDate, view],
-    queryFn: () => api.get<ConvPayload>(`/api/daily-work?section=SCHEME_CONVERSION&view=${view}`),
+    queryFn: () => api.get<ConvPayload>(`/api/daily-work?section=SCHEME_CONVERSION&view=${view}&date=${workDate}`),
   });
 
   const [rows, setRows] = useState<ConvEditRow[]>([]);
@@ -1345,7 +1369,7 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<SummaryPayload>({
     queryKey: ["daily-work", "SUMMARY", workDate, view],
-    queryFn: () => api.get<SummaryPayload>(`/api/daily-work?section=SUMMARY&view=${view}`),
+    queryFn: () => api.get<SummaryPayload>(`/api/daily-work?section=SUMMARY&view=${view}&date=${workDate}`),
   });
 
   const [dealerVisits, setDealerVisits] = useState("");

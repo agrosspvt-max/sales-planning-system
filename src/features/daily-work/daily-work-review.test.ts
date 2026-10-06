@@ -303,6 +303,20 @@ async function main() {
     await expectStatus(() => svc.getDailyWorkReviewDetail(RM1, "so2", DATE), 409, "unsubmitted detail rejected");
   }
 
+  // 10a) Performance → View for a REGIONAL MANAGER's own Daily Work: the same review read model opens it (Admin, read-only),
+  //      with the report data + self rating; an unrelated RM / SO still cannot.
+  {
+    const f = makeFake({ submitted: new Set(["rm1"]), self: new Map([["rm1", 9]]) });
+    const svc = loadService(f.prisma);
+    const d = await svc.getDailyWorkReviewDetail(ADMIN, "rm1", DATE, { allowPlanOnly: true });
+    assert.equal(d.officerName, "RM One");
+    assert.equal(d.reportSubmitted, true);
+    assert.equal(d.selfRating, 9, "the RM's self rating is shown");
+    assert.ok(d.recovery.dealers.length > 0, "the RM's Daily Work sections are read through the same model");
+    await expectStatus(() => svc.getDailyWorkReviewDetail(RM2, "rm1", DATE, { allowPlanOnly: true }), 403, "an unrelated RM cannot open another RM's Daily Work");
+    await expectStatus(() => svc.getDailyWorkReviewDetail(SO1, "rm1", DATE, { allowPlanOnly: true }), 403, "an SO cannot open an RM's Daily Work");
+  }
+
   // 10b) PLAN-ONLY days (Daily Plan submitted, Daily Report not yet): Performance → View opens the submitted plan, shows no
   //      fabricated report values, and the RM still cannot rate until the report is finalized.
   {

@@ -62,7 +62,7 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
     returnedFromLedger: useLabel("cn_requests.status.returned_from_ledger"), unavailable: useLabel("cn_requests.error.not_found"),
     cnTypes: {
       priceDifference: useLabel("cn_requests.cn_type.price_difference"), freight: useLabel("cn_requests.cn_type.freight"),
-      scheme: useLabel("cn_requests.cn_type.scheme"), demo: useLabel("cn_requests.cn_type.demo"), damage: useLabel("cn_requests.cn_type.damage"),
+      scheme: useLabel("cn_requests.cn_type.scheme"), demo: useLabel("cn_requests.cn_type.demo"), damageExpiry: useLabel("cn_requests.cn_type.damage_expiry"), other: useLabel("cn_requests.cn_type.other"),
     },
     paymentStatuses: {
       pending: useLabel("cn_requests.payment.pending"), notPaid: useLabel("cn_requests.payment.not_paid"),

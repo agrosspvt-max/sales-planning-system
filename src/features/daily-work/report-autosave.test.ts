@@ -54,7 +54,7 @@ assert.ok(toolbar.includes("api.post(\"/api/daily-work/submit-report\", { workDa
 assert.ok(toolbar.includes("void draft?.flush()") && !/submitMut\.mutate\(\)/.test(toolbar), "Save Draft in Report only flushes autosave");
 assert.ok(toolbar.includes("daily_work.state.save_failed") && toolbar.includes("daily_work.state.saved"), "save status uses the existing labels");
 // Switching sections / views remounts (key includes view) and the hook flushes on unmount.
-assert.ok(page.includes("key={`${section}-${workDate}-${view}`}") && page.includes("key={`appt-${workDate}-${view}`}") && page.includes("key={`summary-${workDate}-${view}`}"));
+assert.ok(page.includes("key={`${section}-${activeDate}-${view}`}") && page.includes("key={`appt-${activeDate}-${view}`}") && page.includes("key={`summary-${activeDate}-${view}`}"));
 assert.ok(hook.includes("void controller.flush().finally(() => controller.dispose())"), "pending edits are flushed on unmount (section switch, Plan↔Report, navigation)");
 // The server endpoint used only stores actuals.
 const actualRoute = read("src/app/api/daily-work/actual/route.ts");

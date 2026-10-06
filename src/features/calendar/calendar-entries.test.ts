@@ -107,12 +107,15 @@ async function main() {
   assert.equal(task.kind, "TASK"); assert.equal(task.ownerId, "so1"); assert.equal(task.ownerName, "Rahul Patidar"); assert.equal(task.ownerRoleLabel, "Sales Officer");
   same([task.task?.section, task.task?.dealerName, task.task?.amount, task.task?.paymentMode], ["RECOVERY", "ABC Traders", 25000, "UPI"]);
   assert.equal(store.find((r) => r.id === task.id)!.entryType, "REGULAR");
-  const meeting = await svc.createCalendarEntry(ctx("rm1"), { kind: "MEETING", date: FUTURE, text: "Distributor meeting at 11 AM" });
   const reminder = await svc.createCalendarEntry(ctx("so2"), { kind: "REMINDER", date: FUTURE, text: "Call dealer" });
-  const other = await svc.createCalendarEntry(ctx("so2"), { kind: "OTHER", date: FUTURE, text: "Travel day" });
-  same([meeting.kind, reminder.kind, other.kind], ["MEETING", "REMINDER", "OTHER"]);
-  assert.equal(meeting.ownerRoleLabel, "Regional Manager"); assert.equal(meeting.ownerState, "CG");
-  for (const e of [meeting, reminder, other]) assert.equal(e.task, null, "non-task entries carry no Daily Work payload");
+  const rmReminder = await svc.createCalendarEntry(ctx("rm1"), { kind: "REMINDER", date: FUTURE, text: "Review distributors" });
+  assert.equal(reminder.kind, "REMINDER");
+  assert.equal(rmReminder.ownerRoleLabel, "Regional Manager"); assert.equal(rmReminder.ownerState, "CG");
+  for (const e of [reminder, rmReminder]) assert.equal(e.task, null, "non-task entries carry no Daily Work payload");
+  // Meeting / Other are no longer creatable by anyone (UI removed; the API refuses them and stores nothing).
+  const stored = store.length;
+  for (const kind of ["MEETING", "OTHER"]) for (const who of ["so1", "rm1", "admin"]) assert.equal(await status(() => svc.createCalendarEntry(ctx(who), { kind, date: FUTURE, text: "x" })), 422, `${kind} by ${who} is refused`);
+  assert.equal(store.length, stored, "refused Meeting/Other creates write nothing");
 
   // 2 — every active Daily Work section is accepted with the Daily Work fields; a disabled/unknown one is rejected.
   const base = { kind: "TASK", date: FUTURE };
@@ -138,7 +141,7 @@ async function main() {
   assert.equal(await status(() => svc.createCalendarEntry(ctx("so1"), { ...base, section: "APPOINTMENT", dealerName: " " })), 422);
   assert.equal(await status(() => svc.createCalendarEntry(ctx("so1"), { ...base, section: "OTHERS", text: "" })), 422);
   assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { ...base, section: "OTHERS", text: "x" })), 403, "only SO/RM own Daily Work");
-  assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "MEETING", date: FUTURE, text: "Board" })), 0, "Admin can still add calendar-only entries");
+  assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "REMINDER", date: FUTURE, text: "Board" })), 0, "Admin can still add calendar-only entries");
   // A finalized Daily Work for TODAY is never mutated: today's task is refused, a future one is fine.
   const today = dayKey(0);
   finalizedDays.add(`so1|${today}`);
@@ -160,8 +163,8 @@ async function main() {
   const rmTeam = await calendar("rm1", { view: "team" });
   same(owners(rmTeam.entries), ["rm1", "so1", "so2"], "Team Calendar: self + own team");
   assert.ok(!rmTeam.entries.some((e) => e.ownerId === "so3" || e.ownerId === "rm2" || e.ownerId === "admin"), "never another team / admin");
-  const santoshMeeting = rmTeam.entries.find((e) => e.id === meeting.id)!;
-  same([santoshMeeting.ownerName, santoshMeeting.ownerRoleLabel, santoshMeeting.text], ["Santosh Tripathi", "Regional Manager", "Distributor meeting at 11 AM"]);
+  const santoshReminder = rmTeam.entries.find((e) => e.id === rmReminder.id)!;
+  same([santoshReminder.ownerName, santoshReminder.ownerRoleLabel, santoshReminder.text], ["Santosh Tripathi", "Regional Manager", "Review distributors"]);
   assert.equal(rmTeam.entries.find((e) => e.id === task.id)!.ownerName, "Rahul Patidar", "the creator of a team entry is shown");
   assert.equal(rmTeam.entries.find((e) => e.id === task.id)!.canDelete, false, "an RM cannot delete a Sales Officer's entry");
   same(owners((await calendar("rm1")).entries), ["rm1", "so1", "so2"], "no view = the legacy team scope");
@@ -192,8 +195,8 @@ async function main() {
 
   // 8 — writes are owner-only; a Daily Task already in Daily Work cannot be deleted from the calendar.
   assert.equal(await status(() => svc.deleteCalendarEntry(ctx("rm1"), reminder.id)), 403, "RM cannot delete a team member's entry");
-  assert.equal(await status(() => svc.updateCalendarEntry(ctx("rm1"), other.id, { text: "x" })), 403);
-  assert.equal((await svc.updateCalendarEntry(ctx("so2"), other.id, { text: "Travel day (edited)" })).text, "Travel day (edited)");
+  assert.equal(await status(() => svc.updateCalendarEntry(ctx("rm1"), reminder.id, { text: "x" })), 403);
+  assert.equal((await svc.updateCalendarEntry(ctx("so2"), reminder.id, { text: "Call dealer (edited)" })).text, "Call dealer (edited)");
   assert.equal(await status(() => svc.updateCalendarEntry(ctx("so1"), task.id, { text: "x" })), 409, "a Daily Task is not edited here");
   store.find((r) => r.id === sales.id)!.materializedAt = new Date();
   assert.equal(await status(() => svc.deleteCalendarEntry(ctx("so1"), sales.id)), 409, "already in Daily Work");
@@ -206,15 +209,18 @@ async function main() {
   assert.ok(ids(so1.entries).length > 0 && so1.myDealers.map((d) => d.name).join() === "ABC Traders", "the Daily Task form is offered only the caller's own dealers");
   assert.equal((await calendar("admin")).myDealers.length, 0, "Admin has no Daily Task form data");
 
-  // 10 — UI wiring (source-level): the four actions, My/Team switch (RM only), State + Sales Officer filters, creator shown.
+  // 10 — UI wiring (source-level): the two actions (Daily Task + Reminder), My/Team switch (RM only), State + Sales Officer filters, creator shown.
   {
     const ui = readFileSync("src/features/calendar/calendar-view.tsx", "utf8");
-    for (const needle of ["L.addTask", "L.addMeeting", "L.addReminder", "L.addOther"]) assert.ok(ui.includes(needle), `${needle} action`);
+    for (const needle of ["L.addTask", "L.addReminder"]) assert.ok(ui.includes(needle), `${needle} action`);
+    for (const gone of ["L.addMeeting", "L.addOther", "calendar.add_meeting", "calendar.add_other", 'kind: "MEETING", label', 'kind: "OTHER", label']) assert.ok(!ui.includes(gone), `${gone} is no longer offered`);
+    const actionsBlock = ui.slice(ui.indexOf("const actions:"), ui.indexOf("];", ui.indexOf("const actions:")));
+    assert.equal((actionsBlock.match(/kind: "/g) ?? []).length, 2, "the date dialog defines exactly two actions: Task (SO/RM only) and Reminder");
     assert.ok(ui.includes("role === Role.REGIONAL_MANAGER && (") && ui.includes("L.myCalendar") && ui.includes("L.teamCalendar"), "My/Team switch is RM-only");
     assert.ok(ui.includes('params.set("groupId", groupId)') && ui.includes('params.set("view", view)'), "filters travel to the server (which re-validates them)");
     assert.ok(ui.includes("`${o.name} — ${o.roleLabel}`"), "Sales Officer filter shows name + role (RMs included)");
     assert.ok(ui.includes("L.addedBy") && ui.includes("e.ownerName") && ui.includes("e.ownerRoleLabel"), "every entry shows who added it");
-    assert.ok(!ui.includes("L.addNote"), "the old Add Note button is replaced by the four actions (existing notes still render)");
+    assert.ok(!ui.includes("L.addNote"), "the old Add Note button is replaced by the two actions (existing notes still render)");
     assert.ok(ui.includes("function NotesSection") && ui.includes("L.editNote"), "existing notes keep view/edit/delete");
     assert.ok(readFileSync("src/features/calendar/calendar-view.tsx", "utf8").includes("payload?.taskSections"), "Daily Task types come from the server's ACTIVE Daily Work sections, not a hard-coded list");
   }

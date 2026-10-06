@@ -32,7 +32,7 @@ import {
   combineDailyWorkRows, combineAppointmentRows, combineConversionRows, rowTaskType,
   currentBusinessDate, dailyWorkShowsResults, visibleDailyWorkRows, DEFAULT_DAILY_WORK_VIEW, DailyWorkView,
   type RecoveryPaymentMode, paymentModeApplies, paymentModeForActual, type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
-  MANDATORY_SECTIONS, resolveDailyWorkSection,
+  MANDATORY_SECTIONS, resolveDailyWorkSection, isValidTodaysPlan, invalidPlanRows, planRequiredMessage, type PlanRowToCheck,
 } from "@/lib/daily-work";
 
 /* --------------------------------- Types (mirror the service DTO) --------------------------------- */
@@ -84,6 +84,8 @@ const taskTypeText = (value: TaskType | null, L: TaskTypeLabels): string =>
  * (its own autosave.flush + saving/failed); this context only carries a reference — no duplicated logic.
  */
 interface SaveDraftHandle { flush: () => Promise<void>; saving: boolean; failed: boolean; savedAt: number | null }
+/** "SECTION:dealerId" keys the last Submit found without a Today's Plan > 0 — the matching input is outlined until its value becomes valid. */
+const PlanErrorsContext = createContext<ReadonlySet<string>>(new Set());
 const SaveDraftContext = createContext<{ register: (h: SaveDraftHandle | null) => void } | null>(null);
 
 /** Called by the active section (PLAN, not finalized) to publish its Save Draft handle to the Plan Type toolbar. */
@@ -199,8 +201,10 @@ function OwnerDailyWorkPage() {
     });
   }, []);
   const saveDraftContextValue = useMemo(() => ({ register: registerSaveDraft }), [registerSaveDraft]);
+  const [planErrors, setPlanErrors] = useState<ReadonlySet<string>>(new Set());
   return (
     <SaveDraftContext.Provider value={saveDraftContextValue}>
+    <PlanErrorsContext.Provider value={planErrors}>
     <div className="space-y-5">
       <PageHeader
         crumbs={[{ label: planning }, { label: title }]}
@@ -246,7 +250,7 @@ function OwnerDailyWorkPage() {
           </div>
           {/* Plan and Report actions share this toolbar while retaining their existing handlers. */}
           {view === DailyWorkView.PLAN && !dayStatus?.isFinalized && (
-            <DailyWorkActions workDate={workDate} section={section} draft={draftHandle} />
+            <DailyWorkActions workDate={workDate} section={section} draft={draftHandle} onPlanErrors={setPlanErrors} />
           )}
           {view === DailyWorkView.REPORT && dayStatus?.hasSubmittedWork && (
             <DailyReportProgress workDate={activeDate} draft={draftHandle} />
@@ -306,6 +310,7 @@ function OwnerDailyWorkPage() {
         )}
       </DailyWorkFieldset>
     </div>
+    </PlanErrorsContext.Provider>
     </SaveDraftContext.Provider>
   );
 }
@@ -332,7 +337,7 @@ function SectionStatusIcon({ status }: { status?: SectionStatusValue }) {
  * Save Draft (the active section's own flush, lifted via context) + Submit Daily Work. All three reuse the exact
  * existing handlers/state — No-Plan eligibility, autosave flush, and submission gating (`canSubmit`) are unchanged.
  */
-function DailyWorkActions({ workDate, section, draft }: { workDate: string; section: Section; draft: SaveDraftHandle | null }) {
+function DailyWorkActions({ workDate, section, draft, onPlanErrors }: { workDate: string; section: Section; draft: SaveDraftHandle | null; onPlanErrors: (keys: ReadonlySet<string>) => void }) {
   const qc = useQueryClient();
   const { data } = useDailyStatus(workDate);
   const [error, setError] = useState<string | null>(null);
@@ -341,6 +346,9 @@ function DailyWorkActions({ workDate, section, draft }: { workDate: string; sect
     submitting: useLabel("daily_work.state.submitting"),
     saveDraft: useLabel("daily_work.action.save_draft"),
     saving: useLabel("daily_work.state.saving"),
+    planRequired: useLabel("daily_work.validation.plan_required"),
+    sales: useLabel("daily_work.section.sales"),
+    recovery: useLabel("daily_work.section.recovery"),
     previousRequired: useLabel("daily_work.validation.previous_report_required"),
   };
   const submitMut = useMutation({
@@ -348,6 +356,25 @@ function DailyWorkActions({ workDate, section, draft }: { workDate: string; sect
     onSuccess: () => { setError(null); qc.invalidateQueries({ queryKey: ["daily-work"] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); },
     onError: (e) => setError((e as Error).message),
   });
+  // Submit pre-check (the server enforces the same rule): every Sales / Recovery dealer row must have a Today's Plan > 0. Save the
+  // active section first, then read the saved rows of BOTH sections (only one section's rows live in this page's state at a time).
+  const [checking, setChecking] = useState(false);
+  const trySubmit = async () => {
+    setError(null); setChecking(true);
+    try {
+      await draft?.flush();
+      const [sales, recovery] = await Promise.all((["SALES", "RECOVERY"] as const).map((sec) =>
+        api.get<{ dealers: { dealerId: string; dealerName: string; todaysPlan: number | null }[] }>(`/api/daily-work?section=${sec}&view=PLAN&date=${workDate}`)));
+      const rows: PlanRowToCheck[] = [
+        ...sales.dealers.map((d) => ({ section: "SALES" as const, dealerId: d.dealerId, dealerName: d.dealerName, todaysPlan: d.todaysPlan })),
+        ...recovery.dealers.map((d) => ({ section: "RECOVERY" as const, dealerId: d.dealerId, dealerName: d.dealerName, todaysPlan: d.todaysPlan })),
+      ];
+      const bad = invalidPlanRows(rows);
+      onPlanErrors(new Set(bad.map((row) => `${row.section}:${row.dealerId}`)));
+      if (bad.length > 0) { setError(planRequiredMessage(L.planRequired, bad, { SALES: L.sales, RECOVERY: L.recovery })); return; }
+      submitMut.mutate();
+    } catch (e) { setError((e as Error).message); } finally { setChecking(false); }
+  };
   if (!data || data.isFinalized) return null;
   return (
     <div className="flex flex-col items-end gap-1">
@@ -357,13 +384,13 @@ function DailyWorkActions({ workDate, section, draft }: { workDate: string; sect
         <Button variant="outline" size="sm" disabled={!draft || draft.saving} onClick={() => { void draft?.flush(); }}>
           <Save className="h-4 w-4" /> {draft?.saving ? L.saving : L.saveDraft}
         </Button>
-        <Button size="sm" disabled={!data.canSubmit || submitMut.isPending} onClick={() => { setError(null); submitMut.mutate(); }}>
+        <Button size="sm" disabled={!data.canSubmit || submitMut.isPending || checking} onClick={() => { void trySubmit(); }}>
           <Send className="h-4 w-4" /> {submitMut.isPending ? L.submitting : L.submit}
         </Button>
       </div>
       {/* Why Submit is unavailable: yesterday's report is outstanding (still open) or overdue. The server enforces it too. */}
       {data.previousReport?.state === "PENDING" && <p role="status" className="max-w-xs text-right text-xs text-muted-foreground">{L.previousRequired}</p>}
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error && <p className="max-w-sm whitespace-pre-line text-right text-xs text-destructive">{error}</p>}
     </div>
   );
 }
@@ -521,6 +548,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   });
 
   const [rows, setRows] = useState<EditRow[]>([]);
+  const planErrors = useContext(PlanErrorsContext);
   const [addOpen, setAddOpen] = useState(false);
   const [autoTaskDealerId, setAutoTaskDealerId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -739,7 +767,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                     <TableCell className="text-right tabular-nums">{money(r.pending)}</TableCell>
                     {/* Today's Plan — editable until submitted. */}
                     <TableCell className="p-1 text-right">
-                      <Input type="number" min={0} className="h-8 w-full text-right" placeholder="0" value={r.todaysPlan} disabled={busy || submitted} onChange={(e) => update(i, { todaysPlan: e.target.value })} />
+                      <Input type="number" min={0} className={cn("h-8 w-full text-right", planErrors.has(`${section}:${r.dealerId}`) && !isValidTodaysPlan(r.todaysPlan) && "border-destructive focus-visible:ring-destructive")} aria-invalid={planErrors.has(`${section}:${r.dealerId}`) && !isValidTodaysPlan(r.todaysPlan) ? true : undefined} placeholder="0" value={r.todaysPlan} disabled={busy || submitted} onChange={(e) => update(i, { todaysPlan: e.target.value })} />
                     </TableCell>
                     {/* Scheme Recovery uses the dealer's existing enrolled/verified scheme-payment scope. */}
                     <TableCell className="p-1">

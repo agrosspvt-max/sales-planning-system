@@ -70,6 +70,14 @@ function makeFake() {
     const v = sql.values as unknown[];
     if (text.startsWith('SELECT e."dealerId", SUM(t."contribution")')) return [];
 
+    if (text.includes('"planValueCheck"')) {
+      const officerId = v[0] as string, workDate = v[1] as string, batchId = v[2] as string;
+      // Honor the SQL: current batch, DRAFT rows only, and exactly the sections its IN (...) list names.
+      const sectionsInSql = [...(/"section" IN \(([^)]*)\)/.exec(text)?.[1] ?? "").matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]!);
+      return entries
+        .filter((row) => row.officerId === officerId && row.workDate === workDate && row.batchId === batchId && row.status === "DRAFT" && sectionsInSql.includes(row.section) && row.dealerId)
+        .map((row) => ({ section: row.section, dealerId: row.dealerId, dealerName: `Dealer ${row.dealerId}`, todaysPlan: row.todaysPlan }));
+    }
     if (text.includes('"previousDayGate"')) {
       const officerId = v[0] as string, prev = v[1] as string;
       return [{
@@ -429,7 +437,98 @@ async function previousDayRules() {
   assert.ok(!between("export async function setDailyNoPlan(", "export async function submitDailyWorkDay(").includes("previousReportGate"), "No Plan is not gated");
 }
 
+type PlanCell = number | null | "missing"; // "missing" = no value stored at all
+/**
+ * A Daily Plan ready to submit with exactly these Sales / Recovery dealer rows (dealerId → stored Today's Plan). Everything else the
+ * existing rules need (No Plan for untouched sections, no previous-day report outstanding) is already satisfied.
+ */
+async function planWith(sales: Record<string, PlanCell>, recovery: Record<string, PlanCell>, ctx: AuthContext = SO) {
+  at("2026-09-21T10:00:00+05:30");
+  const f = makeFake();
+  const svc = loadService(f.prisma);
+  await svc.setDailyNoPlan(ctx, { workDate: DATE, section: "RECOVERY", noPlan: true });
+  f.addPlan({ salesPlan: 1 });
+  f.entries.splice(f.entries.findIndex((row) => row.section === "SALES" && row.workDate === DATE), 1); // start without Sales rows
+  const add = (section: "SALES" | "RECOVERY", rows: Record<string, PlanCell>) => {
+    for (const [dealerId, plan] of Object.entries(rows)) {
+      f.entries.push({
+        id: `${section}-${dealerId}`, officerId: OFFICER, workDate: DATE, batchId: f.currentDay().currentBatchId, section, rowKey: dealerId, dealerId, typedDealerName: null,
+        todaysPlan: plan === "missing" || plan === null ? null : String(plan), todaysActual: null, resultStatus: null, entryType: "REGULAR", schemeId: null,
+        dealerVisits: null, newPartyVisits: null, actualDealerVisits: null, actualNewPartyVisits: null, others: null, noPlanSections: null, status: "DRAFT",
+      });
+    }
+  };
+  add("SALES", sales); add("RECOVERY", recovery);
+  if (Object.keys(sales).length === 0) await svc.setDailyNoPlan(ctx, { workDate: DATE, section: "SALES", noPlan: true });
+  if (Object.keys(recovery).length > 0) await svc.setDailyNoPlan(ctx, { workDate: DATE, section: "RECOVERY", noPlan: false });
+  return { f, svc, submit: (as: AuthContext = ctx) => svc.submitDailyWorkDay(as, { workDate: DATE }) };
+}
+async function expectPlanRejected(world: Awaited<ReturnType<typeof planWith>>, expectedLines: string[], label: string) {
+  try { await world.submit(); assert.fail(`${label}: expected the submit to be rejected`); }
+  catch (error) {
+    assert.equal((error as { status?: number }).status, 422, `${label}: ${(error as Error).message}`);
+    const message = (error as Error).message;
+    assert.ok(message.startsWith("Please enter a Today's Plan greater than 0 for:"), `${label}: ${message}`);
+    assert.deepEqual(message.split("\n").slice(1), expectedLines, `${label}: names exactly the affected rows`);
+  }
+  assert.ok(world.f.entries.filter((row) => row.workDate === DATE).every((row) => row.status === "DRAFT"), `${label}: nothing was submitted`);
+}
+
+async function todaysPlanRules() {
+  // A) Nothing added to Sales / Recovery → this rule does nothing.
+  assert.equal((await (await planWith({}, {})).submit()).ok, true, "no Sales and no Recovery dealers");
+  // B/C) positive values (including the smallest, 1, and decimals) pass.
+  assert.equal((await (await planWith({ d1: 100 }, {})).submit()).ok, true, "Sales 100");
+  assert.equal((await (await planWith({}, { d1: 100 })).submit()).ok, true, "Recovery 100");
+  assert.equal((await (await planWith({ d1: 10000, d2: 1, d3: 0.5 }, { d1: 5000, d4: 1 })).submit()).ok, true, "several positive rows in both sections");
+  // D-I) 0 / negative / blank / missing, in each section.
+  for (const [name, value] of [["0", 0], ["negative", -100], ["blank", null], ["missing", "missing"]] as const) {
+    await expectPlanRejected(await planWith({ d1: value }, {}), ["- Sales — Dealer d1"], `Sales ${name}`);
+    await expectPlanRejected(await planWith({}, { d1: value }), ["- Recovery — Dealer d1"], `Recovery ${name}`);
+  }
+  // Several dealers, only one invalid → only that one is named (Sales rows are listed first, then Recovery).
+  await expectPlanRejected(await planWith({ d1: 100, d2: 0, d3: 7 }, { d1: 5000 }), ["- Sales — Dealer d2"], "one bad Sales dealer among several");
+  await expectPlanRejected(await planWith({ d1: 100 }, { d1: 5000, d2: -500, d3: 1 }), ["- Recovery — Dealer d2"], "one bad Recovery dealer among several");
+  // J/K) one section complete, the other not.
+  await expectPlanRejected(await planWith({ d1: 100 }, { d1: 0 }), ["- Recovery — Dealer d1"], "Sales complete, Recovery incomplete");
+  await expectPlanRejected(await planWith({ d1: 0 }, { d1: 100 }), ["- Sales — Dealer d1"], "Recovery complete, Sales incomplete");
+  // Both sections reported together, listed with their section.
+  await expectPlanRejected(await planWith({ d1: 0 }, { d2: null }), ["- Sales — Dealer d1", "- Recovery — Dealer d2"], "both sections invalid");
+  // L) The same dealer in both sections is validated independently, per section.
+  assert.equal((await (await planWith({ d1: 100 }, { d1: 200 })).submit()).ok, true, "same dealer, both valid");
+  await expectPlanRejected(await planWith({ d1: 100 }, { d1: 0 }), ["- Recovery — Dealer d1"], "same dealer: only Recovery invalid");
+  await expectPlanRejected(await planWith({ d1: 0 }, { d1: 100 }), ["- Sales — Dealer d1"], "same dealer: only Sales invalid");
+  await expectPlanRejected(await planWith({ d1: 0 }, { d1: 0 }), ["- Sales — Dealer d1", "- Recovery — Dealer d1"], "same dealer: both invalid");
+  // A dealer only in Recovery needs no Sales value (and vice versa): the other section is simply empty.
+  assert.equal((await (await planWith({}, { d9: 50 })).submit()).ok, true, "Recovery-only dealer needs no Sales plan");
+  assert.equal((await (await planWith({ d9: 50 }, {})).submit()).ok, true, "Sales-only dealer needs no Recovery plan");
+  // M) A removed dealer leaves no row, so it causes no failure; fixing the row lets the same plan through.
+  {
+    const w = await planWith({ d1: 100, d2: 0 }, { d1: 5000 });
+    await expectPlanRejected(w, ["- Sales — Dealer d2"], "before removal");
+    w.f.entries.splice(w.f.entries.findIndex((row) => row.id === "SALES-d2"), 1); // the user removed Dealer d2 from Sales
+    assert.equal((await w.submit()).ok, true, "after removing the invalid dealer the plan submits");
+  }
+  { const w = await planWith({ d1: 0 }, {}); await expectPlanRejected(w, ["- Sales — Dealer d1"], "before fix"); w.f.entries.find((row) => row.id === "SALES-d1")!.todaysPlan = "250"; assert.equal((await w.submit()).ok, true, "after fixing the value"); }
+  // Regional Managers submit through the same path.
+  { const RM: AuthContext = { userId: OFFICER, role: Role.REGIONAL_MANAGER, username: OFFICER, groupId: "g1" } as AuthContext;
+    await expectPlanRejected(await planWith({ d1: 0 }, {}, RM), ["- Sales — Dealer d1"], "RM blocked");
+    assert.equal((await (await planWith({ d1: 10 }, { d1: 10 }, RM)).submit()).ok, true, "RM with valid plans submits"); }
+  // The rule applies ONLY to Sales + Recovery rows: Appointment / Visits / Others never trigger it (Others/Visits live on the SUMMARY row).
+  { const w = await planWith({ d1: 100 }, {}); w.f.addPlan({ salesPlan: 100, dealerVisits: 0, newPartyVisits: 0 }); assert.equal((await w.submit()).ok, true, "Visits of 0 are not subject to the rule"); }
+  // Existing plans (already submitted) are untouched: a frozen/finalized row with 0 never matters because only the current DRAFT batch is checked.
+  { const w = await planWith({ d1: 100 }, {}); w.f.entries.push({ ...w.f.entries.find((row) => row.id === "SALES-d1")!, id: "old", workDate: "2026-09-10", batchId: "old-batch", todaysPlan: "0", status: "FINALIZED" }); assert.equal((await w.submit()).ok, true, "historical rows are not re-validated"); }
+  // The pre-existing section gate still reports incomplete sections first (a section with neither data nor No Plan).
+  { at("2026-09-21T10:00:00+05:30"); const f = makeFake(); const svc = loadService(f.prisma); await svc.setDailyNoPlan(SO, { workDate: DATE, section: "RECOVERY", noPlan: true }); f.addPlan({ salesPlan: 1 }); f.entries.splice(f.entries.findIndex((row) => row.section === "SALES" && row.workDate === DATE), 1);
+    await assert.rejects(() => svc.submitDailyWorkDay(SO, { workDate: DATE }), (error: Error) => error.message.startsWith("Complete or mark No Plan for")); }
+  // Source-level: Save Draft is not subject to the rule (drafts may hold blanks / 0).
+  const source = readFileSync("src/features/daily-work/service.server.ts", "utf8");
+  const between = (from: string, to: string) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+  assert.ok(!between("export async function saveDailyWork(", "export async function submitDailyWork(").includes("invalidPlanRows"), "Save Draft is not gated");
+}
+
 async function main() {
+  await todaysPlanRules();
   at("2026-09-22T09:00:00+05:30"); // the legacy scenarios below submit DATE's report the next morning, inside its window
   await previousDayRules();
   at("2026-09-22T09:00:00+05:30");

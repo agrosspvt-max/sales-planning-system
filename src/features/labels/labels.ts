@@ -909,6 +909,7 @@ export const DEFAULT_LABELS = {
   "daily_work.report.missed": "Daily Report missed — submission deadline was 12:00 PM.",
   "daily_work.performance.report_missed": "Missed",
   "daily_work.validation.report_deadline_passed": "The Daily Report can only be submitted until 12:00 PM on the following day. This deadline has passed.",
+  "daily_work.validation.plan_required": "Please enter a Today's Plan greater than 0 for:\n{rows}",
   "daily_work.validation.complete_report": "Complete Daily Report results for: {sections}",
   "daily_work.validation.complete_current_plan": "New Auto Tasks were added to the current Daily Plan. Submit that plan before finalizing the Daily Report.",
   "daily_work.validation.auto_task_amount": "Refresh Daily Work before saving. Today's Plan must retain the active Auto Task amount.",

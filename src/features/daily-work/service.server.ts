@@ -29,7 +29,7 @@ import {
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
   MANDATORY_SECTIONS, SectionStatus, SCHEME_CONVERSION_ENABLED, isDailyWorkSectionEnabled, RECOVERY_PAYMENT_MODES,
   type RecoveryPaymentMode,
-  dailyWorkClock, dailyReportDeadline, isReportDeadlinePassed, isReportMissed, previousBusinessDate, previousReportBlocksPlan, previousReportState, type PreviousReportState,
+  dailyWorkClock, invalidPlanRows, planRequiredMessage, dailyReportDeadline, isReportDeadlinePassed, isReportMissed, previousBusinessDate, previousReportBlocksPlan, previousReportState, type PreviousReportState,
   type DailyWorkSection, type DailyWorkType, type DailyWorkDealerRow,
   type SectionDataPresence, type MandatorySection, type SectionStatusCounts,
 } from "@/lib/daily-work";
@@ -1321,6 +1321,20 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
         VISITS: L["daily_work.section.visits"], OTHERS: L["daily_work.section.others"],
       };
       throw new ApiError(422, formatLabel(L["daily_work.validation.complete_sections"], { sections: remaining.map((section) => sectionLabels[section]).join(", ") }));
+    }
+    // Every Sales / Recovery dealer row currently in the plan needs a Today's Plan strictly greater than 0 (removed dealers have no
+    // row, so they never count). Checked on the rows as stored — after Auto Task / Calendar rows were materialized — so no client can skip it.
+    const planRows = await tx.$queryRaw<{ section: "SALES" | "RECOVERY"; dealerId: string; dealerName: string; todaysPlan: string | null }[]>(Prisma.sql`
+      SELECT e."section", e."dealerId", d."name" AS "dealerName", e."todaysPlan"::text AS "todaysPlan", 'planValueCheck' AS "planValueCheck"
+      FROM "DailyWorkEntry" e JOIN "Dealer" d ON d."id" = e."dealerId"
+      WHERE e."officerId" = ${officerId} AND e."workDate" = ${workDate}::date AND e."batchId" = ${day.currentBatchId} AND e."status" = 'DRAFT'
+        AND e."section" IN ('SALES','RECOVERY')
+      ORDER BY e."section", d."name"`);
+    const badPlanRows = invalidPlanRows(planRows);
+    if (badPlanRows.length > 0) {
+      const aliases = await loadDealerAliasNameMap(badPlanRows.map((row) => row.dealerId));
+      const named = badPlanRows.map((row) => ({ ...row, dealerName: aliases.get(row.dealerId) ?? row.dealerName }));
+      throw new ApiError(422, planRequiredMessage(L["daily_work.validation.plan_required"], named, { SALES: L["daily_work.section.sales"], RECOVERY: L["daily_work.section.recovery"] }));
     }
     submittedBatchId = day.currentBatchId;
     const updated = await tx.$executeRaw(Prisma.sql`

@@ -22,6 +22,7 @@ import {
   DailyWorkView, DEFAULT_DAILY_WORK_VIEW, dailyWorkShowsResults, visibleDailyWorkRows,
   paymentModeApplies, paymentModeForActual,
   addBusinessDays, previousBusinessDate, dailyReportDeadline, isReportDeadlinePassed, previousReportState, previousReportBlocksPlan, isReportMissed, resolveReportDate,
+  isValidTodaysPlan, invalidPlanRows, planRequiredMessage,
 } from "./daily-work";
 import { DEFAULT_LABELS, labelCatalog, resolveLabels } from "@/features/labels/labels";
 
@@ -466,6 +467,27 @@ test("Submit Daily Work shows why it is blocked, and the Report shows its deadli
   assert.match(page, /data\.reportDeadlinePassed/);
   const service = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
   assert.ok(service.includes("previousReportBlocksPlan(previous.state)"), "canSubmit is also false while blocked (server authoritative)");
+});
+
+/* ---------- Today's Plan must be strictly greater than 0 (Sales + Recovery rows) ---------- */
+test("Today's Plan: only a real number > 0 is valid", () => {
+  for (const v of [1, 0.01, 10000, "1", "250.5", " 7 "]) assert.equal(isValidTodaysPlan(v), true, String(v));
+  for (const v of [0, "0", "0.00", -1, "-100", "", "  ", null, undefined, NaN, Infinity, -Infinity, "abc", "₹100", {}, [], true]) assert.equal(isValidTodaysPlan(v), false, String(v));
+});
+test("invalidPlanRows names every failing (section, dealer) and checks the same dealer once per section", () => {
+  const rows = [
+    { section: "SALES" as const, dealerId: "d1", dealerName: "A", todaysPlan: 100 },
+    { section: "SALES" as const, dealerId: "d2", dealerName: "B", todaysPlan: 0 },
+    { section: "RECOVERY" as const, dealerId: "d1", dealerName: "A", todaysPlan: "" },
+    { section: "RECOVERY" as const, dealerId: "d3", dealerName: "C", todaysPlan: -5 },
+    { section: "RECOVERY" as const, dealerId: "d4", dealerName: "D", todaysPlan: 5000 },
+  ];
+  assert.deepEqual(invalidPlanRows(rows).map((r) => `${r.section}:${r.dealerId}`), ["SALES:d2", "RECOVERY:d1", "RECOVERY:d3"]);
+  assert.deepEqual(invalidPlanRows([]), [], "no rows → nothing to validate");
+  assert.equal(
+    planRequiredMessage("Please enter a Today's Plan greater than 0 for:\n{rows}", invalidPlanRows(rows).slice(0, 2), { SALES: "Sales", RECOVERY: "Recovery" }),
+    "Please enter a Today's Plan greater than 0 for:\n- Sales — B\n- Recovery — A",
+  );
 });
 
 console.log(`\n${passed} daily-work helper tests passed`);

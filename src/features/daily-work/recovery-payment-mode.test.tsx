@@ -29,6 +29,11 @@ let rows = [
   },
 ];
 const requests: unknown[] = [];
+let submitMutations = 0; // how many times the "Submit Daily Work" mutation (the submit API call) was triggered
+const planReads: Record<string, { dealers: { dealerId: string; dealerName: string; todaysPlan: number | null }[] }> = {
+  SALES: { dealers: [] }, RECOVERY: { dealers: [] },
+};
+const buttons: { children?: React.ReactNode; onClick?: () => void }[] = [];
 let saveDraft: () => Promise<unknown>;
 let draftKey = "";
 const selects: Array<{
@@ -66,13 +71,20 @@ const overrides: Record<string, unknown> = {
         applicableSchemes: [],
         applicableSchemesByDealer: {},
         availableDealers: [],
+        canSubmit: true,
+        isFinalized: false,
+        sections: [],
       },
     }),
     useQueryClient: () => ({ invalidateQueries: () => {} }),
-    useMutation: () => ({ isPending: false, mutate: () => {} }),
+    useMutation: () => ({ isPending: false, mutate: () => { submitMutations += 1; } }),
+  },
+  "@/components/ui/button": {
+    Button: (props: { children?: React.ReactNode; onClick?: () => void }) => { buttons.push(props); return <button>{props.children}</button>; },
   },
   "@/lib/api-client": {
     api: {
+      get: async (url: string) => planReads[new URL(url, "http://x").searchParams.get("section")!],
       post: async (url: string, payload: unknown) => {
         requests.push(JSON.parse(JSON.stringify({ url, payload })));
       },
@@ -144,14 +156,15 @@ function loadPresentation<T>(path: string, names: string[]): T {
   return mod.exports as T;
 }
 
-const { DailyWorkSection } = loadPresentation<{
+const { DailyWorkSection, DailyWorkActions } = loadPresentation<{
   DailyWorkSection: React.ComponentType<{
     section: "SALES" | "RECOVERY";
     workDate: string;
     view: "PLAN" | "REPORT";
     locked: boolean;
   }>;
-}>("src/features/daily-work/daily-work-page.tsx", ["DailyWorkSection"]);
+  DailyWorkActions: React.ComponentType<{ workDate: string; section: string; draft: unknown; onPlanErrors: (keys: ReadonlySet<string>) => void }>;
+}>("src/features/daily-work/daily-work-page.tsx", ["DailyWorkSection", "DailyWorkActions"]);
 const { AdminDealerReport } = loadPresentation<{
   AdminDealerReport: React.ComponentType<{ section: "SALES" | "RECOVERY"; data: unknown }>;
 }>("src/features/daily-work/admin-daily-work-viewer.tsx", ["AdminDealerReport"]);
@@ -353,6 +366,35 @@ async function main() {
     for (const needle of ["<DealerSection title={L.sales}", "<DealerSection title={L.recovery}", "<AppointmentSection", "<ConversionSection", "<VisitsSection", "<OthersSection", "<RmReviewPanel", "L.selfRating", "/api/daily-work/review"]) assert.ok(src.includes(needle), needle);
     assert.ok(!src.includes('className="flex justify-between gap-2"'), "no scattered text rows remain");
   }
+  // ---- Submit Daily Work: every Sales / Recovery dealer needs a Today's Plan > 0, checked before the API is called ----
+  {
+    const submitClick = async (sales: number | null | undefined, recovery: number | null | undefined) => {
+      planReads.SALES = { dealers: sales === undefined ? [] : [dealer("d1", "AJAY ENTERPRISES", sales)] };
+      planReads.RECOVERY = { dealers: recovery === undefined ? [] : [dealer("d1", "ABC TRADERS", recovery)] };
+      buttons.length = 0; submitMutations = 0; requests.length = 0;
+      const errors: ReadonlySet<string>[] = [];
+      renderToStaticMarkup(<DailyWorkActions workDate="2026-10-05" section="SALES" draft={{ flush: async () => {}, saving: false }} onPlanErrors={(keys) => errors.push(keys)} />);
+      await buttons.find((button) => String(button.children).includes("Submit Daily Work"))!.onClick!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return { errors, submitted: submitMutations };
+    };
+    function dealer(dealerId: string, dealerName: string, todaysPlan: number | null) { return { dealerId, dealerName, todaysPlan }; }
+    // valid rows → the API call is made
+    assert.equal((await submitClick(100, 5000)).submitted, 1, "valid Sales + Recovery → submit goes ahead");
+    assert.equal((await submitClick(undefined, undefined)).submitted, 1, "no Sales/Recovery dealers → rule does nothing");
+    // invalid rows → no API call, affected rows flagged
+    for (const bad of [0, -100, null]) {
+      const salesBad = await submitClick(bad, 5000);
+      assert.equal(salesBad.submitted, 0, `Sales ${bad} blocks`);
+      assert.deepEqual([...salesBad.errors.at(-1)!], ["SALES:d1"], "the Sales row is flagged");
+      const recBad = await submitClick(100, bad);
+      assert.equal(recBad.submitted, 0, `Recovery ${bad} blocks`);
+      assert.deepEqual([...recBad.errors.at(-1)!], ["RECOVERY:d1"], "the Recovery row is flagged");
+    }
+    const both = await submitClick(0, null);
+    assert.deepEqual([both.submitted, [...both.errors.at(-1)!].sort()], [0, ["RECOVERY:d1", "SALES:d1"]], "both sections invalid → both flagged, independently");
+  }
+
   assert.equal(labelMeta("daily_work.col.payment_mode").module, "Daily Work");
   console.log("recovery-payment-mode.test.tsx — all assertions passed");
 }

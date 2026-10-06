@@ -464,3 +464,21 @@ export function parseNoPlanSet(csv: string | null | undefined): Set<MandatorySec
 export function serializeNoPlanSet(set: ReadonlySet<string>): string {
   return ALL_DAILY_WORK_SECTIONS.filter((s) => set.has(s)).join(",");
 }
+
+/**
+ * Daily Plan rule for Sales and Recovery dealer rows: Today's Plan must be a real number strictly greater than 0.
+ * Blank, 0, negative, NaN/Infinity, null and undefined are all invalid (never a truthiness check).
+ */
+export function isValidTodaysPlan(value: unknown): boolean {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isFinite(n) && n > 0;
+}
+
+export interface PlanRowToCheck { section: "SALES" | "RECOVERY"; dealerId: string; dealerName: string; todaysPlan: unknown }
+/** The rows that break the rule, in input order. Each row is its own (section, dealer) — the same dealer in both sections is checked twice. */
+export const invalidPlanRows = (rows: PlanRowToCheck[]): PlanRowToCheck[] => rows.filter((row) => !isValidTodaysPlan(row.todaysPlan));
+/** "Sales — NAME" lines under the configurable heading (`{rows}` placeholder is replaced by the list). */
+export function planRequiredMessage(template: string, rows: PlanRowToCheck[], sectionLabels: Record<"SALES" | "RECOVERY", string>): string {
+  const list = rows.map((row) => `- ${sectionLabels[row.section]} — ${row.dealerName}`).join("\n");
+  return template.replace("{rows}", list);
+}

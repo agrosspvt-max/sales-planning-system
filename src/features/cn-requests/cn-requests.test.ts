@@ -1823,6 +1823,58 @@ async function main() {
     assert.equal(store.paymentEvents[0]?.dailyWorkConfirmed, false, "guarded task stays unconfirmed");
   }
 
+  // CN follow-up Auto Tasks follow the CN's OWNER (`officerId`): SO-owned → the SO, RM-owned → the RM, with the SAME confirm /
+  // reschedule behaviour. Nobody acts on another owner's task — in particular an RM never manages a managed SO's tasks.
+  {
+    const RM_O: AuthContext = { userId: "rm-1", role: Role.REGIONAL_MANAGER, username: "rm", groupId: "g1" };
+    const OTHER_RM_O: AuthContext = { userId: "rm-2", role: Role.REGIONAL_MANAGER, username: "rm2", groupId: "g2" };
+    const store = makeStore();
+    const soReq = store.seed("ACCEPTED_NOT_POSTED", "cn-own-so", "so-1", { acceptedAt: new Date("2026-09-29T04:30:00.000Z") }, "Damage");
+    const rmReq = store.seed("ACCEPTED_NOT_POSTED", "cn-own-rm", "rm-1", { acceptedAt: new Date("2026-09-29T04:30:00.000Z") }, "Demo");
+    for (const row of store.rows) Object.assign(row, { paymentTrackingMode: "PAYMENT_V1", cnExpiryDays: 10, acceptanceReason: "PAYMENT_PENDING" });
+    const task = (id: string, cnRequestId: string, entry: string | null) => store.paymentEvents.push({
+      id, cnRequestId, status: "PENDING", amountPaid: null,
+      eventDate: new Date("2026-09-29T00:00:00.000Z"), outstandingBefore: 24_000, outstandingAfter: 24_000,
+      taskAmount: 24_000, taskDate: new Date("2026-09-29T00:00:00.000Z"), taskStatus: "SCHEDULED",
+      taskRescheduled: false, taskCompletedAt: null, dailyWorkEntryId: entry, dailyWorkContribution: entry ? 24_000 : null,
+      dailyWorkConfirmed: false, source: "ACCEPTANCE", requestKey: `k-${id}`, recordedById: "admin-1", createdAt: new Date("2026-09-29T04:30:00.000Z"),
+    });
+    task("t-so", soReq, "entry-so"); task("t-rm", rmReq, "entry-rm");
+    const reversals: Array<{ entryId: string; contribution: number }> = [];
+    const svc = loadService(store.prisma, [], {}, reversals);
+    const ev = (id: string) => store.paymentEvents.find((e) => e.id === id)!;
+
+    // Not the owner → 403, whatever the role (including the RM over the SO they manage, and the SO over the RM's CN).
+    for (const [who, ctx, reqId, taskId] of [["RM→SO's", RM_O, soReq, "t-so"], ["SO→RM's", SO, rmReq, "t-rm"], ["other RM→RM's", OTHER_RM_O, rmReq, "t-rm"], ["other SO→RM's", OTHER_SO, rmReq, "t-rm"], ["other RM→SO's", OTHER_RM_O, soReq, "t-so"]] as const) {
+      await expectStatus(() => svc.confirmMaterializedAutoTask(ctx, reqId, { taskId }), 403);
+      await expectStatus(() => svc.scheduleCnTask(ctx, reqId, { taskId, taskDate: "2026-10-01" }), 403);
+      assert.equal(ev(taskId).dailyWorkConfirmed, false, `${who}: nothing confirmed`);
+      assert.ok(ev(taskId).dailyWorkEntryId, `${who}: nothing rescheduled`);
+    }
+    assert.equal(reversals.length, 0);
+
+    // Each owner (SO and RM) gets the identical confirm → reschedule behaviour on their OWN task, whatever the CN type.
+    for (const [owner, ownerId, reqId, taskId, entry] of [["SO", "so-1", soReq, "t-so", "entry-so"], ["RM", "rm-1", rmReq, "t-rm", "entry-rm"]] as const) {
+      const ctx = owner === "SO" ? SO : RM_O;
+      assert.equal(await svc.countUnconfirmedMaterializedTasks(store.prisma as never, ownerId, "2026-09-29", "test-batch"), 1, `${owner}: an unconfirmed Auto Task blocks the submit gate`);
+      const confirmed = await svc.confirmMaterializedAutoTask(ctx, reqId, { taskId });
+      assert.equal(confirmed.confirmed, true, `${owner}: confirms`);
+      assert.equal(ev(taskId).taskStatus, "SCHEDULED", `${owner}: confirm never completes the payment task`);
+      assert.equal(await svc.countUnconfirmedMaterializedTasks(store.prisma as never, ownerId, "2026-09-29", "test-batch"), 0, `${owner}: confirmed → submit gate clear`);
+      const moved = await svc.scheduleCnTask(ctx, reqId, { taskId, taskDate: "2026-10-01" });
+      assert.equal(moved.taskId, taskId, `${owner}: reschedules the same task`);
+      assert.equal(ev(taskId).dailyWorkConfirmed, false, `${owner}: reschedule resets confirmation`);
+      assert.equal(ev(taskId).dailyWorkEntryId, null, `${owner}: reschedule un-materializes`);
+      assert.equal(reversals.at(-1)?.entryId, entry, `${owner}: exact contribution reversed`);
+    }
+
+    // Listing is OWNER-only: the RM's Daily Work lists their own CN tasks and never their team Sales Officer's.
+    task("t-so-list", soReq, null); task("t-rm-list", rmReq, null);
+    assert.equal(JSON.stringify((await svc.listActiveCnTasks(RM_O)).map((t) => t.taskId).sort()), JSON.stringify(["t-rm", "t-rm-list"]), "RM sees only RM-owned tasks");
+    assert.equal(JSON.stringify((await svc.listActiveCnTasks(SO)).map((t) => t.taskId).sort()), JSON.stringify(["t-so", "t-so-list"]), "SO sees only SO-owned tasks");
+    assert.equal((await svc.listActiveCnTasks(OTHER_RM_O)).length, 0, "an unrelated RM sees none");
+  }
+
   // Legacy CnRequest.taskDate tasks confirm through the same explicit path.
   {
     const store = makeStore();

@@ -181,6 +181,7 @@ function makeFake() {
 
 // Mutable so a sub-test can simulate an unconfirmed materialized Auto Task blocking day submission.
 let unconfirmedAutoTasks = 0;
+let unconfirmedChecks = 0; // how many times the submit gate looked for unconfirmed Auto Tasks
 const localRequire = createRequire(import.meta.url);
 function loadService(prisma: object) {
   const filename = resolve("src/features/daily-work", "service.server.ts");
@@ -189,7 +190,7 @@ function loadService(prisma: object) {
   const mocks: Record<string, unknown> = {
     ...dailyWorkServiceInfrastructureMocks(prisma as never),
     "server-only": {}, "@/lib/prisma": { prisma },
-    "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], countUnconfirmedMaterializedTasks: async () => unconfirmedAutoTasks },
+    "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], countUnconfirmedMaterializedTasks: async () => { unconfirmedChecks++; return unconfirmedAutoTasks; } },
     "@/lib/http": { ApiError: class extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } } },
     "@/lib/scope": { getCurrentDealerIds: async () => ["d1"] },
     "@/lib/audit": { writeAudit: async () => ({}) },
@@ -229,8 +230,17 @@ async function main() {
   // is rejected. Once confirmed (count → 0) the normal submission lifecycle proceeds.
   unconfirmedAutoTasks = 1;
   await expectStatus(() => svc.submitDailyWorkDay(SO, { workDate: DATE }), 422, "unconfirmed Auto Task blocks submit");
+  // An RM who OWNS a CN is its responsible officer: the same gate applies to them (their own unconfirmed Auto Task blocks
+  // Submit Daily Work, a confirmed one — or none — lets it through). (Same officer id, RM role.)
+  const RM_SAME: AuthContext = { userId: OFFICER, role: Role.REGIONAL_MANAGER, username: OFFICER, groupId: "g1" } as AuthContext;
+  unconfirmedAutoTasks = 1; unconfirmedChecks = 0;
+  await expectStatus(() => svc.submitDailyWorkDay(RM_SAME, { workDate: DATE }), 422, "RM's own unconfirmed Auto Task blocks submit");
+  assert.ok(unconfirmedChecks > 0, "the gate consults the RM's own Auto Tasks");
   unconfirmedAutoTasks = 0;
-  const first = await svc.submitDailyWorkDay(SO, { workDate: DATE });
+  const first = await svc.submitDailyWorkDay(RM_SAME, { workDate: DATE });
+  // A role that cannot own a CN is never gated by (or given) Auto Tasks.
+  const ADMIN_CTX = { userId: OFFICER, role: Role.SUPER_ADMIN, username: "a", groupId: null } as AuthContext;
+  await expectStatus(() => svc.submitDailyWorkDay(ADMIN_CTX, { workDate: DATE }), 403, "Admin is not a Daily Work owner");
   assert.equal(first.batchId, firstBatch);
   assert.notEqual(fake.currentDay().currentBatchId, firstBatch, "submission rotates a fresh batch");
   assert.equal((await svc.getDailyWork(SO, "SALES", DATE, undefined, "PLAN")).dealers.length, 0, "Daily Plan resets");

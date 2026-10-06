@@ -40,6 +40,7 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
     "./auto-task-materialization.server": {
       materializeDueDailyWorkTasks: async () => ({ materializedTasks: 0, affectedDealers: 0, finalized: false }),
       materializeDueDailyWorkTasksInTransaction: async () => ({ materializedTasks: 0, affectedDealers: 0, finalized: false }),
+      autoTasksApplyToRole: (role: string) => role === "SALES_OFFICER" || role === "REGIONAL_MANAGER", // mirrors the real rule (asserted in auto-task-materialization.test.ts)
     },
     // The Auto Tasks visibility flag defaults OFF; a stub keeps status reads DB-double-free.
     "@/lib/recovery-config": {

@@ -697,6 +697,15 @@ export interface CnPaymentDetailDto {
  * Admin verification (verifyCnPayment) is a separate, authoritative action and is unaffected.
  */
 function canReportCnPayment(ctx: AuthContext, officerId: string): boolean {
+  return isCnTaskOwner(ctx, officerId);
+}
+
+/**
+ * The owner rule for a CN: its stored `officerId` is the responsible field officer, and that person is a Sales Officer or
+ * Regional Manager. Used for payment reporting AND for the CN follow-up task (Auto Task) confirm / reschedule, so an RM
+ * acts only on their OWN CNs — never on the tasks of a Sales Officer they manage. (Mirrors `autoTasksApplyToRole`.)
+ */
+function isCnTaskOwner(ctx: AuthContext, officerId: string): boolean {
   return (ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER) && ctx.userId === officerId;
 }
 
@@ -1151,8 +1160,17 @@ function toNewTaskDto(event: NewTaskRow, confirmed = false): CnTaskDto {
   };
 }
 
+/**
+ * Whose CN follow-up tasks a caller's Daily Work lists. A Regional Manager's follow-up tasks are those of the CNs they OWN —
+ * never their team's Sales Officers' (those belong to, and are confirmed by, the SO); everyone else keeps the existing scope.
+ */
+async function cnTaskScope(ctx: AuthContext): Promise<{ all: boolean; ids: string[] }> {
+  if (ctx.role === Role.REGIONAL_MANAGER) return { all: false, ids: [ctx.userId] };
+  return getOfficerScope(ctx);
+}
+
 export async function listPendingCnTasks(ctx: AuthContext): Promise<CnTaskDto[]> {
-  const scope = await getOfficerScope(ctx);
+  const scope = await cnTaskScope(ctx);
   const officerWhere = scope.all ? {} : { officerId: { in: scope.ids } };
   const events = await prisma.cnPaymentEvent.findMany({
     where: { taskStatus: "UNSCHEDULED", dailyWorkEntryId: null, cnRequest: { paymentTrackingMode: "PAYMENT_V1", ...officerWhere } },
@@ -1169,7 +1187,7 @@ export async function listPendingCnTasks(ctx: AuthContext): Promise<CnTaskDto[]>
 
 /** All active CN Working tasks, irrespective of their actual scheduled date, for the compact Daily Work table. */
 export async function listActiveCnTasks(ctx: AuthContext): Promise<CnTaskDto[]> {
-  const scope = await getOfficerScope(ctx);
+  const scope = await cnTaskScope(ctx);
   const officerWhere = scope.all ? {} : { officerId: { in: scope.ids } };
   const events = await prisma.cnPaymentEvent.findMany({
     where: { taskStatus: { in: ["UNSCHEDULED", "SCHEDULED"] }, dailyWorkEntryId: null, cnRequest: { paymentTrackingMode: "PAYMENT_V1", ...officerWhere } },
@@ -1231,7 +1249,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
       if (locked.length === 0) throw new ApiError(404, L["cn_requests.error.task_not_found"]);
       const event = await tx.cnPaymentEvent.findUnique({ where: { id: taskId }, include: { cnRequest: { include: { dealer: true } } } });
       if (!event || event.cnRequestId !== id) throw new ApiError(404, L["cn_requests.error.task_not_found"]);
-      if (ctx.role !== Role.SALES_OFFICER || event.cnRequest.officerId !== ctx.userId) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
+      if (!isCnTaskOwner(ctx, event.cnRequest.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
       if (event.taskStatus !== "UNSCHEDULED" && event.taskStatus !== "SCHEDULED") throw new ApiError(409, L["cn_requests.error.cn_task_inactive"]);
       if (!event.cnRequest.acceptedAt || event.cnRequest.cnExpiryDays == null || !isOpenCnTaskDate(taskDate, event.cnRequest.acceptedAt, event.cnRequest.cnExpiryDays)) {
         throw new ApiError(422, L["cn_requests.validation.task_date_outside_expiry"]);
@@ -1273,7 +1291,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
         legacyDailyWorkEntryId: true, legacyDailyWorkContribution: true },
     });
     if (!existing) throw new ApiError(404, L["cn_requests.error.not_found"]);
-    if (ctx.role !== Role.SALES_OFFICER || existing.officerId !== ctx.userId) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
+    if (!isCnTaskOwner(ctx, existing.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
     if (existing.paymentTrackingMode !== null || existing.status !== CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED) throw new ApiError(409, L["cn_requests.error.not_legacy_task"]);
     if (existing.acceptedAt && existing.cnExpiryDays != null && !isOpenCnTaskDate(taskDate, existing.acceptedAt, existing.cnExpiryDays)) throw new ApiError(422, L["cn_requests.validation.task_date_outside_expiry"]);
     if (existing.legacyDailyWorkEntryId) {
@@ -1308,7 +1326,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
  */
 export async function confirmMaterializedAutoTask(ctx: AuthContext, id: string, raw: unknown): Promise<CnTaskDto> {
   const L = await getResolvedLabels();
-  if (ctx.role !== Role.SALES_OFFICER) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]); // owner-only below (officerId === caller)
   const parsed = paymentSchemas(L).confirmTask.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? L["cn_requests.error.task_not_found"]);
   const { taskId } = parsed.data;

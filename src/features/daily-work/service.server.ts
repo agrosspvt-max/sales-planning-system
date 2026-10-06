@@ -22,7 +22,7 @@ import { getAutoTasksEnabled } from "@/lib/recovery-config";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
-import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction } from "./auto-task-materialization.server";
+import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import {
   currentBusinessDate, monthNameForDate, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
@@ -1236,11 +1236,15 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
   await prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
-    await materializeDueDailyWorkTasksInTransaction(tx, officerId, workDate, day);
-    // Submitting Daily Work must NOT implicitly confirm an Auto Task. Every materialized Auto Task in the current
-    // editable batch must have been explicitly confirmed first (this never completes the payment task).
-    const unconfirmed = await countUnconfirmedMaterializedTasks(tx, officerId, workDate, day.currentBatchId);
-    if (unconfirmed > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
+    // Auto Tasks apply only to users who are shown them (see autoTasksApplyToRole): the SAME rule as the Recovery read path,
+    // so the gate can never reject for a task the user cannot see, confirm or reschedule.
+    if (autoTasksApplyToRole(ctx.role)) {
+      await materializeDueDailyWorkTasksInTransaction(tx, officerId, workDate, day);
+      // Submitting Daily Work must NOT implicitly confirm an Auto Task. Every materialized Auto Task in the current
+      // editable batch must have been explicitly confirmed first (this never completes the payment task).
+      const unconfirmed = await countUnconfirmedMaterializedTasks(tx, officerId, workDate, day.currentBatchId);
+      if (unconfirmed > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
+    }
     const [data, noPlanSet] = await Promise.all([
       sectionDataPresence(officerId, workDate, day.currentBatchId, tx),
       loadNoPlanSet(officerId, workDate, day.currentBatchId, tx),
@@ -1280,7 +1284,9 @@ export async function submitDailyReport(ctx: AuthContext, raw: unknown): Promise
   await prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.report_already_submitted"]);
-    const materialized = await materializeDueDailyWorkTasksInTransaction(tx, officerId, workDate, day);
+    const materialized = autoTasksApplyToRole(ctx.role)
+      ? await materializeDueDailyWorkTasksInTransaction(tx, officerId, workDate, day)
+      : { materializedTasks: 0, affectedDealers: 0, finalized: false };
     if (materialized.materializedTasks > 0) {
       // Commit the new Recovery work, then refuse finalization outside this transaction.
       newlyMaterialized = materialized.materializedTasks;

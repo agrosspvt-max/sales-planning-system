@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { Prisma } from "@prisma/client";
+import { Prisma, Role } from "@prisma/client";
 
 type Entry = { id: string; officerId: string; dealerId: string; workDate: string; batchId: string; section: string; todaysPlan: number; status: string };
 type Event = { id: string; officerId: string; dealerId: string; amount: number; taskDate: string; taskStatus: string; dailyWorkEntryId: string | null; dailyWorkContribution: number | null };
@@ -163,6 +163,44 @@ async function main() {
     await svc.materializeDueDailyWorkTasksInTransaction(f.db as never, "so-1", "2026-09-29", openDay);
     assert.equal(f.entries[0]?.todaysPlan, 7_500);
     assert.equal(f.legacy[0]?.dailyWorkContribution, 7_500);
+  }
+
+  // ONE definition of "Auto Tasks apply": only Sales Officers (the only role shown, able to confirm or reschedule them).
+  // The Recovery read path and both submit gates share it, so a gate can never fire for a task the user cannot see.
+  {
+    assert.equal(svc.autoTasksApplyToRole(Role.SALES_OFFICER), true);
+    assert.equal(svc.autoTasksApplyToRole(Role.REGIONAL_MANAGER), true, "an RM owns CNs raised for themselves → gets their follow-up tasks");
+    for (const role of [Role.SUPER_ADMIN, Role.CUSTOM_ADMIN]) assert.equal(svc.autoTasksApplyToRole(role), false, `${role}`);
+    // Read path for roles that cannot own a CN: nothing is materialized and the database is never touched (prisma is an empty stub here).
+    for (const role of [Role.SUPER_ADMIN, Role.CUSTOM_ADMIN]) {
+      const r = await svc.materializeDueDailyWorkTasks({ userId: "rm-1", role, username: "rm", groupId: "g1" } as never);
+      assert.equal(JSON.stringify(r), JSON.stringify({ materializedTasks: 0, affectedDealers: 0, finalized: false }), `${role}: no Auto Tasks created on read`);
+    }
+    const service = readFileSync("src/features/daily-work/service.server.ts", "utf8");
+    assert.ok(service.includes("if (autoTasksApplyToRole(ctx.role)) {\n      await materializeDueDailyWorkTasksInTransaction"), "Submit Daily Work: materialize + unconfirmed check only where Auto Tasks apply");
+    assert.ok(service.includes("autoTasksApplyToRole(ctx.role)\n      ? await materializeDueDailyWorkTasksInTransaction"), "Submit Daily Report uses the same rule");
+    assert.ok(/materializeDueDailyWorkTasks\(ctx\)/.test(service), "the Recovery read path still goes through the role-aware entry point");
+  }
+
+  // Applicability filters of the materializer itself: only the submitting officer's own, due, positive tasks; never another
+  // officer's, never future ones, never zero-amount — so nothing stale/foreign/empty can produce an unconfirmed task.
+  {
+    const other = { ...event("other-officer", 4_000), officerId: "rm-9" };
+    const zero = event("zero", 0);
+    const f = makeDb({ events: [other, zero, event("future", 3_000, "2026-10-05"), event("mine", 6_000)] });
+    const r = await svc.materializeDueDailyWorkTasksInTransaction(f.db as never, "so-1", "2026-09-29", openDay);
+    assert.equal(r.materializedTasks, 1);
+    assert.deepEqual(f.events.filter((e) => e.dailyWorkEntryId).map((e) => e.id), ["mine"], "only the officer's own due task is linked");
+    assert.equal(f.entries.length, 1);
+    // An RM-owned due task is materialized for the RM (same code path as an SO) and never for the SO — and vice versa.
+    const g = makeDb({ events: [{ ...event("rm-task", 9_000), officerId: "rm-1" }, event("so-task", 2_000)] });
+    assert.equal((await svc.materializeDueDailyWorkTasksInTransaction(g.db as never, "so-1", "2026-09-29", openDay)).materializedTasks, 1, "SO gets only the SO-owned task");
+    assert.deepEqual(g.events.filter((e) => e.dailyWorkEntryId).map((e) => e.id), ["so-task"], "RM's task untouched by the SO's run");
+    const rmRun = await svc.materializeDueDailyWorkTasksInTransaction(g.db as never, "rm-1", "2026-09-29", openDay);
+    assert.equal(rmRun.materializedTasks, 1, "RM gets the RM-owned task");
+    assert.deepEqual(g.events.filter((e) => e.dailyWorkEntryId).map((e) => e.id).sort(), ["rm-task", "so-task"]);
+    assert.equal(g.entries.find((e) => e.officerId === "rm-1")?.todaysPlan, 9_000, "RM's Recovery row carries the RM task amount");
+    assert.equal(g.entries.find((e) => e.officerId === "so-1")?.todaysPlan, 2_000, "SO's row is unaffected by the RM task");
   }
 
   console.log("auto-task-materialization.test.ts — all assertions passed");

@@ -16,6 +16,18 @@ type DueTask = {
 
 type RecoveryEntry = { id: string };
 
+/**
+ * Which roles can OWN a CN and therefore receive its follow-up Auto Task in Daily Work → Recovery: Sales Officers and
+ * Regional Managers (an RM who raises a CN for themselves is its responsible field officer — RM-owned CN ≈ SO-owned CN).
+ * This is only the role gate; every query below is additionally scoped to `c."officerId" = <the submitting user>`, so a
+ * task ever belongs to its CN's owner alone (an RM never gets, sees or confirms an SO's task). The SAME predicate drives the
+ * Recovery read path and both submit gates, so a gate can never fire for a task the user is not shown — and the CN service
+ * authorizes confirm/reschedule with the same owner rule (`isCnTaskOwner`).
+ */
+export function autoTasksApplyToRole(role: Role): boolean {
+  return role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
+}
+
 export interface MaterializationResult {
   materializedTasks: number;
   affectedDealers: number;
@@ -150,7 +162,7 @@ export async function materializeDueDailyWorkTasksInTransaction(
 
 /** Server-authoritative entry point used by Daily Work reads and the Auto Tasks endpoint. */
 export async function materializeDueDailyWorkTasks(ctx: AuthContext): Promise<MaterializationResult> {
-  if (ctx.role !== Role.SALES_OFFICER) {
+  if (!autoTasksApplyToRole(ctx.role)) {
     return { materializedTasks: 0, affectedDealers: 0, finalized: false };
   }
   const workDate = currentBusinessDate();

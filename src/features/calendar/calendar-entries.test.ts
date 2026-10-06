@@ -28,7 +28,7 @@ const TODAY = "2026-10-05"; // currentBusinessDate() is real here; the tests use
 
 type Row = { id: string; ownerId: string; date: Date; kind: string; text: string | null; taskSection: string | null; dealerId: string | null; amount: number | null; entryType: string | null; paymentMode: string | null; typedDealerName: string | null; marketName: string | null; dealerVisits: number | null; newPartyVisits: number | null; materializedAt: Date | null; createdAt: Date };
 let store: Row[] = [];
-let finalizedDays = new Set<string>(); // "owner|YYYY-MM-DD"
+const finalizedDays = new Set<string>(); // "owner|YYYY-MM-DD"
 let seq = 0;
 
 const scopeOf = (c: AuthContext): { all: boolean; ids: string[] } => {

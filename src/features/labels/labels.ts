@@ -724,6 +724,7 @@ export const DEFAULT_LABELS = {
    * ===================================================================================== */
   "party_planning.title": "Party Planning",
   // Navigation — the module's Create Plan | View toggle
+  "party_planning.nav.territory": "Territory Mapping",
   "party_planning.nav.create_plan": "Create Plan",
   "party_planning.nav.view": "View",
   // View tabs
@@ -741,6 +742,22 @@ export const DEFAULT_LABELS = {
   "party_planning.action.submit": "Submit",
   "party_planning.action.approve": "Approve",
   "party_planning.action.reject": "Reject",
+  // Territory Mapping (Phase 1)
+  "party_planning.territory.tab_existing": "Existing Dealers",
+  "party_planning.territory.tab_add_market": "Add Market",
+  "party_planning.territory.col.market": "Market",
+  "party_planning.territory.col.potential": "Potential",
+  "party_planning.territory.col.party_name": "Party Name",
+  "party_planning.territory.col.status": "Status",
+  "party_planning.territory.action.import": "Import Excel",
+  "party_planning.territory.action.send_request": "Send Request",
+  "party_planning.territory.field.market_name": "Market Name",
+  "party_planning.territory.field.market_potential": "Market Potential",
+  "party_planning.territory.field.number_of_parties": "No. of Parties",
+  "party_planning.territory.search": "Search party",
+  "party_planning.territory.all_markets": "All Markets",
+  "party_planning.territory.unmapped": "Unmapped",
+  "party_planning.territory.empty": "No dealers found.",
 
   /* =====================================================================================
    * DAILY WORK — every static, user-facing word used by the Daily Work page and its validation

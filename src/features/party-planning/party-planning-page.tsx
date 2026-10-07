@@ -44,13 +44,14 @@ const fmtDate = (s: string | null) => (s ? formatSchemeDate(s) : "—");
 
 /* --------------------------- Module Create Plan | View toggle --------------------------- */
 
-const MODE_LINKS: { key: "create" | "view"; href: string; labelKey: LabelKey }[] = [
+const MODE_LINKS: { key: "territory" | "create" | "view"; href: string; labelKey: LabelKey }[] = [
+  { key: "territory", href: "/planning/party/territory", labelKey: "party_planning.nav.territory" },
   { key: "create", href: "/planning/party", labelKey: "party_planning.nav.create_plan" },
   { key: "view", href: "/planning/party/view", labelKey: "party_planning.nav.view" },
 ];
 
 /** Route-based [Create Plan | View] toggle — mirrors the Scheme module's mode links. */
-export function PartyPlanModeLinks({ mode }: { mode: "create" | "view" }) {
+export function PartyPlanModeLinks({ mode }: { mode: "territory" | "create" | "view" }) {
   return (
     <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
       {MODE_LINKS.map((m) => (

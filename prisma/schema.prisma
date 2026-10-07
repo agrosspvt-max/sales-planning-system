@@ -40,6 +40,7 @@ model User {
   cnRequests               CnRequest[]                 @relation("OfficerCnRequests")
   dailyWorkAttendance      DailyWorkAttendance[]       @relation("DailyWorkAttendanceOfficer")
   dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
+  marketRequests           MarketRequest[]             @relation("MarketRequestRequester")
   dailyWorkEntries         DailyWorkEntry[]            @relation("DailyWorkOfficer")
   dailyWorkReviews         DailyWorkReview[]           @relation("DailyWorkReviewOfficer")
   dailyWorkReviewsGiven    DailyWorkReview[]           @relation("DailyWorkReviewReviewer")
@@ -693,6 +694,7 @@ model Dealer {
   planDealers         PlanDealer[]
   recoveryPlanDealers RecoveryPlanDealer[]
   schemeSales         SchemeSale[]
+  marketMapping       DealerMarketMapping?
 
   @@index([isActive])
   @@index([status])
@@ -1886,4 +1888,70 @@ enum ImportStatus {
   COMPLETED
   FAILED
   ROLLED_BACK
+}
+
+/// Market master (Party Planning · Territory Mapping). The single authoritative Market list: a Market has a stable id that Dealer
+/// mappings — and, in later phases, Seasonal / Monthly Planning — reference, so no later module duplicates Market records. A Market only
+/// exists once it is usable: it is created either by an approved MarketRequest (source REQUESTED) or by mapping existing dealers
+/// (Excel import, source EXISTING). `potential` is the MARKET-level A/B/C (set by an approved request; null until decided for
+/// markets that came from the import) and is deliberately separate from the dealer-level potential in DealerMarketMapping.
+/// The legacy free-text `marketName` columns (PartyPlan / Daily Work / Calendar) are untouched.
+model Market {
+  id              String                @id @default(cuid())
+  name            String
+  /// Normalized name (lower-case, punctuation/space collapsed) — the duplicate guard: "Pipariya" == "pipariya " == "PIPARIYA".
+  nameKey         String                @unique
+  potential       String? // A | B | C
+  source          String                @default("EXISTING") // EXISTING | REQUESTED
+  expectedParties Int? // "No. of Parties" from the approved request
+  createdById     String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  mappings        DealerMarketMapping[]
+  requests        MarketRequest[]
+}
+
+/// One CURRENT Territory Mapping row per dealer (dealerId unique): the dealer's Market (nullable — unmapped dealers can still carry
+/// a Potential) and the dealer-level Potential A/B/C chosen in the mapping exercise. History of changes is kept in the audit log.
+model DealerMarketMapping {
+  id          String   @id @default(cuid())
+  dealerId    String   @unique
+  marketId    String?
+  potential   String? // A | B | C — dealer-level, NOT the Market's potential
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  dealer      Dealer   @relation(fields: [dealerId], references: [id], onDelete: Cascade)
+  market      Market?  @relation(fields: [marketId], references: [id], onDelete: SetNull)
+
+  @@index([marketId])
+}
+
+/// "Add Market" request: SO → RM review → Admin review → approved Market. An RM's own request goes straight to Admin review.
+/// status: PENDING_RM | PENDING_ADMIN | APPROVED | REJECTED. Every decision (user, time, reason) is retained on the row.
+model MarketRequest {
+  id               String    @id @default(cuid())
+  requesterId      String
+  marketName       String
+  nameKey          String
+  potential        String // A | B | C
+  numberOfParties  Int
+  status           String // PENDING_RM | PENDING_ADMIN | APPROVED | REJECTED
+  rmDecision       String? // APPROVED | REJECTED
+  rmDecidedById    String?
+  rmDecidedAt      DateTime?
+  adminDecision    String? // APPROVED | REJECTED
+  adminDecidedById String?
+  adminDecidedAt   DateTime?
+  rejectionStage   String? // RM | ADMIN
+  rejectionReason  String?
+  marketId         String? // the Market created on final approval
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  requester        User      @relation("MarketRequestRequester", fields: [requesterId], references: [id])
+  market           Market?   @relation(fields: [marketId], references: [id])
+
+  @@index([requesterId])
+  @@index([status])
+  @@index([nameKey])
 }

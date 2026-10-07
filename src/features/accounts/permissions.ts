@@ -14,7 +14,7 @@ export const ADMIN_MODULES = [
   { id: "salesPlanning", label: "Sales Planning", group: "Planning", href: "/planning/sales", actions: [...PLAN, "create", "delete"] },
   { id: "recoveryPlanning", label: "Recovery Planning", group: "Planning", href: "/planning/recovery", actions: [...PLAN, "delete", "upload", "transfer"] },
   { id: "schemePlanning", label: "Scheme Planning", group: "Planning", href: "/planning/scheme", actions: [...PLAN, "verify", "upload"] },
-  { id: "partyPlanning", label: "Dealer Appointment", group: "Planning", href: "/planning/party", actions: ["read", "approve", "reject"] },
+  { id: "partyPlanning", label: "Dealer Appointment", group: "Planning", href: "/planning/party", actions: ["read", "approve", "reject", "manage"] }, // "manage" = Territory Mapping writes (mapping, import, Market requests)
   { id: "dailyWork", label: "Daily Work (administrative viewer)", group: "Planning", href: "/daily-work", actions: READ },
   { id: "calendar", label: "Calendar", group: "Planning", href: "/planning/calendar", actions: ["read", "create", "update", "delete"] },
   { id: "planImport", label: "Import Seasonal Plan", group: "Planning", href: "/planning/sales/import", actions: IMPORT },

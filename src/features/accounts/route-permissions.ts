@@ -66,6 +66,7 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
     if (/\/(?:planning|dealers|enrolled)$/.test(p) || ["schemes/eligible", "schemes/running", "schemes/enrolled", "schemes/team-officers"].includes(p)) return ["schemePlanning", "read"];
     return ["schemeMaster", read ? "read" : /\/(close|reopen)$/.test(p) ? "lifecycle" : writeAction(method)];
   }
+  if (p.startsWith("territory-mapping")) return read || p.endsWith("/act") ? ["partyPlanning", "read"] : ["partyPlanning", "manage"]; // /act: approve / reject checked by the service
   if (p.startsWith("party-plans")) return read ? ["partyPlanning", "read"] : p.endsWith("/act") ? ["partyPlanning", "read"] : null;
   if (p === "planning/approvals") return ["approvals", "read"];
   if (/^planning\/month-extensions\/[^/]+\/decide$/.test(p)) return ["approvals", "read"]; // approve/reject body checked by service

@@ -255,6 +255,61 @@ async function main() {
     assert.equal(await status(() => service.previewTerritoryImport({ ...SO1, role: undefined } as unknown as AuthContext, file, null)), 403, "an unknown role is refused");
   }
 
+  /* ---- Excel import with District (Dealer | Market | District) ---- */
+  {
+    const sheet = [["Dealer", "Market", "District"], ["ABC Traders", "Pipariya", "Rajgarh"], ["Sharma Fertilizers", "Pipariya", "Rajgarh"], ["Twin Name Stores", "Bareli", "Kannauj"], ["Gupta Agency", "Bareli", "Kannauj"], ["Nobody", "Bareli", "Kannauj"], ["Far Away Agro", "Bareli", "Kannauj"]];
+    const file = workbook({ Notes: [["x"]], Mapping: sheet });
+    const { service, t } = loadService();
+    t.markets.push({ id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: "A", source: "REQUESTED" });
+    // d1 already has the SAME Market + District; d2 has an OLD District and OLD Market; d5 has a Potential only.
+    t.mappings.push({ id: "x1", dealerId: "d1", marketId: "m-pip", district: "RAJGARH", potential: "B" }, { id: "x2", dealerId: "d2", marketId: null, district: "Old District", potential: null }, { id: "x5", dealerId: "d5", marketId: null, district: null, potential: "C" });
+    const before = JSON.stringify([t.mappings, t.markets, t.audit]);
+    const preview = plain(await service.previewTerritoryImport(SO1, file, "Mapping"));
+    assert.equal(JSON.stringify([t.mappings, t.markets, t.audit]), before, "preview writes nothing");
+    const row = (n: number) => preview.plan.find((r) => r.rowNumber === n)!;
+    assert.deepEqual([row(2).status, row(2).action, row(2).districtAction, row(2).currentDistrict, row(2).currentMarket], ["MATCHED", "NO_CHANGE", "NO_CHANGE", "RAJGARH", "Pipariya"], "same District + Market → nothing to change");
+    assert.deepEqual([row(3).action, row(3).districtAction, row(3).currentDistrict, row(3).districtName, row(3).marketChanged], ["MAP", "CHANGE", "Old District", "Rajgarh", true], "dealer matched by the dealer resolver; old District replaced, Market added");
+    assert.deepEqual([row(4).status, row(4).dealerId, row(4).districtAction, row(4).currentMarket], ["AMBIGUOUS", undefined, undefined, undefined], "ambiguous dealer is not auto-applied");
+    assert.equal(row(5).status, "INVALID"); assert.equal(row(6).status, "UNMATCHED"); assert.equal(row(7).status, "INVALID", "out-of-scope dealers stay rejected");
+    assert.equal(row(5).excelDistrict, "Kannauj");
+
+    const res = await service.commitTerritoryImport(SO1, file, "Mapping", { 4: "d5" });
+    assert.equal(res.applied, 2);
+    const map = (id: string) => t.mappings.find((m) => m.dealerId === id)!;
+    assert.deepEqual([map("d1").district, map("d1").potential], ["RAJGARH", "B"], "an already-matching dealer is untouched");
+    assert.deepEqual([map("d2").district, map("d2").marketId != null], ["Rajgarh", true], "District + Market written on the existing mapping row");
+    assert.deepEqual([map("d5").district, map("d5").potential, map("d5").marketId != null], ["Kannauj", "C", true], "the picked dealer gets District + Market and keeps its dealer-level Potential");
+    assert.equal(t.mappings.filter((m) => m.dealerId === "d2").length, 1, "District lives on the existing mapping row (no second row)");
+    assert.equal(t.markets.find((m) => m.id === "m-pip")!.potential, "A", "Market potential untouched");
+    assert.ok(t.audit.some((a) => String(a.summary).includes("District: Old District → Rajgarh")), "District change audited");
+    assert.equal(t.dealerWrites, 0);
+    assert.equal(t.markets.length, 2, "only the Bareli Market (new in the sheet) was added; Pipariya reused");
+
+    // Only District differs → only District is written; Market keeps its value.
+    const only = loadService();
+    only.t.markets.push({ id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: null, source: "EXISTING" });
+    only.t.mappings.push({ id: "y1", dealerId: "d1", marketId: "m-pip", district: "Old", potential: null });
+    const d = plain(await only.service.previewTerritoryImport(SO1, workbook({ S: [["Dealer", "Market", "District"], ["ABC Traders", "Pipariya", "New"]] }), null)).plan[0]!;
+    assert.deepEqual([d.action, d.marketChanged, d.districtChanged], ["CHANGE", false, true]);
+    await only.service.commitTerritoryImport(SO1, workbook({ S: [["Dealer", "Market", "District"], ["ABC Traders", "Pipariya", "New"]] }), null, {});
+    assert.deepEqual([only.t.mappings[0]!.district, only.t.mappings[0]!.marketId], ["New", "m-pip"]);
+
+    // Old two-column sheets still work and leave District alone.
+    const old = loadService();
+    old.t.mappings.push({ id: "z1", dealerId: "d1", marketId: null, district: "Keep", potential: null });
+    await old.service.commitTerritoryImport(SO1, workbook({ S: [["Dealer", "Market"], ["ABC Traders", "Pipariya"]] }), null, {});
+    assert.equal(old.t.mappings.find((m) => m.dealerId === "d1")!.district, "Keep", "Dealer | Market sheet leaves District unchanged");
+
+    // Listing + manual edit share the same scope rules as Market.
+    const list = plain(await service.listTerritoryDealers(SO1, PAGE)).items.find((r) => r.dealerId === "d2")!;
+    assert.equal(list.district, "Rajgarh");
+    assert.equal((await service.updateDealerMapping(SO1, "d1", { district: "  Sagar  " })).district, "Sagar");
+    assert.equal((await service.updateDealerMapping(SO1, "d1", { district: "" })).district, null);
+    assert.equal(await status(() => service.updateDealerMapping(SO1, "d3", { district: "X" })), 403, "District edit obeys the same scope");
+    assert.equal(await status(() => service.updateDealerMapping(SO1, "d1", { district: "x".repeat(121) })), 422);
+    assert.equal(await status(() => service.commitTerritoryImport({ ...SO1, role: undefined } as unknown as AuthContext, file, "Mapping", {})), 403);
+  }
+
   /* ---- Add Market request → RM → Admin ---- */
   {
     const { service, t } = loadService();
@@ -312,7 +367,7 @@ async function main() {
   /* ---- UI wiring: Territory Mapping is an ADDITION inside Party Planning; the appointment workflow is untouched ---- */
   {
     const page = readFileSync("src/features/party-planning/party-planning-page.tsx", "utf8");
-    assert.ok(page.includes('href: "/planning/party/territory"') && page.includes('{ key: "create", href: "/planning/party"') && page.includes('{ key: "view", href: "/planning/party/view"'), "Territory Mapping | Create Plan | View live side by side");
+    assert.ok(page.includes('href: "/planning/party/territory"') && !page.includes('labelKey: "party_planning.nav.create_plan"') && page.includes('{ key: "view", href: "/planning/party/view"'), "Territory Mapping | Planning | View; no Create Plan item");
     assert.ok(page.includes("export function PartyCreatePlanPage") && page.includes("export function PartyViewPage") && page.includes("/api/party-plans/save-draft"), "the appointment plan pages are still there");
     const ui = readFileSync("src/features/party-planning/territory-mapping-page.tsx", "utf8");
     for (const needle of ['"party_planning.territory.tab_existing"', '"party_planning.territory.tab_add_market"', "/api/territory-mapping/import/preview", "/api/territory-mapping/import/commit", "party_planning.territory.action.send_request"]) assert.ok(ui.includes(needle), needle);

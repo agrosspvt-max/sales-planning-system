@@ -42,7 +42,7 @@ export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?
     { key: "recovery", label: "Recovery Planning", href: "/planning/recovery", description: "Plan and track outstanding recovery from the Aging Report.", icon: Wallet, available: true },
     // Scheme Planning is gated behind SCHEME_PLANNING_ENABLED — shown as "Coming Soon" (disabled) until ready.
     { key: "scheme", label: "Scheme Planning", href: "/planning/scheme", description: "Plan dealers into schemes, get RM approval, and verify enrollment.", icon: Gift, available: schemePlanningEnabled },
-    { key: "party", label: "Party Planning", href: "/planning/party", description: "Plan party visits and appointments, then submit them for admin approval.", icon: UsersRound, available: true },
+    { key: "party", label: "Party Planning", href: "/planning/party/seasonal", description: "Plan party visits and appointments, then submit them for admin approval.", icon: UsersRound, available: true },
   ];
 
   return (

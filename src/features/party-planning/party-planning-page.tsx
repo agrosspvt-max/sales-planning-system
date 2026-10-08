@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { L, useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
 
@@ -44,25 +45,42 @@ const fmtDate = (s: string | null) => (s ? formatSchemeDate(s) : "—");
 
 /* --------------------------- Module Create Plan | View toggle --------------------------- */
 
-const MODE_LINKS: { key: "territory" | "create" | "view"; href: string; labelKey: LabelKey }[] = [
+// "create" is the legacy appointment-planning page (/planning/party): it is no longer a navigation item, so no primary item is active there.
+type PartyMode = "territory" | "seasonal" | "monthly" | "create" | "view";
+
+// PRIMARY navigation. "Planning" opens the Seasonal tab (/planning/party/seasonal) and stays active for both of its tabs.
+const PRIMARY_LINKS: { key: "territory" | "planning" | "view"; href: string; labelKey: LabelKey }[] = [
   { key: "territory", href: "/planning/party/territory", labelKey: "party_planning.nav.territory" },
-  { key: "create", href: "/planning/party", labelKey: "party_planning.nav.create_plan" },
+  { key: "planning", href: "/planning/party/seasonal", labelKey: "party_planning.nav.planning" },
   { key: "view", href: "/planning/party/view", labelKey: "party_planning.nav.view" },
 ];
+// SECONDARY navigation inside Planning (route-based, so a refresh or Back/Forward keeps the section).
+const PLANNING_TABS: { key: "seasonal" | "monthly"; href: string; labelKey: LabelKey }[] = [
+  { key: "seasonal", href: "/planning/party/seasonal", labelKey: "party_planning.nav.seasonal_tab" },
+  { key: "monthly", href: "/planning/party/monthly", labelKey: "party_planning.nav.monthly_tab" },
+];
 
-/** Route-based [Create Plan | View] toggle — mirrors the Scheme module's mode links. */
-export function PartyPlanModeLinks({ mode }: { mode: "territory" | "create" | "view" }) {
+/**
+ * Party Planning navigation: [Territory Mapping | Planning | View]. Under Planning, the Sales Planning-style underline
+ * tabs [Seasonal | Monthly] are shown; Territory Mapping renders its own [Existing Dealers | Add Market] switch below.
+ */
+export function PartyPlanModeLinks({ mode, children }: { mode: PartyMode; children?: React.ReactNode }) {
+  const primary = mode === "seasonal" || mode === "monthly" ? "planning" : mode;
   return (
-    <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
-      {MODE_LINKS.map((m) => (
-        <Link
-          key={m.key}
-          href={m.href}
-          className={`rounded px-3 py-1.5 font-medium ${mode === m.key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-        >
-          <L k={m.labelKey} />
-        </Link>
-      ))}
+    <div className="space-y-3">
+      <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
+        {PRIMARY_LINKS.map((m) => (
+          <Link
+            key={m.key}
+            href={m.href}
+            className={`rounded px-3 py-1.5 font-medium ${primary === m.key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          >
+            <L k={m.labelKey} />
+          </Link>
+        ))}
+      </div>
+      {primary === "planning" && <UnderlineTabs active={mode} tabs={PLANNING_TABS.map((t) => ({ key: t.key, href: t.href, label: <L k={t.labelKey} /> }))} />}
+      {children}
     </div>
   );
 }

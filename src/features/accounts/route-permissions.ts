@@ -66,6 +66,10 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
     if (/\/(?:planning|dealers|enrolled)$/.test(p) || ["schemes/eligible", "schemes/running", "schemes/enrolled", "schemes/team-officers"].includes(p)) return ["schemePlanning", "read"];
     return ["schemeMaster", read ? "read" : /\/(close|reopen)$/.test(p) ? "lifecycle" : writeAction(method)];
   }
+  if (p.startsWith("party-monthly-sheets")) return read ? ["partyPlanning", "read"] : null; // created by the SO/RM owner only
+  if (p.startsWith("party-monthly-plans")) return read || p.endsWith("/transition") ? ["partyPlanning", "read"] : null; // created / edited by the SO/RM owner only; /transition: owner-vs-Admin step and approve / reject checked by the service
+  if (p.startsWith("seasonal-sheets")) return read ? ["partyPlanning", "read"] : null; // created by the SO/RM owner only
+  if (p.startsWith("seasonal-plans")) return read || p.endsWith("/act") ? ["partyPlanning", "read"] : null; // plans are created/edited/submitted by their SO/RM owner only; /act: approve / reject checked by the service
   if (p.startsWith("territory-mapping")) return read || p.endsWith("/act") ? ["partyPlanning", "read"] : ["partyPlanning", "manage"]; // /act: approve / reject checked by the service
   if (p.startsWith("party-plans")) return read ? ["partyPlanning", "read"] : p.endsWith("/act") ? ["partyPlanning", "read"] : null;
   if (p === "planning/approvals") return ["approvals", "read"];

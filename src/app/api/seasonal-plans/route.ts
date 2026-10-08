@@ -1,0 +1,7 @@
+import { handle, ok, requireAuth } from "@/lib/http";
+import { createSeasonalPlan } from "@/features/party-planning/seasonal.server";
+
+// POST { sheetId, marketId, partyName } — add a market row to the caller's Seasonal Plan. Owner, season and market data are server-derived.
+export async function POST(req: Request) {
+  return handle(async () => ok(await createSeasonalPlan(await requireAuth(), await req.json())));
+}

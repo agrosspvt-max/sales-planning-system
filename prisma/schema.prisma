@@ -41,6 +41,10 @@ model User {
   dailyWorkAttendance      DailyWorkAttendance[]       @relation("DailyWorkAttendanceOfficer")
   dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
   marketRequests           MarketRequest[]             @relation("MarketRequestRequester")
+  seasonalPlans            SeasonalPlan[]              @relation("SeasonalPlanOwner")
+  partyMonthlyPlans        PartyMonthlyPlan[]          @relation("PartyMonthlyPlanOwner")
+  seasonalSheets           SeasonalPlanSheet[]         @relation("SeasonalSheetOwner")
+  partyMonthlySheets       PartyMonthlySheet[]         @relation("PartyMonthlySheetOwner")
   dailyWorkEntries         DailyWorkEntry[]            @relation("DailyWorkOfficer")
   dailyWorkReviews         DailyWorkReview[]           @relation("DailyWorkReviewOfficer")
   dailyWorkReviewsGiven    DailyWorkReview[]           @relation("DailyWorkReviewReviewer")
@@ -931,38 +935,44 @@ model DailyWorkAttendance {
 
 /// A season (e.g. Kharif 2026) with up to six ordered, named months.
 model Season {
-  id                String                  @id @default(cuid())
-  name              String
-  year              Int
-  status            SeasonStatus            @default(OPEN)
-  createdAt         DateTime                @default(now())
-  updatedAt         DateTime                @updatedAt
-  endMonth          Int?
-  endYear           Int?
-  monthlyMode       String                  @default("PACK_SIZE")
-  seasonalMode      String                  @default("PACK_SIZE")
-  startMonth        Int?
-  startYear         Int?
-  extensionRequests MonthExtensionRequest[]
-  recoveryPlans     RecoveryPlan[]
-  months            SeasonMonth[]
-  plans             SeasonPlan[]
+  id                 String                  @id @default(cuid())
+  name               String
+  year               Int
+  status             SeasonStatus            @default(OPEN)
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  endMonth           Int?
+  endYear            Int?
+  monthlyMode        String                  @default("PACK_SIZE")
+  seasonalMode       String                  @default("PACK_SIZE")
+  startMonth         Int?
+  startYear          Int?
+  extensionRequests  MonthExtensionRequest[]
+  recoveryPlans      RecoveryPlan[]
+  months             SeasonMonth[]
+  plans              SeasonPlan[]
+  seasonalPlans      SeasonalPlan[]
+  partyMonthlyPlans  PartyMonthlyPlan[]
+  seasonalSheets     SeasonalPlanSheet[]
+  partyMonthlySheets PartyMonthlySheet[]
 
   @@unique([name, year])
 }
 
 model SeasonMonth {
-  id             String         @id @default(cuid())
-  seasonId       String
-  name           String
-  order          Int
-  status         String         @default("OPEN")
-  calendarMonth  Int?
-  calendarYear   Int?
-  monthlyEntries MonthlyEntry[]
-  monthlyPlans   MonthlyPlan[]
-  recoveryPlans  RecoveryPlan[]
-  season         Season         @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  id                 String              @id @default(cuid())
+  seasonId           String
+  name               String
+  order              Int
+  status             String              @default("OPEN")
+  calendarMonth      Int?
+  calendarYear       Int?
+  monthlyEntries     MonthlyEntry[]
+  monthlyPlans       MonthlyPlan[]
+  partyMonthlyPlans  PartyMonthlyPlan[]
+  partyMonthlySheets PartyMonthlySheet[]
+  recoveryPlans      RecoveryPlan[]
+  season             Season              @relation(fields: [seasonId], references: [id], onDelete: Cascade)
 
   @@unique([seasonId, order])
   @@unique([seasonId, calendarYear, calendarMonth])
@@ -1897,18 +1907,20 @@ enum ImportStatus {
 /// markets that came from the import) and is deliberately separate from the dealer-level potential in DealerMarketMapping.
 /// The legacy free-text `marketName` columns (PartyPlan / Daily Work / Calendar) are untouched.
 model Market {
-  id              String                @id @default(cuid())
-  name            String
+  id                String                @id @default(cuid())
+  name              String
   /// Normalized name (lower-case, punctuation/space collapsed) — the duplicate guard: "Pipariya" == "pipariya " == "PIPARIYA".
-  nameKey         String                @unique
-  potential       String? // A | B | C
-  source          String                @default("EXISTING") // EXISTING | REQUESTED
-  expectedParties Int? // "No. of Parties" from the approved request
-  createdById     String?
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
-  mappings        DealerMarketMapping[]
-  requests        MarketRequest[]
+  nameKey           String                @unique
+  potential         String? // A | B | C
+  source            String                @default("EXISTING") // EXISTING | REQUESTED
+  expectedParties   Int? // "No. of Parties" from the approved request
+  createdById       String?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  mappings          DealerMarketMapping[]
+  requests          MarketRequest[]
+  seasonalPlans     SeasonalPlan[]
+  partyMonthlyPlans PartyMonthlyPlan[]
 }
 
 /// One CURRENT Territory Mapping row per dealer (dealerId unique): the dealer's Market (nullable — unmapped dealers can still carry
@@ -1917,6 +1929,7 @@ model DealerMarketMapping {
   id          String   @id @default(cuid())
   dealerId    String   @unique
   marketId    String?
+  district    String? // dealer territory District (free text from the Excel import / manual edit; no District master)
   potential   String? // A | B | C — dealer-level, NOT the Market's potential
   updatedById String?
   createdAt   DateTime @default(now())
@@ -1954,4 +1967,163 @@ model MarketRequest {
   @@index([requesterId])
   @@index([status])
   @@index([nameKey])
+}
+
+/// Seasonal Planning (Party Planning · Phase 2): an owner (Sales Officer / Regional Manager) plans, for the CURRENT Sales Planning
+/// season, which Market they will develop a party in. `seasonId` is the existing Season (no second season master) and `marketId` the
+/// Phase-1 Market (no second market list) — so Monthly Planning (Phase 3) can hang off SeasonalPlan.id and read its months from
+/// Season.months without keeping its own market list. Type (Existing / New) is DERIVED from Market.source and Market Potential from
+/// Market.potential; they are snapshotted into approved* only at final Admin approval, so an approved plan keeps what Admin approved.
+/// approvalStatus: DRAFT → PENDING_RM → PENDING_ADMIN → APPROVED | REJECTED (an RM's own plan skips PENDING_RM).
+/// appointmentStatus stays NULL ("—") until final approval, then PENDING. APPOINTED + appointedAt are reserved for the actual
+/// appointment event — no workflow sets them yet (the repo has no Admin-confirmed appointment event), approval never does.
+model SeasonalPlan {
+  id                      String             @id @default(cuid())
+  sheetId                 String
+  seasonId                String
+  ownerId                 String
+  marketId                String
+  partyName               String // tentative planning name — never creates or edits a Dealer
+  approvalStatus          String             @default("DRAFT")
+  rmDecidedById           String?
+  rmDecidedAt             DateTime?
+  adminDecidedById        String?
+  adminDecidedAt          DateTime?
+  rejectionStage          String? // RM | ADMIN
+  rejectionReason         String?
+  approvedMarketSource    String? // Market.source at final approval
+  approvedMarketPotential String? // Market.potential at final approval
+  appointmentStatus       String? // NULL | PENDING | APPOINTED
+  appointedAt             DateTime?          @db.Date
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  season                  Season             @relation(fields: [seasonId], references: [id])
+  owner                   User               @relation("SeasonalPlanOwner", fields: [ownerId], references: [id])
+  market                  Market             @relation(fields: [marketId], references: [id])
+  monthlyPlans            PartyMonthlyPlan[]
+  sheet                   SeasonalPlanSheet  @relation(fields: [sheetId], references: [id])
+
+  @@index([sheetId])
+  @@index([seasonId])
+  @@index([ownerId])
+  @@index([marketId])
+  @@index([approvalStatus])
+}
+
+/// Party Planning · Monthly Planning (Phase 3). NOT the Sales Planning `MonthlyPlan`. One row = one approved Seasonal Plan planned for one
+/// SeasonMonth of its season: the market list is therefore the Seasonal Plan's (never an independent list) and the month is a real
+/// SeasonMonth of the season (never free text). Exactly one row per (seasonalPlanId, seasonMonthId). Market name / potential are snapshotted
+/// at creation so history still reads correctly if the Market master changes later. `planDate` is the TENTATIVE plan date; the actual
+/// appointment lives on the options. Two independent options hang off it (PartyMonthlyOption); every change is an append-only
+/// PartyMonthlyEvent. Nothing here is ever cascaded away.
+model PartyMonthlyPlan {
+  id                        String               @id @default(cuid())
+  sheetId                   String
+  seasonalPlanId            String
+  seasonId                  String
+  seasonMonthId             String
+  ownerId                   String
+  marketId                  String
+  marketNameAtPlanning      String
+  marketPotentialAtPlanning String?
+  planDate                  DateTime?            @db.Date
+  createdAt                 DateTime             @default(now())
+  updatedAt                 DateTime             @updatedAt
+  seasonalPlan              SeasonalPlan         @relation(fields: [seasonalPlanId], references: [id])
+  season                    Season               @relation(fields: [seasonId], references: [id])
+  seasonMonth               SeasonMonth          @relation(fields: [seasonMonthId], references: [id])
+  owner                     User                 @relation("PartyMonthlyPlanOwner", fields: [ownerId], references: [id])
+  market                    Market               @relation(fields: [marketId], references: [id])
+  options                   PartyMonthlyOption[]
+  events                    PartyMonthlyEvent[]
+  sheet                     PartyMonthlySheet    @relation(fields: [sheetId], references: [id])
+
+  @@unique([seasonalPlanId, seasonMonthId])
+  @@index([sheetId])
+  @@index([seasonId])
+  @@index([ownerId])
+  @@index([seasonMonthId])
+}
+
+/// Option 1 / Option 2 of a PartyMonthlyPlan — two candidate parties with INDEPENDENT lifecycles.
+/// status: PENDING → DOC_SENT → DOC_RECEIVED → SD_DELAYED_BY_SO / SD_BOUNCE → APPOINTED, or PART_REJECTED (see src/lib/monthly-plan.ts).
+/// sentInfo (what the SO marked as sent) and receivedInfo (what Admin recorded as received) are separate and never overwrite each other.
+model PartyMonthlyOption {
+  id                String              @id @default(cuid())
+  monthlyPlanId     String
+  optionNo          Int // 1 | 2
+  partyName         String? // tentative candidate party
+  status            String              @default("PENDING")
+  sentInfo          Json?
+  sentById          String?
+  sentAt            DateTime?
+  receivedInfo      Json?
+  receivedById      String?
+  receivedAt        DateTime?
+  actualPartyName   String? // the correct party name per the appointment documents (may differ from partyName)
+  actualAppointedOn DateTime?           @db.Date
+  rejectionReason   String?
+  statusChangedAt   DateTime            @default(now())
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  monthlyPlan       PartyMonthlyPlan    @relation(fields: [monthlyPlanId], references: [id])
+  events            PartyMonthlyEvent[]
+
+  @@unique([monthlyPlanId, optionNo])
+}
+
+/// Append-only timeline. Rows are only ever INSERTed (a database trigger refuses UPDATE and DELETE). Each event stores structured
+/// details plus the actor's name/role at the time, so the history never depends on the current row status or on later renames.
+model PartyMonthlyEvent {
+  id            String             @id @default(cuid())
+  monthlyPlanId String
+  optionId      String
+  eventType     String // PLAN_CREATED | PARTY_UPDATED | STATUS_CHANGED
+  fromStatus    String?
+  toStatus      String
+  actorId       String
+  actorName     String
+  actorRole     String
+  details       Json?
+  createdAt     DateTime           @default(now())
+  monthlyPlan   PartyMonthlyPlan   @relation(fields: [monthlyPlanId], references: [id])
+  option        PartyMonthlyOption @relation(fields: [optionId], references: [id])
+
+  @@index([monthlyPlanId])
+  @@index([optionId, createdAt])
+}
+
+/// Party Planning list/detail header (Seasonal): one Seasonal Plan = one owner's plan for ONE selected Season, holding their market rows
+/// (SeasonalPlan). The season is chosen when the plan is created (an OPEN season) and never re-derived from "today". Status and "last
+/// saved" are derived from the rows, so approval stays row-level exactly as before. One sheet per (owner, season).
+model SeasonalPlanSheet {
+  id        String         @id @default(cuid())
+  seasonId  String
+  ownerId   String
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  season    Season         @relation(fields: [seasonId], references: [id])
+  owner     User           @relation("SeasonalSheetOwner", fields: [ownerId], references: [id])
+  items     SeasonalPlan[]
+
+  @@unique([ownerId, seasonId])
+  @@index([seasonId])
+}
+
+/// Party Planning list/detail header (Monthly): one Monthly Plan = one owner's plan for ONE Season + ONE SeasonMonth, holding their
+/// market rows (PartyMonthlyPlan). One sheet per (owner, SeasonMonth).
+model PartyMonthlySheet {
+  id            String             @id @default(cuid())
+  seasonId      String
+  seasonMonthId String
+  ownerId       String
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  season        Season             @relation(fields: [seasonId], references: [id])
+  seasonMonth   SeasonMonth        @relation(fields: [seasonMonthId], references: [id])
+  owner         User               @relation("PartyMonthlySheetOwner", fields: [ownerId], references: [id])
+  items         PartyMonthlyPlan[]
+
+  @@unique([ownerId, seasonMonthId])
+  @@index([seasonId])
 }

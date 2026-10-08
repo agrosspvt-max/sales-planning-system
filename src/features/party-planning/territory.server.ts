@@ -12,7 +12,7 @@ import * as XLSX from "xlsx";
 import { readWorkbook, sheetNames } from "@/lib/import/workbook";
 import { buildPage, type PageParams, type Paginated } from "@/lib/pagination";
 import {
-  POTENTIALS, buildImportPlan, classifyMatch, cleanMarketName, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
+  POTENTIALS, DISTRICT_MAX, buildImportPlan, classifyMatch, cleanDistrict, cleanMarketName, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
   type ImportCandidate, type ImportPlanRow, type ImportSummary, type MarketRequestStatus, type Potential,
 } from "@/lib/territory-mapping";
 
@@ -75,7 +75,7 @@ export async function listMarkets(ctx: AuthContext): Promise<MarketDto[]> {
 
 export interface TerritoryDealerRow {
   dealerId: string; partyName: string; status: string;
-  marketId: string | null; marketName: string | null; potential: Potential | null;
+  marketId: string | null; marketName: string | null; district: string | null; potential: Potential | null;
 }
 export interface TerritoryListParams extends PageParams { market: string } // "" = all, "__none__" = unmapped, else a marketId
 
@@ -85,12 +85,12 @@ export async function listTerritoryDealers(ctx: AuthContext, params: TerritoryLi
   const ids = dealers.map((d) => d.id);
   const [aliases, mappings] = await Promise.all([
     loadDealerAliasNameMap(ids),
-    ids.length ? prisma.dealerMarketMapping.findMany({ where: { dealerId: { in: ids } }, select: { dealerId: true, marketId: true, potential: true, market: { select: { name: true } } } }) : Promise.resolve([]),
+    ids.length ? prisma.dealerMarketMapping.findMany({ where: { dealerId: { in: ids } }, select: { dealerId: true, marketId: true, district: true, potential: true, market: { select: { name: true } } } }) : Promise.resolve([]),
   ]);
   const mappingByDealer = new Map(mappings.map((m) => [m.dealerId, m]));
   const all: TerritoryDealerRow[] = dealers.map((d) => {
     const m = mappingByDealer.get(d.id);
-    return { dealerId: d.id, partyName: aliases.get(d.id) ?? d.name, status: d.status, marketId: m?.marketId ?? null, marketName: m?.market?.name ?? null, potential: asPotential(m?.potential ?? null) };
+    return { dealerId: d.id, partyName: aliases.get(d.id) ?? d.name, status: d.status, marketId: m?.marketId ?? null, marketName: m?.market?.name ?? null, district: m?.district ?? null, potential: asPotential(m?.potential ?? null) };
   });
   const needle = params.search.trim().toLowerCase();
   const matches = all.filter((row) => {
@@ -110,7 +110,8 @@ export async function listTerritoryDealers(ctx: AuthContext, params: TerritoryLi
 const mappingInput = z.object({
   marketId: z.string().min(1).nullable().optional(),
   potential: z.enum(POTENTIALS).nullable().optional(),
-}).refine((v) => v.marketId !== undefined || v.potential !== undefined, { message: "Nothing to update" });
+  district: z.string().max(DISTRICT_MAX, `District can be at most ${DISTRICT_MAX} characters`).nullable().optional(),
+}).refine((v) => v.marketId !== undefined || v.potential !== undefined || v.district !== undefined, { message: "Nothing to update" });
 
 /** Set the dealer's Market and/or dealer-level Potential. Only the provided fields change; the dealer record itself is never written. */
 export async function updateDealerMapping(ctx: AuthContext, dealerId: string, raw: unknown): Promise<TerritoryDealerRow> {
@@ -118,28 +119,31 @@ export async function updateDealerMapping(ctx: AuthContext, dealerId: string, ra
   const parsed = mappingInput.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? "Invalid mapping");
   const { marketId, potential } = parsed.data;
+  const district = parsed.data.district === undefined ? undefined : cleanDistrict(parsed.data.district ?? "") || null;
   const dealer = await assertDealerInScope(ctx, dealerId);
   const market = marketId ? await prisma.market.findUnique({ where: { id: marketId }, select: { id: true, name: true } }) : null;
   if (marketId && !market) throw new ApiError(422, "Select a valid Market");
 
   const row = await prisma.$transaction(async (tx) => {
-    const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, potential: true, market: { select: { name: true } } } });
-    const data: { marketId?: string | null; potential?: string | null; updatedById: string } = { updatedById: ctx.userId };
+    const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, district: true, potential: true, market: { select: { name: true } } } });
+    const data: { marketId?: string | null; potential?: string | null; district?: string | null; updatedById: string } = { updatedById: ctx.userId };
     if (marketId !== undefined) data.marketId = marketId;
     if (potential !== undefined) data.potential = potential;
+    if (district !== undefined) data.district = district;
     const saved = await tx.dealerMarketMapping.upsert({
       where: { dealerId }, update: data,
-      create: { dealerId, marketId: marketId ?? null, potential: potential ?? null, updatedById: ctx.userId },
-      select: { marketId: true, potential: true },
+      create: { dealerId, marketId: marketId ?? null, potential: potential ?? null, district: district ?? null, updatedById: ctx.userId },
+      select: { marketId: true, district: true, potential: true },
     });
     const changes: string[] = [];
     if (marketId !== undefined && (before?.marketId ?? null) !== saved.marketId) changes.push(`Market: ${before?.market?.name ?? "—"} → ${market?.name ?? "—"}`);
+    if (district !== undefined && (before?.district ?? null) !== saved.district) changes.push(`District: ${before?.district ?? "—"} → ${saved.district ?? "—"}`);
     if (potential !== undefined && (before?.potential ?? null) !== saved.potential) changes.push(`Potential: ${before?.potential ?? "—"} → ${saved.potential ?? "—"}`);
     if (changes.length) await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerMarketMapping", entityId: dealerId, summary: `Territory Mapping · ${dealer.name} · ${changes.join("; ")}` }, tx);
     return saved;
   });
   const alias = (await loadDealerAliasNameMap([dealerId])).get(dealerId);
-  return { dealerId, partyName: alias ?? dealer.name, status: dealer.status, marketId: row.marketId, marketName: market?.name ?? (row.marketId ? (await prisma.market.findUnique({ where: { id: row.marketId }, select: { name: true } }))?.name ?? null : null), potential: asPotential(row.potential) };
+  return { dealerId, partyName: alias ?? dealer.name, status: dealer.status, marketId: row.marketId, district: row.district, marketName: market?.name ?? (row.marketId ? (await prisma.market.findUnique({ where: { id: row.marketId }, select: { name: true } }))?.name ?? null : null), potential: asPotential(row.potential) };
 }
 
 /* ------------------------------------------------ Excel import ------------------------------------------------ */
@@ -175,7 +179,7 @@ async function planFromWorkbook(ctx: AuthContext, buffer: Buffer, sheet: string 
     loadDealerResolver(),
     loadScopedDealers(ctx),
     loadDealerAliasNameMap(),
-    prisma.dealerMarketMapping.findMany({ where: { marketId: { not: null } }, select: { dealerId: true, market: { select: { name: true } } } }),
+    prisma.dealerMarketMapping.findMany({ select: { dealerId: true, district: true, market: { select: { name: true } } } }),
     prisma.market.findMany({ select: { name: true, nameKey: true } }),
   ]);
   const inScope = new Set(scoped.map((d) => d.id));
@@ -189,6 +193,7 @@ async function planFromWorkbook(ctx: AuthContext, buffer: Buffer, sheet: string 
   const plan = buildImportPlan({
     rows: parsed.rows, invalid: parsed.invalid, resolve: wrapped, resolutions,
     currentMarketByDealer: new Map(mappings.map((m) => [m.dealerId, m.market?.name ?? null])),
+    currentDistrictByDealer: new Map(mappings.map((m) => [m.dealerId, m.district])),
     existingMarketByKey: new Map(markets.map((m) => [m.nameKey, m.name])),
   });
   return { sheetNames: names, sheet: chosen, needsSheet: false, error: null, plan, summary: summarizeImportPlan(plan) };
@@ -227,7 +232,7 @@ export async function commitTerritoryImport(ctx: AuthContext, buffer: Buffer, sh
   await prisma.$transaction(async (tx) => {
     // 1) Markets named in the sheet that do not exist yet (source EXISTING; potential stays undecided — it is a MARKET-level value).
     const wanted = new Map<string, string>();
-    for (const row of apply) wanted.set(marketNameKey(row.marketName!), row.marketName!);
+    for (const row of apply.filter((r) => r.marketChanged)) wanted.set(marketNameKey(row.marketName!), row.marketName!);
     const have = await tx.market.findMany({ where: { nameKey: { in: [...wanted.keys()] } }, select: { id: true, nameKey: true } });
     const idByKey = new Map(have.map((m) => [m.nameKey, m.id]));
     for (const [key, name] of wanted) {
@@ -235,17 +240,17 @@ export async function commitTerritoryImport(ctx: AuthContext, buffer: Buffer, sh
       const created = await tx.market.create({ data: { name: cleanMarketName(name), nameKey: key, source: "EXISTING", createdById: ctx.userId }, select: { id: true } });
       idByKey.set(key, created.id); result.marketsCreated += 1;
     }
-    // 2) Mappings: only marketId changes; a dealer-level Potential already chosen is preserved.
+    // 2) Mappings: only the Market and/or District the plan flagged as changed are written; a dealer-level Potential already chosen is preserved.
     const existing = await tx.dealerMarketMapping.findMany({ where: { dealerId: { in: apply.map((r) => r.dealerId!) } }, select: { dealerId: true } });
     const existingIds = new Set(existing.map((m) => m.dealerId));
     const creates = apply.filter((r) => !existingIds.has(r.dealerId!));
-    if (creates.length) await tx.dealerMarketMapping.createMany({ data: creates.map((r) => ({ dealerId: r.dealerId!, marketId: idByKey.get(marketNameKey(r.marketName!))!, updatedById: ctx.userId })) });
+    if (creates.length) await tx.dealerMarketMapping.createMany({ data: creates.map((r) => ({ dealerId: r.dealerId!, marketId: r.marketChanged ? idByKey.get(marketNameKey(r.marketName!))! : null, district: r.districtChanged ? r.districtName! : null, updatedById: ctx.userId })) });
     for (const row of apply.filter((r) => existingIds.has(r.dealerId!))) {
-      await tx.dealerMarketMapping.update({ where: { dealerId: row.dealerId! }, data: { marketId: idByKey.get(marketNameKey(row.marketName!))!, updatedById: ctx.userId } });
+      await tx.dealerMarketMapping.update({ where: { dealerId: row.dealerId! }, data: { ...(row.marketChanged ? { marketId: idByKey.get(marketNameKey(row.marketName!))! } : {}), ...(row.districtChanged ? { district: row.districtName! } : {}), updatedById: ctx.userId } });
     }
     // 3) History: one audit row per changed dealer + one for the import itself.
     await tx.auditLog.createMany({ data: [
-      ...apply.map((row) => ({ userId: ctx.userId, actorDesignation: ctx.designation ?? null, action: "UPDATE", entity: "dealerMarketMapping", entityId: row.dealerId!, summary: `Territory Mapping import · ${row.partyName} · Market: ${row.currentMarket ?? "—"} → ${row.marketName}` })),
+      ...apply.map((row) => ({ userId: ctx.userId, actorDesignation: ctx.designation ?? null, action: "UPDATE", entity: "dealerMarketMapping", entityId: row.dealerId!, summary: `Territory Mapping import · ${row.partyName} · ${[row.marketChanged ? `Market: ${row.currentMarket ?? "—"} → ${row.marketName}` : "", row.districtChanged ? `District: ${row.currentDistrict ?? "—"} → ${row.districtName}` : ""].filter(Boolean).join("; ")}` })),
       { userId: ctx.userId, actorDesignation: ctx.designation ?? null, action: "CREATE", entity: "territoryMappingImport", entityId: null, summary: `Territory Mapping import (sheet "${preview.sheet}"): ${apply.length} applied, ${result.skippedUnmatched} unmatched, ${result.skippedAmbiguous} ambiguous, ${result.rejectedInvalid} invalid, ${result.marketsCreated} new market(s)` },
     ] });
   }, { timeout: 60_000, maxWait: 10_000 });

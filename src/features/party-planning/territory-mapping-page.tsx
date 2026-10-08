@@ -7,7 +7,7 @@ import { Check, Upload, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { dealerStatusLabel } from "@/lib/dealer-status";
-import { POTENTIALS, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
+import { DISTRICT_MAX, POTENTIALS, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,12 +19,13 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
+import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { PartyPlanModeLinks } from "./party-planning-page";
 
 /* ------------------------------------------- DTOs (mirror territory.server.ts) ------------------------------------------- */
 
 interface MarketDto { id: string; name: string; potential: Potential | null; source: string }
-interface DealerRow { dealerId: string; partyName: string; status: string; marketId: string | null; marketName: string | null; potential: Potential | null }
+interface DealerRow { dealerId: string; partyName: string; status: string; marketId: string | null; marketName: string | null; district: string | null; potential: Potential | null }
 interface DealerPage { items: DealerRow[]; total: number; page: number; pageSize: number; totalPages: number; mapped: number; unmapped: number }
 interface MarketRequest {
   id: string; marketName: string; potential: Potential; numberOfParties: number; status: "PENDING_RM" | "PENDING_ADMIN" | "APPROVED" | "REJECTED";
@@ -55,12 +56,9 @@ export function TerritoryMappingPage({ role }: { role: Role }) {
         title={title}
         subtitle="Map every existing dealer to its Market, and request new Markets for approval."
       />
-      <PartyPlanModeLinks mode="territory" />
-      <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
-        {([["existing", tabExisting], ["add", tabAdd]] as const).map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)} className={`rounded px-3 py-1.5 font-medium ${tab === key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}>{label}</button>
-        ))}
-      </div>
+      <PartyPlanModeLinks mode="territory">
+        <UnderlineTabs active={tab} onChange={(key) => setTab(key as "existing" | "add")} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }]} />
+      </PartyPlanModeLinks>
       {tab === "existing" ? <ExistingDealers /> : <AddMarket role={role} />}
     </div>
   );
@@ -76,7 +74,7 @@ function ExistingDealers() {
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const L = {
-    market: useLabel("party_planning.territory.col.market"), potential: useLabel("party_planning.territory.col.potential"),
+    district: useLabel("party_planning.territory.col.district"), market: useLabel("party_planning.territory.col.market"), potential: useLabel("party_planning.territory.col.potential"),
     party: useLabel("party_planning.territory.col.party_name"), status: useLabel("party_planning.territory.col.status"),
     importExcel: useLabel("party_planning.territory.action.import"), search: useLabel("party_planning.territory.search"),
     allMarkets: useLabel("party_planning.territory.all_markets"), unmapped: useLabel("party_planning.territory.unmapped"), empty: useLabel("party_planning.territory.empty"),
@@ -88,7 +86,7 @@ function ExistingDealers() {
     placeholderData: keepPreviousData,
   });
   const save = useMutation({
-    mutationFn: (v: { dealerId: string; marketId?: string | null; potential?: Potential | null }) => api.put(`/api/territory-mapping/dealers/${v.dealerId}`, { marketId: v.marketId, potential: v.potential }),
+    mutationFn: (v: { dealerId: string; marketId?: string | null; potential?: Potential | null; district?: string | null }) => api.put(`/api/territory-mapping/dealers/${v.dealerId}`, { marketId: v.marketId, potential: v.potential, district: v.district }),
     onSuccess: () => { setError(null); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
     onError: (e) => setError((e as Error).message),
   });
@@ -110,13 +108,17 @@ function ExistingDealers() {
       <div className="overflow-auto rounded-lg border bg-background">
         <Table>
           <TableHeader><TableRow>
-            <TableHead className="w-56">{L.market}</TableHead><TableHead className="w-28">{L.potential}</TableHead><TableHead>{L.party}</TableHead><TableHead className="w-32">{L.status}</TableHead>
+            <TableHead className="w-48">{L.district}</TableHead><TableHead className="w-56">{L.market}</TableHead><TableHead className="w-28">{L.potential}</TableHead><TableHead>{L.party}</TableHead><TableHead className="w-32">{L.status}</TableHead>
           </TableRow></TableHeader>
           <TableBody>
-            {isLoading ? <TableRow><TableCell colSpan={4}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+            {isLoading ? <TableRow><TableCell colSpan={5}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
               : (data?.items.length ?? 0) === 0 ? <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">{L.empty}</TableCell></TableRow>
                 : data!.items.map((row) => (
                   <TableRow key={row.dealerId}>
+                    <TableCell className="p-1">
+                      <Input key={`${row.dealerId}:${row.district ?? ""}`} className="h-8 w-full" aria-label={L.district} defaultValue={row.district ?? ""} placeholder="—" maxLength={DISTRICT_MAX} disabled={save.isPending}
+                        onBlur={(e) => { const v = e.target.value.trim(); if (v !== (row.district ?? "")) save.mutate({ dealerId: row.dealerId, district: v || null }); }} />
+                    </TableCell>
                     <TableCell className="p-1">
                       <NativeSelect className="h-8 w-full" aria-label={L.market} value={row.marketId ?? ""} disabled={save.isPending} placeholder="—"
                         options={(markets ?? []).map((m) => ({ value: m.id, label: m.name }))}
@@ -162,7 +164,6 @@ async function postImport<T>(url: string, file: File, sheet: string | null, reso
 }
 
 const RESULT_TEXT: Record<ImportPlanRow["status"], string> = { MATCHED: "Matched", UNMATCHED: "Unmatched", AMBIGUOUS: "Ambiguous", INVALID: "Invalid", DUPLICATE: "Duplicate", CONFLICT: "Conflict" };
-const ACTION_TEXT = { MAP: "Will map", CHANGE: "Will change", NO_CHANGE: "Already mapped" } as const;
 
 function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: () => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -209,7 +210,7 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
         ) : (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label>Excel file — columns <b>Dealer</b> and <b>Market</b></Label>
+              <Label>Excel file — columns <b>Dealer</b>, <b>Market</b> and <b>District</b></Label>
               <input ref={fileRef} type="file" accept=".xlsx,.xls" className="block text-sm"
                 onChange={(e) => { const f = e.target.files?.[0] ?? null; setFile(f); setPreview(null); setSheet(null); setError(null); if (f) previewMut.mutate({ file: f, sheet: null }); }} />
               <p className="text-xs text-muted-foreground">Parsed in memory. Nothing changes until you confirm. Dealers are never created from this file.</p>
@@ -228,23 +229,26 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
                   <span>Matched: <b>{preview.summary.matched}</b></span><span>Unmatched: <b>{preview.summary.unmatched}</b></span>
                   <span>Ambiguous: <b>{preview.summary.ambiguous}</b> ({unresolved} to resolve)</span><span>Invalid: <b>{preview.summary.invalid + preview.summary.conflicts}</b></span>
                   <span>Duplicates: <b>{preview.summary.duplicates}</b></span><span>Already mapped: <b>{preview.summary.noChange}</b></span>
-                  <span>New Markets: <b>{preview.summary.newMarkets}</b></span><span>Will apply: <b>{willApply}</b></span>
+                  <span>New Markets: <b>{preview.summary.newMarkets}</b></span><span>District updates: <b>{preview.summary.districtUpdates}</b></span><span>Will apply: <b>{willApply}</b></span>
                 </div>
                 <PlanTable title="Matched" rows={group("MATCHED")} render={(r) => (
                   <><TableCell>{r.excelDealer}</TableCell><TableCell>{r.partyName}</TableCell>
+                    <TableCell>{r.currentDistrict || "—"}</TableCell>
+                    <TableCell>{r.districtName || <span className="text-muted-foreground">not in sheet</span>}</TableCell>
+                    <TableCell>{r.currentMarket || "—"}</TableCell>
                     <TableCell>{r.marketName}{r.newMarket && <Badge variant="secondary" className="ml-2">new</Badge>}</TableCell>
-                    <TableCell>{r.action ? ACTION_TEXT[r.action] : "—"}{r.action === "CHANGE" && r.currentMarket ? ` (was ${r.currentMarket})` : ""}</TableCell></>
-                )} head={["Excel Dealer", "Matched Party", "Market", "Result"]} />
-                <PlanTable title="Ambiguous — choose the right dealer" rows={group("AMBIGUOUS")} head={["Excel Dealer", "Market", "Possible Matches", "Result"]} render={(r) => (
-                  <><TableCell>{r.excelDealer}</TableCell><TableCell>{r.excelMarket}</TableCell>
+                    <TableCell>{changeText(r)}</TableCell></>
+                )} head={["Excel Dealer", "Matched Party", "Current District", "Excel District", "Current Market", "Excel Market", "Result"]} />
+                <PlanTable title="Ambiguous — choose the right dealer" rows={group("AMBIGUOUS")} head={["Excel Dealer", "District · Market", "Possible Matches", "Result"]} render={(r) => (
+                  <><TableCell>{r.excelDealer}</TableCell><TableCell>{districtMarket(r)}</TableCell>
                     <TableCell><NativeSelect className="h-8" value={picks[r.rowNumber] ?? ""} placeholder="Choose…"
                       options={(r.candidates ?? []).map((c) => ({ value: c.dealerId, label: c.partyName }))}
                       onChange={(e) => setPicks((p) => { const next = { ...p }; if (e.target.value) next[r.rowNumber] = e.target.value; else delete next[r.rowNumber]; return next; })} /></TableCell>
                     <TableCell>{picks[r.rowNumber] ? "Resolved" : "Needs a choice — skipped if left blank"}</TableCell></>
                 )} />
-                <PlanTable title="Unmatched" rows={group("UNMATCHED")} head={["Excel Dealer", "Market", "Result"]} render={(r) => (<><TableCell>{r.excelDealer}</TableCell><TableCell>{r.excelMarket}</TableCell><TableCell>{r.reason}</TableCell></>)} />
-                <PlanTable title="Invalid / conflicting / duplicate" rows={plan.filter((r) => ["INVALID", "CONFLICT", "DUPLICATE"].includes(r.status))} head={["Excel Row", "Dealer · Market", "Reason"]}
-                  render={(r) => (<><TableCell>{r.rowNumber} <Badge variant="muted" className="ml-1">{RESULT_TEXT[r.status]}</Badge></TableCell><TableCell>{r.excelDealer || "—"} · {r.excelMarket || "—"}</TableCell><TableCell>{r.reason}</TableCell></>)} />
+                <PlanTable title="Unmatched" rows={group("UNMATCHED")} head={["Excel Dealer", "District · Market", "Result"]} render={(r) => (<><TableCell>{r.excelDealer}</TableCell><TableCell>{districtMarket(r)}</TableCell><TableCell>{r.reason}</TableCell></>)} />
+                <PlanTable title="Invalid / conflicting / duplicate" rows={plan.filter((r) => ["INVALID", "CONFLICT", "DUPLICATE"].includes(r.status))} head={["Excel Row", "Dealer · District · Market", "Reason"]}
+                  render={(r) => (<><TableCell>{r.rowNumber} <Badge variant="muted" className="ml-1">{RESULT_TEXT[r.status]}</Badge></TableCell><TableCell>{r.excelDealer || "—"} · {r.excelDistrict || "—"} · {r.excelMarket || "—"}</TableCell><TableCell>{r.reason}</TableCell></>)} />
               </div>
             )}
           </div>
@@ -257,6 +261,16 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
       </DialogContent>
     </Dialog>
   );
+}
+
+const districtMarket = (r: ImportPlanRow) => `${r.excelDistrict || "—"} · ${r.excelMarket || "—"}`;
+/** What will change for a matched row, spelled out: Market and/or District added or updated, or already matching. */
+function changeText(r: ImportPlanRow): string {
+  const parts: string[] = [];
+  if (r.marketChanged) parts.push(r.currentMarket ? `Market updated (was ${r.currentMarket})` : "Market added");
+  if (r.districtAction === "ADD") parts.push("District added");
+  if (r.districtAction === "CHANGE") parts.push(`District updated (was ${r.currentDistrict})`);
+  return parts.length ? parts.join("; ") : "Already matching";
 }
 
 function PlanTable({ title, rows, head, render }: { title: string; rows: ImportPlanRow[]; head: string[]; render: (row: ImportPlanRow) => React.ReactNode }) {

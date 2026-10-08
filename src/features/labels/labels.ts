@@ -725,7 +725,11 @@ export const DEFAULT_LABELS = {
   "party_planning.title": "Party Planning",
   // Navigation — the module's Create Plan | View toggle
   "party_planning.nav.territory": "Territory Mapping",
-  "party_planning.nav.create_plan": "Create Plan",
+  "party_planning.nav.planning": "Planning",
+  "party_planning.nav.seasonal_tab": "Seasonal",
+  "party_planning.nav.monthly_tab": "Monthly",
+  "party_planning.nav.seasonal": "Seasonal Planning",
+  "party_planning.nav.monthly": "Monthly Planning",
   "party_planning.nav.view": "View",
   // View tabs
   "party_planning.view.submitted": "Submitted",
@@ -745,6 +749,7 @@ export const DEFAULT_LABELS = {
   // Territory Mapping (Phase 1)
   "party_planning.territory.tab_existing": "Existing Dealers",
   "party_planning.territory.tab_add_market": "Add Market",
+  "party_planning.territory.col.district": "District",
   "party_planning.territory.col.market": "Market",
   "party_planning.territory.col.potential": "Potential",
   "party_planning.territory.col.party_name": "Party Name",
@@ -758,6 +763,27 @@ export const DEFAULT_LABELS = {
   "party_planning.territory.all_markets": "All Markets",
   "party_planning.territory.unmapped": "Unmapped",
   "party_planning.territory.empty": "No dealers found.",
+  // Seasonal Planning (Phase 2)
+  "party_planning.seasonal.col.market": "Market",
+  "party_planning.seasonal.col.type": "Type",
+  "party_planning.seasonal.col.market_potential": "Market Potential",
+  "party_planning.seasonal.col.status": "Status",
+  "party_planning.seasonal.col.date": "Date",
+  "party_planning.seasonal.col.party_name": "Party Name",
+  "party_planning.seasonal.col.approval": "Approval",
+  "party_planning.seasonal.col.action": "Action",
+  "party_planning.seasonal.search": "Search Market...",
+  "party_planning.seasonal.empty_filtered": "No Seasonal Plans match the selected filters.",
+  "party_planning.seasonal.empty": "No Seasonal Plans here yet.",
+  // Monthly Planning (Phase 3)
+  "party_planning.monthly.col.month": "Month",
+  "party_planning.monthly.col.market": "Market",
+  "party_planning.monthly.col.potential": "Potential",
+  "party_planning.monthly.col.plan_date": "Plan Date",
+  "party_planning.monthly.col.option1": "Option 1",
+  "party_planning.monthly.col.option2": "Option 2",
+  "party_planning.monthly.search": "Search market or party",
+  "party_planning.monthly.empty": "No Monthly Plans here yet.",
 
   /* =====================================================================================
    * DAILY WORK — every static, user-facing word used by the Daily Work page and its validation

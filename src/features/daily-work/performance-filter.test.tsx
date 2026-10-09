@@ -26,7 +26,7 @@ const payloadFor = (url: string) => {
     states: [{ id: "g1", name: "MP" }, { id: "g2", name: "UP" }],
     officers: pool.map((p) => ({ id: p.id, name: p.name })),
     rows: shown.map((p) => ({ officerId: p.id, officerName: p.name, groupId: p.state, stateName: p.state, date: "2026-09-28", attendance: "PRESENT", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: null, reportMissed: p.id === "so1", selfRating: null, rmRating: null, submitted: true })),
-    summary: { salesOfficers: shown.length, presentDays: shown.length, totalDays: shown.length, submittedPlans: shown.length, submittedReports: 0, averageSelfRating: null, averageRmRating: null },
+    summary: { salesOfficers: shown.length, presentDays: shown.length, totalDays: shown.length, submittedPlans: shown.length, submittedReports: 0, averageSelfRating: null, averageRmRating: null, sections: Object.fromEntries(["sales", "recovery", "schemeConversion", "appointment", "visits"].map((k) => [k, { planned: 0, actual: 0 }])) },
   };
 };
 

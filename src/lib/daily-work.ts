@@ -482,3 +482,61 @@ export function planRequiredMessage(template: string, rows: PlanRowToCheck[], se
   const list = rows.map((row) => `- ${sectionLabels[row.section]} — ${row.dealerName}`).join("\n");
   return template.replace("{rows}", list);
 }
+
+/* =====================================================================================
+ * PERFORMANCE — section Planned / Actual totals (Company Performance summary)
+ *
+ * Units are fixed by the data each section stores, and Planned and Actual always use the SAME unit:
+ *   Sales, Recovery     → rupees        (DailyWorkEntry.todaysPlan / todaysActual)
+ *   Scheme Conversion   → scheme UNITS  (planned = todaysPlan; the report records only Yes/No achievability, so Actual = the units of the rows reported YES)
+ *   Appointment         → dealer appointments (planned = rows with a typed dealer name; actual = rows reported APPOINTED)
+ *   Visits              → visit COUNT   (planned = dealerVisits + newPartyVisits; actual = actualDealerVisits + actualNewPartyVisits)
+ * Others has no numeric plan/actual and is never totalled.
+ *
+ * Rows given here are the day's SUBMITTED plan rows (planSubmittedAt set — the same rule as "Submitted Plans"). Drafts are never passed in.
+ * Planned counts every submitted row; Actual counts a row only once that day's REPORT is finalized, and only the values actually entered
+ * (a missing actual adds nothing; an explicit 0 or a negative adjustment is summed as entered).
+ * ===================================================================================== */
+export interface PerformanceEntryRow {
+  section: string;
+  typedDealerName: string | null;
+  todaysPlan: string | number | null;
+  todaysActual: string | number | null;
+  resultStatus: string | null;
+  dealerVisits: number | null;
+  newPartyVisits: number | null;
+  actualDealerVisits: number | null;
+  actualNewPartyVisits: number | null;
+  reportFinalized: boolean;
+}
+export interface PerformanceSectionTotal { planned: number; actual: number }
+export type PerformanceSectionKey = "sales" | "recovery" | "schemeConversion" | "appointment" | "visits";
+export type PerformanceSectionTotals = Record<PerformanceSectionKey, PerformanceSectionTotal>;
+
+export function performanceSectionTotals(rows: readonly PerformanceEntryRow[]): PerformanceSectionTotals {
+  const out: PerformanceSectionTotals = {
+    sales: { planned: 0, actual: 0 }, recovery: { planned: 0, actual: 0 }, schemeConversion: { planned: 0, actual: 0 },
+    appointment: { planned: 0, actual: 0 }, visits: { planned: 0, actual: 0 },
+  };
+  const n = (v: string | number | null): number | null => (v == null || v === "" ? null : Number(v));
+  for (const r of rows) {
+    if (r.section === "SALES" || r.section === "RECOVERY") {
+      const t = out[r.section === "SALES" ? "sales" : "recovery"];
+      t.planned += n(r.todaysPlan) ?? 0;
+      if (r.reportFinalized) t.actual += n(r.todaysActual) ?? 0;
+    } else if (r.section === "SCHEME_CONVERSION") {
+      const units = n(r.todaysPlan) ?? 0;
+      out.schemeConversion.planned += units;
+      if (r.reportFinalized && r.resultStatus === "YES") out.schemeConversion.actual += units;
+    } else if (r.section === "APPOINTMENT") {
+      if ((r.typedDealerName ?? "").trim() === "") continue; // an unnamed placeholder row is not a planned appointment
+      out.appointment.planned += 1;
+      if (r.reportFinalized && r.resultStatus === "APPOINTED") out.appointment.actual += 1;
+    } else if (r.section === "SUMMARY") {
+      out.visits.planned += (r.dealerVisits ?? 0) + (r.newPartyVisits ?? 0);
+      if (r.reportFinalized) out.visits.actual += (r.actualDealerVisits ?? 0) + (r.actualNewPartyVisits ?? 0);
+    }
+  }
+  for (const t of Object.values(out)) { t.planned = round2(t.planned); t.actual = round2(t.actual); }
+  return out;
+}

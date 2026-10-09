@@ -25,7 +25,7 @@ import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as 
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
 import {
-  currentBusinessDate, monthNameForDate, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
+  currentBusinessDate, monthNameForDate, performanceSectionTotals, type PerformanceEntryRow, type PerformanceSectionTotals, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
   MANDATORY_SECTIONS, SectionStatus, SCHEME_CONVERSION_ENABLED, isDailyWorkSectionEnabled, RECOVERY_PAYMENT_MODES,
   type RecoveryPaymentMode,
@@ -1831,6 +1831,8 @@ export interface PerformanceSummary {
   submittedReports: number;
   averageSelfRating: number | null; // excludes missing (never 0)
   averageRmRating: number | null; // excludes missing (never 0)
+  /** Σ Planned / Actual per section over the SAME filtered population and dates as the rows (see performanceSectionTotals for units). */
+  sections: PerformanceSectionTotals;
 }
 export interface PerformanceOption { id: string; name: string }
 export interface PerformancePayload {
@@ -1913,12 +1915,13 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   }
 
   const ids = population.map((p) => p.id);
-  const [planRows, dayRows, rmRows, attRows] = ids.length === 0
-    ? [[], [], [], []] as [
+  const [planRows, dayRows, rmRows, attRows, entryRows] = ids.length === 0
+    ? [[], [], [], [], []] as [
         { officerId: string; workDate: Date; planSubmittedAt: Date | null }[],
         { officerId: string; workDate: Date; finalizedAt: Date | null; selfRating: number | null; status: string }[],
         { officerId: string; workDate: Date; rating: number }[],
         { officerId: string; workDate: Date; status: string }[],
+        PerformanceEntryRow[],
       ]
     : await Promise.all([
         prisma.$queryRaw<{ officerId: string; workDate: Date; planSubmittedAt: Date | null }[]>(Prisma.sql`
@@ -1938,6 +1941,18 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
           SELECT "officerId", "workDate", "status"
           FROM "DailyWorkAttendance"
           WHERE "officerId" IN (${Prisma.join(ids)}) AND "workDate" BETWEEN ${from}::date AND ${to}::date`),
+        // ONE query for every section total: the SUBMITTED plan rows (planSubmittedAt set — the "Submitted Plans" rule) of the filtered
+        // officers and dates, with whether that day's report is finalized. Totalled in performanceSectionTotals; nothing reaches the browser.
+        prisma.$queryRaw<PerformanceEntryRow[]>(Prisma.sql`
+          SELECT e."section", e."typedDealerName", e."todaysPlan"::text AS "todaysPlan", e."todaysActual"::text AS "todaysActual", e."resultStatus",
+                 e."dealerVisits", e."newPartyVisits", e."actualDealerVisits", e."actualNewPartyVisits",
+                 (d."finalizedAt" IS NOT NULL OR d."status" = 'FINALIZED') AS "reportFinalized"
+          FROM "DailyWorkEntry" e
+          LEFT JOIN "DailyWorkDay" d ON d."officerId" = e."officerId" AND d."workDate" = e."workDate"
+          WHERE e."officerId" IN (${Prisma.join(ids)}) AND e."workDate" BETWEEN ${from}::date AND ${to}::date
+            AND e."planSubmittedAt" IS NOT NULL AND e."status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
+            AND e."section" IN ('SALES','RECOVERY','APPOINTMENT','SCHEME_CONVERSION','SUMMARY')
+            AND (e."section" <> 'SUMMARY' OR e."rowKey" = ${SUMMARY_ROWKEY})`),
       ]);
 
   const dk = (d: Date): string => d.toISOString().slice(0, 10);
@@ -1981,6 +1996,7 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
     submittedReports: rows.filter((r) => r.reportSubmittedAt != null).length,
     averageSelfRating: average(rows.map((r) => r.selfRating).filter((v): v is number => v != null)),
     averageRmRating: average(rows.map((r) => r.rmRating).filter((v): v is number => v != null)),
+    sections: performanceSectionTotals(entryRows),
   };
 
   // State options always span the full authoritative population. Admin officer options follow the selected State;

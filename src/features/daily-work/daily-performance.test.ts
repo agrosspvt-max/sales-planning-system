@@ -29,18 +29,24 @@ const GROUP_NAMES: Record<string, string> = { g1: "MP", g2: "UP", g3: "WB", g4: 
 const D = (s: string) => new Date(`${s}T00:00:00.000Z`); // date-only key → Date
 const TS = (s: string) => new Date(s); // full ISO timestamp
 
+interface Entry {
+  officerId: string; date: string; section: string; rowKey?: string; status?: string; planSubmittedAt?: Date | null;
+  typedDealerName?: string | null; todaysPlan?: number | null; todaysActual?: number | null; resultStatus?: string | null;
+  dealerVisits?: number | null; newPartyVisits?: number | null; actualDealerVisits?: number | null; actualNewPartyVisits?: number | null;
+}
 interface Store {
   plans: Map<string, Date>;      // oid|date → earliest planSubmittedAt
   days: Map<string, { finalizedAt: Date | null; selfRating: number | null }>;
   reviews: Map<string, number>;  // oid|date → rm rating
   attendance: Map<string, string>;
+  entries: Entry[];              // DailyWorkEntry rows (the section-total query)
   rawCount: number;              // # of $queryRaw calls (to assert N+1 boundedness)
 }
 
 function makeFake(init: Partial<Store> = {}) {
   const store: Store = {
     plans: init.plans ?? new Map(), days: init.days ?? new Map(),
-    reviews: init.reviews ?? new Map(), attendance: init.attendance ?? new Map(), rawCount: 0,
+    reviews: init.reviews ?? new Map(), attendance: init.attendance ?? new Map(), entries: init.entries ?? [], rawCount: 0,
   };
   const norm = (a: unknown, rest: unknown[]): Prisma.Sql => (Array.isArray(a) ? Prisma.sql(a as unknown as TemplateStringsArray, ...rest) : (a as Prisma.Sql));
   const inRange = (key: string, ids: string[], from: string, to: string) => {
@@ -57,6 +63,19 @@ function makeFake(init: Partial<Store> = {}) {
     if (isQuery) store.rawCount += 1;
     if (text.startsWith('INSERT INTO "DailyWorkAttendance"')) {
       store.attendance.set(`${v[1]}|${v[2]}`, v[3] as string); return 1;
+    }
+    // Section totals: values = [...ids, from, to, summaryRowKey]. Emulates the query's WHERE (submitted rows only) and its day join.
+    if (text.startsWith('SELECT e."section"')) {
+      const rowKey = v[v.length - 1] as string, to_ = v[v.length - 2] as string, from_ = v[v.length - 3] as string, ids_ = v.slice(0, v.length - 3) as string[];
+      return store.entries
+        .filter((e) => ids_.includes(e.officerId) && e.date >= from_ && e.date <= to_ && (e.planSubmittedAt === undefined ? true : e.planSubmittedAt !== null)
+          && ["PLAN_SUBMITTED", "FINALIZED", "SUBMITTED"].includes(e.status ?? "PLAN_SUBMITTED")
+          && ["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", "SUMMARY"].includes(e.section) && (e.section !== "SUMMARY" || (e.rowKey ?? "SUMMARY") === rowKey))
+        .map((e) => ({
+          section: e.section, typedDealerName: e.typedDealerName ?? null, todaysPlan: e.todaysPlan == null ? null : String(e.todaysPlan), todaysActual: e.todaysActual == null ? null : String(e.todaysActual),
+          resultStatus: e.resultStatus ?? null, dealerVisits: e.dealerVisits ?? null, newPartyVisits: e.newPartyVisits ?? null, actualDealerVisits: e.actualDealerVisits ?? null, actualNewPartyVisits: e.actualNewPartyVisits ?? null,
+          reportFinalized: store.days.get(`${e.officerId}|${e.date}`)?.finalizedAt != null,
+        }));
     }
     // Range queries: values = [...ids, from, to]
     const to = v[v.length - 1] as string;
@@ -191,14 +210,14 @@ async function main() {
     await expectStatus(() => svc.getDailyPerformance(RM1, { ...RANGE, officerId: "so3" }), 403, "RM cannot access other team");
   }
 
-  // 3) Admin sees all SOs across groups; N+1 GUARD: exactly 4 batched range queries regardless of officers×days.
+  // 3) Admin sees all SOs across groups; N+1 GUARD: exactly 5 batched range queries regardless of officers×days.
   {
     const f = makeFake();
     const svc = loadService(f.prisma);
     const p = await svc.getDailyPerformance(ADMIN, RANGE);
     assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["rm1", "rm2", "so1", "so2", "so3", "so4", "so5"], "Admin sees every Daily Work owner: Sales Officers AND Regional Managers");
     assert.equal(p.rows.length, 21, "7 performers × 3 days");
-    assert.equal(f.store.rawCount, 4, "fixed 4 batched range queries — no N+1");
+    assert.equal(f.store.rawCount, 5, "fixed 5 batched range queries (incl. the one section-totals query) — no N+1");
   }
 
   // 4) Date range windowing: records outside the range are excluded; single-day works.
@@ -438,6 +457,97 @@ async function main() {
     const svc = loadService(makeFake().prisma);
     await expectStatus(() => svc.getDailyWorkReviewDetail(SO1, "so2", "2026-09-28"), 403, "SO cannot view another SO's detail");
     await expectStatus(() => svc.getDailyWorkReviewDetail(RM2, "so1", "2026-09-28"), 403, "unrelated RM cannot view detail");
+  }
+
+  // 11) Section Planned / Actual totals (Sales, Recovery, Scheme Conversion, Appointment, Visits) follow the table's filters.
+  {
+    const FIN = { finalizedAt: TS("2026-09-28T12:00:00Z"), selfRating: 7 };
+    const E = (officerId: string, date: string, section: string, o: Partial<Entry> = {}): Entry => ({ officerId, date, section, ...o });
+    const entries: Entry[] = [
+      // so1 (MP) 28th — finalized day
+      E("so1", "2026-09-28", "SALES", { todaysPlan: 1000, todaysActual: 800 }), E("so1", "2026-09-28", "SALES", { todaysPlan: 500, todaysActual: null }),
+      E("so1", "2026-09-28", "RECOVERY", { todaysPlan: 300, todaysActual: 0 }), E("so1", "2026-09-28", "RECOVERY", { todaysPlan: 200, todaysActual: -50 }),
+      E("so1", "2026-09-28", "SCHEME_CONVERSION", { todaysPlan: 4, resultStatus: "YES" }), E("so1", "2026-09-28", "SCHEME_CONVERSION", { todaysPlan: 2, resultStatus: "NO" }), E("so1", "2026-09-28", "SCHEME_CONVERSION", { todaysPlan: 3, resultStatus: null }),
+      E("so1", "2026-09-28", "APPOINTMENT", { typedDealerName: "A", resultStatus: "APPOINTED" }), E("so1", "2026-09-28", "APPOINTMENT", { typedDealerName: "B", resultStatus: "NOT_APPOINTED" }), E("so1", "2026-09-28", "APPOINTMENT", { typedDealerName: "  ", resultStatus: "APPOINTED" }),
+      E("so1", "2026-09-28", "SUMMARY", { rowKey: "SUMMARY", dealerVisits: 3, newPartyVisits: 2, actualDealerVisits: 2, actualNewPartyVisits: 1 }),
+      E("so1", "2026-09-28", "SUMMARY", { rowKey: "SUMMARY", dealerVisits: 1, newPartyVisits: null, actualDealerVisits: null, actualNewPartyVisits: 4 }), // 2nd batch of the same day
+      E("so1", "2026-09-28", "OTHERS", { todaysPlan: 99999, todaysActual: 99999 }), // Others never totalled
+      E("so1", "2026-09-28", "SALES", { todaysPlan: 7777, todaysActual: 7777, status: "DRAFT", planSubmittedAt: null }), // draft: never counted
+      // so1 29th — plan submitted, report NOT finalized (missing report): planned counts, actual does not
+      E("so1", "2026-09-29", "SALES", { todaysPlan: 2000, todaysActual: 1500 }), E("so1", "2026-09-29", "SUMMARY", { rowKey: "SUMMARY", dealerVisits: 5, newPartyVisits: 5, actualDealerVisits: 9, actualNewPartyVisits: 9 }),
+      // so3 (UP) 28th — finalized
+      E("so3", "2026-09-28", "SALES", { todaysPlan: 4000, todaysActual: 3500 }), E("so3", "2026-09-28", "APPOINTMENT", { typedDealerName: "C", resultStatus: "APPOINTED" }),
+      // so2 (MP) 27th
+      E("so2", "2026-09-27", "SALES", { todaysPlan: 100, todaysActual: 90 }),
+      // so1 on 1 Oct: outside the 27–29 range
+      E("so1", "2026-10-01", "SALES", { todaysPlan: 55555, todaysActual: 55555 }),
+    ];
+    const days = new Map([["so1|2026-09-28", FIN], ["so3|2026-09-28", FIN], ["so2|2026-09-27", { finalizedAt: TS("2026-09-27T12:00:00Z"), selfRating: 5 }], ["so1|2026-10-01", FIN]]);
+    const run = (ctx: AuthContext, filters: Record<string, string> = {}) => { const f = makeFake({ entries, days }); return loadService(f.prisma).getDailyPerformance(ctx, { ...RANGE, ...filters }).then((p) => ({ p, f })); };
+    const flat = (t: unknown) => JSON.parse(JSON.stringify(t));
+
+    // so1 alone, 28th only: every section, each rule.
+    const one = (await run(SO1, { from: "2026-09-28", to: "2026-09-28" })).p.summary.sections;
+    assert.deepEqual(flat(one), {
+      sales: { planned: 1500, actual: 800 },                  // draft row excluded; the missing actual adds 0
+      recovery: { planned: 500, actual: -50 },                // explicit 0 and a negative adjustment are summed as entered
+      schemeConversion: { planned: 9, actual: 4 },            // units; actual = units reported YES (NO / not reported are not converted)
+      appointment: { planned: 2, actual: 1 },                 // the unnamed placeholder row is not a planned appointment; counts, not rupees
+      visits: { planned: 6, actual: 7 },                      // both batches of the day, null treated as nothing (not as completed work)
+    }, "per-section Planned and Actual for one officer-day");
+
+    // Missing report: planned counts, actual does not (29th is not finalized).
+    const missing = (await run(SO1, { from: "2026-09-29", to: "2026-09-29" })).p.summary.sections;
+    assert.deepEqual(flat(missing), { sales: { planned: 2000, actual: 0 }, recovery: { planned: 0, actual: 0 }, schemeConversion: { planned: 0, actual: 0 }, appointment: { planned: 0, actual: 0 }, visits: { planned: 10, actual: 0 } }, "an unfinalized report contributes no actuals");
+
+    // Date range: From/To are inclusive; rows outside never leak in.
+    const range = (await run(SO1)).p.summary.sections;
+    assert.equal(range.sales.planned, 3500, "28th + 29th, not 1 Oct");
+    assert.equal(range.sales.actual, 800);
+    assert.equal((await run(SO1, { from: "2026-09-28", to: "2026-09-28" })).p.summary.sections.sales.planned, 1500, "changing To recalculates");
+    assert.equal((await run(SO1, { from: "2026-10-01", to: "2026-10-01" })).p.summary.sections.sales.planned, 55555, "a different range gives its own totals");
+    assert.equal((await run(SO1, { from: "2026-09-26", to: "2026-09-26" })).p.summary.sections.sales.planned, 0, "no work in range → zeros, not company data");
+
+    // Admin: company-wide, then State filter narrows the totals AND the rows together; date + State combined.
+    const all = await run(ADMIN);
+    assert.equal(all.p.summary.sections.sales.planned, 1500 + 2000 + 4000 + 100, "multiple officers across states");
+    assert.equal(all.p.summary.sections.sales.actual, 800 + 3500 + 90, "actuals only from finalized days");
+    assert.equal(all.p.summary.sections.appointment.actual, 2, "so1's A and so3's C");
+    const mp = await run(ADMIN, { groupId: "g1" });
+    assert.deepEqual([...new Set(mp.p.rows.map((r) => r.officerId))].sort(), ["rm1", "so1", "so2"]);
+    assert.equal(mp.p.summary.sections.sales.planned, 1500 + 2000 + 100, "State=MP excludes UP's 4000 — the cards never show company-wide totals under a State filter");
+    const up = await run(ADMIN, { groupId: "g2" });
+    assert.deepEqual(flat(up.p.summary.sections.sales), { planned: 4000, actual: 3500 });
+    assert.equal(up.p.summary.sections.visits.planned, 0);
+    assert.equal((await run(ADMIN, { groupId: "g1", from: "2026-09-28", to: "2026-09-28" })).p.summary.sections.sales.planned, 1500, "State + date range together");
+    assert.equal((await run(ADMIN, { groupId: "g1", officerId: "so2" })).p.summary.sections.sales.planned, 100, "officer filter inside a State");
+
+    // Totals come from the same population as the table rows, over ALL rows (no paging).
+    const expected = entries.filter((e) => e.section === "SALES" && e.status !== "DRAFT" && mp.p.rows.some((r) => r.officerId === e.officerId && r.date === e.date)).reduce((s, e) => s + (e.todaysPlan ?? 0), 0);
+    assert.equal(mp.p.summary.sections.sales.planned, expected, "summary and table share one filter set");
+
+    // Authorization / scope: RM only their team, SO only themself (spoofed officer ignored), unrelated RM sees none.
+    assert.equal((await run(RM1)).p.summary.sections.sales.planned, 1500 + 2000 + 100, "RM sees g1 only");
+    assert.equal((await run(RM2)).p.summary.sections.sales.planned, 4000, "the other RM sees only their own team");
+    assert.equal((await run(SO1, { officerId: "so2" })).p.summary.sections.sales.planned, 3500, "an SO's totals are their own even when another officer is requested");
+    await expectStatus(() => run(RM1, { officerId: "so3" }), 403, "RM cannot total another team's officer");
+    assert.deepEqual(flat((await run(RM2, { from: "2026-09-26", to: "2026-09-26" })).p.summary.sections.sales), { planned: 0, actual: 0 });
+    assert.equal(all.f.store.rawCount, 5, "one totals query regardless of officers/days");
+
+    // Existing summary metrics are unchanged by the new section totals.
+    assert.equal(all.p.summary.salesOfficers, 7); assert.equal(all.p.summary.totalDays, 21);
+  }
+
+  // 12) The page: ten new cards (no Others), money vs count formats, existing cards kept.
+  {
+    const page = readFileSync(resolve("src/features/daily-work/performance-page.tsx"), "utf8");
+    for (const k of ["sales", "recovery", "scheme_conversion", "appointment", "visits"]) for (const w of ["planned", "actual"]) assert.ok(page.includes(`daily_work.performance.summary.${k}_${w}`), `${k} ${w} card`);
+    assert.ok(!/others_(planned|actual)/.test(page) && !page.includes("sections.others"), "no totals for Others");
+    assert.ok(page.includes('[L.sSalesP, L.sSalesA, "sales", rupees]') && page.includes('[L.sRecoveryP, L.sRecoveryA, "recovery", rupees]') && page.includes('"schemeConversion", countText') && page.includes('"appointment", countText') && page.includes('"visits", countText'), "Sales/Recovery in rupees; the others as counts/units");
+    for (const old of ["sOfficers", "sAttendance", "sPlans", "sReports", "sAvgSelf", "sAvgRm"]) assert.ok(page.includes(`label={L.${old}}`), `existing card ${old} kept`);
+    assert.ok(page.includes('queryKey: ["performance", role, from, to, officerId, groupId]'), "cards refetch whenever Date From / Date To / State change");
+    const svc = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
+    assert.ok(svc.includes(`e."planSubmittedAt" IS NOT NULL AND e."status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')`) && svc.includes('e."officerId" IN (${Prisma.join(ids)}) AND e."workDate" BETWEEN ${from}::date AND ${to}::date'), "totals query: submitted rows of the filtered officers and dates only");
   }
 
   console.log("daily-performance.test.ts — all assertions passed");

@@ -27,15 +27,19 @@ interface PerfRow {
   attendance: Attendance; planSubmittedAt: string | null; reportSubmittedAt: string | null;
   selfRating: number | null; rmRating: number | null; submitted: boolean; reportMissed: boolean;
 }
+interface SectionTotal { planned: number; actual: number }
 interface Summary {
   salesOfficers: number; presentDays: number; totalDays: number; submittedPlans: number; submittedReports: number;
   averageSelfRating: number | null; averageRmRating: number | null;
+  sections: { sales: SectionTotal; recovery: SectionTotal; schemeConversion: SectionTotal; appointment: SectionTotal; visits: SectionTotal };
 }
 interface Payload {
   role: Role; from: string; to: string; rows: PerfRow[]; summary: Summary;
   officers: Option[]; states: Option[]; canEditAttendance: boolean;
 }
 
+const rupees = (v: number) => `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v)}`; // Sales / Recovery are money
+const countText = (v: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v); // Scheme units, appointments and visits are counts
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
 const timeText = (iso: string | null) => iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—";
 const dateText = (d: string) => new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" });
@@ -86,6 +90,16 @@ export function PerformancePage({ role }: { role: Role }) {
     sReports: useLabel("daily_work.performance.summary.submitted_reports"),
     sAvgSelf: useLabel("daily_work.team.summary.avg_self_rating"),
     sAvgRm: useLabel("daily_work.team.summary.avg_rm_rating"),
+    sSalesP: useLabel("daily_work.performance.summary.sales_planned"),
+    sSalesA: useLabel("daily_work.performance.summary.sales_actual"),
+    sRecoveryP: useLabel("daily_work.performance.summary.recovery_planned"),
+    sRecoveryA: useLabel("daily_work.performance.summary.recovery_actual"),
+    sSchemeP: useLabel("daily_work.performance.summary.scheme_conversion_planned"),
+    sSchemeA: useLabel("daily_work.performance.summary.scheme_conversion_actual"),
+    sApptP: useLabel("daily_work.performance.summary.appointment_planned"),
+    sApptA: useLabel("daily_work.performance.summary.appointment_actual"),
+    sVisitsP: useLabel("daily_work.performance.summary.visits_planned"),
+    sVisitsA: useLabel("daily_work.performance.summary.visits_actual"),
   };
   const attendanceLabel: Record<Attendance, string> = { PRESENT: L.present, ABSENT: L.absent, LEAVE: L.leave, HOLIDAY: L.holiday };
   const title = isSO ? L.my : isRM ? L.team : L.company;
@@ -145,6 +159,18 @@ export function PerformancePage({ role }: { role: Role }) {
         <Stat label={L.sReports} value={data ? String(data.summary.submittedReports) : "—"} />
         <Stat label={L.sAvgSelf} value={data ? ratingText(data.summary.averageSelfRating) : "—"} />
         <Stat label={L.sAvgRm} value={data ? ratingText(data.summary.averageRmRating) : "—"} />
+        {/* Planned vs Actual per section, over the same filtered officers and dates as the table (Others has no totals). */}
+        <div className="col-span-full grid gap-3 border-t pt-3 sm:grid-cols-2 lg:grid-cols-5" data-testid="section-totals">
+          {([
+            [L.sSalesP, L.sSalesA, "sales", rupees], [L.sRecoveryP, L.sRecoveryA, "recovery", rupees], [L.sSchemeP, L.sSchemeA, "schemeConversion", countText],
+            [L.sApptP, L.sApptA, "appointment", countText], [L.sVisitsP, L.sVisitsA, "visits", countText],
+          ] as const).map(([planned, actual, key, fmt]) => (
+            <div key={key} className="grid grid-cols-2 gap-3">
+              <Stat label={planned} value={data ? fmt(data.summary.sections[key].planned) : "—"} />
+              <Stat label={actual} value={data ? fmt(data.summary.sections[key].actual) : "—"} />
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="overflow-auto rounded-lg border bg-background">

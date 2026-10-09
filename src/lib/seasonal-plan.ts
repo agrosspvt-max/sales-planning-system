@@ -8,7 +8,6 @@ export const APPROVAL_STATUSES = ["DRAFT", "PENDING_RM", "PENDING_ADMIN", "APPRO
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 export type AppointmentStatus = "PENDING" | "APPOINTED";
 
-export const PARTY_NAME_MAX = 200; // same limit as the existing Party Planning appointment plans
 
 /** A plan is editable/deletable by its owner only before it has entered (or after it has left) review. */
 export const EDITABLE_APPROVAL_STATUSES: readonly ApprovalStatus[] = ["DRAFT", "REJECTED"];
@@ -28,13 +27,6 @@ export function displayStatus(plan: { appointmentStatus: string | null }): "—"
   return "—";
 }
 
-export function validatePartyName(value: unknown): string | null {
-  const name = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
-  if (!name) return "Party Name is required.";
-  if (name.length > PARTY_NAME_MAX) return `Party Name can be at most ${PARTY_NAME_MAX} characters.`;
-  return null;
-}
-export const cleanPartyName = (value: string): string => value.replace(/\s+/g, " ").trim();
 
 export type PlannerRole = "SALES_OFFICER" | "REGIONAL_MANAGER";
 
@@ -108,11 +100,10 @@ export function canReviewNow(row: { approvalStatus: string; ownerId: string }, v
   return false;
 }
 
-export const MARKET_POTENTIAL_FILTERS = ["A", "B", "C"] as const;
-
-/** Detail-page column filters: Market name contains `market` (case-insensitive) AND Market Potential equals `potential` ("" = All). */
-export function filterSeasonalRows<T extends { marketName: string; marketPotential: string | null }>(rows: readonly T[], filters: { market: string; potential: string }): T[] {
-  const needle = filters.market.trim().toLowerCase();
-  const potential = (MARKET_POTENTIAL_FILTERS as readonly string[]).includes(filters.potential) ? filters.potential : "";
-  return rows.filter((r) => (!needle || r.marketName.toLowerCase().includes(needle)) && (!potential || r.marketPotential === potential));
+/** Lifecycle section of a Seasonal Plan (same Create | Submitted | Approved | Older Plans classification as Monthly): a closed season is Older; otherwise by the derived plan status. */
+export function seasonalStage(plan: { seasonOpen: boolean; status: string }): "create" | "submitted" | "approved" | "older" {
+  if (!plan.seasonOpen) return "older";
+  if (plan.status === "Approved") return "approved";
+  if (plan.status === "Pending Approval") return "submitted";
+  return "create"; // Draft | Needs Changes
 }

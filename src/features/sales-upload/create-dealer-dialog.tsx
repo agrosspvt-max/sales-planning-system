@@ -43,7 +43,18 @@ const STATUS_OPTIONS: { value: DealerStatus; label: string; note?: string }[] = 
  * service); Edit reuses PATCH /api/dealers/[id] (the Dealers module `editDealer`) for name/territory/
  * officer/status, and DELETE /api/dealer-alias/[id] to remove an alias. Controlled by the caller.
  */
-export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOpenChange: (o: boolean) => void; edit?: EditDealer | null }) {
+export function DealerDialog({ open, onOpenChange, edit, prefill, submitCreate, onCreated, allowAssignExisting = true, title }: {
+  open: boolean; onOpenChange: (o: boolean) => void; edit?: EditDealer | null;
+  /** Create mode only — start the form with these values (Party Planning's Appointed step prefills the candidate party / owner). */
+  prefill?: { name?: string; aliasName?: string; groupId?: string; officerId?: string };
+  /** Create mode only — replace the POST /api/dealers call (Party Planning posts the SAME body to its Appointed endpoint, which creates the dealer in its own transaction). */
+  submitCreate?: (body: Record<string, unknown>) => Promise<CreateResult>;
+  /** Called after a successful create (before the dialog closes). */
+  onCreated?: (r: CreateResult) => void;
+  /** Hide the "Assign this dealer" shortcut of the duplicate warning (default: shown, as in Dealer Alias). */
+  allowAssignExisting?: boolean;
+  title?: string;
+}) {
   const qc = useQueryClient();
   const isEdit = !!edit;
   const [name, setName] = useState("");
@@ -60,10 +71,10 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
   // Prefill on open (Edit) or reset (Create).
   useEffect(() => {
     if (!open) return;
-    setName(edit?.name ?? "");
-    setAliasName("");
-    setGroupId(edit?.groupId ?? "");
-    setOfficerId(edit?.officerId ?? "");
+    setName(edit?.name ?? prefill?.name ?? "");
+    setAliasName(prefill?.aliasName ?? "");
+    setGroupId(edit?.groupId ?? prefill?.groupId ?? "");
+    setOfficerId(edit?.officerId ?? prefill?.officerId ?? "");
     setTown(edit?.town ?? "");
     const s = (DEALER_STATUSES as readonly string[]).includes(edit?.status ?? "") ? (edit!.status as DealerStatus) : "ACTIVE";
     setStatus(s);
@@ -72,7 +83,7 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
     setPhase("form");
     setDuplicates([]);
     setError(null);
-  }, [open, edit]);
+  }, [open, edit]); // eslint-disable-line react-hooks/exhaustive-deps -- prefill is read once per open
 
   const { data: groups } = useQuery<GroupOpt[]>({ queryKey: ["groups"], queryFn: () => api.get("/api/groups"), enabled: open });
   const { data: officers } = useQuery<OfficerOpt[]>({
@@ -96,13 +107,13 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
           name: name.trim(), alias: aliasName.trim() || undefined, officerId, groupId, town: town.trim() || undefined, status, addToSeasonalPlan: addToPlan,
         });
       }
-      return api.post<CreateResult>("/api/dealers", {
-        name: name.trim(), aliasName: aliasName.trim(), officerId, groupId, town: town.trim() || undefined, addToSeasonalPlan: addToPlan, force,
-      });
+      const body = { name: name.trim(), aliasName: aliasName.trim(), officerId, groupId, town: town.trim() || undefined, addToSeasonalPlan: addToPlan, force };
+      return submitCreate ? submitCreate(body) : api.post<CreateResult>("/api/dealers", body);
     },
     onSuccess: (r) => {
       if (r?.duplicates && r.duplicates.length > 0) { setDuplicates(r.duplicates); setPhase("duplicates"); return; }
       invalidate();
+      onCreated?.(r);
       close();
     },
     onError: (e) => setError((e as Error).message),
@@ -124,7 +135,7 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh]">
-        <DialogHeader><DialogTitle>{phase === "duplicates" ? "Possible Existing Dealer" : isEdit ? "Edit Dealer" : "Create Dealer"}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{phase === "duplicates" ? "Possible Existing Dealer" : isEdit ? "Edit Dealer" : title ?? "Create Dealer"}</DialogTitle></DialogHeader>
 
         {phase === "form" ? (
           <div className="space-y-3 overflow-y-auto">
@@ -224,7 +235,7 @@ export function DealerDialog({ open, onOpenChange, edit }: { open: boolean; onOp
               <DealerOrder>{duplicates.map((d) => (
                 <li key={d.id} data-dealer-id={d.id} className="flex items-center justify-between rounded-md border p-2 text-sm">
                   <span><DealerName id={d.id} name={d.name} /> <Badge variant="muted" className="ml-1 text-[10px]">{d.reason}</Badge></span>
-                  <Button size="sm" variant="outline" disabled={assignExisting.isPending} onClick={() => assignExisting.mutate(d.id)}>Assign this dealer</Button>
+                  {allowAssignExisting && <Button size="sm" variant="outline" disabled={assignExisting.isPending} onClick={() => assignExisting.mutate(d.id)}>Assign this dealer</Button>}
                 </li>
               ))}</DealerOrder>
             </ul>

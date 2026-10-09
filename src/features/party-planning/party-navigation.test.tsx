@@ -12,10 +12,11 @@ const overrides = {
   "@tanstack/react-query": { useMutation: () => ({}), useQuery: () => ({}), useQueryClient: () => ({}) },
   "@/lib/api-client": { api: {} },
 };
-const { PartyPlanModeLinks } = testLoader(overrides)("src/features/party-planning/party-planning-page.tsx") as { PartyPlanModeLinks: React.ComponentType<{ mode: string }> };
-const render = (mode: string) => renderToStaticMarkup(<PartyPlanModeLinks mode={mode} />);
+const { PartyPlanModeLinks } = testLoader(overrides)("src/features/party-planning/party-planning-page.tsx") as { PartyPlanModeLinks: React.ComponentType<{ mode: string; stage?: string }> };
+const render = (mode: string, stage?: string) => renderToStaticMarkup(<PartyPlanModeLinks mode={mode} stage={stage} />);
 const anchors = (html: string) => [...html.matchAll(/<a href="([^"]+)"([^>]*)>([^<]*)<\/a>/g)].map((m) => ({ href: m[1]!, cls: m[2]!, label: m[3]!.trim() }));
-const primaryOf = (html: string) => anchors(html).filter((a) => a.cls.includes("rounded px-3"));
+const primaryOf = (html: string) => anchors(html).filter((a) => a.cls.includes("rounded px-3") && !a.href.includes("?stage="));
+const lifecycleOf = (html: string) => anchors(html).filter((a) => a.cls.includes("rounded px-3") && a.href.includes("?stage="));
 const secondaryOf = (html: string) => anchors(html).filter((a) => a.cls.includes("border-b-2"));
 const activePrimary = (html: string) => primaryOf(html).filter((a) => a.cls.includes("bg-primary")).map((a) => a.label);
 const activeSecondary = (html: string) => secondaryOf(html).filter((a) => a.cls.includes("border-primary")).map((a) => a.label);
@@ -36,7 +37,16 @@ for (const mode of ["territory", "seasonal", "monthly", "create", "view"]) asser
 assert.deepEqual(activePrimary(render("view")), ["View"]);
 // SECONDARY tabs exist only under Planning, in the Sales Planning underline style, route-based, with the right one active.
 for (const mode of ["territory", "create", "view"]) assert.equal(secondaryOf(render(mode)).length, 0, `no Seasonal / Monthly tabs on ${mode}`);
-assert.deepEqual(secondaryOf(render("seasonal")).map((a) => [a.label, a.href]), [["Seasonal", "/planning/party/seasonal"], ["Monthly", "/planning/party/monthly"]]);
+assert.deepEqual(secondaryOf(render("seasonal")).map((a) => [a.label, a.href]), [["Seasonal", "/planning/party/seasonal?stage=create"], ["Monthly", "/planning/party/monthly?stage=create"]]);
+// PLAN LIFECYCLE switch (Create | Submitted | Approved | Older Plans): only under Planning, between the primary nav and Seasonal | Monthly, route-state links.
+for (const mode of ["territory", "create", "view"]) assert.equal(lifecycleOf(render(mode)).length, 0, `no lifecycle switch on ${mode}`);
+for (const mode of ["seasonal", "monthly"]) {
+  assert.deepEqual(lifecycleOf(render(mode)).map((a) => [a.label, a.href]), [["Create", `/planning/party/${mode}?stage=create`], ["Submitted", `/planning/party/${mode}?stage=submitted`], ["Approved", `/planning/party/${mode}?stage=approved`], ["Older Plans", `/planning/party/${mode}?stage=older`]], `lifecycle links on ${mode}`);
+  for (const stage of ["create", "submitted", "approved", "older"]) assert.deepEqual(lifecycleOf(render(mode, stage)).filter((a) => a.cls.includes("bg-primary")).map((a) => a.label.toLowerCase().replace(" plans", "")), [stage], `${stage} is the active section`);
+}
+const html = render("monthly", "approved");
+assert.ok(html.indexOf("Territory Mapping") < html.indexOf("Create") && html.indexOf("Create") < html.indexOf(">Seasonal<"), "order: primary nav → lifecycle → Seasonal | Monthly");
+assert.deepEqual(secondaryOf(render("monthly", "approved")).map((a) => a.href), ["/planning/party/seasonal?stage=approved", "/planning/party/monthly?stage=approved"], "switching Seasonal ↔ Monthly keeps the lifecycle section");
 assert.deepEqual(activeSecondary(render("seasonal")), ["Seasonal"]);
 assert.deepEqual(activeSecondary(render("monthly")), ["Monthly"]);
 assert.ok(render("monthly").includes('aria-current="page"'));
@@ -49,8 +59,8 @@ assert.ok(sales.includes('<div className="flex gap-1 border-b">'), "Sales Planni
 
 // Routes: every page still exists at its original URL and renders the right mode; Territory keeps its own [Existing Dealers | Add Market].
 const pageSource = (p: string) => readFileSync(p, "utf8");
-assert.ok(pageSource("src/features/party-planning/seasonal-planning-page.tsx").includes('<PartyPlanModeLinks mode="seasonal" />'));
-assert.ok(pageSource("src/features/party-planning/monthly-planning-page.tsx").includes('<PartyPlanModeLinks mode="monthly" />'));
+assert.ok(pageSource("src/features/party-planning/seasonal-planning-page.tsx").includes('<PartyPlanModeLinks mode="seasonal" stage='));
+assert.ok(pageSource("src/features/party-planning/monthly-planning-page.tsx").includes('<PartyPlanModeLinks mode="monthly" stage='));
 const territory = pageSource("src/features/party-planning/territory-mapping-page.tsx");
 assert.ok(territory.includes('<PartyPlanModeLinks mode="territory">') && territory.includes("<UnderlineTabs") && !territory.includes("onClick={() => setTab(key)}") && territory.includes("tab_existing") && territory.includes("tab_add_market"));
 for (const [route, text] of [["territory", "TerritoryMappingPage"], ["seasonal", "SeasonalPlanListPage"], ["monthly", "MonthlyPlanListPage"]] as const) assert.ok(pageSource(`src/app/(dashboard)/planning/party/${route}/page.tsx`).includes(text), `${route}: the list route is unchanged`);
@@ -61,13 +71,31 @@ for (const [route, text] of [["seasonal", "SeasonalPlanDetailPage"], ["monthly",
 }
 for (const f of ["seasonal-planning-page.tsx", "monthly-planning-page.tsx", "seasonal-plan-list-page.tsx", "monthly-plan-list-page.tsx"]) {
   const src = pageSource(`src/features/party-planning/${f}`);
-  assert.ok(src.includes('<PartyPlanModeLinks mode="' + (f.startsWith("seasonal") ? "seasonal" : "monthly") + '" />'), `${f}: Planning stays active with the Seasonal | Monthly switch (list and detail)`);
+  assert.ok(src.includes('<PartyPlanModeLinks mode="' + (f.startsWith("seasonal") ? "seasonal" : "monthly") + '" stage='), `${f}: Planning stays active with the Seasonal | Monthly switch (list and detail)`);
   assert.ok(!/router\.(replace|push)|window\.history|history\.(push|replace)State/.test(src), `${f}: plain links only — no programmatic history manipulation, so Back / Forward behave`);
 }
 assert.ok(readFileSync("src/components/ui/underline-tabs.tsx", "utf8").includes("<Link") && readFileSync("src/features/party-planning/plan-list-parts.tsx", "utf8").includes("<Link"), "the secondary tabs and the Open buttons are route links");
 // From a detail page the secondary tabs lead to the LIST routes, so switching Seasonal ↔ Monthly never needs a Back first.
-assert.deepEqual(secondaryOf(render("seasonal")).map((a) => a.href), ["/planning/party/seasonal", "/planning/party/monthly"]);
+assert.deepEqual(secondaryOf(render("seasonal")).map((a) => a.href), ["/planning/party/seasonal?stage=create", "/planning/party/monthly?stage=create"]);
 const create = pageSource("src/features/party-planning/party-planning-page.tsx");
 assert.ok(create.includes('<PartyPlanModeLinks mode="create" />') && create.includes('<PartyPlanModeLinks mode="view" />'), "Create Plan / View keep the primary navigation and no Seasonal / Monthly tabs");
 
+// Lifecycle section is ROUTE state: the list pages read ?stage= on the server (survives refresh / Back / Forward), the nav uses plain links, and an unknown value falls back to Create.
+for (const route of ["seasonal", "monthly"]) {
+  const page = pageSource(`src/app/(dashboard)/planning/party/${route}/page.tsx`);
+  assert.ok(page.includes("searchParams: Promise<{ stage?: string }>") && page.includes("parseStage(stage)"), `${route}: ?stage= selects the section on the server`);
+}
+import("../../lib/monthly-plan").then(({ parseStage }) => assert.deepEqual(["create", "submitted", "approved", "older", "nope", undefined].map(parseStage), ["create", "submitted", "approved", "older", "create", "create"]));
+// A page action lives in the SAME row as Seasonal | Monthly, after the tabs (far right), not in the lifecycle container.
+{
+  const withAction = renderToStaticMarkup(<PartyPlanModeLinks mode="seasonal" stage="create" {...{ actions: <button>Create Seasonal Plan</button> }} />);
+  const row = withAction.slice(withAction.indexOf("justify-between"));
+  assert.ok(row.indexOf(">Seasonal<") < row.indexOf(">Monthly<") && row.indexOf(">Monthly<") < row.indexOf("Create Seasonal Plan"), "tabs left, action after them in one row");
+  assert.ok(withAction.indexOf("Plan Type") < withAction.indexOf("Create Seasonal Plan"));
+}
+// Detail pages are opened FROM a section and keep it (route state), so Back and the nav stay in the right section.
+for (const route of ["seasonal", "monthly"]) {
+  const page = pageSource(`src/app/(dashboard)/planning/party/${route}/[id]/page.tsx`);
+  assert.ok(page.includes("searchParams: Promise<{ stage?: string }>") && page.includes("stage={parseStage(stage)}"), `${route}/[id]: the section comes from ?stage=`);
+}
 console.log("party-navigation.test.tsx — all assertions passed");

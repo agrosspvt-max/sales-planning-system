@@ -770,8 +770,10 @@ const adminCreateSchema = dealerFieldsSchema.extend({
  * matching/recovery/sales-upload/future seasonal. Same Dealer model + duplicate check as the Monthly
  * path. Shared by the User Details page (Dealers module) AND the Dealer Alias create form; the latter
  * passes a Tally alias, a group to validate against, and an optional "add to active seasonal plan".
+ * `opts.tx`: run the creation (and its audit) inside the CALLER's transaction instead of opening one — used by Party Planning's
+ * Appointed step so the dealer and the row's status change commit or roll back together. Without it, behaviour is unchanged.
  */
-export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Promise<DealerCreateOutcome> {
+export async function createDealerForOfficer(ctx: AuthContext, raw: unknown, opts: { tx?: Tx } = {}): Promise<DealerCreateOutcome> {
   if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only a Super Admin can create a dealer for an officer");
   const data = adminCreateSchema.parse(raw);
   const officer = await prisma.user.findUnique({ where: { id: data.officerId }, select: { role: true, isActive: true, groupId: true } });
@@ -796,8 +798,7 @@ export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Pr
   }
 
   const status = data.status ?? "ACTIVE";
-  const created = await prisma.$transaction(
-    async (tx: Tx) => {
+  const body = async (tx: Tx) => {
       const dealer = await tx.dealer.create({
         data: { ...dealerData(data), status, isActive: isActiveForStatus(status), createdByUserId: ctx.userId, createdFrom: "ADMIN" },
       });
@@ -808,10 +809,9 @@ export async function createDealerForOfficer(ctx: AuthContext, raw: unknown): Pr
       // Only ACTIVE dealers are plan-eligible; never auto-add a Pending/Inactive/Defaulter dealer.
       if (data.addToSeasonalPlan && status === "ACTIVE") plan = await addDealerToActiveSeasonalPlan(tx, data.officerId, dealer.id);
       return { id: dealer.id, name: dealer.name, plan };
-    },
-    { timeout: 60000, maxWait: 10000 },
-  );
-  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "dealer", entityId: created.id, summary: `Admin created & assigned dealer "${created.name}" to a Sales Officer${created.plan.added ? " (added to active seasonal plan)" : ""}` });
+  };
+  const created = opts.tx ? await body(opts.tx) : await prisma.$transaction(body, { timeout: 60000, maxWait: 10000 });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "dealer", entityId: created.id, summary: `Admin created & assigned dealer "${created.name}" to a Sales Officer${created.plan.added ? " (added to active seasonal plan)" : ""}` }, opts.tx);
   return { dealerId: created.id, dealerName: created.name, addedToPlan: created.plan.added, planWarning: created.plan.warning };
 }
 

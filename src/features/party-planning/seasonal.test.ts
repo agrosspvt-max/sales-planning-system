@@ -33,6 +33,8 @@ function makeDb() {
       { id: "m-exist", name: "Pipariya", source: "EXISTING", potential: "B" },
       { id: "m-new", name: "Bareli", source: "REQUESTED", potential: "A" },
       { id: "m-undecided", name: "Rewa", source: "EXISTING", potential: null },
+      { id: "m-x1", name: "Sagar", source: "EXISTING", potential: "C" },
+      { id: "m-x2", name: "Satna", source: "EXISTING", potential: "A" },
     ] as Row[],
     dealerWrites: 0,
   };
@@ -69,6 +71,7 @@ function makeDb() {
     seasonalPlan: {
       create: async ({ data }: Row) => { const row = { id: `p${++seq}`, ...defaults, ...data, createdAt: tick(), updatedAt: tick() }; t.plans.push(row); return planView(row); },
       findUnique: async ({ where }: Row) => { const r = t.plans.find((x) => matches(x, where)); return r ? planView(r) : null; },
+      findFirst: async ({ where }: Row) => { const r = t.plans.find((x) => matches(x, where)); return r ? planView(r) : null; },
       findMany: async ({ where }: Row) => t.plans.filter((r) => matches(r, where)).map(planView).sort((a, b) => b.createdAt - a.createdAt),
       update: async ({ where, data }: Row) => { const r = t.plans.find((x) => matches(x, where))!; Object.assign(r, data, { updatedAt: tick() }); return planView(r); },
       updateMany: async ({ where, data }: Row) => { const rows = t.plans.filter((x) => matches(x, where)); rows.forEach((r) => Object.assign(r, data, { updatedAt: tick() })); return { count: rows.length }; },
@@ -115,7 +118,7 @@ const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
 type Svc = ReturnType<typeof loadService>["service"];
 const sheetFor = (service: Svc, ctx: AuthContext, seasonId = "s-kharif") => service.createSeasonalSheet(ctx, { seasonId });
-const addRow = (service: Svc, ctx: AuthContext, sheetId: string, marketId = "m-exist", partyName = "ABC Traders") => service.createSeasonalPlan(ctx, { sheetId, marketId, partyName });
+const addRow = (service: Svc, ctx: AuthContext, sheetId: string, marketId = "m-exist") => service.createSeasonalPlan(ctx, { sheetId, marketId });
 
 async function main() {
   /* ---- create: the user CHOOSES an open season; nothing is picked automatically ---- */
@@ -149,16 +152,16 @@ async function main() {
   {
     const { service } = loadService();
     const so = await sheetFor(service, SO1), rm = await sheetFor(service, RM1), adm = await sheetFor(service, ADMIN), other = await sheetFor(service, SO3);
-    const row = await addRow(service, SO1, so.id, "m-exist", "Hidden Draft Party");
+    const row = await addRow(service, SO1, so.id, "m-exist");
     assert.deepEqual(ids(await service.listSeasonalSheets(ADMIN)), ids([so, rm, adm, other]), "Admin lists SO-, RM- and Admin-created plans");
     assert.equal(plain((await service.listSeasonalSheets(ADMIN)).find((s) => s.id === adm.id)!).own, true);
     const opened = plain(await service.getSeasonalSheet(ADMIN, so.id));
-    assert.deepEqual(opened.plans.map((p) => p.partyName), ["Hidden Draft Party"], "Admin sees the officer's draft rows on the plan");
+    assert.deepEqual(opened.plans.map((p) => p.marketName), ["Pipariya"], "Admin sees the officer's draft rows on the plan");
     assert.equal(opened.plans[0]!.editable, false, "…read-only: Admin cannot edit another officer's row");
     assert.equal(opened.plans[0]!.canReview, false, "…and a Draft row is not reviewable");
     assert.equal(await status(() => service.getSeasonalSheet(ADMIN, adm.id)), 0, "Admin opens their own plan");
     assert.equal(await status(() => service.getSeasonalSheet(ADMIN, "nope")), 404);
-    assert.equal(await status(() => service.updateSeasonalPlan(ADMIN, row.id, { partyName: "x" })), 403, "Admin visibility does not grant editing");
+    assert.equal(await status(() => service.updateSeasonalPlan(ADMIN, row.id, { marketId: "m-new" })), 403, "Admin visibility does not grant editing");
     assert.equal(await status(() => service.submitSeasonalPlan(ADMIN, row.id)), 403);
     assert.equal(plain(await service.getSeasonalOptions(ADMIN)).seasons.find((s) => s.id === "s-kharif")!.hasPlan, true, "the create dialog flags Admin's own plan");
     // SO / RM scope is unchanged
@@ -166,6 +169,76 @@ async function main() {
     assert.deepEqual(ids(await service.listSeasonalSheets(RM1)), [rm.id], "an RM still sees only their own until a team row is submitted");
     await service.submitSeasonalPlan(SO1, row.id);
     assert.deepEqual(ids(await service.listSeasonalSheets(RM1)), ids([so, rm]), "…then their team's");
+  }
+
+  /* ---- Party Name is gone from Seasonal Planning ---- */
+  {
+    for (const f of ["src/features/party-planning/seasonal.server.ts", "src/features/party-planning/seasonal-planning-page.tsx", "src/features/party-planning/seasonal-plan-list-page.tsx", "src/app/api/seasonal-plans/route.ts", "src/app/api/seasonal-plans/[id]/route.ts"]) {
+      assert.ok(!/partyName|PartyName|PARTY_NAME|Party Name/i.test(readFileSync(f, "utf8")), `${f} has no party-name dependency`);
+    }
+    const schema = readFileSync("prisma/schema.prisma", "utf8");
+    assert.ok(/model SeasonalPlan \{[\s\S]*?partyName\s+String\?[\s\S]*?\n\}/.test(schema) && schema.includes("RETIRED"), "the column is optional (history kept), marked retired");
+    assert.ok(/ALTER COLUMN "partyName" DROP NOT NULL/.test(readFileSync("prisma/migrations/20261009030000_seasonal_party_name_retired/migration.sql", "utf8")) && !/DROP COLUMN/.test(readFileSync("prisma/migrations/20261009030000_seasonal_party_name_retired/migration.sql", "utf8")), "non-destructive migration");
+    // creating / submitting / approving work with the Market alone
+    const { service, t } = loadService();
+    const sheet = plain(await sheetFor(service, SO1, "s-kharif"));
+    const row = plain(await service.createSeasonalPlan(SO1, { sheetId: sheet.id, marketId: "m-exist" }));
+    assert.ok(!("partyName" in row) && t.plans[0]!.partyName === undefined, "no party name on the row or in storage");
+    assert.deepEqual(plain(await service.submitSeasonalSheet(SO1, sheet.id)), { submitted: 1 });
+    await service.actOnSeasonalPlan(RM1, row.id, { action: "approve" });
+    assert.equal((await service.actOnSeasonalPlan(ADMIN, row.id, { action: "approve" })).approvalStatus, "APPROVED");
+    assert.ok(t.audit.every((a) => !/ · undefined|null/.test(String(a.summary))), "audit lines carry no empty party name");
+    // Monthly Planning still gets its markets from the approved Seasonal rows (market only)
+    const monthly = readFileSync("src/features/party-planning/monthly.server.ts", "utf8");
+    assert.ok(!/p\.partyName|sp\.partyName/.test(monthly), "Monthly Planning does not read a Seasonal party name");
+  }
+
+  /* ---- persistent Create workspace; Submitted / Approved accumulate entries of ONE logical plan ---- */
+  {
+    const { service, t } = loadService();
+    const sheet = plain(await sheetFor(service, SO1, "s-kharif"));
+    const rowOf = (id: string) => t.plans.find((p) => p.id === id)!;
+    const stage = async (ctx: AuthContext, st: string) => plain(await service.getSeasonalSheet(ctx, sheet.id, "", st)).plans.map((p) => p.id);
+    assert.deepEqual(plain((await service.listSeasonalSheets(SO1))[0]!).counts, { create: 0, submitted: 0, approved: 0 }, "a new plan: an empty workspace");
+    assert.equal(await status(() => service.submitSeasonalSheet(SO1, sheet.id)), 409, "nothing to submit yet");
+    assert.equal(await status(() => sheetFor(service, SO1, "s-kharif")), 409, "no second workspace for the same owner + season");
+    // batch 1
+    const a = await addRow(service, SO1, sheet.id, "m-exist"), b = await addRow(service, SO1, sheet.id, "m-new");
+    assert.deepEqual(await stage(SO1, "create"), [b.id, a.id].sort((x, y) => (rowOf(y).createdAt as Date).getTime() - (rowOf(x).createdAt as Date).getTime()), "Create shows the editable entries");
+    for (const who of [SO2, RM1, ADMIN]) assert.ok([403, 404].includes(await status(() => service.submitSeasonalSheet(who, sheet.id))), "only the owner submits");
+    assert.deepEqual(plain(await service.submitSeasonalSheet(SO1, sheet.id)), { submitted: 2 });
+    assert.deepEqual([rowOf(a.id).approvalStatus, rowOf(b.id).approvalStatus], ["PENDING_RM", "PENDING_RM"], "submitted for RM review — not approved");
+    assert.deepEqual(plain((await service.listSeasonalSheets(SO1))[0]!).counts, { create: 0, submitted: 2, approved: 0 }, "the workspace is empty again but the plan stays");
+    assert.equal(await status(() => service.submitSeasonalSheet(SO1, sheet.id)), 409, "a retry submits nothing twice");
+    // batch 2 accumulates in the SAME plan; batch 1 untouched
+    const c = await addRow(service, SO1, sheet.id, "m-undecided");
+    assert.deepEqual(await stage(SO1, "create"), [c.id]); assert.deepEqual((await stage(SO1, "submitted")).sort(), [a.id, b.id].sort());
+    const aStamp = JSON.stringify(rowOf(a.id));
+    assert.deepEqual(plain(await service.submitSeasonalSheet(SO1, sheet.id)), { submitted: 1 });
+    assert.equal(JSON.stringify(rowOf(a.id)), aStamp, "earlier submitted entries are unchanged");
+    assert.equal(t.sheets.length, 1, "still one logical plan"); assert.equal(t.plans.length, 3, "entries keep their identity");
+    // approve batch 1 only (RM → Admin per entry), then batch 2 later
+    for (const id of [a.id, b.id]) { await service.actOnSeasonalPlan(RM1, id, { action: "approve" }); await service.actOnSeasonalPlan(ADMIN, id, { action: "approve" }); }
+    assert.equal(await status(() => service.actOnSeasonalPlan(ADMIN, a.id, { action: "approve" })), 409, "an approval retry changes nothing");
+    assert.deepEqual(plain((await service.listSeasonalSheets(SO1))[0]!).counts, { create: 0, submitted: 1, approved: 2 });
+    assert.deepEqual([rowOf(c.id).approvalStatus], ["PENDING_RM"], "the new entry is not approved just because the plan already has approved ones");
+    const decided = rowOf(a.id).adminDecidedAt;
+    await service.actOnSeasonalPlan(RM1, c.id, { action: "approve" }); await service.actOnSeasonalPlan(ADMIN, c.id, { action: "approve" });
+    assert.deepEqual(plain((await service.listSeasonalSheets(SO1))[0]!).counts, { create: 0, submitted: 0, approved: 3 });
+    assert.equal(rowOf(a.id).adminDecidedAt, decided, "earlier approved entries keep their history"); assert.equal((await stage(SO1, "approved")).length, 3);
+    // a rejected entry returns to Create without touching approved ones
+    const d = await addRow(service, SO1, sheet.id, "m-x1"); await service.submitSeasonalSheet(SO1, sheet.id);
+    await service.actOnSeasonalPlan(RM1, d.id, { action: "reject", reason: "No" });
+    assert.deepEqual([await stage(SO1, "create"), (await stage(SO1, "approved")).length], [[d.id], 3], "rejected → Create, never shown as approved");
+    assert.deepEqual(plain((await service.listSeasonalSheets(SO1))[0]!).counts, { create: 1, submitted: 0, approved: 3 });
+    // isolation
+    const other = plain(await sheetFor(service, SO2, "s-kharif"));
+    assert.equal((await service.listSeasonalSheets(SO1)).length, 1, "another officer's plan is separate"); assert.equal(other.counts.create, 0);
+    assert.ok([403, 404].includes(await status(() => service.submitSeasonalSheet(SO2, sheet.id))));
+    // closed season: read-only, still loads
+    t.seasons.find((x) => x.id === "s-kharif")!.status = "CLOSED";
+    assert.equal(await status(() => service.submitSeasonalSheet(SO1, sheet.id)), 409);
+    assert.equal(plain(await service.getSeasonalSheet(SO1, sheet.id, "", "older")).plans.length, 4, "Older Plans show every entry");
   }
 
   /* ---- list across seasons + open by id ---- */
@@ -205,45 +278,49 @@ async function main() {
     assert.equal(await status(() => service.getSeasonalSheet(RM1, k1.id)), 404, "…but a draft-only plan of the team stays private");
     void k3;
     // Reviewers see only non-draft rows, and which ones they can act on.
-    await addRow(service, SO2, k2.id, "m-new", "Second (draft)");
+    await addRow(service, SO2, k2.id, "m-new");
     const rm = plain(await service.getSeasonalSheet(RM1, k2.id));
     assert.deepEqual(rm.plans.map((p) => [p.marketName, p.canReview, p.editable]), [["Pipariya", true, false]], "the RM sees the submitted row (not the draft) and may review it");
     assert.equal(plain(await service.getSeasonalSheet(SO2, k2.id)).plans.length, 2, "the owner sees every row");
-    assert.equal(plain(await service.getSeasonalSheet(SO2, k2.id, "second")).plans.length, 1, "search");
+    assert.equal(plain(await service.getSeasonalSheet(SO2, k2.id, "bare")).plans.length, 1, "search by market name");
   }
 
   /* ---- rows: the season comes from the plan, markets from the Phase-1 master, nothing from the browser ---- */
   {
     const { service, t } = loadService();
     const kharif = await sheetFor(service, SO1, "s-kharif"), rabi = await sheetFor(service, SO1, "s-rabi");
-    const a = plain(await addRow(service, SO1, kharif.id, "m-exist", "  ABC   Traders "));
-    assert.deepEqual([a.sheetId, a.seasonId, a.ownerId, a.marketName, a.type, a.marketPotential, a.status, a.appointmentDate, a.partyName, a.approvalStatus], [kharif.id, "s-kharif", "so1", "Pipariya", "Existing", "B", "—", null, "ABC Traders", "DRAFT"]);
-    const b = plain(await addRow(service, SO1, rabi.id, "m-new", "Rabi party"));
+    const a = plain(await addRow(service, SO1, kharif.id, "m-exist"));
+    assert.deepEqual([a.sheetId, a.seasonId, a.ownerId, a.marketName, a.type, a.marketPotential, a.status, a.appointmentDate, a.approvalStatus], [kharif.id, "s-kharif", "so1", "Pipariya", "Existing", "B", "—", null, "DRAFT"]);
+    const b = plain(await addRow(service, SO1, rabi.id, "m-new"));
     assert.deepEqual([b.seasonId, b.type, b.marketPotential], ["s-rabi", "New", "A"], "a row belongs to ITS plan's season (Rabi), whatever other seasons are open");
-    assert.equal(plain(await addRow(service, SO1, kharif.id, "m-undecided", "X")).marketPotential, null);
-    const spoof = plain(await service.createSeasonalPlan(SO1, { sheetId: kharif.id, marketId: "m-exist", partyName: "Spoof", type: "New", marketPotential: "A", ownerId: "so2", seasonId: "s-rabi", approvalStatus: "APPROVED", status: "Appointed", appointmentStatus: "APPOINTED", appointedAt: "2026-01-01", marketName: "Fake" }));
-    assert.deepEqual([spoof.ownerId, spoof.seasonId, spoof.type, spoof.marketPotential, spoof.status, spoof.appointmentDate, spoof.approvalStatus, spoof.marketName], ["so1", "s-kharif", "Existing", "B", "—", null, "DRAFT", "Pipariya"], "owner / season / type / potential / status cannot be spoofed");
+    assert.equal(plain(await addRow(service, SO1, kharif.id, "m-undecided")).marketPotential, null);
+    const spoof = plain(await service.createSeasonalPlan(SO1, { sheetId: kharif.id, marketId: "m-x1", type: "New", marketPotential: "A", ownerId: "so2", seasonId: "s-rabi", approvalStatus: "APPROVED", status: "Appointed", appointmentStatus: "APPOINTED", appointedAt: "2026-01-01", marketName: "Fake" }));
+    assert.deepEqual([spoof.ownerId, spoof.seasonId, spoof.type, spoof.marketPotential, spoof.status, spoof.appointmentDate, spoof.approvalStatus, spoof.marketName], ["so1", "s-kharif", "Existing", "C", "—", null, "DRAFT", "Sagar"], "owner / season / type / potential / status cannot be spoofed");
     assert.deepEqual([t.plans.find((r) => r.id === spoof.id)!.appointmentStatus, t.plans.find((r) => r.id === spoof.id)!.appointedAt], [null, null]);
-    const edited = plain(await service.updateSeasonalPlan(SO1, a.id, { partyName: "Renamed", ownerId: "so2", approvalStatus: "APPROVED", seasonId: "s-rabi", type: "New", marketPotential: "A" }));
-    assert.deepEqual([edited.partyName, edited.ownerId, edited.approvalStatus, edited.seasonId, edited.type], ["Renamed", "so1", "DRAFT", "s-kharif", "Existing"], "an edit cannot change owner, status, season, type or potential");
+    const edited = plain(await service.updateSeasonalPlan(SO1, a.id, { marketId: "m-x2", ownerId: "so2", approvalStatus: "APPROVED", seasonId: "s-rabi", type: "New", marketPotential: "A" }));
+    assert.deepEqual([edited.marketName, edited.ownerId, edited.approvalStatus, edited.seasonId, edited.type, edited.marketPotential], ["Satna", "so1", "DRAFT", "s-kharif", "Existing", "A"], "an edit changes the market only — never owner, status, season, type or potential (those follow the market)");
     // validation + ownership
-    assert.equal(await status(() => addRow(service, SO1, kharif.id, "nope", "P")), 422, "an unknown Market is rejected");
-    assert.equal(await status(() => addRow(service, SO1, kharif.id, "pending-request-id", "P")), 422, "a Market that is only a pending request is not a Market");
-    assert.equal(await status(() => service.createSeasonalPlan(SO1, { marketId: "m-exist", partyName: "P" })), 422, "a row needs its Seasonal Plan (no implicit 'current season')");
-    for (const bad of ["", "   ", undefined, "x".repeat(201)]) assert.equal(await status(() => service.createSeasonalPlan(SO1, { sheetId: kharif.id, marketId: "m-exist", partyName: bad })), 422);
+    assert.equal(await status(() => addRow(service, SO1, kharif.id, "nope")), 422, "an unknown Market is rejected");
+    assert.equal(await status(() => addRow(service, SO1, kharif.id, "pending-request-id")), 422, "a Market that is only a pending request is not a Market");
+    assert.equal(await status(() => service.createSeasonalPlan(SO1, { marketId: "m-exist" })), 422, "a row needs its Seasonal Plan (no implicit 'current season')");
+    assert.equal(await status(() => service.createSeasonalPlan(SO1, { sheetId: kharif.id })), 422, "a market is required — and nothing else is: no party name is asked for");
+    assert.equal(await status(() => service.createSeasonalPlan(SO1, { sheetId: kharif.id, marketId: "m-new", partyName: "ignored" })), 0, "a stray partyName in the payload is ignored, never required or stored");
+    assert.ok(!("partyName" in plain(await addRow(service, SO1, kharif.id, "m-x1").catch(() => ({} as never)))), "rows carry no party name");
+    assert.equal(await status(() => addRow(service, SO1, kharif.id, "m-x2")), 409, "the same market cannot be added twice to one Seasonal Plan");
+    assert.equal(await status(() => service.updateSeasonalPlan(SO1, a.id, { marketId: "m-new" })), 409, "…nor edited into a market the plan already holds")
     assert.equal(await status(() => addRow(service, SO2, kharif.id)), 404, "another officer's plan cannot receive rows");
     assert.equal(await status(() => addRow(service, ADMIN, kharif.id)), 403);
-    assert.equal(await status(() => service.updateSeasonalPlan(SO2, a.id, { partyName: "hijack" })), 404);
+    assert.equal(await status(() => service.updateSeasonalPlan(SO2, a.id, { marketId: "m-new" })), 404);
     assert.equal(await status(() => service.deleteSeasonalPlan(SO2, a.id)), 404);
     assert.equal(await status(() => service.submitSeasonalPlan(SO2, a.id)), 404);
-    assert.equal(await status(() => service.updateSeasonalPlan(RM1, a.id, { partyName: "hijack" })), 404, "an RM cannot edit a team member's row");
+    assert.equal(await status(() => service.updateSeasonalPlan(RM1, a.id, { marketId: "m-new" })), 404, "an RM cannot edit a team member's row");
     assert.equal(t.dealerWrites, 0, "no Dealer is created or edited");
     // A season that closes makes ITS plan read-only (other seasons are unaffected).
     t.seasons.find((s) => s.id === "s-rabi")!.status = "CLOSED";
     assert.equal(await status(() => addRow(service, SO1, rabi.id)), 409, "no new rows in a closed season");
-    assert.equal(await status(() => service.updateSeasonalPlan(SO1, b.id, { partyName: "x" })), 409);
+    assert.equal(await status(() => service.updateSeasonalPlan(SO1, b.id, { marketId: "m-new" })), 409);
     assert.equal(await status(() => service.submitSeasonalPlan(SO1, b.id)), 409);
-    assert.equal(await status(() => service.updateSeasonalPlan(SO1, a.id, { partyName: "still editable" })), 0, "Kharif is untouched");
+    assert.equal(await status(() => service.updateSeasonalPlan(SO1, a.id, { marketId: "m-exist" })), 0, "Kharif is untouched");
     assert.equal(plain(await service.getSeasonalSheet(SO1, rabi.id)).plans.length, 1, "a closed season's plan stays readable");
     await service.deleteSeasonalPlan(SO1, spoof.id);
     assert.equal(t.plans.some((r) => r.id === spoof.id), false);
@@ -257,7 +334,7 @@ async function main() {
     assert.equal(await status(() => service.actOnSeasonalPlan(RM1, plan.id, { action: "approve" })), 409, "a draft cannot be reviewed");
     assert.equal((await service.submitSeasonalPlan(SO1, plan.id)).approvalStatus, "PENDING_RM", "an SO's row goes to their RM first");
     assert.equal(await status(() => service.submitSeasonalPlan(SO1, plan.id)), 409);
-    assert.equal(await status(() => service.updateSeasonalPlan(SO1, plan.id, { partyName: "late edit" })), 409);
+    assert.equal(await status(() => service.updateSeasonalPlan(SO1, plan.id, { marketId: "m-new" })), 409);
     assert.equal(await status(() => service.deleteSeasonalPlan(SO1, plan.id)), 409);
     assert.equal(await status(() => service.actOnSeasonalPlan(ADMIN, plan.id, { action: "approve" })), 409, "Admin cannot skip the RM step");
     assert.equal(await status(() => service.actOnSeasonalPlan(RM2, plan.id, { action: "approve" })), 403, "another group's RM is refused");
@@ -274,13 +351,13 @@ async function main() {
     t.markets.find((m) => m.id === "m-exist")!.potential = "A";
     assert.equal(plain(await service.getSeasonalSheet(ADMIN, sheet.id)).plans[0]!.marketPotential, "C", "an approved row keeps the potential Admin approved");
     assert.equal(plain((await service.listSeasonalSheets(SO1))[0]).status, "Approved", "the plan's list status follows its rows");
-    assert.equal(await status(() => service.updateSeasonalPlan(SO1, plan.id, { partyName: "x" })), 409, "an approved row is read-only");
+    assert.equal(await status(() => service.updateSeasonalPlan(SO1, plan.id, { marketId: "m-new" })), 409, "an approved row is read-only");
     assert.ok(t.audit.filter((a) => a.entity === "seasonalPlan" || a.entity === "seasonalPlanSheet").length >= 5, "create, row, submit, RM approval and final approval are audited");
   }
   {
     const { service } = loadService();
     const sheet = await sheetFor(service, RM1);
-    const own = await addRow(service, RM1, sheet.id, "m-new", "RM's party");
+    const own = await addRow(service, RM1, sheet.id, "m-new");
     assert.equal((await service.submitSeasonalPlan(RM1, own.id)).approvalStatus, "PENDING_ADMIN", "an RM's row skips the RM step");
     assert.equal(await status(() => service.actOnSeasonalPlan(RM1, own.id, { action: "approve" })), 403, "an RM never approves their own row");
     assert.equal(await status(() => service.actOnSeasonalPlan(RM2, own.id, { action: "approve" })), 403);
@@ -289,7 +366,7 @@ async function main() {
     assert.equal((await service.submitSeasonalPlan(SO4, lonely.id)).approvalStatus, "PENDING_ADMIN", "an SO with no RM goes straight to Admin");
     // Rejection round trip.
     const s1 = await sheetFor(service, SO1);
-    const p = await addRow(service, SO1, s1.id, "m-exist", "Rejected one");
+    const p = await addRow(service, SO1, s1.id, "m-exist");
     await service.submitSeasonalPlan(SO1, p.id);
     const rej = await service.actOnSeasonalPlan(RM1, p.id, { action: "reject", reason: "Wrong market" });
     assert.deepEqual([rej.approvalStatus, rej.rejectionStage, rej.rejectionReason, rej.status, rej.editable], ["REJECTED", "RM", "Wrong market", "—", false]);

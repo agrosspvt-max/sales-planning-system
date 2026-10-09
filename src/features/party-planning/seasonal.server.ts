@@ -8,13 +8,13 @@ import { writeAudit } from "@/lib/audit";
 import { isAdministrativeRole, assertAdminPermission } from "@/features/accounts/permissions";
 import { getSeasonInfo, isSeasonOpen, listOpenSeasonInfos, type SeasonInfo } from "./season-info.server";
 import {
-  canReviewNow, cleanPartyName, derivedType, displayStatus, finalApprovalFields, isEditable, reviewTransition, seasonalSheetStatus, shownMarketPotential, shownMarketSource, submitTarget, validatePartyName,
+  canReviewNow, derivedType, displayStatus, finalApprovalFields, isEditable, reviewTransition, seasonalSheetStatus, shownMarketPotential, shownMarketSource, submitTarget,
   type ApprovalStatus, type SheetStatus,
 } from "@/lib/seasonal-plan";
 
 /**
  * Party Planning · Seasonal Planning. A "Seasonal Plan" is one owner's plan for ONE selected Season (a SeasonalPlanSheet); inside it sit the
- * owner's market rows (SeasonalPlan: Market + tentative Party Name), each approved SO → RM → Admin exactly as before.
+ * owner's market rows (SeasonalPlan: one Market each), each approved SO → RM → Admin exactly as before.
  *
  *  • Season: chosen when the plan is created, from the OPEN seasons of the Seasons module — never derived from "today". Every later read /
  *    write loads the season from the plan itself; rows may only change while that season is OPEN.
@@ -44,6 +44,8 @@ const SEASON_CLOSED = "This Seasonal Plan belongs to a season that is no longer 
 export interface SeasonalSheetDto {
   id: string; seasonId: string; seasonName: string; seasonOpen: boolean; ownerId: string; ownerName: string;
   status: SheetStatus; itemCount: number; pendingCount: number; needsMyReview: number; updatedAt: string; own: boolean;
+  /** How many of the plan's market entries sit in each lifecycle section: Create (Draft / Rejected), Submitted (awaiting RM / Admin), Approved. One logical plan per owner + season holds them all. */
+  counts: { create: number; submitted: number; approved: number };
 }
 
 const sheetInclude = {
@@ -65,6 +67,11 @@ function toSheetDto(ctx: AuthContext, v: Viewer, r: SheetRow): SeasonalSheetDto 
     id: r.id, seasonId: r.seasonId, seasonName: `${r.season.name} ${r.season.year}`, seasonOpen: r.season.status === "OPEN", ownerId: r.ownerId, ownerName: r.owner.name,
     status: seasonalSheetStatus(r.items), itemCount: r.items.length, pendingCount: r.items.filter((i) => i.approvalStatus === "PENDING_RM" || i.approvalStatus === "PENDING_ADMIN").length,
     needsMyReview: r.items.filter((i) => canReviewNow(i, v)).length, updatedAt: updated.toISOString(), own: r.ownerId === ctx.userId,
+    counts: {
+      create: r.items.filter((i) => isEditable(i.approvalStatus)).length,
+      submitted: r.items.filter((i) => i.approvalStatus === "PENDING_RM" || i.approvalStatus === "PENDING_ADMIN").length,
+      approved: r.items.filter((i) => i.approvalStatus === "APPROVED").length,
+    },
   };
 }
 
@@ -114,10 +121,13 @@ export async function createSeasonalSheet(ctx: AuthContext, raw: unknown): Promi
   return toSheetDto(ctx, await viewerOf(ctx), created);
 }
 
+/** Which row approval statuses belong to each lifecycle section (a plan's rows are shown per section; "older" shows everything, read-only). */
+const STAGE_ROWS: Record<string, string[] | undefined> = { create: ["DRAFT", "REJECTED"], submitted: ["PENDING_RM", "PENDING_ADMIN"], approved: ["APPROVED"] };
+
 export interface SeasonalSheetDetail { sheet: SeasonalSheetDto; season: SeasonInfo; plans: SeasonalPlanDto[] }
 
 /** Open ONE Seasonal Plan by its id. Its season and rows come from the plan itself — nothing is resolved from the current date or season. */
-export async function getSeasonalSheet(ctx: AuthContext, id: string, search = ""): Promise<SeasonalSheetDetail> {
+export async function getSeasonalSheet(ctx: AuthContext, id: string, search = "", stage?: string): Promise<SeasonalSheetDetail> {
   assertReader(ctx);
   const v = await viewerOf(ctx);
   const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id }, include: sheetInclude });
@@ -126,7 +136,7 @@ export async function getSeasonalSheet(ctx: AuthContext, id: string, search = ""
   if (!season) throw new ApiError(404, "Seasonal Plan not found");
   const needle = search.trim();
   const rows = await prisma.seasonalPlan.findMany({
-    where: { AND: [{ sheetId: id }, ...(sheet.ownerId === ctx.userId || v.role === "ADMIN" ? [] : [{ approvalStatus: { not: "DRAFT" } }]), ...(needle ? [{ OR: [{ partyName: { contains: needle, mode: "insensitive" as const } }, { market: { name: { contains: needle, mode: "insensitive" as const } } }] }] : [])] },
+    where: { AND: [{ sheetId: id }, ...(sheet.ownerId === ctx.userId || v.role === "ADMIN" ? [] : [{ approvalStatus: { not: "DRAFT" } }]), ...(STAGE_ROWS[stage ?? ""] ? [{ approvalStatus: { in: STAGE_ROWS[stage ?? ""]! } }] : []), ...(needle ? [{ market: { name: { contains: needle, mode: "insensitive" as const } } }] : [])] },
     include, orderBy: { createdAt: "desc" }, take: 1000,
   });
   return { sheet: toSheetDto(ctx, v, sheet), season, plans: await toDtos(ctx, rows, v) };
@@ -140,7 +150,6 @@ export interface SeasonalPlanDto {
   marketId: string; marketName: string;
   type: "Existing" | "New" | null; marketPotential: string | null;
   status: "—" | "Pending" | "Appointed"; appointmentDate: string | null;
-  partyName: string;
   approvalStatus: ApprovalStatus; rejectionStage: string | null; rejectionReason: string | null;
   rmDecidedByName: string | null; rmDecidedAt: string | null; adminDecidedByName: string | null; adminDecidedAt: string | null;
   createdAt: string; updatedAt: string;
@@ -166,7 +175,7 @@ async function toDtos(ctx: AuthContext, rows: PlanRow[], viewer?: Viewer): Promi
     // Type + Potential come from the authoritative Market (frozen at final approval).
     type: derivedType(shownMarketSource(r, r.market)), marketPotential: shownMarketPotential(r, r.market),
     status: displayStatus(r), appointmentDate: r.appointedAt ? r.appointedAt.toISOString().slice(0, 10) : null,
-    partyName: r.partyName, approvalStatus: r.approvalStatus as ApprovalStatus, rejectionStage: r.rejectionStage, rejectionReason: r.rejectionReason,
+    approvalStatus: r.approvalStatus as ApprovalStatus, rejectionStage: r.rejectionStage, rejectionReason: r.rejectionReason,
     rmDecidedByName: r.rmDecidedById ? name.get(r.rmDecidedById) ?? null : null, rmDecidedAt: r.rmDecidedAt?.toISOString() ?? null,
     adminDecidedByName: r.adminDecidedById ? name.get(r.adminDecidedById) ?? null : null, adminDecidedAt: r.adminDecidedAt?.toISOString() ?? null,
     createdAt: r.createdAt.toISOString(), updatedAt: r.updatedAt.toISOString(),
@@ -177,13 +186,18 @@ async function toDtos(ctx: AuthContext, rows: PlanRow[], viewer?: Viewer): Promi
 /* ------------------------------------------------ owner writes ------------------------------------------------ */
 
 // Only these fields are read from the browser: anything else (ownerId, type, potential, status, season …) is stripped and ignored.
-const createInput = z.object({ sheetId: z.string().min(1, "Open a Seasonal Plan first"), marketId: z.string().min(1, "Select a Market"), partyName: z.unknown() });
-const updateInput = z.object({ marketId: z.string().min(1).optional(), partyName: z.unknown().optional() });
+const createInput = z.object({ sheetId: z.string().min(1, "Open a Seasonal Plan first"), marketId: z.string().min(1, "Select a Market") });
+const updateInput = z.object({ marketId: z.string().min(1).optional() });
 
 async function requireMarket(marketId: string): Promise<{ id: string; name: string }> {
   const market = await prisma.market.findUnique({ where: { id: marketId }, select: { id: true, name: true } });
   if (!market) throw new ApiError(422, "Select a valid Market");
   return market;
+}
+/** A market appears once in a Seasonal Plan (owner + season): a second row for it would be an indistinguishable duplicate. */
+async function assertMarketFree(sheetId: string, marketId: string, exceptId?: string): Promise<void> {
+  const clash = await prisma.seasonalPlan.findFirst({ where: { sheetId, marketId, ...(exceptId ? { id: { not: exceptId } } : {}) }, select: { id: true } });
+  if (clash) throw new ApiError(409, "This market is already in your Seasonal Plan");
 }
 async function ownPlan(ctx: AuthContext, id: string): Promise<PlanRow> {
   const plan = await prisma.seasonalPlan.findUnique({ where: { id }, include });
@@ -196,16 +210,15 @@ export async function createSeasonalPlan(ctx: AuthContext, raw: unknown): Promis
   assertPlanner(ctx);
   const parsed = createInput.safeParse(raw ?? {});
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? "Invalid Seasonal Plan");
-  const problem = validatePartyName(parsed.data.partyName);
-  if (problem) throw new ApiError(422, problem);
   // The season comes from the Seasonal Plan being edited — and must still be open. Another officer's plan looks missing.
   const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id: parsed.data.sheetId }, select: { id: true, ownerId: true, seasonId: true, season: { select: { name: true, year: true, status: true } } } });
   if (!sheet || sheet.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
   if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
   const market = await requireMarket(parsed.data.marketId);
+  await assertMarketFree(sheet.id, market.id);
   const created = await prisma.$transaction(async (tx) => {
-    const row = await tx.seasonalPlan.create({ data: { sheetId: sheet.id, seasonId: sheet.seasonId, ownerId: ctx.userId, marketId: market.id, partyName: cleanPartyName(String(parsed.data.partyName)) }, include });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "seasonalPlan", entityId: row.id, summary: `Seasonal Plan drafted · ${sheet.season.name} ${sheet.season.year} · ${market.name} · ${row.partyName}` }, tx);
+    const row = await tx.seasonalPlan.create({ data: { sheetId: sheet.id, seasonId: sheet.seasonId, ownerId: ctx.userId, marketId: market.id }, include });
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "seasonalPlan", entityId: row.id, summary: `Seasonal Plan drafted · ${sheet.season.name} ${sheet.season.year} · ${market.name}` }, tx);
     return row;
   });
   return (await toDtos(ctx, [created]))[0]!;
@@ -216,18 +229,13 @@ export async function updateSeasonalPlan(ctx: AuthContext, id: string, raw: unkn
   const plan = await ownPlan(ctx, id);
   if (!isEditable(plan.approvalStatus)) throw new ApiError(409, "Only a draft or rejected Seasonal Plan can be edited");
   const parsed = updateInput.safeParse(raw ?? {});
-  if (!parsed.success || (parsed.data.marketId === undefined && parsed.data.partyName === undefined)) throw new ApiError(422, "Nothing to update");
-  const data: { marketId?: string; partyName?: string } = {};
-  if (parsed.data.partyName !== undefined) {
-    const problem = validatePartyName(parsed.data.partyName);
-    if (problem) throw new ApiError(422, problem);
-    data.partyName = cleanPartyName(String(parsed.data.partyName));
-  }
-  if (parsed.data.marketId !== undefined) data.marketId = (await requireMarket(parsed.data.marketId)).id;
+  if (!parsed.success || parsed.data.marketId === undefined) throw new ApiError(422, "Nothing to update");
+  const data: { marketId?: string } = {};
+  if (parsed.data.marketId !== undefined) { data.marketId = (await requireMarket(parsed.data.marketId)).id; await assertMarketFree(plan.sheetId, data.marketId, id); }
   if (!(await isSeasonOpen(plan.seasonId))) throw new ApiError(409, SEASON_CLOSED);
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.seasonalPlan.update({ where: { id }, data, include });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan edited · ${row.market.name} · ${row.partyName}` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan edited · ${row.market.name}` }, tx);
     return row;
   });
   return (await toDtos(ctx, [updated]))[0]!;
@@ -239,7 +247,7 @@ export async function deleteSeasonalPlan(ctx: AuthContext, id: string): Promise<
   if (!isEditable(plan.approvalStatus)) throw new ApiError(409, "Only a draft or rejected Seasonal Plan can be deleted");
   await prisma.$transaction(async (tx) => {
     await tx.seasonalPlan.delete({ where: { id } });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "DELETE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan deleted · ${plan.market.name} · ${plan.partyName}` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "DELETE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan deleted · ${plan.market.name}` }, tx);
   });
   return { ok: true };
 }
@@ -258,10 +266,38 @@ export async function submitSeasonalPlan(ctx: AuthContext, id: string): Promise<
       data: { approvalStatus: target, rmDecidedById: null, rmDecidedAt: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null },
     });
     if (claimed.count === 0) throw new ApiError(409, "This Seasonal Plan has already been submitted");
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan submitted for ${target === "PENDING_RM" ? "RM" : "Admin"} review · ${plan.market.name} · ${plan.partyName}` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan submitted for ${target === "PENDING_RM" ? "RM" : "Admin"} review · ${plan.market.name}` }, tx);
     return (await tx.seasonalPlan.findUnique({ where: { id }, include }))!;
   });
   return (await toDtos(ctx, [updated]))[0]!;
+}
+
+/**
+ * Submit EVERY editable (Draft / Rejected) entry of the caller's Seasonal Plan as one batch. Entries already submitted or approved are untouched, so the
+ * plan keeps accumulating: the same logical plan (owner + season) shows the new batch under Submitted next to the earlier ones. Each entry is claimed on
+ * the status it was read at, so a retry / double click submits nothing twice.
+ */
+export async function submitSeasonalSheet(ctx: AuthContext, sheetId: string): Promise<{ submitted: number }> {
+  assertPlanner(ctx);
+  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id: sheetId }, select: { id: true, ownerId: true, seasonId: true, season: { select: { name: true, year: true, status: true } } } });
+  if (!sheet || sheet.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
+  if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
+  const rmId = ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId) : null;
+  const submitted = await prisma.$transaction(async (tx) => {
+    const rows = await tx.seasonalPlan.findMany({ where: { sheetId, ownerId: ctx.userId, approvalStatus: { in: ["DRAFT", "REJECTED"] } }, select: { id: true, approvalStatus: true } });
+    if (rows.length === 0) throw new ApiError(409, "There is nothing new to submit");
+    let n = 0;
+    for (const row of rows) {
+      const target = submitTarget(row.approvalStatus, ctx.role as "SALES_OFFICER" | "REGIONAL_MANAGER", rmId != null);
+      if (!target) continue;
+      const claimed = await tx.seasonalPlan.updateMany({ where: { id: row.id, ownerId: ctx.userId, approvalStatus: row.approvalStatus }, data: { approvalStatus: target, rmDecidedById: null, rmDecidedAt: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null } });
+      n += claimed.count;
+    }
+    if (n === 0) throw new ApiError(409, "There is nothing new to submit");
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlanSheet", entityId: sheetId, summary: `Seasonal Plan batch submitted · ${sheet.season.name} ${sheet.season.year} · ${n} market(s)` }, tx);
+    return n;
+  });
+  return { submitted };
 }
 
 /* ------------------------------------------------ review ------------------------------------------------ */
@@ -296,7 +332,7 @@ export async function actOnSeasonalPlan(ctx: AuthContext, id: string, raw: unkno
     const claimed = await tx.seasonalPlan.updateMany({ where: { id, approvalStatus: plan.approvalStatus }, data });
     if (claimed.count === 0) throw new ApiError(409, "This plan was just reviewed by someone else");
     const verb = action === "approve" ? (step.finalApproval ? "approved (final)" : "approved by RM") : "rejected";
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan ${verb} · ${plan.market.name} · ${plan.partyName}${action === "reject" ? ` — ${reason}` : ""}` }, tx);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan ${verb} · ${plan.market.name}${action === "reject" ? ` — ${reason}` : ""}` }, tx);
     return (await tx.seasonalPlan.findUnique({ where: { id }, include }))!;
   });
   return (await toDtos(ctx, [updated]))[0]!;

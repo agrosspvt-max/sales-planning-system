@@ -73,6 +73,7 @@ model User {
   seasonPlans              SeasonPlan[]                @relation("OfficerPlans")
   planImportRecords        SeasonPlanImportRecord[]    @relation("PlanImports")
   group                    UserGroup?                  @relation(fields: [groupId], references: [id])
+  territoryMarketEdits     TerritoryMarketEdit[]       @relation("TerritoryMarketEditor")
 
   @@index([role])
   @@index([isActive])
@@ -672,33 +673,35 @@ model ProductMerge {
 
 /// Dealer master. Ownership over time is expressed via DealerAssignment.
 model Dealer {
-  id                  String                @id @default(cuid())
-  name                String
-  town                String?
-  isActive            Boolean               @default(true)
-  createdAt           DateTime              @default(now())
-  updatedAt           DateTime              @updatedAt
-  mobile              String?
-  village             String?
-  tehsil              String?
-  district            String?
-  address             String?
-  status              String                @default("ACTIVE")
-  createdByUserId     String?
-  createdFrom         String?
-  deletedAt           DateTime?
-  cnRequests          CnRequest[]
-  dailyWorkEntries    DailyWorkEntry[]
-  aliases             DealerAlias[]
-  assignments         DealerAssignment[]
-  schemePlans         DealerSchemePlan[]
-  tagAssignments      DealerTagAssignment[]
-  tagRequests         DealerTagRequest[]
-  lastPaymentReceipts LastPaymentReceipt[]
-  planDealers         PlanDealer[]
-  recoveryPlanDealers RecoveryPlanDealer[]
-  schemeSales         SchemeSale[]
-  marketMapping       DealerMarketMapping?
+  id                        String                @id @default(cuid())
+  name                      String
+  town                      String?
+  isActive                  Boolean               @default(true)
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+  mobile                    String?
+  village                   String?
+  tehsil                    String?
+  district                  String?
+  address                   String?
+  status                    String                @default("ACTIVE")
+  createdByUserId           String?
+  createdFrom               String?
+  deletedAt                 DateTime?
+  cnRequests                CnRequest[]
+  dailyWorkEntries          DailyWorkEntry[]
+  aliases                   DealerAlias[]
+  assignments               DealerAssignment[]
+  schemePlans               DealerSchemePlan[]
+  tagAssignments            DealerTagAssignment[]
+  tagRequests               DealerTagRequest[]
+  lastPaymentReceipts       LastPaymentReceipt[]
+  planDealers               PlanDealer[]
+  recoveryPlanDealers       RecoveryPlanDealer[]
+  schemeSales               SchemeSale[]
+  marketMapping             DealerMarketMapping?
+  appointedFromMonthlyPlans PartyMonthlyPlan[]    @relation("PartyMonthlyAppointedDealer")
+  marketEdits               TerritoryMarketEdit[]
 
   @@index([isActive])
   @@index([status])
@@ -1929,6 +1932,9 @@ model DealerMarketMapping {
   id          String   @id @default(cuid())
   dealerId    String   @unique
   marketId    String?
+  /// TEMPORARY manual override of the displayed Market (free text from the Existing Dealers screen). It is NOT a Market master record and
+  /// never feeds Seasonal / Monthly Planning; an Excel import that changes the Market clears it. Each manual change is in TerritoryMarketEdit.
+  marketText  String?
   district    String? // dealer territory District (free text from the Excel import / manual edit; no District master)
   potential   String? // A | B | C — dealer-level, NOT the Market's potential
   updatedById String?
@@ -1938,6 +1944,21 @@ model DealerMarketMapping {
   market      Market?  @relation(fields: [marketId], references: [id], onDelete: SetNull)
 
   @@index([marketId])
+}
+
+/// Append-only history of MANUAL Market edits on Existing Dealers (one row per confirmed change; Excel imports never write here).
+/// Rows are never updated or deleted (database trigger).
+model TerritoryMarketEdit {
+  id             String   @id @default(cuid())
+  dealerId       String
+  previousMarket String?
+  newMarket      String
+  editedById     String
+  editedAt       DateTime @default(now())
+  dealer         Dealer   @relation(fields: [dealerId], references: [id])
+  editedBy       User     @relation("TerritoryMarketEditor", fields: [editedById], references: [id])
+
+  @@index([dealerId, editedAt])
 }
 
 /// "Add Market" request: SO → RM review → Admin review → approved Market. An RM's own request goes straight to Admin review.
@@ -1983,7 +2004,8 @@ model SeasonalPlan {
   seasonId                String
   ownerId                 String
   marketId                String
-  partyName               String // tentative planning name — never creates or edits a Dealer
+  /// RETIRED: Seasonal Planning no longer asks for a party name. Kept nullable (not dropped) so historical entries keep their original value; nothing reads or writes it.
+  partyName               String?
   approvalStatus          String             @default("DRAFT")
   rmDecidedById           String?
   rmDecidedAt             DateTime?
@@ -2017,7 +2039,7 @@ model SeasonalPlan {
 /// appointment lives on the options. Two independent options hang off it (PartyMonthlyOption); every change is an append-only
 /// PartyMonthlyEvent. Nothing here is ever cascaded away.
 model PartyMonthlyPlan {
-  id                        String               @id @default(cuid())
+  id                        String                    @id @default(cuid())
   sheetId                   String
   seasonalPlanId            String
   seasonId                  String
@@ -2026,23 +2048,83 @@ model PartyMonthlyPlan {
   marketId                  String
   marketNameAtPlanning      String
   marketPotentialAtPlanning String?
-  planDate                  DateTime?            @db.Date
-  createdAt                 DateTime             @default(now())
-  updatedAt                 DateTime             @updatedAt
-  seasonalPlan              SeasonalPlan         @relation(fields: [seasonalPlanId], references: [id])
-  season                    Season               @relation(fields: [seasonId], references: [id])
-  seasonMonth               SeasonMonth          @relation(fields: [seasonMonthId], references: [id])
-  owner                     User                 @relation("PartyMonthlyPlanOwner", fields: [ownerId], references: [id])
-  market                    Market               @relation(fields: [marketId], references: [id])
+  planDate                  DateTime?                 @db.Date
+  /// ONE operational status per market row (Option 1 / 2 are only candidate names): NONE → DOC_SENT → DOC_RECEIVED → SD_BOUNCE / APPOINTED / REJECTED.
+  /// NONE = the workflow has not begun (the table then shows Draft / Submitted / Approved from the plan). Each change is a PartyMonthlyStatusEvent.
+  opStatus                  String                    @default("NONE")
+  opStatusChangedAt         DateTime?
+  /// Entry-level approval (like Seasonal): DRAFT → PENDING_RM → PENDING_ADMIN → APPROVED | REJECTED. A Monthly Plan (owner + month) is ONE logical plan whose entries
+  /// are submitted and approved in batches, so the same plan accumulates entries under Submitted and Approved while Create stays open for more.
+  approvalStatus            String                    @default("DRAFT")
+  submittedAt               DateTime?
+  rmDecidedById             String?
+  rmDecidedAt               DateTime?
+  adminDecidedById          String?
+  adminDecidedAt            DateTime?
+  rejectionStage            String?
+  rejectionReason           String?
+  /// the Dealer created when this row was marked Appointed (via the Dealer Alias create-dealer service)
+  appointedDealerId         String?
+  appointedDealer           Dealer?                   @relation("PartyMonthlyAppointedDealer", fields: [appointedDealerId], references: [id], onDelete: SetNull)
+  statusEvents              PartyMonthlyStatusEvent[]
+  createdAt                 DateTime                  @default(now())
+  updatedAt                 DateTime                  @updatedAt
+  seasonalPlan              SeasonalPlan              @relation(fields: [seasonalPlanId], references: [id])
+  season                    Season                    @relation(fields: [seasonId], references: [id])
+  seasonMonth               SeasonMonth               @relation(fields: [seasonMonthId], references: [id])
+  owner                     User                      @relation("PartyMonthlyPlanOwner", fields: [ownerId], references: [id])
+  market                    Market                    @relation(fields: [marketId], references: [id])
   options                   PartyMonthlyOption[]
   events                    PartyMonthlyEvent[]
-  sheet                     PartyMonthlySheet    @relation(fields: [sheetId], references: [id])
+  dateChanges               PartyMonthlyDateChange[]
+  sheet                     PartyMonthlySheet         @relation(fields: [sheetId], references: [id])
 
   @@unique([seasonalPlanId, seasonMonthId])
   @@index([sheetId])
   @@index([seasonId])
   @@index([ownerId])
   @@index([seasonMonthId])
+}
+
+/// Append-only history of every change to a Monthly Plan row's Conversion Date (`planDate`): previous → new, who, when, and whether it was an
+/// Admin action (byAdmin). The SO change count = rows with byAdmin=false; the date is "Admin-confirmed" while the LATEST row is an Admin one.
+/// Rows are never updated or deleted (database trigger).
+model PartyMonthlyDateChange {
+  id            String           @id @default(cuid())
+  monthlyPlanId String
+  previousDate  DateTime?        @db.Date
+  newDate       DateTime?        @db.Date
+  byAdmin       Boolean
+  /// true when the date was set automatically by a status change (not edited by hand)
+  automatic     Boolean          @default(false)
+  actorId       String
+  actorName     String
+  actorRole     String
+  createdAt     DateTime         @default(now())
+  monthlyPlan   PartyMonthlyPlan @relation(fields: [monthlyPlanId], references: [id])
+
+  @@index([monthlyPlanId, createdAt])
+}
+
+/// Append-only history of a market row's operational status: previous → new, actor, time, remarks, and what the SO said was sent / Admin said was received.
+/// Rows are never updated or deleted (database trigger).
+model PartyMonthlyStatusEvent {
+  id             String           @id @default(cuid())
+  monthlyPlanId  String
+  previousStatus String
+  newStatus      String
+  /// set on the Appointed event: the Dealer created in the same transaction
+  dealerId       String?
+  actorId        String
+  actorName      String
+  actorRole      String
+  remarks        String?
+  sentInfo       Json?
+  receivedInfo   Json?
+  createdAt      DateTime         @default(now())
+  monthlyPlan    PartyMonthlyPlan @relation(fields: [monthlyPlanId], references: [id])
+
+  @@index([monthlyPlanId, createdAt])
 }
 
 /// Option 1 / Option 2 of a PartyMonthlyPlan — two candidate parties with INDEPENDENT lifecycles.
@@ -2113,16 +2195,25 @@ model SeasonalPlanSheet {
 /// Party Planning list/detail header (Monthly): one Monthly Plan = one owner's plan for ONE Season + ONE SeasonMonth, holding their
 /// market rows (PartyMonthlyPlan). One sheet per (owner, SeasonMonth).
 model PartyMonthlySheet {
-  id            String             @id @default(cuid())
-  seasonId      String
-  seasonMonthId String
-  ownerId       String
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
-  season        Season             @relation(fields: [seasonId], references: [id])
-  seasonMonth   SeasonMonth        @relation(fields: [seasonMonthId], references: [id])
-  owner         User               @relation("PartyMonthlySheetOwner", fields: [ownerId], references: [id])
-  items         PartyMonthlyPlan[]
+  id               String             @id @default(cuid())
+  seasonId         String
+  seasonMonthId    String
+  ownerId          String
+  /// Plan-level approval (separate from each option's own lifecycle): DRAFT → PENDING_RM → PENDING_ADMIN → APPROVED | REJECTED (same steps as Seasonal).
+  approvalStatus   String             @default("DRAFT")
+  submittedAt      DateTime?
+  rmDecidedById    String?
+  rmDecidedAt      DateTime?
+  adminDecidedById String?
+  adminDecidedAt   DateTime?
+  rejectionStage   String?
+  rejectionReason  String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  season           Season             @relation(fields: [seasonId], references: [id])
+  seasonMonth      SeasonMonth        @relation(fields: [seasonMonthId], references: [id])
+  owner            User               @relation("PartyMonthlySheetOwner", fields: [ownerId], references: [id])
+  items            PartyMonthlyPlan[]
 
   @@unique([ownerId, seasonMonthId])
   @@index([seasonId])

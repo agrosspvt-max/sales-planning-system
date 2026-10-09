@@ -1,6 +1,7 @@
 /** Pure Seasonal Plan rules: derived Type/Status, routing, review transitions, approval ≠ appointment. */
 import assert from "node:assert/strict";
-import { filterSeasonalRows, canReviewNow, seasonalSheetStatus, applyAppointment, derivedType, displayStatus, finalApprovalFields, isEditable, reviewTransition, shownMarketPotential, shownMarketSource, submitTarget, validatePartyName } from "./seasonal-plan";
+import { canReviewNow, seasonalSheetStatus, applyAppointment, derivedType, displayStatus, finalApprovalFields, isEditable, reviewTransition, shownMarketPotential, shownMarketSource, submitTarget } from "./seasonal-plan";
+import * as lib from "./seasonal-plan";
 
 let passed = 0;
 const test = (name: string, fn: () => void) => { fn(); passed += 1; console.log(`  ok  ${name}`); };
@@ -18,9 +19,8 @@ test("Status is — until final approval, then Pending; Appointed only from the 
   assert.equal(displayStatus({ appointmentStatus: "APPOINTED" }), "Appointed");
 });
 
-test("Party Name: required, trimmed, bounded", () => {
-  assert.equal(validatePartyName("ABC Traders"), null);
-  for (const bad of ["", "   ", null, undefined, 5, "x".repeat(201)]) assert.ok(validatePartyName(bad), String(bad));
+test("Seasonal Planning has no Party Name rules any more", () => {
+  for (const gone of ["validatePartyName", "cleanPartyName", "PARTY_NAME_MAX"]) assert.ok(!(gone in lib), `${gone} was removed`);
 });
 
 test("only draft / rejected plans are editable by their owner", () => {
@@ -98,11 +98,3 @@ test("who can approve / reject a row right now (the review queue that replaced t
 
 console.log(`\n${passed} seasonal-plan rule tests passed`);
 
-test("detail-page column filters: Market contains (case-insensitive) AND Potential A/B/C", () => {
-  const rows = [{ marketName: "Pipariya", marketPotential: "A" }, { marketName: "Pip Nagar", marketPotential: "B" }, { marketName: "Bareli", marketPotential: null }];
-  assert.equal(filterSeasonalRows(rows, { market: "", potential: "" }).length, 3);
-  assert.equal(filterSeasonalRows(rows, { market: " PIP ", potential: "" }).length, 2);
-  assert.deepEqual(filterSeasonalRows(rows, { market: "pip", potential: "A" }).map((r) => r.marketName), ["Pipariya"]);
-  assert.equal(filterSeasonalRows(rows, { market: "", potential: "C" }).length, 0);
-  assert.equal(filterSeasonalRows(rows, { market: "", potential: "Z" }).length, 3, "arbitrary potentials are ignored");
-});

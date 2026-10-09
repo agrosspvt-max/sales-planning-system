@@ -3,16 +3,17 @@ import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { getOfficerScope } from "@/lib/scope";
+import { getCurrentManagerId, getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
-import { isAdministrativeRole, assertAdminPermission } from "@/features/accounts/permissions";
+import { hasAdminPermission, isAdministrativeRole, assertAdminPermission } from "@/features/accounts/permissions";
 import { getSeasonInfo, listOpenSeasonInfos, type MonthOption, type SeasonInfo } from "./season-info.server";
 import { identity, monthLabel } from "@/lib/season-calendar";
 import { currentBusinessDate } from "@/lib/daily-work";
-import { applyAppointment, derivedType, shownMarketPotential, shownMarketSource } from "@/lib/seasonal-plan";
+import { createDealerForOfficer } from "@/features/planning/monthly-plan.server";
+import { applyAppointment, derivedType, isEditable, reviewTransition, shownMarketPotential, shownMarketSource, submitTarget } from "@/lib/seasonal-plan";
 import {
-  ADMIN_PENDING_STATUSES, OPTION_NUMBERS, STATUS_LABEL, TRANSITIONS, adminActionFor, cleanParty, monthKey, monthlySheetStatus, parseTransition, transitionActor, validatePartyName, validatePlanDate,
-  type MonthlySheetStatus, type OptionNo, type OptionStatus,
+  APPROVAL_LABEL, ADMIN_PENDING_STATUSES, OPTION_NUMBERS, STAGE_ROW_STATUSES, sheetInStage, type PlanStage, type StageCounts, conversionDays, summarizeDateHistory, ROW_STATUS_LABEL, TRANSITIONS, adminActionFor, cleanParty, displayRowStatus, isRowStatus, monthKey, monthlySheetStatus, parseTransition, transitionActor, validatePartyName, validatePlanDate,
+  type DocInfo, type TransitionInput, type MonthlySheetStatus, type OptionNo, type RowStatus,
 } from "@/lib/monthly-plan";
 
 /**
@@ -27,7 +28,7 @@ import {
  *    Plan cannot even be created for a season in which the caller has no approved market.
  *  • Workflow: no second approval layer — the Seasonal Plan was already approved, and the option lifecycle itself carries the Admin steps.
  *  • Owner / season / month / market / potential / status / actor / dates are all derived server-side from authoritative records.
- *  • Every transition updates the option AND appends a PartyMonthlyEvent in ONE transaction (events are never updated or deleted).
+ *  • Every status change updates the row AND appends a PartyMonthlyStatusEvent (and the automatic Conversion Date change) in ONE transaction (events are never updated or deleted).
  */
 
 const planner = (ctx: AuthContext): boolean => ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER;
@@ -45,27 +46,48 @@ const SEASON_CLOSED = "This Monthly Plan belongs to a season that is no longer o
 export interface MonthlySheetDto {
   id: string; seasonId: string; seasonName: string; seasonOpen: boolean; seasonMonthId: string; monthLabel: string; monthKey: string;
   ownerId: string; ownerName: string; status: MonthlySheetStatus; itemCount: number; needsMyAction: number; updatedAt: string; own: boolean;
+  /** ONE logical plan per owner + month: how many of its entries sit in each lifecycle section (Create = Draft / Rejected, Submitted = awaiting RM / Admin, Approved). */
+  counts: StageCounts & { pendingRm: number; pendingAdmin: number; rejected: number };
+  submittedAt: string | null; rejectionStage: string | null; rejectionReason: string | null;
+  /** What the caller may do now (the service re-checks each one). canEdit = add entries; canSubmit = there are editable entries; canReview = entries waiting on this caller. */
+  canEdit: boolean; canSubmit: boolean; canReview: boolean;
 }
 const sheetInclude = {
   season: { select: { name: true, year: true, status: true } },
   seasonMonth: { select: { name: true, calendarMonth: true, calendarYear: true } },
   owner: { select: { name: true } },
-  items: { select: { updatedAt: true, options: { select: { status: true, partyName: true, updatedAt: true } } } },
+  items: { select: { updatedAt: true, opStatus: true, approvalStatus: true, submittedAt: true, rejectionStage: true, rejectionReason: true, options: { select: { optionNo: true, partyName: true, updatedAt: true } } } },
 } as const;
 type SheetRow = Prisma.PartyMonthlySheetGetPayload<{ include: typeof sheetInclude }>;
 
-/** What the caller can do next on a sheet: Admin → options waiting on an Admin step; an owner → options still Pending that have a candidate party to send. */
+/** What the caller can do next on a sheet: Admin → entries waiting on an Admin step; an owner → APPROVED entries whose status workflow has not begun. */
 function needsMyAction(ctx: AuthContext, r: SheetRow): number {
-  const options = r.items.flatMap((i) => i.options);
-  if (isAdministrativeRole(ctx.role)) return options.filter((o) => (ADMIN_PENDING_STATUSES as readonly string[]).includes(o.status)).length;
-  return r.ownerId === ctx.userId ? options.filter((o) => o.status === "PENDING" && o.partyName).length : 0;
+  if (isAdministrativeRole(ctx.role)) return r.items.filter((i) => i.approvalStatus === "APPROVED" && (ADMIN_PENDING_STATUSES as readonly string[]).includes(i.opStatus)).length;
+  return r.ownerId === ctx.userId ? r.items.filter((i) => i.approvalStatus === "APPROVED" && i.opStatus === "NONE").length : 0;
 }
-function toSheetDto(ctx: AuthContext, r: SheetRow): MonthlySheetDto {
+/** Entry-level review rights: Admin on PENDING_ADMIN; an RM on PENDING_RM entries of a TEAM member (never their own). `teamIds` = the RM's scope. */
+function canReviewEntry(ctx: AuthContext, r: { ownerId: string; approvalStatus: string }, teamIds: readonly string[]): boolean {
+  if (isAdministrativeRole(ctx.role)) return r.approvalStatus === "PENDING_ADMIN" && hasAdminPermission(ctx, "partyPlanning", "approve");
+  if (ctx.role === Role.REGIONAL_MANAGER) return r.approvalStatus === "PENDING_RM" && r.ownerId !== ctx.userId && teamIds.includes(r.ownerId);
+  return false;
+}
+function toSheetDto(ctx: AuthContext, r: SheetRow, teamIds: readonly string[] = []): MonthlySheetDto {
   const updated = [r.updatedAt, ...r.items.flatMap((i) => [i.updatedAt, ...i.options.map((o) => o.updatedAt)])].sort((a, b) => b.getTime() - a.getTime())[0]!;
+  const n = (...statuses: string[]) => r.items.filter((i) => statuses.includes(i.approvalStatus)).length;
+  const open = r.season.status === "OPEN";
+  const owner = r.ownerId === ctx.userId;
+  const counts = { create: n("DRAFT", "REJECTED"), submitted: n("PENDING_RM", "PENDING_ADMIN"), approved: n("APPROVED"), pendingRm: n("PENDING_RM"), pendingAdmin: n("PENDING_ADMIN"), rejected: n("REJECTED") };
+  const rejected = r.items.filter((i) => i.approvalStatus === "REJECTED" && i.rejectionReason);
+  const submitted = r.items.map((i) => i.submittedAt).filter((d): d is Date => !!d).sort((a, b) => b.getTime() - a.getTime())[0];
   return {
-    id: r.id, seasonId: r.seasonId, seasonName: `${r.season.name} ${r.season.year}`, seasonOpen: r.season.status === "OPEN", seasonMonthId: r.seasonMonthId,
+    id: r.id, seasonId: r.seasonId, seasonName: `${r.season.name} ${r.season.year}`, seasonOpen: open, seasonMonthId: r.seasonMonthId,
     monthLabel: monthLabel({ ...r.seasonMonth }), monthKey: monthKey(r.seasonMonth) ?? "", ownerId: r.ownerId, ownerName: r.owner.name,
-    status: monthlySheetStatus(r.items), itemCount: r.items.length, needsMyAction: needsMyAction(ctx, r), updatedAt: updated.toISOString(), own: r.ownerId === ctx.userId,
+    status: monthlySheetStatus(r.items), itemCount: r.items.length, updatedAt: updated.toISOString(), own: owner,
+    needsMyAction: needsMyAction(ctx, r) + r.items.filter((i) => canReviewEntry(ctx, { ownerId: r.ownerId, approvalStatus: i.approvalStatus }, teamIds)).length,
+    counts, submittedAt: submitted?.toISOString() ?? null, rejectionStage: rejected[0]?.rejectionStage ?? null, rejectionReason: rejected[0]?.rejectionReason ?? null,
+    canEdit: owner && (planner(ctx) || isAdministrativeRole(ctx.role)) && open,
+    canSubmit: owner && planner(ctx) && open && counts.create > 0,
+    canReview: open && r.items.some((i) => canReviewEntry(ctx, { ownerId: r.ownerId, approvalStatus: i.approvalStatus }, teamIds)),
   };
 }
 /** The owner always; an RM their team's; Admin everyone's. Anyone else cannot tell it exists. */
@@ -95,11 +117,11 @@ export async function getMonthlyOptions(ctx: AuthContext): Promise<{ seasons: Mo
 }
 
 /** The Monthly Plans the caller may see, across ALL seasons and months. `needsAction` narrows to those with something the caller can act on now. */
-export async function listMonthlySheets(ctx: AuthContext, filters: { seasonId?: string; needsAction?: boolean } = {}): Promise<MonthlySheetDto[]> {
+export async function listMonthlySheets(ctx: AuthContext, filters: { seasonId?: string; needsAction?: boolean; stage?: PlanStage } = {}): Promise<MonthlySheetDto[]> {
   assertReader(ctx);
   const scope = await getOfficerScope(ctx);
   const rows = await prisma.partyMonthlySheet.findMany({ where: { ...(filters.seasonId ? { seasonId: filters.seasonId } : {}), ...(scope.all ? {} : { ownerId: { in: scope.ids } }) }, include: sheetInclude, take: 1000 });
-  return rows.map((r) => toSheetDto(ctx, r)).filter((d) => !filters.needsAction || d.needsMyAction > 0)
+  return rows.map((r) => toSheetDto(ctx, r, scope.ids)).filter((d) => !filters.stage || sheetInStage(d.counts, d.seasonOpen, filters.stage)).filter((d) => !filters.needsAction || d.needsMyAction > 0)
     .sort((a, b) => b.monthKey.localeCompare(a.monthKey) || b.updatedAt.localeCompare(a.updatedAt));
 }
 
@@ -121,80 +143,105 @@ export async function createMonthlySheet(ctx: AuthContext, raw: unknown): Promis
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "partyMonthlySheet", entityId: sheet.id, summary: `Monthly Plan created · ${season.name} ${season.year} · ${month.label}` }, tx);
     return sheet;
   });
-  return toSheetDto(ctx, created);
+  return toSheetDto(ctx, created, [ctx.userId]);
 }
 
-export interface EligibleSeasonalPlan { id: string; marketName: string; marketPotential: string | null; type: "Existing" | "New" | null; partyName: string }
+export interface EligibleSeasonalPlan { id: string; marketName: string; marketPotential: string | null; type: "Existing" | "New" | null }
 export interface MonthlySheetDetail { sheet: MonthlySheetDto; season: SeasonInfo; month: MonthOption; seasonalPlans: EligibleSeasonalPlan[]; plans: MonthlyPlanDto[] }
 
 /** Open ONE Monthly Plan by its id: season, month and rows all come from the plan itself. `seasonalPlans` = the owner's approved markets still free for this month. */
-export async function getMonthlySheet(ctx: AuthContext, id: string): Promise<MonthlySheetDetail> {
+export async function getMonthlySheet(ctx: AuthContext, id: string, stage?: string): Promise<MonthlySheetDetail> {
   assertReader(ctx);
   const sheet = await prisma.partyMonthlySheet.findUnique({ where: { id }, include: sheetInclude });
   if (!sheet || !(await sheetVisible(ctx, sheet.ownerId))) throw new ApiError(404, "Monthly Plan not found");
   const season = await getSeasonInfo(sheet.seasonId);
   const month = season?.months.find((m) => m.id === sheet.seasonMonthId);
   if (!season || !month) throw new ApiError(404, "Monthly Plan not found");
-  const rows = await prisma.partyMonthlyPlan.findMany({ where: { sheetId: id }, include, take: 1000 });
-  const plans = (await toDtos(ctx, rows)).sort((a, b) => a.marketName.localeCompare(b.marketName));
+  // The plan is one logical plan; each lifecycle section shows only ITS entries (Create = editable ones, Submitted = awaiting review, Approved = approved; Older Plans = all, read-only).
+  const inStage = STAGE_ROW_STATUSES[stage ?? ""];
+  const rows = await prisma.partyMonthlyPlan.findMany({ where: { sheetId: id, ...(inStage ? { approvalStatus: { in: [...inStage] } } : {}) }, include, take: 1000 });
+  const plans = (await toDtos(ctx, rows, (await getOfficerScope(ctx)).ids)).sort((a, b) => a.marketName.localeCompare(b.marketName));
   const own = sheet.ownerId === ctx.userId && planner(ctx);
-  const approved = own
+  const usedRows = await prisma.partyMonthlyPlan.findMany({ where: { sheetId: id }, select: { seasonalPlanId: true } }); // a market already planned this month (in ANY section) is not offered again
+  const approved = own && (!stage || stage === "create")
     ? await prisma.seasonalPlan.findMany({ where: { ownerId: ctx.userId, seasonId: sheet.seasonId, approvalStatus: "APPROVED" }, include: { market: { select: { name: true, source: true, potential: true } } }, orderBy: { createdAt: "asc" } })
     : [];
-  const used = new Set(rows.map((r) => r.seasonalPlanId));
+  const used = new Set(usedRows.map((r) => r.seasonalPlanId));
   return {
-    sheet: toSheetDto(ctx, sheet), season, month, plans,
-    seasonalPlans: approved.filter((p) => !used.has(p.id)).map((p) => ({ id: p.id, marketName: p.market.name, marketPotential: shownMarketPotential(p, p.market), type: derivedType(shownMarketSource(p, p.market)), partyName: p.partyName })),
+    sheet: toSheetDto(ctx, sheet, (await getOfficerScope(ctx)).ids), season, month, plans,
+    seasonalPlans: approved.filter((p) => !used.has(p.id)).map((p) => ({ id: p.id, marketName: p.market.name, marketPotential: shownMarketPotential(p, p.market), type: derivedType(shownMarketSource(p, p.market)) })),
   };
 }
 
 /* ------------------------------------------------ DTO ------------------------------------------------ */
 
-export interface TimelineEventDto { id: string; eventType: string; fromStatus: OptionStatus | null; toStatus: OptionStatus; actorName: string; actorRole: string; details: Record<string, unknown> | null; createdAt: string }
-export interface OptionDto {
-  id: string; optionNo: OptionNo; partyName: string | null; status: OptionStatus; statusLabel: string; statusChangedAt: string;
-  sentInfo: unknown; sentByName: string | null; sentAt: string | null;
-  receivedInfo: unknown; receivedByName: string | null; receivedAt: string | null;
-  actualPartyName: string | null; actualAppointedOn: string | null; rejectionReason: string | null;
-  /** The moves the CALLER may make from here (the server re-checks every one). */
-  allowed: OptionStatus[];
-  events: TimelineEventDto[];
-}
+/** Option 1 / Option 2 are only candidate party names — no status, no timeline of their own. */
+export interface OptionDto { id: string; optionNo: OptionNo; partyName: string | null }
+export interface StatusEventDto { id: string; dealerId: string | null; previousStatus: string; newStatus: string; previousLabel: string; newLabel: string; actorName: string; actorRole: string; remarks: string | null; sentInfo: DocInfo | null; receivedInfo: DocInfo | null; createdAt: string }
 export interface MonthlyPlanDto {
   id: string; sheetId: string; seasonalPlanId: string; seasonId: string; seasonMonthId: string; monthLabel: string; monthKey: string;
-  ownerId: string; ownerName: string; marketId: string; marketName: string; marketPotential: string | null;
+  ownerId: string; ownerName: string; ownerGroupId: string | null; marketId: string; marketName: string; marketPotential: string | null;
   planDate: string | null; createdAt: string; canManage: boolean; options: OptionDto[];
+  /** The dealer created when the row was marked Appointed. */
+  appointedDealerId: string | null; appointedDealerName: string | null;
+  /** The ONE operational status of the row (and what the Status column shows: Draft / Submitted / Approved until the workflow begins). */
+  opStatus: RowStatus; statusLabel: string; statusChangedAt: string | null;
+  /** Entry-level approval (separate from the operational status): which batch section the entry is in, and why it was rejected. */
+  approvalStatus: string; approvalLabel: string; rejectionStage: string | null; rejectionReason: string | null; canEditEntry: boolean; canReview: boolean;
+  /** The moves the CALLER may make now (the server re-checks every one). */
+  allowedStatuses: { to: RowStatus; label: string }[];
+  /** What the SO last said was sent / what Admin last said was actually received — kept apart, never merged. */
+  sentInfo: DocInfo | null; receivedInfo: DocInfo | null; statusEvents: StatusEventDto[];
+  /** Conversion Date (= planDate): hand-editable by the SO only before the status workflow begins, then set automatically on every status change. */
+  canEditDate: boolean; dateChangeCount: number; seasonalAddedOn: string; days: number; daysFinal: boolean;
+  dateHistory: DateChangeDto[];
 }
+export interface DateChangeDto { id: string; previousDate: string | null; newDate: string | null; byAdmin: boolean; automatic: boolean; actorName: string; actorRole: string; createdAt: string }
+const dayOf = (d: Date | null): string | null => (d ? d.toISOString().slice(0, 10) : null);
 
 const include = {
   seasonMonth: { select: { name: true, calendarMonth: true, calendarYear: true } },
   season: { select: { status: true } },
-  owner: { select: { name: true } },
-  options: { orderBy: { optionNo: "asc" as const }, include: { events: { orderBy: { createdAt: "asc" as const } } } },
+  owner: { select: { name: true, groupId: true } },
+  appointedDealer: { select: { id: true, name: true } },
+  seasonalPlan: { select: { createdAt: true } }, // when the market was ADDED to the Seasonal Plan — the start of "Days"
+  dateChanges: { orderBy: { createdAt: "asc" as const } },
+  statusEvents: { orderBy: { createdAt: "asc" as const } },
+  options: { orderBy: { optionNo: "asc" as const } },
 } as const;
 type PlanRow = Prisma.PartyMonthlyPlanGetPayload<{ include: typeof include }>;
 
-async function toDtos(ctx: AuthContext, rows: PlanRow[]): Promise<MonthlyPlanDto[]> {
-  const userIds = [...new Set(rows.flatMap((r) => r.options.flatMap((o) => [o.sentById, o.receivedById])).filter((v): v is string => !!v))];
-  const users = userIds.length ? await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true } }) : [];
-  const name = new Map(users.map((u) => [u.id, u.name]));
+async function toDtos(ctx: AuthContext, rows: PlanRow[], teamIds: readonly string[] = []): Promise<MonthlyPlanDto[]> {
   const admin = isAdministrativeRole(ctx.role);
+  const todayIst = currentBusinessDate();
   return rows.map((r) => {
     const open = r.season.status === "OPEN"; // history stays readable; actions need the plan's season to be open
     const own = r.ownerId === ctx.userId && planner(ctx);
+    const history = summarizeDateHistory(r.dateChanges);
+    const planDay = dayOf(r.planDate);
+    const opStatus = (isRowStatus(r.opStatus) ? r.opStatus : "NONE") as RowStatus;
+    const seasonalAddedOn = currentBusinessDate(r.seasonalPlan.createdAt); // Asia/Kolkata calendar date
+    const aging = conversionDays(seasonalAddedOn, opStatus === "APPOINTED" ? planDay : null, todayIst); // freezes at the Appointed date
+    const allowedStatuses = !open || r.approvalStatus !== "APPROVED" ? [] : TRANSITIONS[opStatus]
+      .filter((t) => (t.actor === "OWNER" ? own : admin && hasAdminPermission(ctx, "partyPlanning", adminActionFor(t.to)) && (t.to !== "APPOINTED" || hasAdminPermission(ctx, "dealers", "create")))).map((t) => ({ to: t.to, label: ROW_STATUS_LABEL[t.to] }));
+    const events: StatusEventDto[] = r.statusEvents.map((e) => ({
+      id: e.id, dealerId: e.dealerId ?? null, previousStatus: e.previousStatus, newStatus: e.newStatus, previousLabel: displayRowStatus(e.previousStatus, "APPROVED"), newLabel: displayRowStatus(e.newStatus, "APPROVED"),
+      actorName: e.actorName, actorRole: e.actorRole, remarks: e.remarks, sentInfo: (e.sentInfo ?? null) as DocInfo | null, receivedInfo: (e.receivedInfo ?? null) as DocInfo | null, createdAt: e.createdAt.toISOString(),
+    }));
     return {
       id: r.id, sheetId: r.sheetId, seasonalPlanId: r.seasonalPlanId, seasonId: r.seasonId, seasonMonthId: r.seasonMonthId,
-      monthLabel: monthLabel({ ...r.seasonMonth }), monthKey: monthKey(r.seasonMonth) ?? "", ownerId: r.ownerId, ownerName: r.owner.name,
+      monthLabel: monthLabel({ ...r.seasonMonth }), monthKey: monthKey(r.seasonMonth) ?? "", ownerId: r.ownerId, ownerName: r.owner.name, ownerGroupId: r.owner.groupId ?? null,
+      appointedDealerId: r.appointedDealerId ?? null, appointedDealerName: r.appointedDealer?.name ?? null,
       marketId: r.marketId, marketName: r.marketNameAtPlanning, marketPotential: r.marketPotentialAtPlanning,
-      planDate: r.planDate ? r.planDate.toISOString().slice(0, 10) : null, createdAt: r.createdAt.toISOString(), canManage: own && open,
-      options: r.options.map((o) => ({
-        id: o.id, optionNo: o.optionNo as OptionNo, partyName: o.partyName, status: o.status as OptionStatus, statusLabel: STATUS_LABEL[o.status as OptionStatus], statusChangedAt: o.statusChangedAt.toISOString(),
-        sentInfo: o.sentInfo, sentByName: o.sentById ? name.get(o.sentById) ?? null : null, sentAt: o.sentAt?.toISOString() ?? null,
-        receivedInfo: o.receivedInfo, receivedByName: o.receivedById ? name.get(o.receivedById) ?? null : null, receivedAt: o.receivedAt?.toISOString() ?? null,
-        actualPartyName: o.actualPartyName, actualAppointedOn: o.actualAppointedOn ? o.actualAppointedOn.toISOString().slice(0, 10) : null, rejectionReason: o.rejectionReason,
-        allowed: !open ? [] : TRANSITIONS[o.status as OptionStatus].filter((t) => (t.actor === "OWNER" ? own : admin)).map((t) => t.to),
-        events: o.events.map((e) => ({ id: e.id, eventType: e.eventType, fromStatus: e.fromStatus as OptionStatus | null, toStatus: e.toStatus as OptionStatus, actorName: e.actorName, actorRole: e.actorRole, details: (e.details ?? null) as Record<string, unknown> | null, createdAt: e.createdAt.toISOString() })),
-      })),
+      planDate: planDay, createdAt: r.createdAt.toISOString(), canManage: own && open,
+      options: r.options.map((o) => ({ id: o.id, optionNo: o.optionNo as OptionNo, partyName: o.partyName })),
+      opStatus, statusLabel: displayRowStatus(opStatus, r.approvalStatus),
+      approvalStatus: r.approvalStatus, approvalLabel: APPROVAL_LABEL[r.approvalStatus] ?? r.approvalStatus, rejectionStage: r.rejectionStage, rejectionReason: r.rejectionReason,
+      canEditEntry: own && open && isEditable(r.approvalStatus) && opStatus === "NONE", canReview: open && canReviewEntry(ctx, r, teamIds), statusChangedAt: r.opStatusChangedAt?.toISOString() ?? null, allowedStatuses,
+      sentInfo: [...events].reverse().find((e) => e.newStatus === "DOC_SENT")?.sentInfo ?? null,
+      receivedInfo: [...events].reverse().find((e) => e.newStatus === "DOC_RECEIVED")?.receivedInfo ?? null, statusEvents: events,
+      canEditDate: own && open && opStatus === "NONE", dateChangeCount: history.soChanges, seasonalAddedOn, days: aging.days, daysFinal: aging.final,
+      dateHistory: r.dateChanges.map((c) => ({ id: c.id, previousDate: dayOf(c.previousDate), newDate: dayOf(c.newDate), byAdmin: c.byAdmin, automatic: c.automatic, actorName: c.actorName, actorRole: c.actorRole, createdAt: c.createdAt.toISOString() })),
     };
   });
 }
@@ -234,18 +281,13 @@ export async function createMonthlyPlan(ctx: AuthContext, raw: unknown): Promise
   const p2 = validatePartyName(parsed.data.option2Party, false); if (p2) throw new ApiError(422, `Option 2: ${p2}`);
   if (await prisma.partyMonthlyPlan.findFirst({ where: { seasonalPlanId: sp.id, seasonMonthId: month.id }, select: { id: true } })) throw new ApiError(409, "This market is already planned for that month");
 
-  const actor = await actorOf(ctx);
   const potential = shownMarketPotential(sp, sp.market);
   const planDate = parsed.data.planDate ? String(parsed.data.planDate) : null;
   const parties: Record<OptionNo, string | null> = { 1: cleanParty(parsed.data.option1Party), 2: cleanParty(parsed.data.option2Party) };
   const created = await prisma.$transaction(async (tx) => {
     const plan = await tx.partyMonthlyPlan.create({ data: { sheetId: sheet.id, seasonalPlanId: sp.id, seasonId: sheet.seasonId, seasonMonthId: month.id, ownerId: ctx.userId, marketId: sp.marketId, marketNameAtPlanning: sp.market.name, marketPotentialAtPlanning: potential, planDate: planDate ? new Date(`${planDate}T00:00:00.000Z`) : null } });
     for (const optionNo of OPTION_NUMBERS) {
-      const option = await tx.partyMonthlyOption.create({ data: { monthlyPlanId: plan.id, optionNo, partyName: parties[optionNo], status: "PENDING" } });
-      await tx.partyMonthlyEvent.create({ data: {
-        monthlyPlanId: plan.id, optionId: option.id, eventType: "PLAN_CREATED", fromStatus: null, toStatus: "PENDING", actorId: ctx.userId, actorName: actor.name, actorRole: actor.role,
-        details: { optionNo, marketName: sp.market.name, marketPotential: potential, month: monthLabel(month), planDate, partyName: parties[optionNo] },
-      } });
+      await tx.partyMonthlyOption.create({ data: { monthlyPlanId: plan.id, optionNo, partyName: parties[optionNo], status: "PENDING" } }); // a candidate name only
     }
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "partyMonthlyPlan", entityId: plan.id, summary: `Monthly Plan market added · ${monthLabel(month)} · ${sp.market.name}` }, tx);
     return (await tx.partyMonthlyPlan.findUnique({ where: { id: plan.id }, include }))!;
@@ -270,7 +312,7 @@ export async function updateMonthlyPlan(ctx: AuthContext, id: string, raw: unkno
   if (d.planDate === undefined && d.option1Party === undefined && d.option2Party === undefined) throw new ApiError(422, "Nothing to update");
   let planDate: Date | null | undefined;
   if (d.planDate !== undefined) {
-    if (plan.options.some((o) => o.status === "APPOINTED")) throw new ApiError(409, "The plan date cannot change once an option is Appointed");
+    if (plan.opStatus !== "NONE") throw new ApiError(409, "The Conversion Date is now set automatically by each status change");
     const problem = validatePlanDate(d.planDate, plan.seasonMonth);
     if (problem) throw new ApiError(422, problem);
     planDate = d.planDate ? new Date(`${String(d.planDate)}T00:00:00.000Z`) : null;
@@ -279,17 +321,19 @@ export async function updateMonthlyPlan(ctx: AuthContext, id: string, raw: unkno
   for (const [no, value] of [[1, d.option1Party], [2, d.option2Party]] as const) {
     if (value === undefined) continue;
     const option = plan.options.find((o) => o.optionNo === no)!;
-    if (option.status !== "PENDING") throw new ApiError(409, `Option ${no}: the candidate party can only change while it is Pending`);
+    if (plan.opStatus !== "NONE" || !isEditable(plan.approvalStatus)) throw new ApiError(409, "The candidate parties can only change while the entry is a draft (before it is submitted / its status workflow begins)");
     const problem = validatePartyName(value, no === 1); if (problem) throw new ApiError(422, `Option ${no}: ${problem}`);
     const to = cleanParty(value);
     if (to !== option.partyName) renames.push({ option, to });
   }
   const actor = await actorOf(ctx);
+  const dateChanged = planDate !== undefined && dayOf(planDate) !== dayOf(plan.planDate);
   const updated = await prisma.$transaction(async (tx) => {
     if (planDate !== undefined) await tx.partyMonthlyPlan.update({ where: { id }, data: { planDate } });
+    // Every hand edit of the Conversion Date by the SO is kept (the grey counter = how many).
+    if (dateChanged) await tx.partyMonthlyDateChange.create({ data: { monthlyPlanId: id, previousDate: plan.planDate, newDate: planDate ?? null, byAdmin: false, automatic: false, actorId: ctx.userId, actorName: actor.name, actorRole: actor.role } });
     for (const { option, to } of renames) {
       await tx.partyMonthlyOption.update({ where: { id: option.id }, data: { partyName: to } });
-      await tx.partyMonthlyEvent.create({ data: { monthlyPlanId: id, optionId: option.id, eventType: "PARTY_UPDATED", fromStatus: option.status, toStatus: option.status, actorId: ctx.userId, actorName: actor.name, actorRole: actor.role, details: { optionNo: option.optionNo, from: option.partyName, to } } });
     }
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyMonthlyPlan", entityId: id, summary: `Monthly Plan edited · ${plan.marketNameAtPlanning}` }, tx);
     return (await tx.partyMonthlyPlan.findUnique({ where: { id }, include }))!;
@@ -297,20 +341,98 @@ export async function updateMonthlyPlan(ctx: AuthContext, id: string, raw: unkno
   return (await toDtos(ctx, [updated]))[0]!;
 }
 
-/* ------------------------------------------------ option transitions ------------------------------------------------ */
+/* ------------------------------------------------ submit / review the whole Monthly Plan ------------------------------------------------ */
+
+async function loadSheet(id: string) {
+  const sheet = await prisma.partyMonthlySheet.findUnique({ where: { id }, include: sheetInclude });
+  if (!sheet) throw new ApiError(404, "Monthly Plan not found");
+  return sheet;
+}
 
 /**
- * Move ONE option to a new status. Checked in order: authenticate → role → scope/ownership → plan's season open → the option exists on
- * this plan → the move exists in the transition table → the caller is the right actor for it → payload valid → atomic claim of the
- * current status → option update + timeline event in one transaction. The other option is never touched.
+ * Submit EVERY editable (Draft / Rejected) entry of the caller's Monthly Plan as one batch: RM review (an SO who has an RM) or Admin review. Entries that are
+ * already Submitted / Approved are untouched, so the same plan (owner + month) keeps accumulating entries while Create stays open for new ones. Each entry is
+ * claimed on the status it was read at, so a retry or double click submits nothing twice (the second call finds nothing to submit).
  */
-export async function transitionOption(ctx: AuthContext, planId: string, optionNoRaw: unknown, raw: unknown): Promise<MonthlyPlanDto> {
+export async function submitMonthlySheet(ctx: AuthContext, id: string): Promise<MonthlySheetDto> {
+  assertPlanner(ctx);
+  const sheet = await loadSheet(id);
+  if (sheet.ownerId !== ctx.userId) throw new ApiError(404, "Monthly Plan not found");
+  if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
+  const rmId = ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId) : null;
+  const updated = await prisma.$transaction(async (tx) => {
+    const rows = await tx.partyMonthlyPlan.findMany({ where: { sheetId: id, ownerId: ctx.userId, approvalStatus: { in: ["DRAFT", "REJECTED"] } }, select: { id: true, approvalStatus: true, options: { select: { optionNo: true, partyName: true } } } });
+    if (rows.length === 0) throw new ApiError(409, "There is nothing new to submit");
+    if (rows.some((r) => !r.options.some((o) => o.optionNo === 1 && o.partyName))) throw new ApiError(422, "Every market needs an Option 1 party before submitting");
+    const now = new Date();
+    let n = 0;
+    for (const row of rows) {
+      const target = submitTarget(row.approvalStatus, ctx.role as "SALES_OFFICER" | "REGIONAL_MANAGER", rmId != null);
+      if (!target) continue;
+      const claimed = await tx.partyMonthlyPlan.updateMany({
+        where: { id: row.id, ownerId: ctx.userId, approvalStatus: row.approvalStatus },
+        data: { approvalStatus: target, submittedAt: now, rmDecidedById: null, rmDecidedAt: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null },
+      });
+      n += claimed.count;
+    }
+    if (n === 0) throw new ApiError(409, "There is nothing new to submit");
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyMonthlySheet", entityId: id, summary: `Monthly Plan batch submitted for ${rmId ? "RM" : "Admin"} review · ${monthLabel(sheet.seasonMonth)} · ${n} market(s)` }, tx);
+    return (await tx.partyMonthlySheet.findUnique({ where: { id }, include: sheetInclude }))!;
+  });
+  return toSheetDto(ctx, updated, [ctx.userId]);
+}
+
+const sheetActInput = z.object({ action: z.enum(["approve", "reject"]), reason: z.string().optional() });
+
+/**
+ * RM (their team's entries awaiting RM) or Admin (entries awaiting Admin) approves / rejects the plan's pending entries AT THEIR STEP, as a batch. Approved
+ * entries join the plan's Approved section next to earlier ones (never duplicated: each is claimed on the status it was read at); rejected ones return to
+ * the owner's Create section. Submitting never approves anything.
+ */
+export async function actOnMonthlySheet(ctx: AuthContext, id: string, raw: unknown): Promise<MonthlySheetDto> {
+  const parsed = sheetActInput.safeParse(raw);
+  if (!parsed.success) throw new ApiError(422, "Choose approve or reject");
+  const { action } = parsed.data;
+  const reason = parsed.data.reason?.trim() ?? "";
+  if (reason.length > 500) throw new ApiError(422, "The reason can be at most 500 characters.");
+  const isRm = ctx.role === Role.REGIONAL_MANAGER, isAdmin = isAdministrativeRole(ctx.role);
+  if (!isRm && !isAdmin) throw new ApiError(403, "Only a Regional Manager or Admin can review Monthly Plans");
+  if (isAdmin) assertAdminPermission(ctx, "partyPlanning", action === "approve" ? "approve" : "reject");
+  const scope = await getOfficerScope(ctx);
+  const sheet = await loadSheet(id);
+  if (isRm && (sheet.ownerId === ctx.userId || !scope.ids.includes(sheet.ownerId))) throw new ApiError(404, "Monthly Plan not found");
+  if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
+  const expected = isRm ? "PENDING_RM" : "PENDING_ADMIN";
+  const step = reviewTransition(expected, { by: isRm ? "RM" : "ADMIN", action, reason });
+  if (!step.ok) throw new ApiError(step.code, step.message);
+  const now = new Date();
+  const who = isRm ? { rmDecidedById: ctx.userId, rmDecidedAt: now } : { adminDecidedById: ctx.userId, adminDecidedAt: now };
+  const updated = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.partyMonthlyPlan.updateMany({
+      where: { sheetId: id, approvalStatus: expected },
+      data: { approvalStatus: step.approvalStatus, ...who, ...(action === "reject" ? { rejectionStage: isRm ? "RM" : "ADMIN", rejectionReason: reason } : {}) },
+    });
+    if (claimed.count === 0) throw new ApiError(409, isRm ? "No entries are waiting for RM review (they may have just been reviewed)" : "No entries are waiting for Admin review (they may have just been reviewed)");
+    const verb = action === "approve" ? (step.finalApproval ? "approved (final)" : "approved by RM") : "rejected";
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyMonthlySheet", entityId: id, summary: `Monthly Plan batch ${verb} · ${monthLabel(sheet.seasonMonth)} · ${claimed.count} market(s)${action === "reject" ? ` — ${reason}` : ""}` }, tx);
+    return (await tx.partyMonthlySheet.findUnique({ where: { id }, include: sheetInclude }))!;
+  });
+  return toSheetDto(ctx, updated, scope.ids);
+}
+
+/* ------------------------------------------------ row status workflow ------------------------------------------------ */
+
+/**
+ * Move ONE market row to a new operational status. Valid moves come from TRANSITIONS (NONE → Doc Send By SO by the owner; every later step by
+ * Admin); the plan must already be APPROVED. The row update (claimed on the status it was read at), the automatic Conversion Date change and the
+ * append-only status event are written in ONE transaction. Option 1 / Option 2 are untouched.
+ */
+export async function changeRowStatus(ctx: AuthContext, planId: string, raw: unknown): Promise<MonthlyPlanDto> {
   assertReader(ctx);
-  const optionNo = Number(optionNoRaw);
-  if (!(OPTION_NUMBERS as readonly number[]).includes(optionNo)) throw new ApiError(422, "Option must be 1 or 2");
   const input = parseTransition(raw);
   if (!input.ok) throw new ApiError(422, input.message);
   const move = input.value;
+  if (move.to === "APPOINTED") throw new ApiError(422, "Use the Appointed action: it creates the dealer and marks the row Appointed together");
 
   const plan = await prisma.partyMonthlyPlan.findUnique({ where: { id: planId }, include });
   if (!plan) throw new ApiError(404, "Monthly Plan not found");
@@ -319,47 +441,93 @@ export async function transitionOption(ctx: AuthContext, planId: string, optionN
   if (!admin && !own) {
     // Someone else's plan: a Regional Manager may SEE their team's, but only the owner or Admin acts. Anyone else cannot even tell it exists.
     const scope = await getOfficerScope(ctx);
-    throw new ApiError(ctx.role === Role.REGIONAL_MANAGER && scope.ids.includes(plan.ownerId) ? 403 : 404, ctx.role === Role.REGIONAL_MANAGER && scope.ids.includes(plan.ownerId) ? "Only the plan's owner or Admin can change an option" : "Monthly Plan not found");
+    const teamMember = ctx.role === Role.REGIONAL_MANAGER && scope.ids.includes(plan.ownerId);
+    throw new ApiError(teamMember ? 403 : 404, teamMember ? "Only the plan's owner or Admin can change the status" : "Monthly Plan not found");
   }
   if (plan.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
-  const option = plan.options.find((o) => o.optionNo === optionNo);
-  if (!option) throw new ApiError(404, "Option not found");
+  if (plan.approvalStatus !== "APPROVED") throw new ApiError(409, "The status workflow starts once the entry is approved");
 
-  const actorNeeded = transitionActor(option.status, move.to);
-  if (!actorNeeded) throw new ApiError(409, `A ${STATUS_LABEL[option.status as OptionStatus]} option cannot move to ${STATUS_LABEL[move.to]}`);
+  const from = (isRowStatus(plan.opStatus) ? plan.opStatus : "NONE") as RowStatus;
+  const actorNeeded = transitionActor(from, move.to);
+  if (!actorNeeded) throw new ApiError(409, `A ${displayRowStatus(from, "APPROVED")} row cannot move to ${ROW_STATUS_LABEL[move.to]}`);
   if (actorNeeded === "OWNER" && !own) throw new ApiError(403, "Only the plan's owner can do this step");
   if (actorNeeded === "ADMIN") {
     if (!admin) throw new ApiError(403, "Only an Admin can do this step");
     assertAdminPermission(ctx, "partyPlanning", adminActionFor(move.to));
   }
-  if (move.to === "DOC_SENT" && !option.partyName) throw new ApiError(422, "Add the candidate party name before sending documents");
 
-  const now = new Date();
-  const today = currentBusinessDate(now);
-  const data: Prisma.PartyMonthlyOptionUncheckedUpdateManyInput = { status: move.to, statusChangedAt: now };
-  let details: Record<string, unknown>;
-  switch (move.to) {
-    case "DOC_SENT": Object.assign(data, { sentInfo: move.sent, sentById: ctx.userId, sentAt: now }); details = { sent: move.sent }; break;
-    case "DOC_RECEIVED": Object.assign(data, { receivedInfo: move.received, receivedById: ctx.userId, receivedAt: now }); details = { received: move.received, sentBySo: option.sentInfo }; break;
-    case "APPOINTED": Object.assign(data, { actualPartyName: move.actualPartyName, actualAppointedOn: new Date(`${today}T00:00:00.000Z`) }); details = { actualPartyName: move.actualPartyName, appointedOn: today, tentativePartyName: option.partyName }; break;
-    case "PART_REJECTED": Object.assign(data, { rejectionReason: move.reason }); details = { reason: move.reason }; break;
-    default: details = { reason: move.reason };
-  }
   const actor = await actorOf(ctx);
-  const updated = await prisma.$transaction(async (tx) => {
-    const claimed = await tx.partyMonthlyOption.updateMany({ where: { id: option.id, status: option.status }, data });
-    if (claimed.count === 0) throw new ApiError(409, "This option was just changed by someone else — reload and try again");
-    if (move.to === "APPOINTED") {
-      // The actual appointment is the event Seasonal Planning reserved "Appointed" + its Date for. The first Appointed option of a Seasonal Plan
-      // records it; applyAppointment refuses (null) when it was already recorded, which is simply not repeated.
-      const sp = await tx.seasonalPlan.findUnique({ where: { id: plan.seasonalPlanId }, select: { approvalStatus: true, appointmentStatus: true } });
-      const appointment = sp ? applyAppointment(sp, today) : null;
-      if (appointment) await tx.seasonalPlan.updateMany({ where: { id: plan.seasonalPlanId, approvalStatus: "APPROVED", appointmentStatus: "PENDING" }, data: { appointmentStatus: appointment.appointmentStatus, appointedAt: new Date(`${appointment.appointedAt}T00:00:00.000Z`) } });
-      details = { ...details, seasonalPlanMarkedAppointed: appointment != null };
-    }
-    await tx.partyMonthlyEvent.create({ data: { monthlyPlanId: planId, optionId: option.id, eventType: "STATUS_CHANGED", fromStatus: option.status, toStatus: move.to, actorId: ctx.userId, actorName: actor.name, actorRole: actor.role, details: details as Prisma.InputJsonValue } });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyMonthlyOption", entityId: option.id, summary: `Monthly Plan option ${optionNo} · ${plan.marketNameAtPlanning} · ${STATUS_LABEL[option.status as OptionStatus]} → ${STATUS_LABEL[move.to]}` }, tx);
-    return (await tx.partyMonthlyPlan.findUnique({ where: { id: planId }, include }))!;
-  });
+  const updated = await prisma.$transaction((tx) => applyRowStatus(tx, ctx, actor, plan, from, move));
   return (await toDtos(ctx, [updated]))[0]!;
+}
+
+/**
+ * The transactional core of a row status change (shared by every status, including Appointed): claim the row on the status it was read at, set the
+ * Conversion Date to today (history kept), run the Seasonal-appointment side effect, and append the status event. `dealerId` = the Dealer created
+ * by the Appointed step in the SAME transaction.
+ */
+async function applyRowStatus(tx: Prisma.TransactionClient, ctx: AuthContext, actor: { name: string; role: string }, plan: PlanRow, from: RowStatus, move: TransitionInput, dealerId?: string): Promise<PlanRow> {
+  const now = new Date();
+  const today = currentBusinessDate(now); // Asia/Kolkata
+  const admin = isAdministrativeRole(ctx.role);
+  const claimed = await tx.partyMonthlyPlan.updateMany({ where: { id: plan.id, opStatus: from }, data: { opStatus: move.to, opStatusChangedAt: now, planDate: new Date(`${today}T00:00:00.000Z`) } });
+  if (claimed.count === 0) throw new ApiError(409, "This row was just changed by someone else — reload and try again");
+  if (dealerId) await tx.partyMonthlyPlan.update({ where: { id: plan.id }, data: { appointedDealerId: dealerId } });
+  // Conversion Date follows the status: set to the transition's date, keeping the previous value in the (append-only) date history.
+  if (dayOf(plan.planDate) !== today) await tx.partyMonthlyDateChange.create({ data: { monthlyPlanId: plan.id, previousDate: plan.planDate, newDate: new Date(`${today}T00:00:00.000Z`), byAdmin: admin, automatic: true, actorId: ctx.userId, actorName: actor.name, actorRole: actor.role } });
+  if (move.to === "APPOINTED") {
+    // The actual appointment is the event Seasonal Planning reserved "Appointed" + its Date for; applyAppointment refuses (null) when it was already recorded.
+    const sp = await tx.seasonalPlan.findUnique({ where: { id: plan.seasonalPlanId }, select: { approvalStatus: true, appointmentStatus: true } });
+    const appointment = sp ? applyAppointment(sp, today) : null;
+    if (appointment) await tx.seasonalPlan.updateMany({ where: { id: plan.seasonalPlanId, approvalStatus: "APPROVED", appointmentStatus: "PENDING" }, data: { appointmentStatus: appointment.appointmentStatus, appointedAt: new Date(`${appointment.appointedAt}T00:00:00.000Z`) } });
+  }
+  await tx.partyMonthlyStatusEvent.create({ data: {
+    monthlyPlanId: plan.id, previousStatus: from, newStatus: move.to, actorId: ctx.userId, actorName: actor.name, actorRole: actor.role, dealerId: dealerId ?? null,
+    remarks: "remarks" in move ? move.remarks : null, sentInfo: move.to === "DOC_SENT" ? (move.sent as unknown as Prisma.InputJsonValue) : undefined, receivedInfo: move.to === "DOC_RECEIVED" ? (move.received as unknown as Prisma.InputJsonValue) : undefined,
+  } });
+  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyMonthlyPlan", entityId: plan.id, summary: `Monthly Plan status · ${plan.marketNameAtPlanning} · ${displayRowStatus(from, "APPROVED")} → ${ROW_STATUS_LABEL[move.to]}${dealerId ? " (dealer created)" : ""}` }, tx);
+  return (await tx.partyMonthlyPlan.findUnique({ where: { id: plan.id }, include }))!;
+}
+
+/**
+ * ADMIN ONLY: mark a row Appointed AND create the Dealer, atomically. The Dealer is created by the very same service as Dealer Alias → Create Dealer
+ * (createDealerForOfficer: dealer + officer assignment + alias + optional Active Seasonal Plan membership), inside the same transaction as the status
+ * change: if either fails, neither persists — so a failed / cancelled / duplicate-warned attempt leaves the row exactly as it was, and a retry or a
+ * double click cannot create a second dealer (the row is claimed on its previous status first; the loser of a race rolls back its dealer).
+ * Returns { duplicates } (nothing saved) when the dealer name resembles an existing dealer and `dealer.force` was not set.
+ */
+export async function appointRow(ctx: AuthContext, planId: string, raw: unknown): Promise<MonthlyPlanDto | { duplicates: NonNullable<Awaited<ReturnType<typeof createDealerForOfficer>>["duplicates"]> }> {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const remarks = typeof r.remarks === "string" ? r.remarks.replace(/\s+/g, " ").trim() : "";
+  if (remarks.length > 500) throw new ApiError(422, "Remarks can be at most 500 characters.");
+  if (!r.dealer || typeof r.dealer !== "object") throw new ApiError(422, "Dealer details are required to mark a row Appointed");
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only an Admin can appoint a party");
+  assertAdminPermission(ctx, "partyPlanning", "approve");
+  assertAdminPermission(ctx, "dealers", "create"); // same permission as POST /api/dealers (Dealer Alias → Create Dealer)
+
+  const plan = await prisma.partyMonthlyPlan.findUnique({ where: { id: planId }, include });
+  if (!plan) throw new ApiError(404, "Monthly Plan not found");
+  if (plan.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
+  if (plan.approvalStatus !== "APPROVED") throw new ApiError(409, "The status workflow starts once the entry is approved");
+  const from = (isRowStatus(plan.opStatus) ? plan.opStatus : "NONE") as RowStatus;
+  if (transitionActor(from, "APPOINTED") !== "ADMIN") throw new ApiError(409, `A ${displayRowStatus(from, "APPROVED")} row cannot move to Appointed`);
+  if (plan.appointedDealerId) throw new ApiError(409, "A dealer was already created for this row");
+
+  const actor = await actorOf(ctx);
+  class Duplicates extends Error { constructor(readonly found: NonNullable<Awaited<ReturnType<typeof createDealerForOfficer>>["duplicates"]>) { super("duplicates"); } }
+  try {
+    const updated = await prisma.$transaction(async (tx) => {
+      // Claim FIRST (a second submission fails here, before any dealer exists), then create the dealer in this same transaction, then link it.
+      const claimed = await tx.partyMonthlyPlan.updateMany({ where: { id: planId, opStatus: from, appointedDealerId: null }, data: { updatedAt: new Date() } });
+      if (claimed.count === 0) throw new ApiError(409, "This row was just changed by someone else — reload and try again");
+      const outcome = await createDealerForOfficer(ctx, r.dealer, { tx });
+      if (outcome.duplicates) throw new Duplicates(outcome.duplicates);
+      if (!outcome.dealerId) throw new ApiError(500, "The dealer could not be created");
+      return applyRowStatus(tx, ctx, actor, plan, from, { to: "APPOINTED", remarks: remarks || null }, outcome.dealerId);
+    }, { timeout: 60_000, maxWait: 10_000 });
+    return (await toDtos(ctx, [updated]))[0]!;
+  } catch (e) {
+    if (e instanceof Duplicates) return { duplicates: e.found };
+    throw e;
+  }
 }

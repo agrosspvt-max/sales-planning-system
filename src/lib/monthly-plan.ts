@@ -1,92 +1,87 @@
 /**
- * Party Planning · Monthly Planning — pure rules (no database). The transition table below is the ONE definition of the option
- * lifecycle; the server applies it and the UI only reads it. Each option (Option 1 / Option 2) is its own state machine.
+ * Party Planning · Monthly Planning — pure rules (no database). A Monthly Plan row (one market) has ONE operational status; Option 1 /
+ * Option 2 are only the two candidate party names. The transition table below is the single definition of that workflow:
+ * the server applies it and the UI only reads it.
  *
- *   PENDING ──SO──► DOC_SENT ──Admin──► DOC_RECEIVED ──Admin──► SD_DELAYED_BY_SO ──► SD_BOUNCE ──► APPOINTED
- *      │                │                    │  └─────────────────────────┴────────────┴──────────────┘
- *      └────────────────┴────────────────────┴──► PART_REJECTED (Admin, reason required; terminal)      (APPOINTED is terminal)
+ *   NONE ──SO──► DOC_SENT ──Admin──► DOC_RECEIVED ──Admin──► SD_BOUNCE ──Admin──► APPOINTED   (terminal)
+ *     │              │                    └──────────────────────┴───────────────────► REJECTED   (Admin, terminal)
+ *     └──────────────┴─► REJECTED (Admin)
  *
- * Statuses after DOC_RECEIVED may be skipped forward (a plan need not hit every SD state), but nothing moves backwards and nothing leaves
- * APPOINTED or PART_REJECTED. Only the owning SO/RM moves PENDING → DOC_SENT; every later step is an Admin step.
+ * NONE means the status workflow has not begun. It can begin only once the PLAN is approved (a separate, plan-level approval); an operational
+ * status change never approves a plan. Only the owning SO/RM moves NONE → DOC_SENT; every other step is an Admin step.
  */
 
-export const OPTION_STATUSES = ["PENDING", "DOC_SENT", "DOC_RECEIVED", "SD_DELAYED_BY_SO", "SD_BOUNCE", "APPOINTED", "PART_REJECTED"] as const;
-export type OptionStatus = (typeof OPTION_STATUSES)[number];
+export const ROW_STATUSES = ["NONE", "DOC_SENT", "DOC_RECEIVED", "SD_BOUNCE", "APPOINTED", "REJECTED"] as const;
+export type RowStatus = (typeof ROW_STATUSES)[number];
 export const OPTION_NUMBERS = [1, 2] as const;
 export type OptionNo = (typeof OPTION_NUMBERS)[number];
 
-export const STATUS_LABEL: Record<OptionStatus, string> = {
-  PENDING: "Pending", DOC_SENT: "Doc Sent", DOC_RECEIVED: "Doc Received", SD_DELAYED_BY_SO: "SD Delayed by SO",
-  SD_BOUNCE: "SD Bounce", APPOINTED: "Appointed", PART_REJECTED: "Part Rejected",
+export const ROW_STATUS_LABEL: Record<RowStatus, string> = {
+  NONE: "Approved", DOC_SENT: "Doc Send By SO", DOC_RECEIVED: "Doc Received", SD_BOUNCE: "SD Bounce", APPOINTED: "Appointed", REJECTED: "Rejected",
 };
-export const isOptionStatus = (v: unknown): v is OptionStatus => typeof v === "string" && (OPTION_STATUSES as readonly string[]).includes(v);
+export const isRowStatus = (v: unknown): v is RowStatus => typeof v === "string" && (ROW_STATUSES as readonly string[]).includes(v);
+
+/** What the Status column shows: the operational status once it has begun, otherwise the plan's own stage (Draft / Submitted / Approved). */
+export function displayRowStatus(rowStatus: string, planApprovalStatus: string): string {
+  if (isRowStatus(rowStatus) && rowStatus !== "NONE") return ROW_STATUS_LABEL[rowStatus];
+  if (planApprovalStatus === "APPROVED") return "Approved";
+  if (planApprovalStatus === "PENDING_RM" || planApprovalStatus === "PENDING_ADMIN") return "Submitted";
+  return "Draft";
+}
 
 export type Actor = "OWNER" | "ADMIN";
-const LATE: OptionStatus[] = ["SD_DELAYED_BY_SO", "SD_BOUNCE", "APPOINTED", "PART_REJECTED"];
-export const TRANSITIONS: Record<OptionStatus, { to: OptionStatus; actor: Actor }[]> = {
-  PENDING: [{ to: "DOC_SENT", actor: "OWNER" }, { to: "PART_REJECTED", actor: "ADMIN" }],
-  DOC_SENT: [{ to: "DOC_RECEIVED", actor: "ADMIN" }, { to: "PART_REJECTED", actor: "ADMIN" }],
-  DOC_RECEIVED: LATE.map((to) => ({ to, actor: "ADMIN" as const })),
-  SD_DELAYED_BY_SO: (["SD_BOUNCE", "APPOINTED", "PART_REJECTED"] as OptionStatus[]).map((to) => ({ to, actor: "ADMIN" as const })),
-  SD_BOUNCE: (["APPOINTED", "PART_REJECTED"] as OptionStatus[]).map((to) => ({ to, actor: "ADMIN" as const })),
+export const TRANSITIONS: Record<RowStatus, { to: RowStatus; actor: Actor }[]> = {
+  NONE: [{ to: "DOC_SENT", actor: "OWNER" }, { to: "REJECTED", actor: "ADMIN" }],
+  DOC_SENT: [{ to: "DOC_RECEIVED", actor: "ADMIN" }, { to: "REJECTED", actor: "ADMIN" }],
+  DOC_RECEIVED: [{ to: "SD_BOUNCE", actor: "ADMIN" }, { to: "APPOINTED", actor: "ADMIN" }, { to: "REJECTED", actor: "ADMIN" }],
+  SD_BOUNCE: [{ to: "APPOINTED", actor: "ADMIN" }, { to: "REJECTED", actor: "ADMIN" }],
   APPOINTED: [],
-  PART_REJECTED: [],
+  REJECTED: [],
 };
 
 /** Who may make this exact move, or null when the move does not exist. */
 export function transitionActor(from: string, to: string): Actor | null {
-  if (!isOptionStatus(from) || !isOptionStatus(to)) return null;
+  if (!isRowStatus(from) || !isRowStatus(to)) return null;
   return TRANSITIONS[from].find((t) => t.to === to)?.actor ?? null;
 }
 /** The existing Dealer-Appointment permission action an Admin needs for the target status (rejection → reject, every other step → approve). */
-export const adminActionFor = (to: OptionStatus): "approve" | "reject" => (to === "PART_REJECTED" ? "reject" : "approve");
+export const adminActionFor = (to: RowStatus): "approve" | "reject" => (to === "REJECTED" ? "reject" : "approve");
 
 /* ------------------------------------------------ transition payloads ------------------------------------------------ */
 
-export interface DocInfo { documents: boolean; checks: boolean; other: boolean; otherDetails: string | null }
+/** What the SO says was sent / what Admin says was actually received. `other` is free text, never a checkbox. */
+export interface DocInfo { documents: boolean; checks: boolean; other: string | null }
 const MAX_TEXT = 500;
 const text = (v: unknown): string => (typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "");
 
-/** What was sent (by the SO) / received (by Admin): at least one item; "Other" needs its clarification. Stored exactly as given. */
+/** At least one of Document / Check must be ticked; "Other" is optional free text. Stored exactly as given. */
 export function parseDocInfo(raw: unknown): { ok: true; value: DocInfo } | { ok: false; message: string } {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const info: DocInfo = { documents: r.documents === true, checks: r.checks === true, other: r.other === true, otherDetails: null };
-  if (!info.documents && !info.checks && !info.other) return { ok: false, message: "Select at least one of Documents, Checks or Other." };
-  if (info.other) {
-    const details = text(r.otherDetails);
-    if (!details) return { ok: false, message: "Describe what 'Other' is." };
-    if (details.length > MAX_TEXT) return { ok: false, message: `Other details can be at most ${MAX_TEXT} characters.` };
-    info.otherDetails = details;
-  }
-  return { ok: true, value: info };
+  const documents = r.documents === true, checks = r.checks === true;
+  if (!documents && !checks) return { ok: false, message: "Select at least one of Document or Check." };
+  const other = text(r.other);
+  if (other.length > MAX_TEXT) return { ok: false, message: `Other can be at most ${MAX_TEXT} characters.` };
+  return { ok: true, value: { documents, checks, other: other || null } };
 }
 
 export type TransitionInput =
   | { to: "DOC_SENT"; sent: DocInfo }
   | { to: "DOC_RECEIVED"; received: DocInfo }
-  | { to: "SD_DELAYED_BY_SO" | "SD_BOUNCE" | "PART_REJECTED"; reason: string }
-  | { to: "APPOINTED"; actualPartyName: string };
+  | { to: "SD_BOUNCE" | "APPOINTED" | "REJECTED"; remarks: string | null };
 
 /** Validates the data a transition requires. Nothing the browser sends is trusted beyond these fields (actor, date and status come from the server). */
 export function parseTransition(raw: unknown): { ok: true; value: TransitionInput } | { ok: false; message: string } {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const to = r.to;
-  if (!isOptionStatus(to) || to === "PENDING") return { ok: false, message: "Choose a valid status." };
+  if (!isRowStatus(to) || to === "NONE") return { ok: false, message: "Choose a valid status." };
   if (to === "DOC_SENT" || to === "DOC_RECEIVED") {
     const info = parseDocInfo(to === "DOC_SENT" ? r.sent : r.received);
     if (!info.ok) return info;
     return { ok: true, value: to === "DOC_SENT" ? { to, sent: info.value } : { to, received: info.value } };
   }
-  if (to === "APPOINTED") {
-    const name = text(r.actualPartyName);
-    if (!name) return { ok: false, message: "Actual Party Name is required." };
-    if (name.length > 200) return { ok: false, message: "Actual Party Name can be at most 200 characters." };
-    return { ok: true, value: { to, actualPartyName: name } };
-  }
-  const reason = text(r.reason);
-  if (!reason) return { ok: false, message: to === "PART_REJECTED" ? "A rejection reason is required." : "A reason is required." };
-  if (reason.length > MAX_TEXT) return { ok: false, message: `The reason can be at most ${MAX_TEXT} characters.` };
-  return { ok: true, value: { to, reason } };
+  const remarks = text(r.remarks);
+  if (remarks.length > MAX_TEXT) return { ok: false, message: `Remarks can be at most ${MAX_TEXT} characters.` };
+  return { ok: true, value: { to, remarks: remarks || null } };
 }
 
 export function validatePartyName(value: unknown, required: boolean): string | null {
@@ -112,12 +107,65 @@ export function validatePlanDate(value: unknown, month: { calendarMonth: number 
   return value.startsWith(key) ? null : "The plan date must be inside the selected month.";
 }
 
-/** The status a Monthly Plan (the per-season-month header) shows in the list, derived from its rows' options: none → Draft; all options final → Completed; else In Progress. */
+/** The status a Monthly Plan (the per-season-month header) shows in the list, derived from its rows: none → Draft; every row Appointed / Rejected → Completed; else In Progress. */
 export type MonthlySheetStatus = "Draft" | "In Progress" | "Completed";
-export function monthlySheetStatus(rows: { options: { status: string }[] }[]): MonthlySheetStatus {
-  const options = rows.flatMap((r) => r.options);
+export function monthlySheetStatus(rows: { opStatus: string }[]): MonthlySheetStatus {
   if (rows.length === 0) return "Draft";
-  return options.length > 0 && options.every((o) => o.status === "APPOINTED" || o.status === "PART_REJECTED") ? "Completed" : "In Progress";
+  return rows.every((r) => r.opStatus === "APPOINTED" || r.opStatus === "REJECTED") ? "Completed" : "In Progress";
 }
-/** Option statuses that are waiting on an Admin (documents sent → received → SD steps → appointment): what Admin filters by to find work. */
-export const ADMIN_PENDING_STATUSES: readonly OptionStatus[] = ["DOC_SENT", "DOC_RECEIVED", "SD_DELAYED_BY_SO", "SD_BOUNCE"];
+/** Row statuses that are waiting on an Admin: what Admin filters by to find work. */
+export const ADMIN_PENDING_STATUSES: readonly RowStatus[] = ["DOC_SENT", "DOC_RECEIVED", "SD_BOUNCE"];
+
+/** Whole calendar days from `from` to `to` (both YYYY-MM-DD business dates); never negative. */
+export function daysBetween(from: string, to: string): number {
+  const ms = Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`);
+  return Math.max(0, Math.round(ms / 86_400_000));
+}
+
+/**
+ * The "Days" aging metric of a Monthly Plan row: Seasonal Plan ADDED date → the date the row became Appointed (frozen), or → today while it
+ * has not (live). The Monthly Plan's own creation date is never involved.
+ */
+export function conversionDays(seasonalAddedOn: string, appointedOn: string | null, today: string): { days: number; final: boolean } {
+  return appointedOn ? { days: daysBetween(seasonalAddedOn, appointedOn), final: true } : { days: daysBetween(seasonalAddedOn, today), final: false };
+}
+
+/** Summary of a row's Conversion Date history: only HAND edits by the SO are counted; automatic status-change dates and (older) Admin confirmations are not. */
+export function summarizeDateHistory(changes: readonly { byAdmin: boolean; automatic?: boolean }[]): { soChanges: number } {
+  return { soChanges: changes.filter((c) => !c.byAdmin && !c.automatic).length };
+}
+
+/* ------------------------------------------------ plan lifecycle (Create | Submitted | Approved | Older Plans) ------------------------------------------------ */
+
+export const PLAN_STAGES = ["create", "submitted", "approved", "older"] as const;
+export type PlanStage = (typeof PLAN_STAGES)[number];
+export const STAGE_LABEL: Record<PlanStage, string> = { create: "Create", submitted: "Submitted", approved: "Approved", older: "Older Plans" };
+export const parseStage = (value: unknown): PlanStage => (PLAN_STAGES as readonly string[]).includes(value as string) ? (value as PlanStage) : "create";
+
+/**
+ * Which lifecycle section a plan belongs to — the Sales Planning classification: a plan whose parent (the Season) is closed is OLDER whatever
+ * its status; otherwise it follows the plan-level approval status. Option 1 / Option 2 statuses play no part.
+ */
+export function planStage(plan: { seasonOpen: boolean; approvalStatus: string }): PlanStage {
+  if (!plan.seasonOpen) return "older";
+  if (plan.approvalStatus === "APPROVED") return "approved";
+  if (plan.approvalStatus === "PENDING_RM" || plan.approvalStatus === "PENDING_ADMIN") return "submitted";
+  return "create"; // DRAFT | REJECTED — still editable by its owner
+}
+
+export const APPROVAL_LABEL: Record<string, string> = { DRAFT: "Draft", PENDING_RM: "Awaiting RM review", PENDING_ADMIN: "Awaiting Admin review", APPROVED: "Approved", REJECTED: "Rejected" };
+
+/** Entry approval statuses shown in each lifecycle section of a plan (Older Plans = a closed season: every entry, read-only). */
+export const STAGE_ROW_STATUSES: Record<string, readonly string[] | undefined> = { create: ["DRAFT", "REJECTED"], submitted: ["PENDING_RM", "PENDING_ADMIN"], approved: ["APPROVED"] };
+export interface StageCounts { create: number; submitted: number; approved: number }
+/**
+ * Whether a logical plan (owner + period) appears in a lifecycle list. Create is a persistent workspace: an open-season plan stays there for ever so entries can
+ * be added at any time. Submitted / Approved list the plan while it holds entries in that state (one row per plan, however many batches). A closed season → Older Plans.
+ */
+export function sheetInStage(counts: StageCounts, seasonOpen: boolean, stage: PlanStage): boolean {
+  if (!seasonOpen) return stage === "older";
+  if (stage === "create") return true;
+  if (stage === "submitted") return counts.submitted > 0;
+  if (stage === "approved") return counts.approved > 0;
+  return false;
+}

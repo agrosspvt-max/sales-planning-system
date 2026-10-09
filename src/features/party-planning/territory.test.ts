@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Role } from "@prisma/client";
+import { DEFAULT_LABELS } from "@/features/labels/labels";
 import * as XLSX from "xlsx";
 import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
 import type { AuthContext } from "@/lib/http";
@@ -36,8 +37,8 @@ const ALIASES = [{ systemDealerId: "d1", tallyName: "ABC TRADING CO (TALLY)", ta
 
 function makeDb() {
   const t = {
-    mappings: [] as Row[], markets: [] as Row[], requests: [] as Row[], audit: [] as Row[],
-    dealerWrites: 0, // any write to a Dealer table row would bump this
+    mappings: [] as Row[], markets: [] as Row[], requests: [] as Row[], audit: [] as Row[], edits: [] as Row[],
+    clock: 0, dealerWrites: 0, // any write to a Dealer table row would bump this
   };
   let seq = 0;
   const id = (p: string) => `${p}${++seq}`;
@@ -57,6 +58,7 @@ function makeDb() {
   const withMarket = (m: Row) => ({ ...m, market: m.marketId ? { name: marketById(m.marketId)?.name } : null });
   const requester = (r: Row): Row & { requester: { name: string | undefined } } => ({ ...r, requester: { name: USERS.find((u) => u.id === r.requesterId)?.name } });
   let failNextMappingWrite = false;
+  let failNextEdit = false;
 
   const prisma = {
     dealer: {
@@ -88,6 +90,17 @@ function makeDb() {
         for (const d of data) t.mappings.push({ id: id("map"), potential: null, ...d }); return { count: data.length };
       },
       update: async ({ where, data }: { where: Row; data: Row }) => { const m = t.mappings.find((x) => matches(x, where))!; Object.assign(m, data); return { ...m }; },
+      updateMany: async ({ where, data }: { where: Row; data: Row }) => { const hit = t.mappings.filter((x) => matches(x, where)); hit.forEach((m) => Object.assign(m, data)); return { count: hit.length }; },
+      create: async ({ data }: { data: Row }) => { const row = { id: id("map"), marketId: null, marketText: null, district: null, potential: null, ...data }; t.mappings.push(row); return { ...row }; },
+    },
+    territoryMarketEdit: {
+      findMany: async ({ where, distinct }: { where: { dealerId: string | { in: string[] } }; distinct?: string[] }) => {
+        const w = where.dealerId; const rows = t.edits.filter((e) => typeof w === "string" ? e.dealerId === w : w.in.includes(e.dealerId as string))
+          .sort((a, b) => (a.editedAt as Date).getTime() - (b.editedAt as Date).getTime() || String(a.id).localeCompare(String(b.id)));
+        const out = distinct ? rows.filter((r, i) => rows.findIndex((x) => x.dealerId === r.dealerId) === i) : rows;
+        return out.map((e) => ({ ...e, editedBy: { name: USERS.find((u) => u.id === e.editedById)?.name } }));
+      },
+      create: async ({ data }: { data: Row }) => { if (failNextEdit) { failNextEdit = false; throw new Error("boom"); } const row = { id: id("edit"), editedAt: new Date(Date.UTC(2026, 9, 8, 12, 0, ++t.clock)), ...data }; t.edits.push(row); return { ...row }; },
     },
     marketRequest: {
       findFirst: async ({ where }: { where: Row }) => { const r = t.requests.find((x) => matches(x, where)); return r ? { ...r } : null; },
@@ -99,12 +112,12 @@ function makeDb() {
     auditLog: { createMany: async ({ data }: { data: Row[] }) => { t.audit.push(...data); return { count: data.length }; } },
     // A real transaction: all-or-nothing. A failure restores the tables exactly as they were.
     $transaction: async <T,>(fn: (tx: unknown) => Promise<T>) => {
-      const snapshot = structuredClone([t.mappings, t.markets, t.requests, t.audit]);
+      const snapshot = structuredClone([t.mappings, t.markets, t.requests, t.audit, t.edits]);
       try { return await fn(prisma); }
-      catch (error) { const [m, k, r, a] = snapshot; t.mappings = m; t.markets = k; t.requests = r; t.audit = a; throw error; }
+      catch (error) { const [m, k, r, a, e] = snapshot; t.mappings = m; t.markets = k; t.requests = r; t.audit = a; t.edits = e; throw error; }
     },
   };
-  return { prisma, t, failNextMappingWrite: () => { failNextMappingWrite = true; } };
+  return { prisma, t, failNextMappingWrite: () => { failNextMappingWrite = true; }, failNextEdit: () => { failNextEdit = true; } };
 }
 
 /* ------------------------------------------------ service under test ------------------------------------------------ */
@@ -308,6 +321,103 @@ async function main() {
     assert.equal(await status(() => service.updateDealerMapping(SO1, "d3", { district: "X" })), 403, "District edit obeys the same scope");
     assert.equal(await status(() => service.updateDealerMapping(SO1, "d1", { district: "x".repeat(121) })), 422);
     assert.equal(await status(() => service.commitTerritoryImport({ ...SO1, role: undefined } as unknown as AuthContext, file, "Mapping", {})), 403);
+  }
+
+  /* ---- TEMPORARY manual Market edit + append-only history ---- */
+  {
+    const { service, t } = loadService();
+    t.markets.push({ id: "m-tun", name: "TUNDLA", nameKey: "tundla", potential: "A", source: "EXISTING" });
+    t.mappings.push({ id: "e1", dealerId: "d1", marketId: "m-tun", marketText: null, district: "FIROZABAD", potential: "B" });
+    const marketsBefore = JSON.stringify(t.markets);
+    const shown = async (id = "d1") => plain(await service.listTerritoryDealers(SO1, PAGE)).items.find((r) => r.dealerId === id)!;
+    assert.deepEqual([(await shown()).marketName, (await shown()).marketEdited], ["TUNDLA", false], "before any edit: no Edited indicator");
+    // 1) first edit → one history row; current Market = the new value
+    const first = plain(await service.editDealerMarket(SO1, "d1", { expectedMarket: "TUNDLA", market: "  FIROZABAD " }));
+    assert.deepEqual([first.marketName, first.marketEdited, first.district, first.potential], ["FIROZABAD", true, "FIROZABAD", "B"], "district / potential untouched");
+    assert.equal(t.edits.length, 1);
+    assert.deepEqual([t.edits[0]!.previousMarket, t.edits[0]!.newMarket, t.edits[0]!.editedById, t.edits[0]!.editedAt instanceof Date], ["TUNDLA", "FIROZABAD", "so1", true]);
+    assert.equal(JSON.stringify(t.markets), marketsBefore, "NO Market master record is created or changed by a manual edit");
+    assert.equal(t.mappings[0]!.marketId, "m-tun", "the mapped Market master id (used by planning) is untouched");
+    assert.deepEqual([(await shown()).marketName, (await shown()).marketEdited], ["FIROZABAD", true]);
+    // 2) many edits, by different users, all kept in order
+    await service.editDealerMarket(SO1, "d1", { expectedMarket: "FIROZABAD", market: "AGRA" });
+    await service.editDealerMarket(RM1, "d1", { expectedMarket: "AGRA", market: "FATEHABAD" });
+    await service.editDealerMarket(ADMIN, "d1", { expectedMarket: "FATEHABAD", market: "SHIKOHABAD" });
+    const hist = plain(await service.listMarketEdits(SO1, "d1"));
+    assert.deepEqual(hist.edits.map((e) => [e.previousMarket, e.newMarket, e.editedByName]), [["TUNDLA", "FIROZABAD", "Officer One"], ["FIROZABAD", "AGRA", "Officer One"], ["AGRA", "FATEHABAD", "RM One"], ["FATEHABAD", "SHIKOHABAD", "Admin"]], "every transition, chronological, with the editor");
+    assert.ok(hist.edits.every((e) => !Number.isNaN(Date.parse(e.editedAt))) && hist.edits.every((e, i) => i === 0 || e.editedAt >= hist.edits[i - 1]!.editedAt), "timestamps present and ordered");
+    assert.equal((await shown()).marketName, "SHIKOHABAD", "current Market = the latest confirmed value");
+    assert.equal(hist.dealerName, "ABC TRADING CO (TALLY)", "shown with the same display name as the list (alias)");
+    // 10 edits keep 10 records
+    for (let i = 0; i < 6; i++) await service.editDealerMarket(SO1, "d1", { expectedMarket: i === 0 ? "SHIKOHABAD" : `M${i - 1}`, market: `M${i}` });
+    assert.equal(plain(await service.listMarketEdits(SO1, "d1")).edits.length, 10);
+    // rejected edits leave no history
+    const n = t.edits.length;
+    assert.equal(await status(() => service.editDealerMarket(SO1, "d1", { expectedMarket: "WRONG", market: "X" })), 409, "stale value → conflict (no wrong history)");
+    assert.equal(await status(() => service.editDealerMarket(SO1, "d1", { expectedMarket: "M5", market: " m5 " })), 422, "same Market → nothing to record");
+    assert.equal(await status(() => service.editDealerMarket(SO1, "d1", { expectedMarket: "M5", market: "   " })), 422);
+    assert.equal(await status(() => service.editDealerMarket(SO1, "d1", { expectedMarket: "M5", market: "x".repeat(121) })), 422);
+    assert.equal(t.edits.length, n, "cancelled / rejected edits write nothing");
+    // append-only: the service has no way to alter or remove history
+    const src = readFileSync("src/features/party-planning/territory.server.ts", "utf8");
+    assert.ok(!/territoryMarketEdit\.(update|delete|upsert)/.test(src), "service only ever inserts history rows");
+    assert.ok(readFileSync("prisma/migrations/20261008010000_territory_market_edits/migration.sql", "utf8").includes("TerritoryMarketEdit_no_update"), "database trigger blocks UPDATE / DELETE");
+    // authorization (server-side)
+    assert.equal(await status(() => service.editDealerMarket(SO1, "d3", { expectedMarket: null, market: "X" })), 403, "another officer's dealer");
+    assert.equal(await status(() => service.editDealerMarket(SO1, "d4", { expectedMarket: null, market: "X" })), 403, "another group's dealer");
+    assert.equal(await status(() => service.editDealerMarket(SO1, "missing", { expectedMarket: null, market: "X" })), 404);
+    assert.equal(await status(() => service.listMarketEdits(SO1, "d3")), 403, "history is scoped too");
+    assert.equal(await status(() => service.editDealerMarket({ ...SO1, role: undefined } as unknown as AuthContext, "d1", { expectedMarket: "M5", market: "X" })), 403);
+    assert.equal(await status(() => service.editDealerMarket(RM1, "d3", { expectedMarket: null, market: "Team Market" })), 0, "an RM edits a team dealer (no mapping yet → created)");
+    assert.equal(await status(() => service.editDealerMarket(RM1, "d4", { expectedMarket: null, market: "X" })), 403);
+    assert.equal(t.mappings.find((m) => m.dealerId === "d3")!.marketId, null, "an unmapped dealer gets the text only — still no Market master link");
+    // atomic: history and mapping succeed or fail together
+    const fail = loadService();
+    fail.t.mappings.push({ id: "f1", dealerId: "d1", marketId: null, marketText: "OLD", district: null, potential: null });
+    fail.failNextEdit();
+    assert.equal(await status(() => fail.service.editDealerMarket(SO1, "d1", { expectedMarket: "OLD", market: "NEW" })), -1);
+    assert.deepEqual([fail.t.mappings[0]!.marketText, fail.t.edits.length, fail.t.audit.length], ["OLD", 0, 0], "a failing history write rolls the Market change back (and vice versa)");
+  }
+
+  /* ---- UI wiring of the temporary Market edit (source-level) ---- */
+  {
+    const ui = readFileSync("src/features/party-planning/territory-mapping-page.tsx", "utf8");
+    const cell = ui.slice(ui.indexOf("function MarketCell"), ui.indexOf("function MarketHistoryDialog"));
+    assert.equal((cell.match(/change\.mutate\(/g) ?? []).length, 1, "the only save path is the confirmation dialog's Confirm button");
+    assert.ok(cell.includes("onClick={() => change.mutate()}") && cell.includes("T.confirm") && DEFAULT_LABELS["party_planning.territory.dialog.confirm_change"] === "Confirm Change", "Confirm Change button");
+    assert.ok(cell.includes("setConfirming(true)") && ["{T.title}", "{T.currentMarket}", "{T.newMarket}", "{row.partyName}"].every((x) => cell.includes(x)) && DEFAULT_LABELS["party_planning.territory.dialog.change_title"] === "Change Market for this dealer?" && DEFAULT_LABELS["party_planning.territory.dialog.current_market"] === "Current Market" && DEFAULT_LABELS["party_planning.territory.dialog.new_market"] === "New Market", "Save only opens a confirmation naming dealer, current and new Market");
+    assert.ok(cell.includes("onClick={() => setEditing(false)}") && cell.includes("onClick={() => setConfirming(false)}"), "Cancel (edit and confirmation) only closes — it does not call the save mutation");
+    assert.ok(cell.includes("T.edited") && cell.includes("setHistory(true)") && DEFAULT_LABELS["party_planning.territory.badge.edited"] === "Edited" && DEFAULT_LABELS["party_planning.territory.history.title"] === "Market Edit History", "Edited indicator opens the history");
+    assert.ok(!/aria-label=\{L\.market\} value=\{row\.marketId/.test(ui), "the Market dropdown is gone from the Existing Dealers rows");
+    assert.ok(ui.includes('aria-label={L.district}') && ui.includes("district: v.district"), "District editing unchanged");
+    // Seasonal / Monthly keep their searchable Market selectors and never see the editable Market.
+    const seasonal = readFileSync("src/features/party-planning/seasonal-planning-page.tsx", "utf8"), monthly = readFileSync("src/features/party-planning/monthly-planning-page.tsx", "utf8");
+    assert.ok(seasonal.includes("seasonal-add-markets") && seasonal.includes("/api/territory-mapping/markets"), "Seasonal Market selector: datalist of the Market master");
+    assert.ok(!seasonal.includes("MarketCell") && !monthly.includes("MarketCell") && !seasonal.includes("market-history") && !monthly.includes("market-history") && !monthly.includes("marketText"));
+    for (const f of ["seasonal.server.ts", "monthly.server.ts"]) assert.ok(!readFileSync(`src/features/party-planning/${f}`, "utf8").includes("marketText"), `${f} never reads the manual override`);
+  }
+
+  /* ---- Excel import vs manual edits ---- */
+  {
+    const { service, t } = loadService();
+    t.markets.push({ id: "m-tun", name: "Tundla", nameKey: "tundla", potential: null, source: "EXISTING" });
+    t.mappings.push({ id: "g1", dealerId: "d1", marketId: "m-tun", marketText: "Agra", district: "Rajgarh", potential: null });
+    await service.editDealerMarket(SO1, "d1", { expectedMarket: "Agra", market: "Firozabad" });
+    const editsBefore = t.edits.length;
+    const sheetSame = workbook({ S: [["Dealer", "Market", "District"], ["ABC Traders", "Firozabad", "Rajgarh"]] });
+    assert.equal(plain(await service.previewTerritoryImport(SO1, sheetSame, null)).plan[0]!.action, "NO_CHANGE", "the import compares against the DISPLAYED (edited) Market");
+    const sheetNew = workbook({ S: [["Dealer", "Market", "District"], ["ABC Traders", "Tundla", "Rajgarh"]] });
+    assert.equal(plain(await service.previewTerritoryImport(SO1, sheetNew, null)).plan[0]!.currentMarket, "Firozabad");
+    await service.commitTerritoryImport(SO1, sheetNew, null, {});
+    assert.equal(t.edits.length, editsBefore, "an Excel import never writes manual-edit history");
+    const mapped = t.mappings.find((m) => m.dealerId === "d1")!;
+    assert.deepEqual([mapped.marketId, mapped.marketText], ["m-tun", null], "an import-set Market replaces the manual override");
+    const row = plain(await service.listTerritoryDealers(SO1, PAGE)).items.find((r) => r.dealerId === "d1")!;
+    assert.deepEqual([row.marketName, row.marketEdited], ["Tundla", true], "the Edited indicator (history) remains — it is history, not state");
+    assert.equal(plain(await service.listMarketEdits(SO1, "d1")).edits.length, 1, "history is preserved across the import");
+    // District editing unchanged
+    assert.equal((await service.updateDealerMapping(SO1, "d1", { district: "Sagar" })).district, "Sagar");
+    assert.equal(t.edits.length, editsBefore, "District edits never touch Market history");
   }
 
   /* ---- Add Market request → RM → Admin ---- */

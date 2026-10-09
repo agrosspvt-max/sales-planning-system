@@ -18,6 +18,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { L, useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
+import { PLAN_STAGES, type PlanStage } from "@/lib/monthly-plan";
+import { fill, useLabels } from "./party-labels";
 
 /* --------------------------------- Shared types --------------------------------- */
 
@@ -38,9 +40,6 @@ export interface PartyPlan {
 const STATUS_VARIANT: Record<string, "secondary" | "success" | "destructive" | "muted"> = {
   DRAFT: "muted", PENDING_APPROVAL: "secondary", APPROVED: "success", REJECTED: "destructive",
 };
-const STATUS_TEXT: Record<string, string> = {
-  DRAFT: "Draft", PENDING_APPROVAL: "Pending Approval", APPROVED: "Approved", REJECTED: "Rejected",
-};
 const fmtDate = (s: string | null) => (s ? formatSchemeDate(s) : "—");
 
 /* --------------------------- Module Create Plan | View toggle --------------------------- */
@@ -55,6 +54,7 @@ const PRIMARY_LINKS: { key: "territory" | "planning" | "view"; href: string; lab
   { key: "view", href: "/planning/party/view", labelKey: "party_planning.nav.view" },
 ];
 // SECONDARY navigation inside Planning (route-based, so a refresh or Back/Forward keeps the section).
+const STAGE_LABEL_KEY: Record<PlanStage, LabelKey> = { create: "party_planning.stage.create", submitted: "party_planning.stage.submitted", approved: "party_planning.stage.approved", older: "party_planning.stage.older" };
 const PLANNING_TABS: { key: "seasonal" | "monthly"; href: string; labelKey: LabelKey }[] = [
   { key: "seasonal", href: "/planning/party/seasonal", labelKey: "party_planning.nav.seasonal_tab" },
   { key: "monthly", href: "/planning/party/monthly", labelKey: "party_planning.nav.monthly_tab" },
@@ -64,11 +64,13 @@ const PLANNING_TABS: { key: "seasonal" | "monthly"; href: string; labelKey: Labe
  * Party Planning navigation: [Territory Mapping | Planning | View]. Under Planning, the Sales Planning-style underline
  * tabs [Seasonal | Monthly] are shown; Territory Mapping renders its own [Existing Dealers | Add Market] switch below.
  */
-export function PartyPlanModeLinks({ mode, children }: { mode: PartyMode; children?: React.ReactNode }) {
+export function PartyPlanModeLinks({ mode, stage = "create", actions, children }: { mode: PartyMode; stage?: PlanStage; actions?: React.ReactNode; children?: React.ReactNode }) {
   const primary = mode === "seasonal" || mode === "monthly" ? "planning" : mode;
+  const planLifecycleAria = useLabel("party_planning.nav.plan_lifecycle_aria");
   return (
     <div className="space-y-3">
-      <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
+      {/* Row 1 — main navigation. Each switch sits in its own block row (as Sales Planning does) so they never share a line. */}
+      <div className="flex flex-wrap items-center gap-3"><div className="inline-flex flex-wrap rounded-md border bg-background p-0.5 text-sm">
         {PRIMARY_LINKS.map((m) => (
           <Link
             key={m.key}
@@ -78,8 +80,27 @@ export function PartyPlanModeLinks({ mode, children }: { mode: PartyMode; childr
             <L k={m.labelKey} />
           </Link>
         ))}
-      </div>
-      {primary === "planning" && <UnderlineTabs active={mode} tabs={PLANNING_TABS.map((t) => ({ key: t.key, href: t.href, label: <L k={t.labelKey} /> }))} />}
+      </div></div>
+      {primary === "planning" && (
+        <>
+          {/* Plan lifecycle — route state (?stage=), so the section survives refresh and Back / Forward. Same boxed segmented style as the primary switch. */}
+          {/* Row 2 — the labelled "Plan Type" container (same markup as Sales Planning → View Plans) holding the lifecycle switch; Row 3 — Seasonal | Monthly. */}
+          <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="party_planning.nav.plan_type" /></div>
+          <div className="flex flex-wrap items-center gap-3"><div className="inline-flex flex-wrap rounded-md border bg-background p-0.5 text-sm" aria-label={planLifecycleAria}>
+            {PLAN_STAGES.map((s) => (
+              <Link key={s} href={`/planning/party/${mode}?stage=${s}`} aria-current={stage === s ? "page" : undefined}
+                className={`rounded px-3 py-1.5 font-medium ${stage === s ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}><L k={STAGE_LABEL_KEY[s]} /></Link>
+            ))}
+          </div></div>
+          </div>
+          {/* Row 3 — Seasonal | Monthly on the left; an optional page action (e.g. Create Seasonal Plan) at the far right of the SAME row (wraps below on small screens). */}
+          <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-2 [&>div:first-child]:min-w-0 [&>div:first-child]:flex-1">
+            <UnderlineTabs active={mode} tabs={PLANNING_TABS.map((t) => ({ key: t.key, href: `${t.href}?stage=${stage}`, label: <L k={t.labelKey} /> }))} />
+            {actions}
+          </div>
+        </>
+      )}
       {children}
     </div>
   );
@@ -144,20 +165,22 @@ export function PartyCreatePlanPage() {
   const title = useLabel("party_planning.title");
   const saveLabel = useLabel("party_planning.action.save_draft");
   const submitLabel = useLabel("party_planning.action.submit");
+  const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.legacy.subtitle_create", rejectedBanner: "party_planning.legacy.rejected_banner",
+    phParty: "party_planning.legacy.placeholder_party", phMarket: "party_planning.legacy.placeholder_market", rejectedRemark: "party_planning.legacy.rejected_remark", removeRow: "party_planning.legacy.remove_row", saving: "party_planning.common.saving", submitting: "party_planning.common.submitting" });
 
   return (
     <div className="space-y-5">
       <PageHeader
-        crumbs={[{ label: "Planning" }, { label: "Create/View Plans", href: "/planning/create" }, { label: title }]}
+        crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: title }]}
         title={title}
-        subtitle="Add the parties you plan to meet, then Save Draft or Submit for approval."
+        subtitle={T.subtitle}
       />
 
       <PartyPlanModeLinks mode="create" />
 
       {hasRejected && (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-          One or more plans were rejected. Update them below and submit again. Any admin remark is shown under the row.
+          {T.rejectedBanner}
         </div>
       )}
 
@@ -178,13 +201,13 @@ export function PartyCreatePlanPage() {
               rows.map((r, i) => (
                 <TableRow key={r.id ?? `new-${i}`}>
                   <TableCell>
-                    <Input value={r.partyName} onChange={(e) => update(i, { partyName: e.target.value })} placeholder="Party name" />
-                    {r.status === "REJECTED" && r.remarks && <p className="mt-1 text-xs text-destructive">Rejected: {r.remarks}</p>}
+                    <Input value={r.partyName} onChange={(e) => update(i, { partyName: e.target.value })} placeholder={T.phParty} />
+                    {r.status === "REJECTED" && r.remarks && <p className="mt-1 text-xs text-destructive">{fill(T.rejectedRemark, { remarks: r.remarks })}</p>}
                   </TableCell>
-                  <TableCell><Input value={r.marketName} onChange={(e) => update(i, { marketName: e.target.value })} placeholder="Market name" /></TableCell>
+                  <TableCell><Input value={r.marketName} onChange={(e) => update(i, { marketName: e.target.value })} placeholder={T.phMarket} /></TableCell>
                   <TableCell><Input type="date" value={r.appointmentDate} onChange={(e) => update(i, { appointmentDate: e.target.value })} /></TableCell>
                   <TableCell className="text-right">
-                    <Button size="sm" variant="ghost" className="text-destructive" onClick={() => removeRow(i)} disabled={busy} title="Remove row">
+                    <Button size="sm" variant="ghost" className="text-destructive" onClick={() => removeRow(i)} disabled={busy} title={T.removeRow}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </TableCell>
@@ -201,10 +224,10 @@ export function PartyCreatePlanPage() {
         <Button variant="outline" onClick={addRow} disabled={busy}><Plus className="h-4 w-4" /> <L k="party_planning.action.add_row" /></Button>
         <div className="flex-1" />
         <Button variant="outline" onClick={() => { setError(null); saveMut.mutate(); }} disabled={busy}>
-          <Save className="h-4 w-4" /> {saveMut.isPending ? "Saving…" : saveLabel}
+          <Save className="h-4 w-4" /> {saveMut.isPending ? T.saving : saveLabel}
         </Button>
         <Button onClick={() => { setError(null); submitMut.mutate(); }} disabled={busy || !canSubmit}>
-          <Send className="h-4 w-4" /> {submitMut.isPending ? "Submitting…" : submitLabel}
+          <Send className="h-4 w-4" /> {submitMut.isPending ? T.submitting : submitLabel}
         </Button>
       </div>
     </div>
@@ -223,13 +246,14 @@ export function PartyViewPage({ role }: { role: Role }) {
   const [tab, setTab] = useState<"submitted" | "approved">("submitted");
   const title = useLabel("party_planning.title");
   const viewLabel = useLabel("party_planning.nav.view");
+  const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.legacy.subtitle_view" });
 
   return (
     <div className="space-y-5">
       <PageHeader
-        crumbs={[{ label: "Planning" }, { label: "Create/View Plans", href: "/planning/create" }, { label: title }, { label: viewLabel }]}
+        crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: title }, { label: viewLabel }]}
         title={title}
-        subtitle="Submitted plans await approval; approved plans are read-only."
+        subtitle={T.subtitle}
       />
 
       <PartyPlanModeLinks mode="view" />
@@ -264,6 +288,7 @@ function PartyTable({ view, showAction }: { view: "submitted" | "approved"; show
     onError: (e) => alert((e as Error).message),
   });
 
+  const T = useLabels({ empty: "party_planning.legacy.empty", DRAFT: "party_planning.status.draft", PENDING_APPROVAL: "party_planning.status.pending_approval", APPROVED: "party_planning.status.approved", REJECTED: "party_planning.status.rejected" });
   const cols = showAction ? 5 : 4;
   return (
     <div className="overflow-auto rounded-lg border bg-background">
@@ -281,14 +306,14 @@ function PartyTable({ view, showAction }: { view: "submitted" | "approved"; show
           {isLoading ? (
             <TableRow><TableCell colSpan={cols}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
           ) : (rows?.length ?? 0) === 0 ? (
-            <TableRow><TableCell colSpan={cols} className="py-10 text-center text-muted-foreground">No party plans here yet.</TableCell></TableRow>
+            <TableRow><TableCell colSpan={cols} className="py-10 text-center text-muted-foreground">{T.empty}</TableCell></TableRow>
           ) : (
             rows!.map((r) => (
               <TableRow key={r.id}>
                 <TableCell className="font-medium">{r.partyName ?? "—"}</TableCell>
                 <TableCell>{r.marketName ?? "—"}</TableCell>
                 <TableCell className="whitespace-nowrap">{fmtDate(r.appointmentDate)}</TableCell>
-                <TableCell><Badge variant={STATUS_VARIANT[r.status] ?? "muted"}>{STATUS_TEXT[r.status] ?? r.status}</Badge></TableCell>
+                <TableCell><Badge variant={STATUS_VARIANT[r.status] ?? "muted"}>{(T as Record<string, string>)[r.status] ?? r.status}</Badge></TableCell>
                 {showAction && (
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">

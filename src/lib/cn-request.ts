@@ -410,3 +410,37 @@ export function buildCreateCnRequestPayload(input: {
     details,
   };
 }
+
+/* ------------------------------------------- Excel export (Admin) ------------------------------------------- */
+
+/** The ONLY columns of the CN Requests export, in order. Nothing else (amounts, payment, status, ids, files) is ever exported. */
+export const CN_EXPORT_COLUMNS = [
+  { key: "dealer", label: "Dealer", width: 38 },
+  { key: "cnType", label: "CN Type", width: 18 },
+  { key: "employeeName", label: "Employee Name", width: 28 },
+  { key: "state", label: "State", width: 22 },
+  { key: "territory", label: "Territory", width: 26 },
+] as const;
+export type CnExportRow = Record<(typeof CN_EXPORT_COLUMNS)[number]["key"], string>;
+
+export const NO_CN_EXPORT_MESSAGE = "There are no CN Requests to export in this tab.";
+const CN_EXPORT_VIEW_NAME: Record<CnRequestView, string> = {
+  submitted: "Submitted", rejected: "Rejected", "accepted-not-posted": "CN-Working-Shared", "posted-in-ledger": "Posted-in-Ledger",
+};
+/** e.g. CN-Requests-CN-Working-Shared-2026-10-09.xlsx (the date is the business date, IST). */
+export function cnExportFilename(view: CnRequestView, date: Date = new Date()): string {
+  return `CN-Requests-${CN_EXPORT_VIEW_NAME[view]}-${cnRequestBusinessDateKey(date) ?? date.toISOString().slice(0, 10)}.xlsx`;
+}
+/** Project request rows onto the five export columns. A missing value stays an empty cell — nothing is invented. */
+export function toCnExportRows(
+  rows: { partyName: string | null; cnType: string | null; employeeName: string | null; state: string | null; territory: string | null }[],
+  labels?: CnTypeLabels,
+): CnExportRow[] {
+  return rows.map((r) => ({
+    dealer: r.partyName?.trim() ?? "",
+    cnType: r.cnType ? cnTypeLabel(r.cnType, labels) : "",
+    employeeName: r.employeeName?.trim() ?? "",
+    state: r.state?.trim() ?? "",
+    territory: r.territory?.trim() ?? "",
+  }));
+}

@@ -39,6 +39,8 @@ import {
   isCnSundayDateKey,
   nextCnWorkingDateKey,
   paymentStatusLabel,
+  toCnExportRows,
+  type CnExportRow,
   type CnRequestView,
   type CnRequestCurrentDisplayStatus,
   type CnAcceptanceReason,
@@ -369,6 +371,21 @@ export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Pr
   })) as unknown as RawRow[];
   const verified = await paymentVerifiedMap(rows.map((r) => r.id));
   return withDealerDisplayNames(rows.map((r) => toRow({ ...r, paymentVerified: verified.get(r.id) ?? false })));
+}
+
+/**
+ * Admin Excel export of ONE CN Requests tab. It is the table's own data path (listCnRequests: same scope, same tab filter, no pagination),
+ * projected onto the five export columns — Dealer / CN Type / Employee Name / State / Territory — and nothing else.
+ */
+export async function listCnRequestsForExport(ctx: AuthContext, view: CnRequestView): Promise<CnExportRow[]> {
+  const L = await getResolvedLabels();
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["cn_requests.error.admin_export_only"]);
+  assertAdminPermission(ctx, "cnRequests", "read");
+  const rows = await listCnRequests(ctx, view);
+  return toCnExportRows(rows, {
+    priceDifference: L["cn_requests.cn_type.price_difference"], freight: L["cn_requests.cn_type.freight"], scheme: L["cn_requests.cn_type.scheme"],
+    demo: L["cn_requests.cn_type.demo"], damageExpiry: L["cn_requests.cn_type.damage_expiry"], other: L["cn_requests.cn_type.other"],
+  });
 }
 
 export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequestRow> {

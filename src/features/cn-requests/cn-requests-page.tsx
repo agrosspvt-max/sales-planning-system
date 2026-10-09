@@ -46,6 +46,7 @@ import {
   type CnRejectionReason,
   type CnRequestView,
   type CnType,
+  cnExportFilename,
 } from "@/lib/cn-request";
 import { CnPaymentDialog } from "./cn-payment-dialog";
 import { CnRequestDetailDialog } from "./cn-request-detail-dialog";
@@ -125,6 +126,10 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     downloadFinalCn: useLabel("cn_requests.action.download_final_cn"),
     downloadCn: useLabel("cn_requests.action.download_cn"),
     createNewRequest: useLabel("cn_requests.action.create_new_request"),
+    exportExcel: useLabel("cn_requests.action.export_excel"),
+    exporting: useLabel("cn_requests.action.exporting"),
+    exportEmpty: useLabel("cn_requests.state.export_empty"),
+    exportFailed: useLabel("cn_requests.state.export_failed"),
     cancel: useLabel("cn_requests.action.cancel"),
     close: useLabel("cn_requests.action.close"),
     party: useLabel("cn_requests.task.party"),
@@ -188,6 +193,41 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     queryKey: ["cn-requests", view],
     queryFn: () => api.get<CnRequest[]>(`/api/cn-requests?view=${encodeURIComponent(view)}`),
   });
+
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<{ view: CnRequestView; text: string } | null>(null);
+  const exportMessage = exportNote?.view === view ? exportNote.text : null; // a message belongs to the tab it was raised on
+  const setExportMessage = (text: string | null) => setExportNote(text ? { view, text } : null);
+  // Admin only. The file is built server-side from the tab's full authorized data (not the rows on screen); this just asks for it.
+  const exportExcel = async () => {
+    if (exporting) return; // no duplicate requests
+    setExportMessage(null);
+    if (rows && rows.length === 0) { setExportMessage(labels.exportEmpty); return; }
+    setExporting(true);
+    try {
+      const response = await fetch(`/api/cn-requests/export?view=${encodeURIComponent(view)}`);
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        setExportMessage(response.status === 422 ? labels.exportEmpty : body.error ?? labels.exportFailed);
+        return;
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url; link.download = cnExportFilename(view);
+      document.body.appendChild(link); link.click(); link.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setExportMessage(labels.exportFailed);
+    } finally {
+      setExporting(false);
+    }
+  };
+  const exportButton = isAdmin ? (
+    <div className="flex items-center gap-2">
+      {exportMessage && <span role="status" className="text-sm text-muted-foreground">{exportMessage}</span>}
+      <Button variant="outline" size="sm" disabled={exporting || isLoading} onClick={() => void exportExcel()}><Download className="h-4 w-4" /> {exporting ? labels.exporting : labels.exportExcel}</Button>
+    </div>
+  ) : null;
 
   const [createOpen, setCreateOpen] = useState(false);
   const [detail, setDetail] = useState<CnRequest | null>(null);
@@ -281,6 +321,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
               { value: "rejected", label: labels.rejected },
             ]}
           />
+          {exportButton}
         </div>
       ) : (
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -292,6 +333,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
               { value: "posted-in-ledger", label: labels.postedInLedger },
             ]}
           />
+          {exportButton}
         </div>
       )}
 

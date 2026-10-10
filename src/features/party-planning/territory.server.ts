@@ -463,8 +463,11 @@ export interface MarketRequestDto {
   rmDecision: string | null; rmDecidedByName: string | null; rmDecidedAt: string | null;
   adminDecision: string | null; adminDecidedByName: string | null; adminDecidedAt: string | null;
   rejectionStage: string | null; rejectionReason: string | null; marketId: string | null;
+  /** The District Master entry the request is for; null / null on requests made before the field existed (shown as "—"). */
+  districtId: string | null; districtName: string | null;
 }
-type RequestRow = Prisma.MarketRequestGetPayload<{ include: { requester: { select: { name: true } } } }>;
+const REQUEST_INCLUDE = { requester: { select: { name: true } }, district: { select: { name: true } } } as const;
+type RequestRow = Prisma.MarketRequestGetPayload<{ include: typeof REQUEST_INCLUDE }>;
 
 async function toRequestDtos(rows: RequestRow[]): Promise<MarketRequestDto[]> {
   const deciderIds = [...new Set(rows.flatMap((r) => [r.rmDecidedById, r.adminDecidedById]).filter((v): v is string => !!v))];
@@ -476,7 +479,24 @@ async function toRequestDtos(rows: RequestRow[]): Promise<MarketRequestDto[]> {
     rmDecision: r.rmDecision, rmDecidedByName: r.rmDecidedById ? name.get(r.rmDecidedById) ?? null : null, rmDecidedAt: r.rmDecidedAt?.toISOString() ?? null,
     adminDecision: r.adminDecision, adminDecidedByName: r.adminDecidedById ? name.get(r.adminDecidedById) ?? null : null, adminDecidedAt: r.adminDecidedAt?.toISOString() ?? null,
     rejectionStage: r.rejectionStage, rejectionReason: r.rejectionReason, marketId: r.marketId,
+    districtId: r.districtId, districtName: r.district?.name ?? null,
   }));
+}
+
+export interface RequesterDistricts { stateName: string | null; districts: DistrictOption[] }
+/** The requester's OWN State (their UserGroup) — never the team's — and its active districts. No State / no districts → an empty list, never a fallback to others. */
+async function requesterState(userId: string): Promise<StateRef | null> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { groupId: true } });
+  if (!user?.groupId) return null;
+  const group = (await prisma.userGroup.findMany({ where: { id: { in: [user.groupId] } }, select: { id: true, name: true } }))[0];
+  return group ?? null;
+}
+export async function listRequesterDistricts(ctx: AuthContext): Promise<RequesterDistricts> {
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only a Sales Officer or Regional Manager can request a Market");
+  const state = await requesterState(ctx.userId);
+  if (!state) return { stateName: null, districts: [] };
+  const rows = await prisma.district.findMany({ where: { groupId: state.id, isActive: true }, select: { id: true, name: true } });
+  return { stateName: state.name, districts: [...rows].sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
 /** SO / RM submit a request. Duplicate Markets (normalized name) and duplicate pending requests are refused, never merged. */
@@ -485,6 +505,14 @@ export async function createMarketRequest(ctx: AuthContext, raw: unknown): Promi
   const input = (raw ?? {}) as Record<string, unknown>;
   const problem = validateMarketRequest({ marketName: input.marketName, potential: input.potential, numberOfParties: input.numberOfParties });
   if (problem) throw new ApiError(422, problem);
+  // District (required for new requests): an existing, ACTIVE District Master entry of the requester's own State.
+  if (typeof input.districtId !== "string" || !input.districtId.trim()) throw new ApiError(422, "Select a District.");
+  const state = await requesterState(ctx.userId);
+  if (!state) throw new ApiError(422, "Your State could not be identified, so a Market cannot be requested.");
+  const district = await prisma.district.findUnique({ where: { id: input.districtId.trim() } });
+  if (!district) throw new ApiError(422, "That District does not exist.");
+  if (!district.isActive) throw new ApiError(422, "That District is not active.");
+  if (district.groupId !== state.id) throw new ApiError(422, `That District does not belong to your State (${state.name}).`);
   const marketName = cleanMarketName(String(input.marketName));
   const nameKey = marketNameKey(marketName);
   const potential = input.potential as Potential;
@@ -501,8 +529,8 @@ export async function createMarketRequest(ctx: AuthContext, raw: unknown): Promi
   const rmId = ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId) : null;
   const created = await prisma.$transaction(async (tx) => {
     const row = await tx.marketRequest.create({
-      data: { requesterId: ctx.userId, marketName, nameKey, potential, numberOfParties, status: rmId ? "PENDING_RM" : "PENDING_ADMIN" },
-      include: { requester: { select: { name: true } } },
+      data: { requesterId: ctx.userId, marketName, nameKey, potential, numberOfParties, districtId: district.id, status: rmId ? "PENDING_RM" : "PENDING_ADMIN" },
+      include: REQUEST_INCLUDE,
     });
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "marketRequest", entityId: row.id, summary: `Requested Market "${marketName}" (Potential ${potential}, ${numberOfParties} parties)` }, tx);
     return row;
@@ -519,7 +547,7 @@ export type MarketRequestView = "mine" | "review" | "history";
  */
 export async function listMarketRequests(ctx: AuthContext, view: MarketRequestView): Promise<MarketRequestDto[]> {
   assertTerritoryUser(ctx);
-  const include = { requester: { select: { name: true } } } as const;
+  const include = REQUEST_INCLUDE;
   const scope = await getOfficerScope(ctx);
   const inScope: Prisma.MarketRequestWhereInput = scope.all ? {} : { requesterId: { in: scope.ids } };
   let where: Prisma.MarketRequestWhereInput;
@@ -553,7 +581,7 @@ export async function actOnMarketRequest(ctx: AuthContext, id: string, raw: unkn
   if (isAdmin) assertAdminPermission(ctx, "partyPlanning", action === "approve" ? "approve" : "reject");
 
   const updated = await prisma.$transaction(async (tx) => {
-    const request = await tx.marketRequest.findUnique({ where: { id }, include: { requester: { select: { name: true } } } });
+    const request = await tx.marketRequest.findUnique({ where: { id }, include: REQUEST_INCLUDE });
     if (!request) throw new ApiError(404, "Market request not found");
     const now = new Date();
     if (isRm) {
@@ -563,20 +591,20 @@ export async function actOnMarketRequest(ctx: AuthContext, id: string, raw: unkn
       const data = action === "approve"
         ? { status: "PENDING_ADMIN", rmDecision: "APPROVED", rmDecidedById: ctx.userId, rmDecidedAt: now }
         : { status: "REJECTED", rmDecision: "REJECTED", rmDecidedById: ctx.userId, rmDecidedAt: now, rejectionStage: "RM", rejectionReason: reason };
-      const row = await tx.marketRequest.update({ where: { id }, data, include: { requester: { select: { name: true } } } });
+      const row = await tx.marketRequest.update({ where: { id }, data, include: REQUEST_INCLUDE });
       await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `RM ${action === "approve" ? "approved" : "rejected"} Market request "${request.marketName}"${action === "reject" ? ` — ${reason}` : ""}` }, tx);
       return row;
     }
     if (request.status !== "PENDING_ADMIN") throw new ApiError(409, "This request is not waiting for Admin review");
     if (action === "reject") {
-      const row = await tx.marketRequest.update({ where: { id }, data: { status: "REJECTED", adminDecision: "REJECTED", adminDecidedById: ctx.userId, adminDecidedAt: now, rejectionStage: "ADMIN", rejectionReason: reason }, include: { requester: { select: { name: true } } } });
+      const row = await tx.marketRequest.update({ where: { id }, data: { status: "REJECTED", adminDecision: "REJECTED", adminDecidedById: ctx.userId, adminDecidedAt: now, rejectionStage: "ADMIN", rejectionReason: reason }, include: REQUEST_INCLUDE });
       await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `Admin rejected Market request "${request.marketName}" — ${reason}` }, tx);
       return row;
     }
     // Final approval is the ONLY point at which the Market becomes real / usable.
     if (await tx.market.findUnique({ where: { nameKey: request.nameKey }, select: { id: true } })) throw new ApiError(409, `The Market "${request.marketName}" already exists.`);
     const market = await tx.market.create({ data: { name: request.marketName, nameKey: request.nameKey, potential: request.potential, source: "REQUESTED", expectedParties: request.numberOfParties, createdById: request.requesterId }, select: { id: true } });
-    const row = await tx.marketRequest.update({ where: { id }, data: { status: "APPROVED", adminDecision: "APPROVED", adminDecidedById: ctx.userId, adminDecidedAt: now, marketId: market.id }, include: { requester: { select: { name: true } } } });
+    const row = await tx.marketRequest.update({ where: { id }, data: { status: "APPROVED", adminDecision: "APPROVED", adminDecidedById: ctx.userId, adminDecidedAt: now, marketId: market.id }, include: REQUEST_INCLUDE });
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "market", entityId: market.id, summary: `Admin approved Market request "${request.marketName}" (Potential ${request.potential})` }, tx);
     return row;
   });

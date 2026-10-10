@@ -1989,14 +1989,18 @@ model MarketRequest {
   rejectionStage   String? // RM | ADMIN
   rejectionReason  String?
   marketId         String? // the Market created on final approval
+  /// The District Master entry (of the requester's own State) the vacant Market is in. Nullable ONLY for requests made before this field existed — new requests always carry one.
+  districtId       String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   requester        User      @relation("MarketRequestRequester", fields: [requesterId], references: [id])
   market           Market?   @relation(fields: [marketId], references: [id])
+  district         District? @relation(fields: [districtId], references: [id], onDelete: Restrict)
 
   @@index([requesterId])
   @@index([status])
   @@index([nameKey])
+  @@index([districtId])
 }
 
 /// Seasonal Planning (Party Planning · Phase 2): an owner (Sales Officer / Regional Manager) plans, for the CURRENT Sales Planning
@@ -2243,6 +2247,7 @@ model District {
   group       UserGroup             @relation(fields: [groupId], references: [id], onDelete: Restrict)
   aliases     DistrictAlias[]
   mappings    DealerMarketMapping[]
+  marketRequests MarketRequest[]
 
   @@unique([groupId, nameKey])
   @@index([groupId, isActive])

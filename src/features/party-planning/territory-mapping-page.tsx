@@ -38,6 +38,7 @@ interface MarketRequest {
   id: string; marketName: string; potential: Potential; numberOfParties: number; status: "PENDING_RM" | "PENDING_ADMIN" | "APPROVED" | "REJECTED";
   requesterName: string; createdAt: string; rmDecidedByName: string | null; rmDecidedAt: string | null; adminDecidedByName: string | null; adminDecidedAt: string | null;
   rejectionStage: string | null; rejectionReason: string | null;
+  districtId: string | null; districtName: string | null; // null on requests made before District was captured (shown as "—")
 }
 interface ImportPreview { sheetNames: string[]; sheet: string | null; needsSheet: boolean; error: string | null; plan: ImportPlanRow[]; summary: ImportSummary | null }
 interface ImportResult { applied: number; noChange: number; skippedUnmatched: number; skippedAmbiguous: number; rejectedInvalid: number; duplicates: number; marketsCreated: number; skippedUnknownDistrict: number }
@@ -466,6 +467,7 @@ export function AddMarket({ role }: { role: Role }) {
   const qc = useQueryClient();
   const canRequest = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
   const canReview = role === Role.REGIONAL_MANAGER || isAdministrativeRole(role);
+  const [districtId, setDistrictId] = useState("");
   const [name, setName] = useState("");
   const [potential, setPotential] = useState("");
   const [parties, setParties] = useState("");
@@ -476,25 +478,33 @@ export function AddMarket({ role }: { role: Role }) {
   const [adding, setAdding] = useState(false);
   const L = {
     name: useLabel("party_planning.territory.field.market_name"), potential: useLabel("party_planning.territory.field.market_potential"),
-    parties: useLabel("party_planning.territory.field.number_of_parties"), send: useLabel("party_planning.territory.action.send_request"),
+    district: useLabel("party_planning.territory.col.district"), parties: useLabel("party_planning.territory.field.number_of_parties"), send: useLabel("party_planning.territory.action.send_request"),
   };
   const T = useLabels({ sent: "party_planning.territory.msg.request_sent", review: "party_planning.territory.view.review", mine: "party_planning.territory.view.mine", history: "party_planning.territory.view.history", requestedBy: "party_planning.common.requested_by",
-    date: "party_planning.territory.col.date", status: "party_planning.territory.col.status", decision: "party_planning.common.decision", action: "party_planning.territory.col.action", empty: "party_planning.territory.empty_requests", select: "party_planning.territory.placeholder.select",
+    date: "party_planning.territory.col.date", status: "party_planning.territory.col.status", decision: "party_planning.common.decision", action: "party_planning.territory.col.action", empty: "party_planning.territory.empty_requests", select: "party_planning.territory.placeholder.select", selectDistrict: "party_planning.territory.placeholder.select_district", noDistrictResults: "party_planning.territory.msg.no_district_results",
+    selectDistrictFirst: "party_planning.territory.msg.select_district", noState: "party_planning.territory.msg.no_state", noDistricts: "party_planning.territory.msg.no_districts",
     addMarket: "party_planning.action.add_market", approve: "party_planning.action.approve", reject: "party_planning.action.reject", cancel: "party_planning.common.cancel", decidedRm: "party_planning.common.decided_rm", decidedAdmin: "party_planning.common.decided_admin", rejectedBy: "party_planning.common.rejected_by",
     PENDING_RM: "party_planning.status.awaiting_rm", PENDING_ADMIN: "party_planning.status.awaiting_admin", APPROVED: "party_planning.status.approved", REJECTED: "party_planning.status.rejected" });
   const send = useMutation({
-    mutationFn: () => api.post<MarketRequest>("/api/territory-mapping/market-requests", { marketName: name, potential, numberOfParties: parties }),
-    onSuccess: () => { setError(null); setNotice(T.sent); setName(""); setPotential(""); setParties(""); setAdding(false); setView("mine"); qc.invalidateQueries({ queryKey: ["market-requests"] }); },
+    mutationFn: () => api.post<MarketRequest>("/api/territory-mapping/market-requests", { districtId, marketName: name, potential, numberOfParties: parties }),
+    onSuccess: () => { setError(null); setNotice(T.sent); setDistrictId(""); setName(""); setPotential(""); setParties(""); setAdding(false); setView("mine"); qc.invalidateQueries({ queryKey: ["market-requests"] }); },
     onError: (e) => { setNotice(null); setError((e as Error).message); },
   });
-  const closeForm = () => { setAdding(false); setName(""); setPotential(""); setParties(""); setError(null); }; // Cancel: nothing is sent
+  const closeForm = () => { setAdding(false); setDistrictId(""); setName(""); setPotential(""); setParties(""); setError(null); }; // Cancel: nothing is sent
   const submit = () => {
     setNotice(null);
+    if (!districtId) { setError(T.selectDistrictFirst); return; }
     const problem = validateMarketRequest({ marketName: name, potential, numberOfParties: parties });
     if (problem) { setError(problem); return; }
     setError(null); send.mutate();
   };
 
+  // The requester's OWN State's active districts (server-resolved; never the team's, never all).
+  const { data: districtData, isLoading: districtsLoading } = useQuery<{ stateName: string | null; districts: { id: string; name: string }[] }>({
+    queryKey: ["market-request-districts"], queryFn: () => api.get("/api/territory-mapping/market-request-districts"), enabled: canRequest && adding,
+  });
+  const districts = districtData?.districts ?? [];
+  const districtBlocked = !districtsLoading && districts.length === 0; // no State / no active districts: say so and block submission
   const { data: requests, isLoading } = useQuery<MarketRequest[]>({ queryKey: ["market-requests", view], queryFn: () => api.get<MarketRequest[]>(`/api/territory-mapping/market-requests?view=${view}`) });
   const act = useMutation({
     mutationFn: (v: { id: string; action: "approve" | "reject"; reason?: string }) => api.post(`/api/territory-mapping/market-requests/${v.id}/act`, { action: v.action, reason: v.reason }),
@@ -521,15 +531,15 @@ export function AddMarket({ role }: { role: Role }) {
         <div className="overflow-auto rounded-lg border bg-background">
           <Table>
             <TableHeader><TableRow>
-              <TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><TableHead>{T.requestedBy}</TableHead><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
+              <TableHead>{L.district}</TableHead><TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><TableHead>{T.requestedBy}</TableHead><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
               {view === "review" && <TableHead className="text-right">{T.action}</TableHead>}
             </TableRow></TableHeader>
             <TableBody>
-              {isLoading ? <TableRow><TableCell colSpan={8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-                : (requests?.length ?? 0) === 0 ? <TableRow><TableCell colSpan={8} className="py-8 text-center text-muted-foreground">{T.empty}</TableCell></TableRow>
+              {isLoading ? <TableRow><TableCell colSpan={view === "review" ? 9 : 8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                : (requests?.length ?? 0) === 0 ? <TableRow><TableCell colSpan={view === "review" ? 9 : 8} className="py-8 text-center text-muted-foreground">{T.empty}</TableCell></TableRow>
                   : requests!.map((r) => (
                     <TableRow key={r.id}>
-                      <TableCell className="font-medium">{r.marketName}</TableCell><TableCell>{r.potential}</TableCell><TableCell>{r.numberOfParties}</TableCell>
+                      <TableCell>{r.districtName ?? dash}</TableCell><TableCell className="font-medium">{r.marketName}</TableCell><TableCell>{r.potential}</TableCell><TableCell>{r.numberOfParties}</TableCell>
                       <TableCell>{r.requesterName}</TableCell><TableCell className="whitespace-nowrap">{dateText(r.createdAt)}</TableCell>
                       <TableCell><Badge variant={REQUEST_VARIANT[r.status]}>{T[r.status]}</Badge></TableCell>
                       <TableCell className="text-xs text-muted-foreground">
@@ -558,6 +568,11 @@ export function AddMarket({ role }: { role: Role }) {
           <DialogContent className="max-w-md">
             <DialogHeader><DialogTitle>{T.addMarket}</DialogTitle></DialogHeader>
             <div className="space-y-3">
+              <div className="space-y-1.5"><Label>{L.district} *</Label>
+                <SearchableSelect ariaLabel={L.district} options={districts.map((d) => ({ value: d.id, label: d.name }))} value={districtId} onChange={setDistrictId}
+                  placeholder={T.selectDistrict} emptyText={T.noDistrictResults} disabled={districtsLoading || districtBlocked} />
+                {districtBlocked && <p className="text-xs text-destructive">{districtData?.stateName ? fill(T.noDistricts, { state: districtData.stateName }) : T.noState}</p>}
+              </div>
               <div className="space-y-1.5"><Label>{L.name} *</Label><Input value={name} maxLength={120} onChange={(e) => setName(e.target.value)} /></div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5"><Label>{L.potential} *</Label>
@@ -571,7 +586,7 @@ export function AddMarket({ role }: { role: Role }) {
             </div>
             <DialogFooter>
               <Button variant="outline" disabled={send.isPending} onClick={closeForm}>{T.cancel}</Button>
-              <Button disabled={send.isPending} onClick={submit}>{L.send}</Button>
+              <Button disabled={send.isPending || districtsLoading || districtBlocked} onClick={submit}>{L.send}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

@@ -67,7 +67,7 @@ function makeDb() {
   const marketById = (mid: unknown) => t.markets.find((m) => m.id === mid);
   const districtById = (did: unknown) => DISTRICTS.find((d) => d.id === did);
   const withMarket = (m: Row) => ({ ...m, market: m.marketId ? { name: marketById(m.marketId)?.name } : null, districtRef: m.districtId ? { name: districtById(m.districtId)?.name, groupId: districtById(m.districtId)?.groupId } : null });
-  const requester = (r: Row): Row & { requester: { name: string | undefined } } => ({ ...r, requester: { name: USERS.find((u) => u.id === r.requesterId)?.name } });
+  const requester = (r: Row): Row & { requester: { name: string | undefined } } => ({ ...r, requester: { name: USERS.find((u) => u.id === r.requesterId)?.name }, district: r.districtId ? { name: DISTRICTS.find((d) => d.id === r.districtId)?.name } : null });
   let failNextMappingWrite = false;
   let failNextEdit = false;
 
@@ -81,7 +81,7 @@ function makeDb() {
       findFirst: async ({ where }: { where: { id: string } }) => { const d = DEALERS.find((x) => x.id === where.id); return d ? { id: d.id, name: d.name, status: d.status } : null; },
     },
     dealerAlias: { findMany: async ({ where }: { where?: { systemDealerId?: { in: string[] } } }) => ALIASES.filter((a) => !where?.systemDealerId || where.systemDealerId.in.includes(a.systemDealerId)) },
-    user: { findMany: async ({ where }: { where: { id?: { in: string[] }; role?: Role; isActive?: boolean } }) => USERS.filter((u) => (!where.id || where.id.in.includes(u.id)) && (!where.role || u.role === where.role)) },
+    user: { findUnique: async ({ where }: { where: { id: string } }) => USERS.find((u) => u.id === where.id) ?? null, findMany: async ({ where }: { where: { id?: { in: string[] }; role?: Role; isActive?: boolean } }) => USERS.filter((u) => (!where.id || where.id.in.includes(u.id)) && (!where.role || u.role === where.role)) },
     userGroup: { findMany: async ({ where }: { where?: { id?: { in: string[] } } } = {}) => GROUPS.filter((g) => !where?.id || where.id.in.includes(g.id)) },
     district: {
       findMany: async ({ where }: { where?: Row } = {}) => DISTRICTS.filter((d) => matches(d as Row, where)).map((d) => ({ ...d })),
@@ -196,7 +196,7 @@ async function main() {
   /* ---- Manual mapping: Market + Potential, scope enforced on write ---- */
   {
     const { service, t } = loadService();
-    const market = await service.createMarketRequest(SO1, { marketName: "Pipariya", potential: "A", numberOfParties: 10 }); void market;
+    const market = await service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "Pipariya", potential: "A", numberOfParties: 10 }); void market;
     t.markets.push({ id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: "A", source: "REQUESTED" });
     const set = await service.updateDealerMapping(SO1, "d1", { marketId: "m-pip", potential: "B" });
     assert.deepEqual([set.marketName, set.potential], ["Pipariya", "B"]);
@@ -561,7 +561,7 @@ async function main() {
   /* ---- Add Market request → RM → Admin ---- */
   {
     const { service, t } = loadService();
-    const req = await service.createMarketRequest(SO1, { marketName: "  Pipariya ", potential: "A", numberOfParties: 12 });
+    const req = await service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "  Pipariya ", potential: "A", numberOfParties: 12 });
     assert.deepEqual([req.status, req.marketName, req.potential, req.numberOfParties, req.requesterName], ["PENDING_RM", "Pipariya", "A", 12, "Officer One"], "an SO's request goes to their RM first");
     assert.equal(t.markets.length, 0, "no Market exists before approval");
     assert.deepEqual((await service.listMarkets(SO1)).length, 0, "…and none is usable");
@@ -572,7 +572,7 @@ async function main() {
     assert.equal((await service.listMarketRequests(SO2, "review")).length, 0, "an SO reviews nothing");
     // Validation + duplicates (normalized), never merged.
     for (const bad of [{ marketName: "", potential: "A", numberOfParties: 3 }, { marketName: "X", potential: "D", numberOfParties: 3 }, { marketName: "X", potential: "A", numberOfParties: 0 }, { marketName: "X", potential: "A", numberOfParties: 2.5 }]) assert.equal(await status(() => service.createMarketRequest(SO1, bad)), 422);
-    assert.equal(await status(() => service.createMarketRequest(SO2, { marketName: "PIPARIYA", potential: "B", numberOfParties: 3 })), 409, "a pending request with the same normalized name blocks a duplicate");
+    assert.equal(await status(() => service.createMarketRequest(SO2, { districtId: "dist-raj", marketName: "PIPARIYA", potential: "B", numberOfParties: 3 })), 409, "a pending request with the same normalized name blocks a duplicate");
     assert.equal(await status(() => service.createMarketRequest(ADMIN, { marketName: "Z", potential: "A", numberOfParties: 3 })), 403, "Admin does not file requests");
 
     // RM and Admin rejection both need a reason.
@@ -590,25 +590,25 @@ async function main() {
     assert.deepEqual([approved.status, approved.adminDecidedByName, approved.marketId != null], ["APPROVED", "Admin", true]);
     assert.deepEqual(t.markets.map((m) => [m.name, m.potential, m.source, m.expectedParties]), [["Pipariya", "A", "REQUESTED", 12]], "final approval creates the Market");
     assert.deepEqual((await service.listMarkets(SO1)).map((m) => m.name), ["Pipariya"], "the approved Market is now available");
-    assert.equal(await status(() => service.createMarketRequest(SO1, { marketName: "pipariya", potential: "C", numberOfParties: 4 })), 409, "an existing Market blocks a duplicate request");
+    assert.equal(await status(() => service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "pipariya", potential: "C", numberOfParties: 4 })), 409, "an existing Market blocks a duplicate request");
     assert.deepEqual(t.audit.filter((a) => a.entity === "marketRequest" || a.entity === "market").map((a) => a.entity), ["marketRequest", "marketRequest", "market"], "request, RM decision and final approval are each audited");
 
     // Rejections keep who / when / why.
-    const r2 = await service.createMarketRequest(SO1, { marketName: "Bareli", potential: "B", numberOfParties: 5 });
+    const r2 = await service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "Bareli", potential: "B", numberOfParties: 5 });
     const rmRej = await service.actOnMarketRequest(RM1, r2.id, { action: "reject", reason: "Too small" });
     assert.deepEqual([rmRej.status, rmRej.rejectionStage, rmRej.rejectionReason, rmRej.rmDecidedByName], ["REJECTED", "RM", "Too small", "RM One"]);
     assert.equal(t.markets.length, 1, "a rejected request creates no Market");
-    const r3 = await service.createMarketRequest(SO1, { marketName: "Bareli", potential: "B", numberOfParties: 5 });
+    const r3 = await service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "Bareli", potential: "B", numberOfParties: 5 });
     await service.actOnMarketRequest(RM1, r3.id, { action: "approve" });
     const adminRej = await service.actOnMarketRequest(ADMIN, r3.id, { action: "reject", reason: "Duplicate territory" });
     assert.deepEqual([adminRej.status, adminRej.rejectionStage, adminRej.rejectionReason, adminRej.adminDecidedByName], ["REJECTED", "ADMIN", "Duplicate territory", "Admin"]);
     assert.equal((await service.listMarketRequests(SO1, "history")).length, 3, "history keeps every decided request with its reasons");
     // An RM's own request skips the RM step; a SO with no RM goes straight to Admin.
-    const rmReq = await service.createMarketRequest(RM1, { marketName: "Chhindwara", potential: "C", numberOfParties: 8 });
+    const rmReq = await service.createMarketRequest(RM1, { districtId: "dist-raj", marketName: "Chhindwara", potential: "C", numberOfParties: 8 });
     assert.equal(rmReq.status, "PENDING_ADMIN");
     assert.equal(await status(() => service.actOnMarketRequest(RM1, rmReq.id, { action: "approve" })), 409, "an RM cannot approve their own request");
     assert.deepEqual((await service.listMarketRequests(ADMIN, "review")).map((r) => r.marketName), ["Chhindwara"]);
-    const lonely = await service.createMarketRequest(SO3, { marketName: "Rewa", potential: "A", numberOfParties: 2 });
+    const lonely = await service.createMarketRequest(SO3, { districtId: "dist-kan", marketName: "Rewa", potential: "A", numberOfParties: 2 });
     assert.equal(lonely.status, "PENDING_RM", "SO3's RM exists (rm2) → RM first");
     void SO2; void RM2;
   }
@@ -669,6 +669,57 @@ async function main() {
     assert.equal((await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "", officer: "", market: "" })).total, 8, "All / All / All restores the full set");
     const adminCounts = await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "g1", market: "m-pip" });
     assert.deepEqual([adminCounts.total, adminCounts.mapped, adminCounts.unmapped], [1, 3, 3], "counts are for the State (market filter does not change them)");
+  }
+
+  /* ---- Add Market: District (the requester's OWN State, active only) is captured, validated server-side, returned, and survives review ---- */
+  {
+    const { service, t } = loadService();
+    const names = (r: { districts: { name: string }[] }) => r.districts.map((d) => d.name).join(",");
+    const so = await service.listRequesterDistricts(SO1);
+    assert.deepEqual([so.stateName, names(so)], ["Madhya Pradesh", "Rajgarh,Sagar"], "SO: only own State's ACTIVE districts (inactive Indore excluded)");
+    assert.equal(names(await service.listRequesterDistricts(RM1)), "Rajgarh,Sagar", "RM: own State too");
+    assert.equal(names(await service.listRequesterDistricts(SO3)), "Agra,Kannauj", "another State's officer sees only theirs — never the team's or all");
+    assert.equal(await status(() => service.listRequesterDistricts(ADMIN)), 403, "Admin does not file requests");
+    const so3 = USERS.find((u) => u.id === "so3")!; const keep = so3.groupId; so3.groupId = "";
+    assert.equal(JSON.stringify(await service.listRequesterDistricts(SO3)), JSON.stringify({ stateName: null, districts: [] }), "no State → nothing offered, no fallback to all districts");
+    assert.equal(await status(() => service.createMarketRequest(SO3, { districtId: "dist-kan", marketName: "NoState", potential: "A", numberOfParties: 2 })), 422, "no State → submission refused");
+    so3.groupId = keep;
+
+    const base = { marketName: "Pipariya", potential: "A", numberOfParties: 10 };
+    for (const [why, districtId] of [["missing", undefined], ["blank", "  "], ["unknown id", "nope"], ["inactive", "dist-indore"], ["another State", "dist-kan"]] as const) {
+      assert.equal(await status(() => service.createMarketRequest(SO1, { ...base, districtId })), 422, `${why} district is rejected`);
+    }
+    assert.equal(await status(() => service.createMarketRequest(RM1, { ...base, districtId: "dist-kan" })), 422, "RM cannot use another State's district either");
+    assert.equal(t.requests.length, 0, "nothing was saved by the rejected submissions");
+
+    // Existing validation + duplicate check are unchanged.
+    assert.equal(await status(() => service.createMarketRequest(SO1, { districtId: "dist-raj", ...base, potential: "Z" })), 422);
+    const created = await service.createMarketRequest(SO1, { ...base, districtId: "dist-raj" });
+    assert.deepEqual([created.districtId, created.districtName, created.status], ["dist-raj", "Rajgarh", "PENDING_RM"], "saved and returned; SO routing still starts at the RM");
+    assert.equal(t.requests[0]!.districtId, "dist-raj", "persisted on the request");
+    assert.equal(await status(() => service.createMarketRequest(SO2, { ...base, districtId: "dist-sagar", marketName: "pipariya" })), 409, "duplicate pending name still blocked");
+
+    // Every listing carries it; review keeps it.
+    const mine = await service.listMarketRequests(SO1, "mine");
+    assert.equal(mine[0]!.districtName, "Rajgarh");
+    assert.equal((await service.listMarketRequests(RM1, "review"))[0]!.districtName, "Rajgarh");
+    const viaRm = await service.actOnMarketRequest(RM1, created.id, { action: "approve" });
+    assert.deepEqual([viaRm.status, viaRm.districtId, viaRm.districtName], ["PENDING_ADMIN", "dist-raj", "Rajgarh"], "RM approval keeps the district");
+    assert.equal((await service.listMarketRequests(ADMIN, "review"))[0]!.districtName, "Rajgarh");
+    const approved = await service.actOnMarketRequest(ADMIN, created.id, { action: "approve" });
+    assert.deepEqual([approved.status, approved.districtId, approved.districtName], ["APPROVED", "dist-raj", "Rajgarh"], "final approval keeps the district");
+    assert.equal(t.markets.find((m) => m.name === "Pipariya") !== undefined && !("districtId" in t.markets.find((m) => m.name === "Pipariya")!), true, "the Market master gets no district (market identity is unchanged)");
+    assert.equal((await service.listMarketRequests(ADMIN, "history")).find((r) => r.id === created.id)!.districtName, "Rajgarh", "history keeps it");
+
+    // Rejection keeps it too.
+    const second = await service.createMarketRequest(RM1, { marketName: "Sehore", potential: "B", numberOfParties: 4, districtId: "dist-sagar" });
+    const rejected = await service.actOnMarketRequest(ADMIN, second.id, { action: "reject", reason: "Not needed" });
+    assert.deepEqual([rejected.status, rejected.districtName], ["REJECTED", "Sagar"], "rejection keeps the district");
+
+    // Historical request (made before the field existed) stays readable, not guessed.
+    t.requests.push({ id: "legacy", requesterId: "so1", marketName: "Old Market", nameKey: "old market", potential: "C", numberOfParties: 1, status: "APPROVED", rmDecision: "APPROVED", rmDecidedById: "rm1", rmDecidedAt: new Date(), adminDecision: "APPROVED", adminDecidedById: "admin", adminDecidedAt: new Date(), rejectionStage: null, rejectionReason: null, marketId: null, districtId: null, createdAt: new Date(0) }); // as the database returns a pre-existing row: districtId NULL
+    const old = (await service.listMarketRequests(SO1, "history")).find((r) => r.id === "legacy")!;
+    assert.deepEqual([old.districtId, old.districtName, old.marketName], [null, null, "Old Market"], "older requests: no district, nothing invented");
   }
 
   console.log("territory.test.ts — all assertions passed");

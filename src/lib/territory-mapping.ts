@@ -36,8 +36,9 @@ export function validateMarketRequest(input: { marketName: unknown; potential: u
 export const DISTRICT_MAX = 120;
 /** District is plain dealer territory text (no master): trimmed, inner whitespace collapsed, case preserved. */
 export const cleanDistrict = (value: string): string => value.replace(/\s+/g, " ").trim();
-/** Comparison key for a District ("Rajgarh" == " RAJGARH "). */
-export const districtKey = (value: string): string => marketNameKey(value);
+/** Comparison key for a District ("Rajgarh" == " RAJGARH ") — the District master's own rule. */
+export { districtKey } from "./district-master";
+import { districtKey } from "./district-master";
 
 /** `district` is "" when the sheet has no District column or the cell is blank — meaning "leave the dealer's District unchanged". */
 export interface ImportSheetRow { rowNumber: number; dealer: string; market: string; district: string }
@@ -46,22 +47,23 @@ export type ImportRowProblem = { rowNumber: number; dealer: string; market: stri
 const cellText = (v: unknown): string => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 
 /**
- * Read the selected sheet's rows (array-of-arrays, row 0 = header). The sheet must carry the columns `Dealer` and `Market`, and
- * may carry `District` (header text is case/space-insensitive; extra columns are ignored). An older Dealer | Market sheet still
- * works: District is then left unchanged. Returns the data rows plus the rows that are unusable on
+ * Read the selected sheet's rows (array-of-arrays, row 0 = header). The standard columns are `District | Market | Party Name` (any order;
+ * header text is case/space-insensitive; extra columns are ignored). The legacy `Dealer` header is still accepted for the party name. A sheet
+ * without a District column still works: District is then left unchanged. Returns the data rows plus the rows that are unusable on
  * their own (blank dealer or market). Fully blank rows are ignored.
  */
 export function parseTerritorySheet(raw: readonly (readonly unknown[])[]): { error: string | null; rows: ImportSheetRow[]; invalid: ImportRowProblem[] } {
   const header = raw[0] ?? [];
   const find = (name: string) => header.findIndex((cell) => cellText(cell).toLowerCase() === name);
-  const dealerCol = find("dealer"), marketCol = find("market"), districtCol = find("district");
-  if (dealerCol < 0 || marketCol < 0) return { error: "The selected sheet must have two columns named Dealer and Market in its first row.", rows: [], invalid: [] };
+  const partyCol = find("party name");
+  const dealerCol = partyCol >= 0 ? partyCol : find("dealer"), marketCol = find("market"), districtCol = find("district");
+  if (dealerCol < 0 || marketCol < 0) return { error: "The selected sheet must have columns named Party Name (or Dealer) and Market in its first row.", rows: [], invalid: [] };
   const rows: ImportSheetRow[] = [], invalid: ImportRowProblem[] = [];
   raw.slice(1).forEach((cells, index) => {
     const rowNumber = index + 2; // spreadsheet row number (header is row 1)
     const dealer = cellText(cells[dealerCol]), market = cellText(cells[marketCol]), district = districtCol < 0 ? "" : cellText(cells[districtCol]);
     if (!dealer && !market && !district) return;
-    if (!dealer) return void invalid.push({ rowNumber, dealer, market, district, reason: "Dealer is empty" });
+    if (!dealer) return void invalid.push({ rowNumber, dealer, market, district, reason: "Party Name is empty" });
     if (!market || !marketNameKey(market)) return void invalid.push({ rowNumber, dealer, market, district, reason: "Market is empty" });
     if (market.length > MARKET_NAME_MAX) return void invalid.push({ rowNumber, dealer, market, district, reason: `Market is longer than ${MARKET_NAME_MAX} characters` });
     if (district.length > DISTRICT_MAX) return void invalid.push({ rowNumber, dealer, market, district, reason: `District is longer than ${DISTRICT_MAX} characters` });
@@ -70,7 +72,9 @@ export function parseTerritorySheet(raw: readonly (readonly unknown[])[]): { err
   return { error: null, rows, invalid };
 }
 
-export type ImportRowStatus = "MATCHED" | "UNMATCHED" | "AMBIGUOUS" | "INVALID" | "DUPLICATE" | "CONFLICT";
+export type ImportRowStatus = "MATCHED" | "UNMATCHED" | "AMBIGUOUS" | "INVALID" | "DUPLICATE" | "CONFLICT" | "UNKNOWN_DISTRICT";
+/** What the District master said about one District cell for a matched dealer (its state decides). */
+export type ImportDistrictOutcome = { kind: "OK"; districtId: string; name: string; viaAlias: boolean } | { kind: "UNKNOWN" } | { kind: "INVALID"; reason: string };
 export interface ImportCandidate { dealerId: string; partyName: string; matchType: string; score: number }
 export interface ImportPlanRow {
   rowNumber: number; excelDealer: string; excelMarket: string; excelDistrict: string; status: ImportRowStatus; reason?: string;
@@ -78,6 +82,8 @@ export interface ImportPlanRow {
   marketName?: string; newMarket?: boolean;
   /** The District to store ("" = the sheet gave none, so the dealer's District is left alone). */
   districtName?: string;
+  /** The District master record the cell resolved to (absent when the sheet gave none, or no master is in use). `districtViaAlias`: the cell used an approved alternative spelling. */
+  districtId?: string; districtViaAlias?: boolean;
   /** Overall result: MAP (no Market yet), CHANGE (Market and/or District differs), NO_CHANGE (everything already matches). */
   action?: "MAP" | "CHANGE" | "NO_CHANGE";
   /** What exactly will be written — the commit touches only these. */
@@ -112,6 +118,9 @@ export function buildImportPlan(args: {
   resolve: (name: string) => ResolvedName;
   currentMarketByDealer: ReadonlyMap<string, string | null>; // dealerId → current Market name (null/absent = unmapped)
   currentDistrictByDealer?: ReadonlyMap<string, string | null>; // dealerId → current District (null/absent = none)
+  currentDistrictIdByDealer?: ReadonlyMap<string, string | null>; // dealerId → current standard District id (null/absent = none yet)
+  /** District master check for a MATCHED dealer: the dealer's own state decides. Omitted → the District cell is stored as plain text (legacy behaviour). */
+  resolveDistrict?: (dealerId: string, text: string) => ImportDistrictOutcome;
   existingMarketByKey: ReadonlyMap<string, string>; // marketNameKey → canonical Market name
   resolutions?: Readonly<Record<number, string>>;
 }): ImportPlanRow[] {
@@ -152,6 +161,16 @@ export function buildImportPlan(args: {
       if (!picked) { plan.push({ ...base, status: "AMBIGUOUS", reason: "Several possible dealers — choose the right one", candidates }); continue; }
     }
 
+    // The District is validated BEFORE anything of this row is planned: a bad District blocks the whole row, so its Market is never changed alone.
+    const districtText = cleanDistrict(row.district);
+    let districtId: string | undefined, districtViaAlias = false, districtCanonical = districtText;
+    if (districtText && args.resolveDistrict) {
+      const outcome = args.resolveDistrict(picked.dealerId, districtText);
+      if (outcome.kind === "UNKNOWN") { plan.push({ ...base, status: "UNKNOWN_DISTRICT", dealerId: picked.dealerId, partyName: picked.partyName, reason: `Unknown District "${districtText}" — it is not in the District master` }); continue; }
+      if (outcome.kind === "INVALID") { plan.push({ ...base, status: "INVALID", dealerId: picked.dealerId, partyName: picked.partyName, reason: outcome.reason }); continue; }
+      districtId = outcome.districtId; districtViaAlias = outcome.viaAlias; districtCanonical = outcome.name;
+    }
+
     const marketKey = marketNameKey(row.market);
     const existing = args.existingMarketByKey.get(marketKey);
     const marketName = existing ?? seenMarketSpelling.get(marketKey) ?? cleanMarketName(row.market);
@@ -159,11 +178,14 @@ export function buildImportPlan(args: {
     const current = args.currentMarketByDealer.get(picked.dealerId) ?? null;
     const marketChanged = current == null || marketNameKey(current) !== marketKey;
     const currentDistrict = args.currentDistrictByDealer?.get(picked.dealerId) ?? null;
-    const districtName = cleanDistrict(row.district);
-    const districtAction: ImportPlanRow["districtAction"] = !districtName ? "UNCHANGED" : currentDistrict == null || !districtKey(currentDistrict) ? "ADD" : districtKey(currentDistrict) === districtKey(districtName) ? "NO_CHANGE" : "CHANGE";
+    const districtName = districtCanonical;
+    const currentDistrictId = args.currentDistrictIdByDealer?.get(picked.dealerId) ?? null;
+    const districtAction: ImportPlanRow["districtAction"] = !districtName ? "UNCHANGED"
+      : districtId ? (currentDistrictId === districtId ? "NO_CHANGE" : currentDistrict == null || !districtKey(currentDistrict) || districtKey(currentDistrict) === districtKey(districtName) ? "ADD" : "CHANGE") // a master district: same record → nothing to do; same text but not yet linked → link it
+      : currentDistrict == null || !districtKey(currentDistrict) ? "ADD" : districtKey(currentDistrict) === districtKey(districtName) ? "NO_CHANGE" : "CHANGE";
     const districtChanged = districtAction === "ADD" || districtAction === "CHANGE";
     const action: ImportPlanRow["action"] = !marketChanged && !districtChanged ? "NO_CHANGE" : current == null ? "MAP" : "CHANGE";
-    const entry: ImportPlanRow = { ...base, status: "MATCHED", dealerId: picked.dealerId, partyName: picked.partyName, currentMarket: current, currentDistrict, marketName, newMarket: marketChanged && !existing, districtName, action, marketChanged, districtChanged, districtAction, candidates };
+    const entry: ImportPlanRow = { ...base, status: "MATCHED", dealerId: picked.dealerId, partyName: picked.partyName, currentMarket: current, currentDistrict, marketName, newMarket: marketChanged && !existing, districtName, districtId, districtViaAlias, action, marketChanged, districtChanged, districtAction, candidates };
     const list = byDealer.get(picked.dealerId) ?? [];
     list.push(entry); byDealer.set(picked.dealerId, list);
     plan.push(entry);
@@ -183,14 +205,14 @@ export function buildImportPlan(args: {
 
 const nameKey = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
-export interface ImportSummary { total: number; matched: number; willApply: number; noChange: number; unmatched: number; ambiguous: number; invalid: number; duplicates: number; conflicts: number; newMarkets: number; districtUpdates: number }
+export interface ImportSummary { total: number; matched: number; willApply: number; noChange: number; unmatched: number; ambiguous: number; invalid: number; duplicates: number; conflicts: number; newMarkets: number; districtUpdates: number; unknownDistricts: number }
 export function summarizeImportPlan(plan: readonly ImportPlanRow[]): ImportSummary {
   const count = (status: ImportRowStatus) => plan.filter((r) => r.status === status).length;
   const matched = plan.filter((r) => r.status === "MATCHED");
   const apply = matched.filter((r) => r.action !== "NO_CHANGE");
   return {
     total: plan.length, matched: matched.length, willApply: apply.length, noChange: matched.length - apply.length,
-    unmatched: count("UNMATCHED"), ambiguous: count("AMBIGUOUS"), invalid: count("INVALID"), duplicates: count("DUPLICATE"), conflicts: count("CONFLICT"),
+    unmatched: count("UNMATCHED"), ambiguous: count("AMBIGUOUS"), invalid: count("INVALID"), duplicates: count("DUPLICATE"), conflicts: count("CONFLICT"), unknownDistricts: count("UNKNOWN_DISTRICT"),
     districtUpdates: apply.filter((r) => r.districtChanged).length,
     newMarkets: new Set(apply.filter((r) => r.newMarket).map((r) => marketNameKey(r.marketName!))).size,
   };

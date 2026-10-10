@@ -10,6 +10,7 @@ import { DEFAULT_LABELS } from "@/features/labels/labels";
 import * as XLSX from "xlsx";
 import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
 import type { AuthContext } from "@/lib/http";
+import { parseTerritorySheet } from "@/lib/territory-mapping";
 
 /* ------------------------------------------------ in-memory database ------------------------------------------------ */
 
@@ -33,6 +34,15 @@ const DEALERS: { id: string; name: string; status: string; owner: string; also?:
   // Current owner so3, but an older assignment to so1 was never closed: so1 must NOT see it (the current owner decides).
   { id: "d8", name: "Stale Assignment Co", status: "ACTIVE", owner: "so3", also: ["so1"] },
 ];
+const OWNERS_AT_START = DEALERS.map((d) => [d.id, d.owner]);
+const GROUPS = [{ id: "g1", name: "Madhya Pradesh" }, { id: "g2", name: "Uttar Pradesh" }];
+// District master: g1 (Madhya Pradesh) Rajgarh / Sagar / Indore (inactive); g2 (Uttar Pradesh) Kannauj / Agra. "Raj Garh" is an approved alias of Rajgarh.
+const DISTRICTS = [
+  { id: "dist-raj", groupId: "g1", name: "Rajgarh", nameKey: "rajgarh", isActive: true }, { id: "dist-sagar", groupId: "g1", name: "Sagar", nameKey: "sagar", isActive: true },
+  { id: "dist-indore", groupId: "g1", name: "Indore", nameKey: "indore", isActive: false },
+  { id: "dist-kan", groupId: "g2", name: "Kannauj", nameKey: "kannauj", isActive: true }, { id: "dist-agra", groupId: "g2", name: "Agra", nameKey: "agra", isActive: true },
+];
+const DISTRICT_ALIASES = [{ districtId: "dist-raj", groupId: "g1", aliasKey: "raj garh" }];
 const ALIASES = [{ systemDealerId: "d1", tallyName: "ABC TRADING CO (TALLY)", tallyKey: "abctradingcotally", createdAt: new Date(), id: "a1" }];
 
 function makeDb() {
@@ -55,7 +65,8 @@ function makeDb() {
     });
   };
   const marketById = (mid: unknown) => t.markets.find((m) => m.id === mid);
-  const withMarket = (m: Row) => ({ ...m, market: m.marketId ? { name: marketById(m.marketId)?.name } : null });
+  const districtById = (did: unknown) => DISTRICTS.find((d) => d.id === did);
+  const withMarket = (m: Row) => ({ ...m, market: m.marketId ? { name: marketById(m.marketId)?.name } : null, districtRef: m.districtId ? { name: districtById(m.districtId)?.name, groupId: districtById(m.districtId)?.groupId } : null });
   const requester = (r: Row): Row & { requester: { name: string | undefined } } => ({ ...r, requester: { name: USERS.find((u) => u.id === r.requesterId)?.name } });
   let failNextMappingWrite = false;
   let failNextEdit = false;
@@ -71,6 +82,12 @@ function makeDb() {
     },
     dealerAlias: { findMany: async ({ where }: { where?: { systemDealerId?: { in: string[] } } }) => ALIASES.filter((a) => !where?.systemDealerId || where.systemDealerId.in.includes(a.systemDealerId)) },
     user: { findMany: async ({ where }: { where: { id: { in: string[] } } }) => USERS.filter((u) => where.id.in.includes(u.id)) },
+    userGroup: { findMany: async ({ where }: { where?: { id?: { in: string[] } } } = {}) => GROUPS.filter((g) => !where?.id || where.id.in.includes(g.id)) },
+    district: {
+      findMany: async ({ where }: { where?: Row } = {}) => DISTRICTS.filter((d) => matches(d as Row, where)).map((d) => ({ ...d })),
+      findUnique: async ({ where }: { where: Row }) => { const d = DISTRICTS.find((x) => matches(x as Row, where)); return d ? { ...d } : null; },
+    },
+    districtAlias: { findMany: async () => DISTRICT_ALIASES.map((a) => ({ ...a })) },
     market: {
       findMany: async ({ where }: { where?: Row } = {}) => t.markets.filter((m) => matches(m, where)).map((m) => ({ ...m })).sort((a, b) => String(a.name).localeCompare(String(b.name))),
       findUnique: async ({ where }: { where: Row }) => { const m = t.markets.find((x) => matches(x, where)); return m ? { ...m } : null; },
@@ -83,15 +100,15 @@ function makeDb() {
         if (failNextMappingWrite) { failNextMappingWrite = false; throw new Error("boom"); }
         const existing = t.mappings.find((x) => matches(x, where));
         if (existing) { Object.assign(existing, update); return { ...existing }; }
-        const row = { id: id("map"), marketId: null, potential: null, ...create }; t.mappings.push(row); return { ...row };
+        const row = { id: id("map"), marketId: null, potential: null, district: null, districtId: null, ...create }; t.mappings.push(row); return { ...row };
       },
       createMany: async ({ data }: { data: Row[] }) => {
         if (failNextMappingWrite) { failNextMappingWrite = false; throw new Error("boom"); }
-        for (const d of data) t.mappings.push({ id: id("map"), potential: null, ...d }); return { count: data.length };
+        for (const d of data) t.mappings.push({ id: id("map"), potential: null, district: null, districtId: null, ...d }); return { count: data.length };
       },
       update: async ({ where, data }: { where: Row; data: Row }) => { const m = t.mappings.find((x) => matches(x, where))!; Object.assign(m, data); return { ...m }; },
       updateMany: async ({ where, data }: { where: Row; data: Row }) => { const hit = t.mappings.filter((x) => matches(x, where)); hit.forEach((m) => Object.assign(m, data)); return { count: hit.length }; },
-      create: async ({ data }: { data: Row }) => { const row = { id: id("map"), marketId: null, marketText: null, district: null, potential: null, ...data }; t.mappings.push(row); return { ...row }; },
+      create: async ({ data }: { data: Row }) => { const row = { id: id("map"), marketId: null, marketText: null, district: null, districtId: null, potential: null, ...data }; t.mappings.push(row); return { ...row }; },
     },
     territoryMarketEdit: {
       findMany: async ({ where, distinct }: { where: { dealerId: string | { in: string[] } }; distinct?: string[] }) => {
@@ -126,7 +143,7 @@ function loadService() {
   const db = makeDb();
   const owners = new Map(DEALERS.map((d) => [d.id, d.owner]));
   const getOfficerScope = async (ctx: AuthContext) => {
-    if (ctx.role === Role.SUPER_ADMIN) return { all: true, ids: [] as string[] };
+    if (ctx.role === Role.SUPER_ADMIN || ctx.role === Role.CUSTOM_ADMIN) return { all: true, ids: [] as string[] };
     if (ctx.role === Role.SALES_OFFICER) return { all: false, ids: [ctx.userId] };
     return { all: false, ids: [ctx.userId, ...USERS.filter((u) => u.role === Role.SALES_OFFICER && u.groupId === ctx.groupId).map((u) => u.id)] };
   };
@@ -221,7 +238,7 @@ async function main() {
     assert.equal(byRow(6).status, "UNMATCHED");
     assert.equal(byRow(7).status, "AMBIGUOUS", "two dealers share that name");
     assert.deepEqual(byRow(7).candidates!.map((c) => c.dealerId).sort(), ["d5"], "…and only the dealer the caller may map is offered");
-    assert.deepEqual([byRow(8).status, byRow(8).reason], ["INVALID", "Dealer is empty"]);
+    assert.deepEqual([byRow(8).status, byRow(8).reason], ["INVALID", "Party Name is empty"]);
     assert.equal(byRow(9).status, "INVALID", "a dealer from another group is outside scope");
     // A near-miss name is only ever offered for review — never mapped automatically.
     const fuzzy = plain(await service.previewTerritoryImport(SO1, workbook({ S: [["Dealer", "Market"], ["Sharma Fertilizers Agency", "Bareli"]] }), null)).plan[0]!;
@@ -232,7 +249,7 @@ async function main() {
 
     // Confirm without resolving the ambiguity: it is SKIPPED, never guessed.
     const result = await service.commitTerritoryImport(SO1, file, "Mapping", {});
-    assert.deepEqual(plain(result), { applied: 2, noChange: 0, skippedUnmatched: 1, skippedAmbiguous: 1, rejectedInvalid: 3, duplicates: 1, marketsCreated: 1 });
+    assert.deepEqual(plain(result), { applied: 2, noChange: 0, skippedUnmatched: 1, skippedAmbiguous: 1, rejectedInvalid: 3, duplicates: 1, marketsCreated: 1, skippedUnknownDistrict: 0 });
     assert.deepEqual(t.markets.map((m) => [m.name, m.source, m.potential]), [["Pipariya", "EXISTING", null]], "one Market for Pipariya/pipariya; potential stays undecided");
     assert.deepEqual(t.mappings.map((m) => [m.dealerId, m.marketId === t.markets[0]!.id]).sort(), [["d1", true], ["d2", true]]);
     assert.equal(t.dealerWrites, 0, "no dealer was created or edited");
@@ -268,59 +285,178 @@ async function main() {
     assert.equal(await status(() => service.previewTerritoryImport({ ...SO1, role: undefined } as unknown as AuthContext, file, null)), 403, "an unknown role is refused");
   }
 
-  /* ---- Excel import with District (Dealer | Market | District) ---- */
+  /* ---- Excel import with the District master (District | Market | Party Name, legacy Dealer header accepted) ---- */
   {
-    const sheet = [["Dealer", "Market", "District"], ["ABC Traders", "Pipariya", "Rajgarh"], ["Sharma Fertilizers", "Pipariya", "Rajgarh"], ["Twin Name Stores", "Bareli", "Kannauj"], ["Gupta Agency", "Bareli", "Kannauj"], ["Nobody", "Bareli", "Kannauj"], ["Far Away Agro", "Bareli", "Kannauj"]];
+    const sheet = [["Dealer", "Market", "District"], ["ABC Traders", "Pipariya", "Rajgarh"], ["Sharma Fertilizers", "Pipariya", "Rajgarh"], ["Twin Name Stores", "Bareli", "Sagar"], ["Gupta Agency", "Bareli", "Sagar"], ["Nobody", "Bareli", "Sagar"], ["Far Away Agro", "Bareli", "Kannauj"]];
     const file = workbook({ Notes: [["x"]], Mapping: sheet });
     const { service, t } = loadService();
     t.markets.push({ id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: "A", source: "REQUESTED" });
-    // d1 already has the SAME Market + District; d2 has an OLD District and OLD Market; d5 has a Potential only.
-    t.mappings.push({ id: "x1", dealerId: "d1", marketId: "m-pip", district: "RAJGARH", potential: "B" }, { id: "x2", dealerId: "d2", marketId: null, district: "Old District", potential: null }, { id: "x5", dealerId: "d5", marketId: null, district: null, potential: "C" });
+    // d1 already has the SAME Market + District (linked); d2 has an OLD free-text District and no Market; d5 has a Potential only.
+    t.mappings.push({ id: "x1", dealerId: "d1", marketId: "m-pip", district: "Rajgarh", districtId: "dist-raj", potential: "B" }, { id: "x2", dealerId: "d2", marketId: null, district: "Old District", districtId: null, potential: null }, { id: "x5", dealerId: "d5", marketId: null, district: null, districtId: null, potential: "C" });
     const before = JSON.stringify([t.mappings, t.markets, t.audit]);
     const preview = plain(await service.previewTerritoryImport(SO1, file, "Mapping"));
     assert.equal(JSON.stringify([t.mappings, t.markets, t.audit]), before, "preview writes nothing");
     const row = (n: number) => preview.plan.find((r) => r.rowNumber === n)!;
-    assert.deepEqual([row(2).status, row(2).action, row(2).districtAction, row(2).currentDistrict, row(2).currentMarket], ["MATCHED", "NO_CHANGE", "NO_CHANGE", "RAJGARH", "Pipariya"], "same District + Market → nothing to change");
-    assert.deepEqual([row(3).action, row(3).districtAction, row(3).currentDistrict, row(3).districtName, row(3).marketChanged], ["MAP", "CHANGE", "Old District", "Rajgarh", true], "dealer matched by the dealer resolver; old District replaced, Market added");
+    assert.deepEqual([row(2).status, row(2).action, row(2).districtAction, row(2).currentDistrict, row(2).currentMarket], ["MATCHED", "NO_CHANGE", "NO_CHANGE", "Rajgarh", "Pipariya"], "same District + Market → nothing to change");
+    assert.deepEqual([row(3).action, row(3).districtAction, row(3).currentDistrict, row(3).districtName, row(3).districtId, row(3).marketChanged], ["MAP", "CHANGE", "Old District", "Rajgarh", "dist-raj", true], "dealer matched by the dealer resolver; the old free text is replaced by the master district, Market added");
     assert.deepEqual([row(4).status, row(4).dealerId, row(4).districtAction, row(4).currentMarket], ["AMBIGUOUS", undefined, undefined, undefined], "ambiguous dealer is not auto-applied");
     assert.equal(row(5).status, "INVALID"); assert.equal(row(6).status, "UNMATCHED"); assert.equal(row(7).status, "INVALID", "out-of-scope dealers stay rejected");
-    assert.equal(row(5).excelDistrict, "Kannauj");
+    assert.equal(row(5).excelDistrict, "Sagar");
 
     const res = await service.commitTerritoryImport(SO1, file, "Mapping", { 4: "d5" });
     assert.equal(res.applied, 2);
     const map = (id: string) => t.mappings.find((m) => m.dealerId === id)!;
-    assert.deepEqual([map("d1").district, map("d1").potential], ["RAJGARH", "B"], "an already-matching dealer is untouched");
-    assert.deepEqual([map("d2").district, map("d2").marketId != null], ["Rajgarh", true], "District + Market written on the existing mapping row");
-    assert.deepEqual([map("d5").district, map("d5").potential, map("d5").marketId != null], ["Kannauj", "C", true], "the picked dealer gets District + Market and keeps its dealer-level Potential");
+    assert.deepEqual([map("d1").district, map("d1").potential], ["Rajgarh", "B"], "an already-matching dealer is untouched");
+    assert.deepEqual([map("d2").district, map("d2").districtId, map("d2").marketId != null], ["Rajgarh", "dist-raj", true], "District (text + master id) + Market written on the existing mapping row");
+    assert.deepEqual([map("d5").district, map("d5").districtId, map("d5").potential, map("d5").marketId != null], ["Sagar", "dist-sagar", "C", true], "the picked dealer gets District + Market and keeps its dealer-level Potential");
     assert.equal(t.mappings.filter((m) => m.dealerId === "d2").length, 1, "District lives on the existing mapping row (no second row)");
     assert.equal(t.markets.find((m) => m.id === "m-pip")!.potential, "A", "Market potential untouched");
     assert.ok(t.audit.some((a) => String(a.summary).includes("District: Old District → Rajgarh")), "District change audited");
     assert.equal(t.dealerWrites, 0);
     assert.equal(t.markets.length, 2, "only the Bareli Market (new in the sheet) was added; Pipariya reused");
+    assert.deepEqual(plain(DEALERS.map((d) => [d.id, d.owner])), plain(OWNERS_AT_START), "dealer assignments are untouched");
 
     // Only District differs → only District is written; Market keeps its value.
     const only = loadService();
     only.t.markets.push({ id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: null, source: "EXISTING" });
-    only.t.mappings.push({ id: "y1", dealerId: "d1", marketId: "m-pip", district: "Old", potential: null });
-    const d = plain(await only.service.previewTerritoryImport(SO1, workbook({ S: [["Dealer", "Market", "District"], ["ABC Traders", "Pipariya", "New"]] }), null)).plan[0]!;
-    assert.deepEqual([d.action, d.marketChanged, d.districtChanged], ["CHANGE", false, true]);
-    await only.service.commitTerritoryImport(SO1, workbook({ S: [["Dealer", "Market", "District"], ["ABC Traders", "Pipariya", "New"]] }), null, {});
-    assert.deepEqual([only.t.mappings[0]!.district, only.t.mappings[0]!.marketId], ["New", "m-pip"]);
+    only.t.mappings.push({ id: "y1", dealerId: "d1", marketId: "m-pip", district: "Sagar", districtId: "dist-sagar", potential: null });
+    const standard = workbook({ S: [["District", "Market", "Party Name"], ["Rajgarh", "Pipariya", "ABC Traders"]] });
+    const d = plain(await only.service.previewTerritoryImport(SO1, standard, null)).plan[0]!;
+    assert.deepEqual([d.action, d.marketChanged, d.districtChanged, d.excelDealer], ["CHANGE", false, true, "ABC Traders"], "the standard District | Market | Party Name sheet (any column order) works");
+    await only.service.commitTerritoryImport(SO1, standard, null, {});
+    assert.deepEqual([only.t.mappings[0]!.district, only.t.mappings[0]!.districtId, only.t.mappings[0]!.marketId], ["Rajgarh", "dist-raj", "m-pip"]);
 
-    // Old two-column sheets still work and leave District alone.
+    // Old two-column sheets still work and leave District alone; a blank District cell preserves the existing district.
     const old = loadService();
-    old.t.mappings.push({ id: "z1", dealerId: "d1", marketId: null, district: "Keep", potential: null });
+    old.t.mappings.push({ id: "z1", dealerId: "d1", marketId: null, district: "Keep", districtId: null, potential: null });
     await old.service.commitTerritoryImport(SO1, workbook({ S: [["Dealer", "Market"], ["ABC Traders", "Pipariya"]] }), null, {});
     assert.equal(old.t.mappings.find((m) => m.dealerId === "d1")!.district, "Keep", "Dealer | Market sheet leaves District unchanged");
+    const blank = loadService();
+    blank.t.mappings.push({ id: "b1", dealerId: "d1", marketId: null, district: "Sagar", districtId: "dist-sagar", potential: null });
+    await blank.service.commitTerritoryImport(SO1, workbook({ S: [["District", "Market", "Party Name"], ["", "Pipariya", "ABC Traders"]] }), null, {});
+    assert.deepEqual([blank.t.mappings[0]!.district, blank.t.mappings[0]!.districtId, blank.t.mappings[0]!.marketId != null], ["Sagar", "dist-sagar", true], "a blank District cell keeps the existing district; the Market still maps");
+    assert.equal(plain(parseTerritorySheet([["Party Name", "Dealer", "Market"], ["P", "D", "M"]])).rows[0]!.dealer, "P", "Party Name wins when both headers exist");
+
+    // Unknown / cross-state / alias / inactive / no-state districts: whole row decided BEFORE anything of it is written.
+    const bad = loadService();
+    bad.t.markets.push({ id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: null, source: "EXISTING" });
+    const badFile = workbook({ S: [["District", "Market", "Party Name"],
+      ["Nowhere", "Newtown", "ABC Traders"],            // 2 unknown
+      ["Kannauj", "Newtown", "Sharma Fertilizers"],      // 3 belongs to Uttar Pradesh, dealer is Madhya Pradesh
+      ["Raj Garh", "Pipariya", "Twin Name Stores"],     // 4 alias (ambiguous dealer → picked below)
+      ["Indore", "Newtown", "Own RM Dealer"],           // 5 inactive
+    ] });
+    const bp = plain(await bad.service.previewTerritoryImport(RM1, badFile, null));
+    const brow = (n: number) => bp.plan.find((r) => r.rowNumber === n)!;
+    assert.equal(brow(2).status, "UNKNOWN_DISTRICT"); assert.ok(brow(2).reason!.includes("Unknown District"));
+    assert.equal(brow(3).status, "INVALID"); assert.ok(brow(3).reason!.includes("Uttar Pradesh") && brow(3).reason!.includes("Madhya Pradesh"), "the mismatch names both states");
+    assert.equal(brow(5).status, "INVALID"); assert.ok(brow(5).reason!.includes("inactive"));
+    assert.equal(bp.summary!.unknownDistricts, 1);
+    assert.equal(brow(4).status, "AMBIGUOUS", "the two same-named dealers still need a choice");
+    const applied = await bad.service.commitTerritoryImport(RM1, workbook({ S: [["District", "Market", "Party Name"], ["Raj Garh", "Pipariya", "Own RM Dealer"], ["Nowhere", "Newtown", "ABC Traders"], ["Kannauj", "Newtown", "Sharma Fertilizers"]] }), null, {});
+    assert.deepEqual([applied.applied, applied.skippedUnknownDistrict, applied.rejectedInvalid], [1, 1, 1]);
+    const alias = bad.t.mappings.find((m) => m.dealerId === "d7")!;
+    assert.deepEqual([alias.district, alias.districtId], ["Rajgarh", "dist-raj"], "an approved alias is stored as the canonical district");
+    assert.equal(bad.t.mappings.filter((m) => m.dealerId === "d1" || m.dealerId === "d2").length, 0, "rows with a bad district wrote nothing — not even their Market");
+    assert.equal(bad.t.markets.some((m) => m.nameKey === "newtown"), false, "no Market was created for a blocked row");
+    const aliasPlan = plain(await bad.service.previewTerritoryImport(RM1, workbook({ S: [["District", "Market", "Party Name"], ["Raj Garh", "Pipariya", "Own RM Dealer"]] }), null)).plan[0]!;
+    assert.deepEqual([aliasPlan.districtViaAlias, aliasPlan.districtName], [true, "Rajgarh"], "the preview says the spelling was matched to the canonical name");
+
+    // A dealer whose state cannot be determined can't receive a district.
+    const so2 = USERS.find((u) => u.id === "so2")!;
+    so2.groupId = null;
+    try {
+      const nos = loadService();
+      const np = plain(await nos.service.previewTerritoryImport(SO2, workbook({ S: [["District", "Market", "Party Name"], ["Rajgarh", "Pipariya", "Gupta Agency"]] }), null)).plan[0]!;
+      assert.equal(np.status, "INVALID"); assert.ok(np.reason!.includes("state cannot be determined"));
+    } finally { so2.groupId = "g1"; }
 
     // Listing + manual edit share the same scope rules as Market.
     const list = plain(await service.listTerritoryDealers(SO1, PAGE)).items.find((r) => r.dealerId === "d2")!;
     assert.equal(list.district, "Rajgarh");
-    assert.equal((await service.updateDealerMapping(SO1, "d1", { district: "  Sagar  " })).district, "Sagar");
-    assert.equal((await service.updateDealerMapping(SO1, "d1", { district: "" })).district, null);
-    assert.equal(await status(() => service.updateDealerMapping(SO1, "d3", { district: "X" })), 403, "District edit obeys the same scope");
-    assert.equal(await status(() => service.updateDealerMapping(SO1, "d1", { district: "x".repeat(121) })), 422);
     assert.equal(await status(() => service.commitTerritoryImport({ ...SO1, role: undefined } as unknown as AuthContext, file, "Mapping", {})), 403);
+  }
+
+  /* ---- District dropdown: state-specific options, server-side validation, explicit Save, audit ---- */
+  {
+    const { service, t } = loadService();
+    t.markets.push({ id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: null, source: "EXISTING" });
+    // State-specific options: active districts of the caller's state(s) only.
+    const opts = async (c: AuthContext) => plain(await service.listDistrictOptions(c));
+    assert.deepEqual(Object.keys(await opts(SO1)), ["g1"], "an SO gets only their own state");
+    assert.deepEqual((await opts(SO1)).g1!.map((d) => d.name), ["Rajgarh", "Sagar"], "active districts only (Indore is inactive), sorted");
+    assert.deepEqual(Object.keys(await opts(SO3)), ["g2"]);
+    assert.deepEqual(Object.keys(await opts(RM1)), ["g1"], "an RM gets the states inside their scope");
+    assert.deepEqual(Object.keys(await opts(ADMIN)).sort(), ["g1", "g2"], "an Admin gets every state that has districts");
+    assert.equal(await status(() => service.listDistrictOptions({ ...SO1, role: undefined } as unknown as AuthContext)), 403);
+
+    // Each row carries the dealer's resolved state (Dealer → current assignment → officer → UserGroup).
+    const rows = plain(await service.listTerritoryDealers(ADMIN, PAGE)).items;
+    const by = (id: string) => rows.find((r) => r.dealerId === id)!;
+    assert.deepEqual([by("d1").stateId, by("d1").stateName, by("d4").stateId, by("d4").stateName], ["g1", "Madhya Pradesh", "g2", "Uttar Pradesh"]);
+    assert.equal(by("d8").stateId, "g2", "the CURRENT owner decides the state, not a stale assignment");
+
+    // Explicit save: pick → server validates → persists text + id → audit entry with old and new.
+    const saved = plain(await service.updateDealerMapping(SO1, "d1", { districtId: "dist-raj" }));
+    assert.deepEqual([saved.district, saved.districtId, saved.districtReview, saved.stateName], ["Rajgarh", "dist-raj", null, "Madhya Pradesh"]);
+    assert.deepEqual([t.mappings[0]!.district, t.mappings[0]!.districtId], ["Rajgarh", "dist-raj"]);
+    assert.ok(t.audit.some((a) => String(a.summary).includes("District: — → Rajgarh") && a.entityId === "d1"), "audit: old → new");
+    const auditCount = t.audit.length;
+    await service.updateDealerMapping(SO1, "d1", { districtId: "dist-raj" });
+    assert.equal(t.audit.length, auditCount, "re-saving the same district is not a change (no audit entry)");
+    await service.updateDealerMapping(SO1, "d1", { districtId: "dist-sagar" });
+    assert.ok(t.audit.some((a) => String(a.summary).includes("District: Rajgarh → Sagar")));
+
+    // The server — not the dropdown — enforces state, status, existence and scope, whatever the client sends.
+    const writes = () => JSON.stringify(t.mappings);
+    const snapshot = writes();
+    assert.equal(await status(() => service.updateDealerMapping(SO1, "d1", { districtId: "dist-kan" })), 422, "a forged district id of ANOTHER state is rejected");
+    assert.equal(await status(() => service.updateDealerMapping(SO1, "d1", { districtId: "dist-indore" })), 422, "inactive district rejected");
+    assert.equal(await status(() => service.updateDealerMapping(SO1, "d1", { districtId: "does-not-exist" })), 422, "unknown id rejected");
+    assert.equal(await status(() => service.updateDealerMapping(SO1, "d1", { district: "Sagar" } as never)), 422, "free text is no longer accepted");
+    assert.equal(await status(() => service.updateDealerMapping(SO1, "d3", { districtId: "dist-raj" })), 403, "SO scope: another officer's dealer");
+    assert.equal(await status(() => service.updateDealerMapping(SO3, "d1", { districtId: "dist-kan" })), 403, "an SO of another state cannot touch it");
+    assert.equal(await status(() => service.updateDealerMapping(RM2, "d1", { districtId: "dist-raj" })), 403, "RM scope");
+    assert.equal(writes(), snapshot, "every rejection left the mapping exactly as it was");
+    assert.equal((await service.updateDealerMapping(RM1, "d2", { districtId: "dist-raj" })).districtId, "dist-raj", "an RM edits dealers inside their group");
+    assert.equal((await service.updateDealerMapping(ADMIN, "d4", { districtId: "dist-kan" })).stateName, "Uttar Pradesh", "Super Admin may edit any dealer");
+    assert.equal(await status(() => service.updateDealerMapping(ADMIN, "d4", { districtId: "dist-raj" })), 422, "…but the district must still belong to that dealer's state");
+    const custom = (perms: Record<string, string[]>) => ({ ...ADMIN, role: Role.CUSTOM_ADMIN, permissions: perms } as unknown as AuthContext);
+    assert.equal(await status(() => service.updateDealerMapping(custom({ partyPlanning: ["read"] }), "d4", { districtId: "dist-kan" })), 403, "a custom Admin needs the Party Planning manage grant");
+    assert.equal((await service.updateDealerMapping(custom({ partyPlanning: ["read", "manage"] }), "d4", { districtId: "dist-agra" })).district, "Agra");
+
+    // Clearing: explicit, allowed, audited, keeps Market + potential.
+    t.mappings.find((m) => m.dealerId === "d1")!.marketId = "m-pip"; t.mappings.find((m) => m.dealerId === "d1")!.potential = "B";
+    const cleared = plain(await service.updateDealerMapping(SO1, "d1", { districtId: null }));
+    assert.deepEqual([cleared.district, cleared.districtId, cleared.marketId, cleared.potential], [null, null, "m-pip", "B"], "clearing removes only the district");
+    assert.ok(t.audit.some((a) => String(a.summary).includes("District: Sagar → —")));
+
+    // Legacy free text stays visible and is flagged; clearing it is audited too.
+    t.mappings.push({ id: "L1", dealerId: "d5", marketId: null, district: "Raj-garh (old)", districtId: null, potential: null });
+    const legacy = plain(await service.listTerritoryDealers(SO1, PAGE)).items.find((r) => r.dealerId === "d5")!;
+    assert.deepEqual([legacy.district, legacy.districtId, legacy.districtReview], ["Raj-garh (old)", null, "LEGACY"], "unresolved legacy text remains visible and flagged for review");
+    await service.updateDealerMapping(SO1, "d5", { districtId: null });
+    assert.ok(t.audit.some((a) => String(a.summary).includes("District: Raj-garh (old) → —")), "the old legacy value is kept in the audit trail");
+
+    // Reassignment to another state: the old district is NOT erased, it is flagged until corrected.
+    t.mappings.push({ id: "W1", dealerId: "d4", marketId: null, district: "Rajgarh", districtId: "dist-raj", potential: null });
+    t.mappings.splice(t.mappings.findIndex((m) => m.dealerId === "d4" && m.id !== "W1"), 1);
+    const moved = plain(await service.listTerritoryDealers(ADMIN, PAGE)).items.find((r) => r.dealerId === "d4")!;
+    assert.deepEqual([moved.district, moved.districtReview, moved.stateName], ["Rajgarh", "WRONG_STATE", "Uttar Pradesh"], "kept, flagged, and correctable");
+
+    // No state → no assignment, with a clear reason; Market/Potential saves still work.
+    const so2 = USERS.find((u) => u.id === "so2")!;
+    so2.groupId = null;
+    try {
+      const ns = loadService();
+      const stateless = plain(await ns.service.listTerritoryDealers(SO2, PAGE)).items.find((r) => r.dealerId === "d3")!;
+      assert.deepEqual([stateless.stateId, stateless.stateName], [null, null]);
+      assert.equal(await status(() => ns.service.updateDealerMapping(SO2, "d3", { districtId: "dist-raj" })), 422, "no state → no district can be assigned");
+      assert.equal((await ns.service.updateDealerMapping(SO2, "d3", { potential: "A" })).potential, "A", "other mapping fields are unaffected");
+      assert.deepEqual(plain(await ns.service.listDistrictOptions(SO2)), {}, "and no unrestricted district list is offered");
+    } finally { so2.groupId = "g1"; }
+    assert.equal(t.dealerWrites, 0, "dealers themselves are never written");
+    assert.deepEqual(plain(DEALERS.map((d) => [d.id, d.owner])), plain(OWNERS_AT_START), "dealer assignments are untouched");
   }
 
   /* ---- TEMPORARY manual Market edit + append-only history ---- */
@@ -389,7 +525,7 @@ async function main() {
     assert.ok(cell.includes("onClick={() => setEditing(false)}") && cell.includes("onClick={() => setConfirming(false)}"), "Cancel (edit and confirmation) only closes — it does not call the save mutation");
     assert.ok(cell.includes("T.edited") && cell.includes("setHistory(true)") && DEFAULT_LABELS["party_planning.territory.badge.edited"] === "Edited" && DEFAULT_LABELS["party_planning.territory.history.title"] === "Market Edit History", "Edited indicator opens the history");
     assert.ok(!/aria-label=\{L\.market\} value=\{row\.marketId/.test(ui), "the Market dropdown is gone from the Existing Dealers rows");
-    assert.ok(ui.includes('aria-label={L.district}') && ui.includes("district: v.district"), "District editing unchanged");
+    assert.ok(ui.includes("<DistrictCell") && !ui.includes("district: v.district"), "District editing goes through the explicit-Save dropdown, not a blur-saving text box");
     // Seasonal / Monthly keep their searchable Market selectors and never see the editable Market.
     const seasonal = readFileSync("src/features/party-planning/seasonal-planning-page.tsx", "utf8"), monthly = readFileSync("src/features/party-planning/monthly-planning-page.tsx", "utf8");
     assert.ok(seasonal.includes("seasonal-add-markets") && seasonal.includes("/api/territory-mapping/markets"), "Seasonal Market selector: datalist of the Market master");
@@ -401,7 +537,7 @@ async function main() {
   {
     const { service, t } = loadService();
     t.markets.push({ id: "m-tun", name: "Tundla", nameKey: "tundla", potential: null, source: "EXISTING" });
-    t.mappings.push({ id: "g1", dealerId: "d1", marketId: "m-tun", marketText: "Agra", district: "Rajgarh", potential: null });
+    t.mappings.push({ id: "g1", dealerId: "d1", marketId: "m-tun", marketText: "Agra", district: "Rajgarh", districtId: "dist-raj", potential: null });
     await service.editDealerMarket(SO1, "d1", { expectedMarket: "Agra", market: "Firozabad" });
     const editsBefore = t.edits.length;
     const sheetSame = workbook({ S: [["Dealer", "Market", "District"], ["ABC Traders", "Firozabad", "Rajgarh"]] });
@@ -415,8 +551,8 @@ async function main() {
     const row = plain(await service.listTerritoryDealers(SO1, PAGE)).items.find((r) => r.dealerId === "d1")!;
     assert.deepEqual([row.marketName, row.marketEdited], ["Tundla", true], "the Edited indicator (history) remains — it is history, not state");
     assert.equal(plain(await service.listMarketEdits(SO1, "d1")).edits.length, 1, "history is preserved across the import");
-    // District editing unchanged
-    assert.equal((await service.updateDealerMapping(SO1, "d1", { district: "Sagar" })).district, "Sagar");
+    // District editing unchanged by Market history
+    assert.equal((await service.updateDealerMapping(SO1, "d1", { districtId: "dist-sagar" })).district, "Sagar");
     assert.equal(t.edits.length, editsBefore, "District edits never touch Market history");
   }
 

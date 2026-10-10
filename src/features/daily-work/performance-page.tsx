@@ -19,6 +19,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useLabel } from "@/features/labels/label-ui";
 import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { DailyWorkReviewDialog } from "./team-performance-page";
+import { PerformanceMetricDetail, countText, rupees, type MetricRequest } from "./performance-metric-detail";
 
 type Attendance = "PRESENT" | "ABSENT" | "LEAVE" | "HOLIDAY";
 interface Option { id: string; name: string }
@@ -38,8 +39,6 @@ interface Payload {
   officers: Option[]; states: Option[]; canEditAttendance: boolean;
 }
 
-const rupees = (v: number) => `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v)}`; // Sales / Recovery are money
-const countText = (v: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v); // Scheme units, appointments and visits are counts
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
 const timeText = (iso: string | null) => iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—";
 const dateText = (d: string) => new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" });
@@ -52,6 +51,7 @@ export function PerformancePage({ role }: { role: Role }) {
   const [officerId, setOfficerId] = useState("");
   const [groupId, setGroupId] = useState("");
   const [detail, setDetail] = useState<{ officerId: string; date: string } | null>(null);
+  const [metric, setMetric] = useState<{ metric: string; title: string } | null>(null); // the summary card whose contribution details are open
 
   const isSO = role === Role.SALES_OFFICER;
   const isRM = role === Role.REGIONAL_MANAGER;
@@ -100,6 +100,8 @@ export function PerformancePage({ role }: { role: Role }) {
     sApptA: useLabel("daily_work.performance.summary.appointment_actual"),
     sVisitsP: useLabel("daily_work.performance.summary.visits_planned"),
     sVisitsA: useLabel("daily_work.performance.summary.visits_actual"),
+    detailTitle: useLabel("daily_work.performance.detail.title"),
+    openHint: useLabel("daily_work.performance.detail.open_hint"),
   };
   const attendanceLabel: Record<Attendance, string> = { PRESENT: L.present, ABSENT: L.absent, LEAVE: L.leave, HOLIDAY: L.holiday };
   const title = isSO ? L.my : isRM ? L.team : L.company;
@@ -162,12 +164,12 @@ export function PerformancePage({ role }: { role: Role }) {
         {/* Planned vs Actual per section, over the same filtered officers and dates as the table (Others has no totals). */}
         <div className="col-span-full grid gap-3 border-t pt-3 sm:grid-cols-2 lg:grid-cols-5" data-testid="section-totals">
           {([
-            [L.sSalesP, L.sSalesA, "sales", rupees], [L.sRecoveryP, L.sRecoveryA, "recovery", rupees], [L.sSchemeP, L.sSchemeA, "schemeConversion", countText],
-            [L.sApptP, L.sApptA, "appointment", countText], [L.sVisitsP, L.sVisitsA, "visits", countText],
-          ] as const).map(([planned, actual, key, fmt]) => (
+            [L.sSalesP, L.sSalesA, "sales", rupees, "sales"], [L.sRecoveryP, L.sRecoveryA, "recovery", rupees, "recovery"], [L.sSchemeP, L.sSchemeA, "schemeConversion", countText, "scheme_conversion"],
+            [L.sApptP, L.sApptA, "appointment", countText, "appointment"], [L.sVisitsP, L.sVisitsA, "visits", countText, "visits"],
+          ] as const).map(([planned, actual, key, fmt, id]) => (
             <div key={key} className="grid grid-cols-2 gap-3">
-              <Stat label={planned} value={data ? fmt(data.summary.sections[key].planned) : "—"} />
-              <Stat label={actual} value={data ? fmt(data.summary.sections[key].actual) : "—"} />
+              <Stat label={planned} value={data ? fmt(data.summary.sections[key].planned) : "—"} hint={L.openHint} onOpen={data ? () => setMetric({ metric: `${id}_planned`, title: L.detailTitle.replace("{metric}", planned) }) : undefined} />
+              <Stat label={actual} value={data ? fmt(data.summary.sections[key].actual) : "—"} hint={L.openHint} onOpen={data ? () => setMetric({ metric: `${id}_actual`, title: L.detailTitle.replace("{metric}", actual) }) : undefined} />
             </div>
           ))}
         </div>
@@ -238,6 +240,11 @@ export function PerformancePage({ role }: { role: Role }) {
         </Table>
       </div>
 
+      {metric && data && (
+        // The drill-down uses the filters of the data the card was computed from (this page's Date From / Date To / State / officer).
+        <PerformanceMetricDetail request={{ ...metric, from: data.from, to: data.to, officerId, groupId, isSO, isAdmin } satisfies MetricRequest} onClose={() => setMetric(null)} />
+      )}
+
       {detail && (
         <DailyWorkReviewDialog
           officerId={detail.officerId}
@@ -250,11 +257,18 @@ export function PerformancePage({ role }: { role: Role }) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
+function Stat({ label, value, hint, onOpen }: { label: string; value: string; hint?: string; onOpen?: () => void }) {
+  const body = (
+    <>
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="text-lg font-semibold tabular-nums">{value}</div>
-    </div>
+    </>
+  );
+  if (!onOpen) return <div>{body}</div>;
+  // A clickable card: same look, plus a pointer, hover and keyboard-focus state. A real button, so Enter / Space open it.
+  return (
+    <button type="button" title={hint} onClick={onOpen} className="-m-1 cursor-pointer rounded-md p-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      {body}
+    </button>
   );
 }

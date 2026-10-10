@@ -1,0 +1,7 @@
+{
+  "_note": "PROPOSED alternative spellings, taken ONLY from the supplied Market workbook (claude_market_with_district.xlsx) where one spelling clearly names the same district as a master entry. They are loaded only with --with-aliases, after the data owner has approved this list. Each value must be a district name that exists in that state's list; the seed stops otherwise.",
+  "UP": { "Barabanki": "Bara Banki", "Maharajganj": "Mahrajganj", "Raebareli": "Rae Bareli", "Lakhimpur Kheri": "Kheri" },
+  "CG": { "Kanker": "Uttar Bastar Kanker", "Gariaband": "Gariyaband", "Kabirdham": "Kabeerdham", "Baloda Bazar": "Balodabazar-Bhatapara", "Mohla-Manpur-Ambagarh Chowki": "Mohla-Manpur-Ambagarh Chouki" },
+  "MP": {},
+  "WB": {}
+}

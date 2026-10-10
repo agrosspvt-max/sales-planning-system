@@ -508,35 +508,64 @@ export interface PerformanceEntryRow {
   actualDealerVisits: number | null;
   actualNewPartyVisits: number | null;
   reportFinalized: boolean;
+  /** Record identity — present on rows loaded for the contribution drill-down; the totals ignore them. */
+  id?: string;
+  officerId?: string;
+  workDate?: Date | string;
+  dealerId?: string | null;
+  schemeId?: string | null;
+  marketName?: string | null;
+  entryType?: string | null;
+  batchId?: string | null;
 }
 export interface PerformanceSectionTotal { planned: number; actual: number }
 export type PerformanceSectionKey = "sales" | "recovery" | "schemeConversion" | "appointment" | "visits";
 export type PerformanceSectionTotals = Record<PerformanceSectionKey, PerformanceSectionTotal>;
+
+/** The ten clickable summary metrics. */
+export const PERFORMANCE_METRICS = [
+  "sales_planned", "sales_actual", "recovery_planned", "recovery_actual", "scheme_conversion_planned", "scheme_conversion_actual",
+  "appointment_planned", "appointment_actual", "visits_planned", "visits_actual",
+] as const;
+export type PerformanceMetric = (typeof PERFORMANCE_METRICS)[number];
+export const isPerformanceMetric = (v: unknown): v is PerformanceMetric => (PERFORMANCE_METRICS as readonly string[]).includes(v as string);
+export type PerformanceUnit = "currency" | "units" | "count";
+export const PERFORMANCE_METRIC_INFO: Record<PerformanceMetric, { key: PerformanceSectionKey; kind: "planned" | "actual"; section: string; unit: PerformanceUnit }> = {
+  sales_planned: { key: "sales", kind: "planned", section: "SALES", unit: "currency" }, sales_actual: { key: "sales", kind: "actual", section: "SALES", unit: "currency" },
+  recovery_planned: { key: "recovery", kind: "planned", section: "RECOVERY", unit: "currency" }, recovery_actual: { key: "recovery", kind: "actual", section: "RECOVERY", unit: "currency" },
+  scheme_conversion_planned: { key: "schemeConversion", kind: "planned", section: "SCHEME_CONVERSION", unit: "units" }, scheme_conversion_actual: { key: "schemeConversion", kind: "actual", section: "SCHEME_CONVERSION", unit: "units" },
+  appointment_planned: { key: "appointment", kind: "planned", section: "APPOINTMENT", unit: "count" }, appointment_actual: { key: "appointment", kind: "actual", section: "APPOINTMENT", unit: "count" },
+  visits_planned: { key: "visits", kind: "planned", section: "SUMMARY", unit: "count" }, visits_actual: { key: "visits", kind: "actual", section: "SUMMARY", unit: "count" },
+};
+
+/**
+ * What ONE submitted plan row contributes to ONE metric — the single definition behind both the summary totals and the drill-down rows, so the
+ * two can never disagree. null = the row does not contribute (not that sort of row, or the value was never entered / the report is not finalized).
+ */
+export function performanceRowValue(r: PerformanceEntryRow, metric: PerformanceMetric): number | null {
+  const info = PERFORMANCE_METRIC_INFO[metric];
+  if (r.section !== info.section) return null;
+  const n = (v: string | number | null): number | null => (v == null || v === "" ? null : Number(v));
+  const actual = info.kind === "actual";
+  if (actual && !r.reportFinalized) return null;
+  if (info.key === "sales" || info.key === "recovery") return n(actual ? r.todaysActual : r.todaysPlan);
+  if (info.key === "schemeConversion") return actual && r.resultStatus !== "YES" ? null : n(r.todaysPlan);
+  if (info.key === "appointment") {
+    if ((r.typedDealerName ?? "").trim() === "") return null; // an unnamed placeholder row is not a planned appointment
+    return actual && r.resultStatus !== "APPOINTED" ? null : 1;
+  }
+  const a = actual ? r.actualDealerVisits : r.dealerVisits, b = actual ? r.actualNewPartyVisits : r.newPartyVisits;
+  return a == null && b == null ? null : (a ?? 0) + (b ?? 0);
+}
 
 export function performanceSectionTotals(rows: readonly PerformanceEntryRow[]): PerformanceSectionTotals {
   const out: PerformanceSectionTotals = {
     sales: { planned: 0, actual: 0 }, recovery: { planned: 0, actual: 0 }, schemeConversion: { planned: 0, actual: 0 },
     appointment: { planned: 0, actual: 0 }, visits: { planned: 0, actual: 0 },
   };
-  const n = (v: string | number | null): number | null => (v == null || v === "" ? null : Number(v));
-  for (const r of rows) {
-    if (r.section === "SALES" || r.section === "RECOVERY") {
-      const t = out[r.section === "SALES" ? "sales" : "recovery"];
-      t.planned += n(r.todaysPlan) ?? 0;
-      if (r.reportFinalized) t.actual += n(r.todaysActual) ?? 0;
-    } else if (r.section === "SCHEME_CONVERSION") {
-      const units = n(r.todaysPlan) ?? 0;
-      out.schemeConversion.planned += units;
-      if (r.reportFinalized && r.resultStatus === "YES") out.schemeConversion.actual += units;
-    } else if (r.section === "APPOINTMENT") {
-      if ((r.typedDealerName ?? "").trim() === "") continue; // an unnamed placeholder row is not a planned appointment
-      out.appointment.planned += 1;
-      if (r.reportFinalized && r.resultStatus === "APPOINTED") out.appointment.actual += 1;
-    } else if (r.section === "SUMMARY") {
-      out.visits.planned += (r.dealerVisits ?? 0) + (r.newPartyVisits ?? 0);
-      if (r.reportFinalized) out.visits.actual += (r.actualDealerVisits ?? 0) + (r.actualNewPartyVisits ?? 0);
-    }
+  for (const metric of PERFORMANCE_METRICS) {
+    const info = PERFORMANCE_METRIC_INFO[metric];
+    out[info.key][info.kind] = round2(rows.reduce((sum, r) => sum + (performanceRowValue(r, metric) ?? 0), 0));
   }
-  for (const t of Object.values(out)) { t.planned = round2(t.planned); t.actual = round2(t.actual); }
   return out;
 }

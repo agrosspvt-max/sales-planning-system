@@ -80,7 +80,7 @@ export function canReadSeasonOptions(identity: PermissionIdentity): boolean {
 }
 export function moduleForPage(path: string): AdminModule | null {
   try { path = decodeURIComponent(path); } catch { return null; }
-  if (/^\/groups\/[^/]+\/catalogue(?:\/|$)/.test(path)) return "productCatalogue";
+  if (/^\/groups\/[^/]+\/(?:catalogue|districts)(?:\/|$)/.test(path)) return "productCatalogue";
   if (path.startsWith("/groups/") || path.startsWith("/planning/group/")) return "users";
   if (path.startsWith("/masters/product-groups")) return "productCatalogue";
   const moduleKey = [...ADMIN_MODULES].sort((a, b) => b.href.length - a.href.length)

@@ -25,7 +25,7 @@ import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as 
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
 import {
-  currentBusinessDate, monthNameForDate, performanceSectionTotals, type PerformanceEntryRow, type PerformanceSectionTotals, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
+  currentBusinessDate, monthNameForDate, performanceSectionTotals, performanceRowValue, isPerformanceMetric, PERFORMANCE_METRIC_INFO, type PerformanceMetric, type PerformanceUnit, type PerformanceEntryRow, type PerformanceSectionTotals, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
   MANDATORY_SECTIONS, SectionStatus, SCHEME_CONVERSION_ENABLED, isDailyWorkSectionEnabled, RECOVERY_PAYMENT_MODES,
   type RecoveryPaymentMode,
@@ -1866,30 +1866,55 @@ const performanceFilterSchema = z.object({
 const DAILY_WORK_OWNER_ROLES = [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] as const;
 
 /** The authoritative Daily Work performer population for the caller (server-side scope), with group/state names. */
-async function performancePopulation(ctx: AuthContext): Promise<{ id: string; name: string; groupId: string | null; groupName: string | null }[]> {
-  const select = { id: true, name: true, groupId: true, group: { select: { id: true, name: true } } } as const;
+type PerformancePerson = { id: string; name: string; role: Role; groupId: string | null; groupName: string | null };
+async function performancePopulation(ctx: AuthContext): Promise<PerformancePerson[]> {
+  const select = { id: true, name: true, role: true, groupId: true, group: { select: { id: true, name: true } } } as const;
   if (ctx.role === Role.SALES_OFFICER) {
     const self = await prisma.user.findUnique({ where: { id: ctx.userId }, select });
-    return self ? [{ id: self.id, name: self.name, groupId: self.groupId, groupName: self.group?.name ?? null }] : [];
+    return self ? [{ id: self.id, name: self.name, role: self.role, groupId: self.groupId, groupName: self.group?.name ?? null }] : [];
   }
   if (ctx.role === Role.REGIONAL_MANAGER) {
     const scope = await getOfficerScope(ctx);
     const ids = scope.ids.filter((id) => id !== ctx.userId);
     if (ids.length === 0) return [];
     const officers = await prisma.user.findMany({ where: { role: Role.SALES_OFFICER, isActive: true, deletedAt: null, id: { in: ids } }, select, orderBy: { name: "asc" } });
-    return officers.map((o) => ({ id: o.id, name: o.name, groupId: o.groupId, groupName: o.group?.name ?? null }));
+    return officers.map((o) => ({ id: o.id, name: o.name, role: o.role, groupId: o.groupId, groupName: o.group?.name ?? null }));
   }
   // Super Admin — company-wide. Daily Work owners are Sales Officers AND Regional Managers (an RM submits Daily Work too),
   // so both appear. Each user is one row source (unique id), so nobody is double-counted. The RM caller's own scope above is unchanged.
   const officers = await prisma.user.findMany({ where: { role: { in: [...DAILY_WORK_OWNER_ROLES] }, isActive: true, deletedAt: null }, select, orderBy: { name: "asc" } });
-  return officers.map((o) => ({ id: o.id, name: o.name, groupId: o.groupId, groupName: o.group?.name ?? null }));
+  return officers.map((o) => ({ id: o.id, name: o.name, role: o.role, groupId: o.groupId, groupName: o.group?.name ?? null }));
 }
 
 /**
  * Role-aware date-range performance. SO → own rows only (no SO/State columns); RM → authorized team (+SO filter);
  * Admin → all SOs (+SO and State filters). Filters are validated against the authoritative population server-side.
  */
-export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): Promise<PerformancePayload> {
+/**
+ * The SUBMITTED plan rows (planSubmittedAt set — the "Submitted Plans" rule) of the given officers and dates, with whether that day's report is
+ * finalized. Drafts never appear. The summary cards total these rows (performanceSectionTotals) and the card drill-down lists them — the same
+ * rows and the same per-row rule (performanceRowValue), so the two always reconcile. Nothing here is loaded into the browser.
+ */
+async function loadPerformanceEntryRows(ids: string[], from: string, to: string): Promise<PerformanceEntryRow[]> {
+  if (ids.length === 0) return [];
+  return prisma.$queryRaw<PerformanceEntryRow[]>(Prisma.sql`
+    SELECT e."id", e."officerId", e."workDate", e."dealerId", e."schemeId", e."marketName", e."entryType", e."batchId",
+           e."section", e."typedDealerName", e."todaysPlan"::text AS "todaysPlan", e."todaysActual"::text AS "todaysActual", e."resultStatus",
+           e."dealerVisits", e."newPartyVisits", e."actualDealerVisits", e."actualNewPartyVisits",
+           (d."finalizedAt" IS NOT NULL OR d."status" = 'FINALIZED') AS "reportFinalized"
+    FROM "DailyWorkEntry" e
+    LEFT JOIN "DailyWorkDay" d ON d."officerId" = e."officerId" AND d."workDate" = e."workDate"
+    WHERE e."officerId" IN (${Prisma.join(ids)}) AND e."workDate" BETWEEN ${from}::date AND ${to}::date
+      AND e."planSubmittedAt" IS NOT NULL AND e."status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
+      AND e."section" IN ('SALES','RECOVERY','APPOINTMENT','SCHEME_CONVERSION','SUMMARY')
+      AND (e."section" <> 'SUMMARY' OR e."rowKey" = ${SUMMARY_ROWKEY})`);
+}
+
+/**
+ * The ONE filter resolution behind the Performance table, its summary cards and the card drill-down: role gate, date range, State and officer
+ * validated against the caller's authoritative population. Anything outside the caller's scope is refused (403), never silently widened.
+ */
+async function resolvePerformanceFilters(ctx: AuthContext, raw: unknown) {
   const L = await getResolvedLabels();
   if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER && !isAdministrativeRole(ctx.role)) {
     throw new ApiError(403, L["daily_work.performance.forbidden"]);
@@ -1913,6 +1938,11 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
     if (!population.some((p) => p.id === filters.officerId)) throw new ApiError(403, L["daily_work.performance.forbidden"]);
     population = population.filter((p) => p.id === filters.officerId);
   }
+  return { L, filters, from, to, dates, population };
+}
+
+export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): Promise<PerformancePayload> {
+  const { filters, from, to, dates, population } = await resolvePerformanceFilters(ctx, raw);
 
   const ids = population.map((p) => p.id);
   const [planRows, dayRows, rmRows, attRows, entryRows] = ids.length === 0
@@ -1941,18 +1971,8 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
           SELECT "officerId", "workDate", "status"
           FROM "DailyWorkAttendance"
           WHERE "officerId" IN (${Prisma.join(ids)}) AND "workDate" BETWEEN ${from}::date AND ${to}::date`),
-        // ONE query for every section total: the SUBMITTED plan rows (planSubmittedAt set — the "Submitted Plans" rule) of the filtered
-        // officers and dates, with whether that day's report is finalized. Totalled in performanceSectionTotals; nothing reaches the browser.
-        prisma.$queryRaw<PerformanceEntryRow[]>(Prisma.sql`
-          SELECT e."section", e."typedDealerName", e."todaysPlan"::text AS "todaysPlan", e."todaysActual"::text AS "todaysActual", e."resultStatus",
-                 e."dealerVisits", e."newPartyVisits", e."actualDealerVisits", e."actualNewPartyVisits",
-                 (d."finalizedAt" IS NOT NULL OR d."status" = 'FINALIZED') AS "reportFinalized"
-          FROM "DailyWorkEntry" e
-          LEFT JOIN "DailyWorkDay" d ON d."officerId" = e."officerId" AND d."workDate" = e."workDate"
-          WHERE e."officerId" IN (${Prisma.join(ids)}) AND e."workDate" BETWEEN ${from}::date AND ${to}::date
-            AND e."planSubmittedAt" IS NOT NULL AND e."status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
-            AND e."section" IN ('SALES','RECOVERY','APPOINTMENT','SCHEME_CONVERSION','SUMMARY')
-            AND (e."section" <> 'SUMMARY' OR e."rowKey" = ${SUMMARY_ROWKEY})`),
+        // ONE query for every section total (and for the card drill-down — loadPerformanceEntryRows): the SUBMITTED plan rows of the filtered officers and dates.
+        loadPerformanceEntryRows(ids, from, to),
       ]);
 
   const dk = (d: Date): string => d.toISOString().slice(0, 10);
@@ -2014,6 +2034,91 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
     role: ctx.role,
     from, to, rows, summary, officers, states,
     canEditAttendance: isAdministrativeRole(ctx.role) && (ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "performance", "attendance")),
+  };
+}
+
+/* ---------- Summary card drill-down: which records make up a Planned / Actual total ---------- */
+
+export interface PerformanceDetailRow {
+  entryId: string; date: string; officerId: string; employeeName: string; role: Role; stateName: string | null;
+  section: string; value: number; record: string | null; recordDetail: string | null;
+  visitParts: { dealer: number; newParty: number } | null; reportFinalized: boolean;
+}
+export interface PerformanceDetailPayload {
+  metric: PerformanceMetric; unit: PerformanceUnit; kind: "planned" | "actual"; from: string; to: string;
+  stateName: string | null; officerName: string | null;
+  total: number; recordCount: number; employeeCount: number; // over ALL matching records, not the page
+  rows: PerformanceDetailRow[]; page: number; pageSize: number; totalPages: number;
+  sort: "date" | "employee" | "value"; dir: "asc" | "desc";
+}
+const DETAIL_MAX_PAGE_SIZE = 100;
+
+/**
+ * The records behind ONE summary metric, under the SAME role scope, Date From/To, State and officer filters as the Performance page
+ * (resolvePerformanceFilters), from the SAME rows and per-row rule as the summary total (loadPerformanceEntryRows / performanceRowValue).
+ * total / recordCount / employeeCount cover every contributing record; only `rows` is paged.
+ */
+export async function getPerformanceMetricDetail(ctx: AuthContext, raw: unknown = {}): Promise<PerformanceDetailPayload> {
+  const input = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const { L, filters, from, to, population } = await resolvePerformanceFilters(ctx, input);
+  if (!isPerformanceMetric(input.metric)) throw new ApiError(422, L["daily_work.performance.invalid_metric"]);
+  const metric = input.metric;
+  const info = PERFORMANCE_METRIC_INFO[metric];
+  const sort = input.sort === "employee" || input.sort === "value" ? input.sort : "date";
+  const dir = input.dir === "desc" ? "desc" : input.dir === "asc" ? "asc" : sort === "date" ? "desc" : "asc";
+  const pageSize = Math.min(DETAIL_MAX_PAGE_SIZE, Math.max(1, Math.floor(Number(input.pageSize)) || 25));
+
+  const people = new Map(population.map((p) => [p.id, p]));
+  const entries = await loadPerformanceEntryRows(population.map((p) => p.id), from, to);
+  const contributions = entries.flatMap((r) => {
+    const value = performanceRowValue(r, metric);
+    const person = r.officerId ? people.get(r.officerId) : undefined;
+    return value == null || !person ? [] : [{ r, value, person, date: r.workDate instanceof Date ? r.workDate.toISOString().slice(0, 10) : String(r.workDate).slice(0, 10) }];
+  });
+  const total = round2(contributions.reduce((sum, c) => sum + c.value, 0));
+  const employeeCount = new Set(contributions.map((c) => c.person.id)).size;
+
+  const sign = dir === "asc" ? 1 : -1;
+  contributions.sort((a, b) => {
+    const byDate = a.date.localeCompare(b.date), byName = a.person.name.localeCompare(b.person.name), byValue = a.value - b.value;
+    const primary = sort === "date" ? byDate : sort === "employee" ? byName : byValue;
+    return sign * primary || byDate * -1 || byName || String(a.r.id).localeCompare(String(b.r.id));
+  });
+  const totalPages = Math.max(1, Math.ceil(contributions.length / pageSize));
+  const page = Math.min(totalPages, Math.max(1, Math.floor(Number(input.page)) || 1));
+  const pageRows = contributions.slice((page - 1) * pageSize, page * pageSize);
+
+  // Record names for the visible page only: two batched lookups, never one per row.
+  const dealerIds = [...new Set(pageRows.map((c) => c.r.dealerId).filter((x): x is string => !!x))];
+  const schemeIds = [...new Set(pageRows.map((c) => c.r.schemeId).filter((x): x is string => !!x))];
+  const [dealerRows, aliasNames, schemeRows] = await Promise.all([
+    dealerIds.length ? prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true } }) : [],
+    dealerIds.length ? loadDealerAliasNameMap(dealerIds) : new Map<string, string>(),
+    schemeIds.length ? prisma.scheme.findMany({ where: { id: { in: schemeIds } }, select: { id: true, schemeName: true } }) : [],
+  ]);
+  const dealerName = new Map(dealerRows.map((d) => [d.id, aliasNames.get(d.id) ?? d.name]));
+  const schemeName = new Map(schemeRows.map((x) => [x.id, x.schemeName]));
+
+  const rows: PerformanceDetailRow[] = pageRows.map(({ r, value, person, date }) => {
+    const dealer = r.dealerId ? dealerName.get(r.dealerId) ?? null : null;
+    const scheme = r.schemeId ? schemeName.get(r.schemeId) ?? null : null;
+    const appointment = info.section === "APPOINTMENT";
+    return {
+      entryId: String(r.id), date, officerId: person.id, employeeName: person.name, role: person.role, stateName: person.groupName,
+      section: info.section, value,
+      record: appointment ? (r.typedDealerName ?? "").trim() || null : dealer,
+      recordDetail: appointment ? r.marketName ?? null : scheme,
+      visitParts: info.section === "SUMMARY"
+        ? (info.kind === "planned" ? { dealer: r.dealerVisits ?? 0, newParty: r.newPartyVisits ?? 0 } : { dealer: r.actualDealerVisits ?? 0, newParty: r.actualNewPartyVisits ?? 0 })
+        : null,
+      reportFinalized: r.reportFinalized,
+    };
+  });
+
+  const stateName = filters.groupId ? (await performancePopulation(ctx)).find((p) => p.groupId === filters.groupId)?.groupName ?? null : null;
+  return {
+    metric, unit: info.unit, kind: info.kind, from, to, stateName, officerName: filters.officerId ? people.get(filters.officerId)?.name ?? null : null,
+    total, recordCount: contributions.length, employeeCount, rows, page, pageSize, totalPages, sort, dir,
   };
 }
 

@@ -91,6 +91,7 @@ model UserGroup {
   productCatalogue GroupProductCatalogue[]
   schemeStates     SchemeState[]
   members          User[]
+  districts        District[]
 }
 
 /// Commercial Scheme Master. This is intentionally independent of sales planning in Phase 1;
@@ -1929,21 +1930,26 @@ model Market {
 /// One CURRENT Territory Mapping row per dealer (dealerId unique): the dealer's Market (nullable — unmapped dealers can still carry
 /// a Potential) and the dealer-level Potential A/B/C chosen in the mapping exercise. History of changes is kept in the audit log.
 model DealerMarketMapping {
-  id          String   @id @default(cuid())
-  dealerId    String   @unique
+  id          String    @id @default(cuid())
+  dealerId    String    @unique
   marketId    String?
   /// TEMPORARY manual override of the displayed Market (free text from the Existing Dealers screen). It is NOT a Market master record and
   /// never feeds Seasonal / Monthly Planning; an Excel import that changes the Market clears it. Each manual change is in TerritoryMarketEdit.
   marketText  String?
-  district    String? // dealer territory District (free text from the Excel import / manual edit; no District master)
+  /// LEGACY free text (kept — never dropped or blindly overwritten). Once `districtId` is set this mirrors the District master's name; a row with text but no districtId is an unresolved legacy value awaiting review.
+  district    String?
+  /// The standard District (District master, belongs to one State = UserGroup). Null = none chosen yet.
+  districtId  String?
   potential   String? // A | B | C — dealer-level, NOT the Market's potential
   updatedById String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  dealer      Dealer   @relation(fields: [dealerId], references: [id], onDelete: Cascade)
-  market      Market?  @relation(fields: [marketId], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  dealer      Dealer    @relation(fields: [dealerId], references: [id], onDelete: Cascade)
+  market      Market?   @relation(fields: [marketId], references: [id], onDelete: SetNull)
+  districtRef District? @relation(fields: [districtId], references: [id], onDelete: SetNull)
 
   @@index([marketId])
+  @@index([districtId])
 }
 
 /// Append-only history of MANUAL Market edits on Existing Dealers (one row per confirmed change; Excel imports never write here).
@@ -2217,4 +2223,39 @@ model PartyMonthlySheet {
 
   @@unique([ownerId, seasonMonthId])
   @@index([seasonId])
+}
+
+/// District master: the official districts of ONE State. The State is the existing UserGroup (State Catalogue is per group), so a district is
+/// unique within its state (`nameKey` = normalized name) while the same name may exist in another state. Districts are never deleted by an
+/// upload; `isActive=false` hides one from the Territory Mapping dropdown without touching dealers that already use it.
+model District {
+  id          String                @id @default(cuid())
+  groupId     String
+  name        String
+  nameKey     String
+  isActive    Boolean               @default(true)
+  createdById String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  group       UserGroup             @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  aliases     DistrictAlias[]
+  mappings    DealerMarketMapping[]
+
+  @@unique([groupId, nameKey])
+  @@index([groupId, isActive])
+}
+
+/// An APPROVED alternative spelling of a district ("Barabanki" for "Bara Banki"), unique within the state. Used only to resolve imported /
+/// legacy text to the canonical district — never shown as a separate choice.
+model DistrictAlias {
+  id         String   @id @default(cuid())
+  districtId String
+  groupId    String
+  alias      String
+  aliasKey   String
+  createdAt  DateTime @default(now())
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, aliasKey])
+  @@index([districtId])
 }

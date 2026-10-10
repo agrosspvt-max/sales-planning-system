@@ -27,7 +27,7 @@ test("sheet parsing needs the Dealer and Market columns and reports unusable row
   const parsed = parseTerritorySheet([[" dealer ", "MARKET", "Extra"], ["Dealer A", "Pipariya", 1], [null, null], ["", "Bareli"], ["Dealer C", ""], ["Dealer D", "Bareli"]]);
   assert.equal(parsed.error, null);
   assert.deepEqual(parsed.rows.map((r) => [r.rowNumber, r.dealer, r.market]), [[2, "Dealer A", "Pipariya"], [6, "Dealer D", "Bareli"]]);
-  assert.deepEqual(parsed.invalid.map((r) => [r.rowNumber, r.reason]), [[4, "Dealer is empty"], [5, "Market is empty"]]);
+  assert.deepEqual(parsed.invalid.map((r) => [r.rowNumber, r.reason]), [[4, "Party Name is empty"], [5, "Market is empty"]]);
 });
 
 test("a name is matched automatically only when exactly one dealer is found by a non-fuzzy tier", () => {
@@ -53,7 +53,7 @@ test("import plan: matched / unmatched / ambiguous / out-of-scope are classified
   assert.deepEqual(result.map((r) => r.status), ["MATCHED", "UNMATCHED", "AMBIGUOUS", "INVALID"]);
   assert.equal(result[2]!.dealerId, undefined, "an ambiguous row has no dealer until the user chooses");
   assert.equal(result[3]!.reason, "This dealer is outside your authorized scope");
-  assert.deepEqual(summarizeImportPlan(result), { total: 4, matched: 1, willApply: 1, noChange: 0, unmatched: 1, ambiguous: 1, invalid: 1, duplicates: 0, conflicts: 0, newMarkets: 1, districtUpdates: 0 });
+  assert.deepEqual(summarizeImportPlan(result), { total: 4, matched: 1, willApply: 1, noChange: 0, unmatched: 1, ambiguous: 1, invalid: 1, duplicates: 0, conflicts: 0, newMarkets: 1, districtUpdates: 0, unknownDistricts: 0 });
 });
 
 test("an ambiguity pick is honoured only for one of that row's own candidates", () => {
@@ -89,7 +89,7 @@ test("sheet parsing: Dealer | Market | District reads the District; an old Deale
   const old = parseTerritorySheet([["Dealer", "Market"], ["Dealer A", "Market A"]]);
   assert.equal(old.error, null);
   assert.deepEqual(old.rows.map((r) => r.district), [""], "no District column → District left unchanged");
-  assert.deepEqual(parseTerritorySheet([["Dealer", "Market", "District"], ["", "M", "D"]]).invalid.map((r) => [r.reason, r.district]), [["Dealer is empty", "D"]]);
+  assert.deepEqual(parseTerritorySheet([["Dealer", "Market", "District"], ["", "M", "D"]]).invalid.map((r) => [r.reason, r.district]), [["Party Name is empty", "D"]]);
 });
 
 test("import plan: District + Market are compared with what the dealer has now (the five cases)", () => {

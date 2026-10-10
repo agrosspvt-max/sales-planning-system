@@ -31,7 +31,7 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
   if (p.startsWith("announcements")) return ["announcements", "read"];
   if (p.startsWith("daily-work")) {
     if (p.endsWith("attendance")) return ["performance", read ? "read" : "attendance"];
-    if (/performance$/.test(p)) return ["performance", "read"];
+    if (/performance(\/detail)?$/.test(p)) return ["performance", "read"];
     if (p.endsWith("admin-view") || p.endsWith("review")) return read ? ["dailyWork", "read"] : null;
     return null; // Existing employee plan/actual/submit/rating flows are not administrative actions.
   }
@@ -84,7 +84,7 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
   if (p.startsWith("planning/groups/")) return [p.endsWith("/recovery") ? "recoveryPlanning" : "salesPlanning", "read"];
   if (p.startsWith("products/merge") || p === "products/unmerge") return ["products", "merge"];
   if (p.startsWith("products")) return ["products", read ? "read" : "update"];
-  if (/^groups\/[^/]+\/catalogue/.test(p)) return ["productCatalogue", read ? "read" : writeAction(method)];
+  if (/^groups\/[^/]+\/(catalogue|districts)/.test(p)) return ["productCatalogue", read ? "read" : writeAction(method)]; // districts = the State Catalogue's District master
   if (p.startsWith("groups") || p.startsWith("users")) return ["users", read ? "read" : p.endsWith("/status") ? "delete" : /\/(password|role)$/.test(p) ? "update" : writeAction(method)];
   if (p.startsWith("dealer-assignments") || p === "dealers/assign") return ["dealerAssignments", read ? "read" : writeAction(method)];
   if (p === "rm-assignments") return ["rmAssignments", read ? "read" : writeAction(method)];

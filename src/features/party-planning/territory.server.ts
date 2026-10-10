@@ -11,9 +11,10 @@ import { loadDealerResolver } from "@/lib/dealer-resolver";
 import * as XLSX from "xlsx";
 import { readWorkbook, sheetNames } from "@/lib/import/workbook";
 import { buildPage, type PageParams, type Paginated } from "@/lib/pagination";
+import { buildDistrictCatalog } from "@/lib/district-master";
 import {
-  POTENTIALS, DISTRICT_MAX, buildImportPlan, classifyMatch, cleanDistrict, cleanMarketName, MARKET_NAME_MAX, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
-  type ImportCandidate, type ImportPlanRow, type ImportSummary, type MarketRequestStatus, type Potential,
+  POTENTIALS, buildImportPlan, classifyMatch, cleanDistrict, cleanMarketName, MARKET_NAME_MAX, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
+  type ImportCandidate, type ImportDistrictOutcome, type ImportPlanRow, type ImportSummary, type MarketRequestStatus, type Potential,
 } from "@/lib/territory-mapping";
 
 /**
@@ -59,6 +60,63 @@ async function assertDealerInScope(ctx: AuthContext, dealerId: string): Promise<
   return dealer;
 }
 
+/* ------------------------------------------------ State + District ------------------------------------------------ */
+
+type StateRef = { id: string; name: string };
+/** dealerId → the dealer's State: Dealer → CURRENT DealerAssignment → officer → UserGroup. null = no current owner, or the owner has no group. */
+async function dealerStates(dealerIds: readonly string[], db: typeof prisma = prisma): Promise<Map<string, StateRef | null>> {
+  const ids = [...new Set(dealerIds)];
+  const out = new Map<string, StateRef | null>(ids.map((id) => [id, null]));
+  if (ids.length === 0) return out;
+  const owners = await getCurrentOwnerByDealer(ids, db as unknown as Parameters<typeof getCurrentOwnerByDealer>[1]);
+  const officerIds = [...new Set(owners.values())];
+  const users = officerIds.length ? await db.user.findMany({ where: { id: { in: officerIds } }, select: { id: true, groupId: true } }) : [];
+  const groupOf = new Map(users.map((u) => [u.id, u.groupId]));
+  const groupIds = [...new Set([...groupOf.values()].filter((g): g is string => !!g))];
+  const groups = groupIds.length ? await db.userGroup.findMany({ where: { id: { in: groupIds } }, select: { id: true, name: true } }) : [];
+  const groupById = new Map(groups.map((g) => [g.id, g]));
+  for (const [dealerId, officerId] of owners) { const gid = groupOf.get(officerId); out.set(dealerId, gid ? groupById.get(gid) ?? null : null); }
+  return out;
+}
+
+interface MappingDistrictColumns { district: string | null; districtId: string | null; districtRef?: { name: string; groupId: string } | null }
+function districtFields(m: MappingDistrictColumns | null | undefined, state: StateRef | null): DistrictFields {
+  const ref = m?.districtRef ?? null;
+  const text = ref?.name ?? m?.district ?? null;
+  const review = ref ? (state && ref.groupId !== state.id ? "WRONG_STATE" : null) : text && text.trim() ? "LEGACY" : null;
+  return { district: text, districtId: m?.districtId ?? null, stateId: state?.id ?? null, stateName: state?.name ?? null, districtReview: review };
+}
+const DISTRICT_SELECT = { district: true, districtId: true, districtRef: { select: { name: true, groupId: true } } } as const;
+
+async function loadDistrictCatalog(db: typeof prisma = prisma) {
+  const [districts, aliases, groups] = await Promise.all([
+    db.district.findMany({ select: { id: true, groupId: true, name: true, nameKey: true, isActive: true } }),
+    db.districtAlias.findMany({ select: { districtId: true, groupId: true, aliasKey: true } }),
+    db.userGroup.findMany({ select: { id: true, name: true } }),
+  ]);
+  return { catalog: buildDistrictCatalog(districts, aliases), groupName: new Map(groups.map((g) => [g.id, g.name])) };
+}
+
+export interface DistrictOption { id: string; name: string }
+/**
+ * The ACTIVE districts the caller may pick from, grouped by State (UserGroup id): an Admin sees every state that has districts; an SO / RM only
+ * the states of the officers inside their scope. A dealer's own list is then chosen by its resolved state (the server re-checks on save).
+ */
+export async function listDistrictOptions(ctx: AuthContext): Promise<Record<string, DistrictOption[]>> {
+  assertTerritoryUser(ctx);
+  const scope = await getOfficerScope(ctx);
+  let groupIds: string[] | null = null;
+  if (!scope.all) {
+    const users = await prisma.user.findMany({ where: { id: { in: scope.ids } }, select: { id: true, groupId: true } });
+    groupIds = [...new Set(users.map((u) => u.groupId).filter((g): g is string => !!g))];
+    if (groupIds.length === 0) return {};
+  }
+  const rows = await prisma.district.findMany({ where: { isActive: true, ...(groupIds ? { groupId: { in: groupIds } } : {}) }, select: { id: true, groupId: true, name: true } });
+  const out: Record<string, DistrictOption[]> = {};
+  for (const d of [...rows].sort((a, b) => a.name.localeCompare(b.name))) (out[d.groupId] ??= []).push({ id: d.id, name: d.name });
+  return out;
+}
+
 /* ------------------------------------------------ markets ------------------------------------------------ */
 
 export interface MarketDto { id: string; name: string; potential: Potential | null; source: string }
@@ -73,27 +131,35 @@ export async function listMarkets(ctx: AuthContext): Promise<MarketDto[]> {
 
 /* ------------------------------------------------ existing dealers ------------------------------------------------ */
 
-export interface TerritoryDealerRow {
+export type TerritoryDealerRow = {
   dealerId: string; partyName: string; status: string;
   /** `marketName` is the displayed Market: the manual override when one was confirmed, else the mapped Market master name. */
-  marketId: string | null; marketName: string | null; marketEdited: boolean; district: string | null; potential: Potential | null;
-}
+  marketId: string | null; marketName: string | null; marketEdited: boolean; potential: Potential | null;
+} & DistrictFields;
+/**
+ * The dealer's District as the screen needs it. `district` is the shown text (the District master's name once chosen, else the legacy text).
+ * `stateId/stateName` = the dealer's resolved State (current owner's group; null = cannot be determined, so no District can be assigned).
+ * `districtReview`: LEGACY = free text not yet matched to the master; WRONG_STATE = the chosen district belongs to another state than the
+ * dealer's current one (e.g. after a reassignment) — flagged for correction, never silently erased.
+ */
+export interface DistrictFields { district: string | null; districtId: string | null; stateId: string | null; stateName: string | null; districtReview: "LEGACY" | "WRONG_STATE" | null }
 export interface TerritoryListParams extends PageParams { market: string } // "" = all, "__none__" = unmapped, else a marketId
 
 export async function listTerritoryDealers(ctx: AuthContext, params: TerritoryListParams): Promise<Paginated<TerritoryDealerRow> & { mapped: number; unmapped: number }> {
   assertTerritoryUser(ctx);
   const dealers = await loadScopedDealers(ctx);
   const ids = dealers.map((d) => d.id);
-  const [aliases, mappings, edited] = await Promise.all([
+  const [aliases, mappings, edited, states] = await Promise.all([
     loadDealerAliasNameMap(ids),
-    ids.length ? prisma.dealerMarketMapping.findMany({ where: { dealerId: { in: ids } }, select: { dealerId: true, marketId: true, marketText: true, district: true, potential: true, market: { select: { name: true } } } }) : Promise.resolve([]),
+    ids.length ? prisma.dealerMarketMapping.findMany({ where: { dealerId: { in: ids } }, select: { dealerId: true, marketId: true, marketText: true, ...DISTRICT_SELECT, potential: true, market: { select: { name: true } } } }) : Promise.resolve([]),
     ids.length ? prisma.territoryMarketEdit.findMany({ where: { dealerId: { in: ids } }, select: { dealerId: true }, distinct: ["dealerId"] }) : Promise.resolve([]),
+    dealerStates(ids),
   ]);
   const editedIds = new Set(edited.map((e) => e.dealerId));
   const mappingByDealer = new Map(mappings.map((m) => [m.dealerId, m]));
   const all: TerritoryDealerRow[] = dealers.map((d) => {
     const m = mappingByDealer.get(d.id);
-    return { dealerId: d.id, partyName: aliases.get(d.id) ?? d.name, status: d.status, marketId: m?.marketId ?? null, marketName: m?.marketText ?? m?.market?.name ?? null, marketEdited: editedIds.has(d.id), district: m?.district ?? null, potential: asPotential(m?.potential ?? null) };
+    return { dealerId: d.id, partyName: aliases.get(d.id) ?? d.name, status: d.status, marketId: m?.marketId ?? null, marketName: m?.marketText ?? m?.market?.name ?? null, marketEdited: editedIds.has(d.id), potential: asPotential(m?.potential ?? null), ...districtFields(m, states.get(d.id) ?? null) };
   });
   const needle = params.search.trim().toLowerCase();
   const matches = all.filter((row) => {
@@ -113,41 +179,57 @@ export async function listTerritoryDealers(ctx: AuthContext, params: TerritoryLi
 const mappingInput = z.object({
   marketId: z.string().min(1).nullable().optional(),
   potential: z.enum(POTENTIALS).nullable().optional(),
-  district: z.string().max(DISTRICT_MAX, `District can be at most ${DISTRICT_MAX} characters`).nullable().optional(),
-}).refine((v) => v.marketId !== undefined || v.potential !== undefined || v.district !== undefined, { message: "Nothing to update" });
+  /** A District master id (never free text). null = remove the dealer's district. */
+  districtId: z.string().min(1).nullable().optional(),
+}).refine((v) => v.marketId !== undefined || v.potential !== undefined || v.districtId !== undefined, { message: "Nothing to update" });
 
-/** Set the dealer's Market and/or dealer-level Potential. Only the provided fields change; the dealer record itself is never written. */
+/**
+ * Set the dealer's Market, dealer-level Potential and/or standard District. Only the provided fields change; the dealer record itself is never
+ * written. A District must be an ACTIVE district of the dealer's CURRENT state (current owner's group) — checked here, whatever the client sent.
+ */
 export async function updateDealerMapping(ctx: AuthContext, dealerId: string, raw: unknown): Promise<TerritoryDealerRow> {
   assertTerritoryWriter(ctx);
   const parsed = mappingInput.safeParse(raw);
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? "Invalid mapping");
   const { marketId, potential } = parsed.data;
-  const district = parsed.data.district === undefined ? undefined : cleanDistrict(parsed.data.district ?? "") || null;
+  const districtId = parsed.data.districtId;
   const dealer = await assertDealerInScope(ctx, dealerId);
+  const state = (await dealerStates([dealerId])).get(dealerId) ?? null;
+  let district: { id: string; name: string } | null = null;
+  if (districtId) {
+    if (!state) throw new ApiError(422, "This dealer's state cannot be determined (its current owner has no state group), so a District cannot be assigned yet.");
+    const found = await prisma.district.findUnique({ where: { id: districtId }, select: { id: true, name: true, groupId: true, isActive: true } });
+    if (!found) throw new ApiError(422, "Select a valid District");
+    if (found.groupId !== state.id) throw new ApiError(422, `"${found.name}" does not belong to this dealer's state (${state.name}).`);
+    if (!found.isActive) throw new ApiError(422, `"${found.name}" is inactive and cannot be assigned.`);
+    district = { id: found.id, name: found.name };
+  }
   const market = marketId ? await prisma.market.findUnique({ where: { id: marketId }, select: { id: true, name: true } }) : null;
   if (marketId && !market) throw new ApiError(422, "Select a valid Market");
 
   const row = await prisma.$transaction(async (tx) => {
-    const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, marketText: true, district: true, potential: true, market: { select: { name: true } } } });
-    const data: { marketId?: string | null; marketText?: string | null; potential?: string | null; district?: string | null; updatedById: string } = { updatedById: ctx.userId };
+    const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, marketText: true, ...DISTRICT_SELECT, potential: true, market: { select: { name: true } } } });
+    const data: { marketId?: string | null; marketText?: string | null; potential?: string | null; district?: string | null; districtId?: string | null; updatedById: string } = { updatedById: ctx.userId };
     if (marketId !== undefined) { data.marketId = marketId; data.marketText = null; } // choosing a Market master record replaces a manual override
     if (potential !== undefined) data.potential = potential;
-    if (district !== undefined) data.district = district;
+    if (districtId !== undefined) { data.districtId = district?.id ?? null; data.district = district?.name ?? null; } // the legacy text mirrors the master name; clearing clears both (the old value stays in the audit entry)
     const saved = await tx.dealerMarketMapping.upsert({
       where: { dealerId }, update: data,
-      create: { dealerId, marketId: marketId ?? null, potential: potential ?? null, district: district ?? null, updatedById: ctx.userId },
-      select: { marketId: true, district: true, potential: true },
+      create: { dealerId, marketId: marketId ?? null, potential: potential ?? null, districtId: district?.id ?? null, district: district?.name ?? null, updatedById: ctx.userId },
+      select: { marketId: true, district: true, districtId: true, potential: true },
     });
     const changes: string[] = [];
     if (marketId !== undefined && (before?.marketId ?? null) !== saved.marketId) changes.push(`Market: ${before?.marketText ?? before?.market?.name ?? "—"} → ${market?.name ?? "—"}`);
-    if (district !== undefined && (before?.district ?? null) !== saved.district) changes.push(`District: ${before?.district ?? "—"} → ${saved.district ?? "—"}`);
+    const oldDistrict = before?.districtRef?.name ?? before?.district ?? null;
+    if (districtId !== undefined && ((before?.districtId ?? null) !== saved.districtId || oldDistrict !== (district?.name ?? null))) changes.push(`District: ${oldDistrict ?? "—"} → ${district?.name ?? "—"}`);
     if (potential !== undefined && (before?.potential ?? null) !== saved.potential) changes.push(`Potential: ${before?.potential ?? "—"} → ${saved.potential ?? "—"}`);
     if (changes.length) await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerMarketMapping", entityId: dealerId, summary: `Territory Mapping · ${dealer.name} · ${changes.join("; ")}` }, tx);
     return saved;
   });
   const alias = (await loadDealerAliasNameMap([dealerId])).get(dealerId);
   const wasEdited = (await prisma.territoryMarketEdit.findMany({ where: { dealerId }, select: { dealerId: true }, take: 1 })).length > 0;
-  return { dealerId, partyName: alias ?? dealer.name, status: dealer.status, marketId: row.marketId, marketEdited: wasEdited, district: row.district, marketName: market?.name ?? (row.marketId ? (await prisma.market.findUnique({ where: { id: row.marketId }, select: { name: true } }))?.name ?? null : null), potential: asPotential(row.potential) };
+  const after = await prisma.dealerMarketMapping.findUnique({ where: { dealerId }, select: DISTRICT_SELECT });
+  return { dealerId, partyName: alias ?? dealer.name, status: dealer.status, marketId: row.marketId, marketEdited: wasEdited, ...districtFields(after ?? { district: row.district, districtId: row.districtId }, state), marketName: market?.name ?? (row.marketId ? (await prisma.market.findUnique({ where: { id: row.marketId }, select: { name: true } }))?.name ?? null : null), potential: asPotential(row.potential) };
 }
 
 /* ------------------------------------------------ manual Market edit (temporary) ------------------------------------------------ */
@@ -170,25 +252,25 @@ export async function editDealerMarket(ctx: AuthContext, dealerId: string, raw: 
   const dealer = await assertDealerInScope(ctx, dealerId);
   const next = parsed.data.market;
   const saved = await prisma.$transaction(async (tx) => {
-    const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, marketText: true, district: true, potential: true, market: { select: { name: true } } } });
+    const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, marketText: true, district: true, districtId: true, potential: true, market: { select: { name: true } } } });
     const current = before?.marketText ?? before?.market?.name ?? null;
     if (!sameMarket(current, parsed.data.expectedMarket)) throw new ApiError(409, "This dealer's Market was changed by someone else. Reload and try again.");
     if (sameMarket(current, next)) throw new ApiError(422, "That is already this dealer's Market");
-    let row: { marketId: string | null; district: string | null; potential: string | null };
+    let row: { marketId: string | null; district: string | null; districtId: string | null; potential: string | null };
     if (before) {
       // Claim: only succeeds while the mapping still holds the value we just read.
       const claimed = await tx.dealerMarketMapping.updateMany({ where: { dealerId, marketId: before.marketId, marketText: before.marketText }, data: { marketText: next, updatedById: ctx.userId } });
       if (claimed.count !== 1) throw new ApiError(409, "This dealer's Market was changed by someone else. Reload and try again.");
       row = before;
     } else {
-      row = await tx.dealerMarketMapping.create({ data: { dealerId, marketText: next, updatedById: ctx.userId }, select: { marketId: true, district: true, potential: true } });
+      row = await tx.dealerMarketMapping.create({ data: { dealerId, marketText: next, updatedById: ctx.userId }, select: { marketId: true, district: true, districtId: true, potential: true } });
     }
     await tx.territoryMarketEdit.create({ data: { dealerId, previousMarket: current, newMarket: next, editedById: ctx.userId } });
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerMarketMapping", entityId: dealerId, summary: `Territory Mapping · ${dealer.name} · Market (manual edit): ${current ?? "—"} → ${next}` }, tx);
     return row;
   });
   const alias = (await loadDealerAliasNameMap([dealerId])).get(dealerId);
-  return { dealerId, partyName: alias ?? dealer.name, status: dealer.status, marketId: saved.marketId, marketName: next, marketEdited: true, district: saved.district, potential: asPotential(saved.potential) };
+  return { dealerId, partyName: alias ?? dealer.name, status: dealer.status, marketId: saved.marketId, marketName: next, marketEdited: true, potential: asPotential(saved.potential), ...districtFields((await prisma.dealerMarketMapping.findUnique({ where: { dealerId }, select: DISTRICT_SELECT })) ?? { district: saved.district, districtId: saved.districtId }, (await dealerStates([dealerId])).get(dealerId) ?? null) };
 }
 
 export interface MarketEditDto { id: string; previousMarket: string | null; newMarket: string; editedByName: string; editedAt: string }
@@ -230,14 +312,29 @@ async function planFromWorkbook(ctx: AuthContext, buffer: Buffer, sheet: string 
   if (parsed.error) return { sheetNames: names, sheet: chosen, needsSheet: false, error: parsed.error, plan: [], summary: null };
   if (parsed.rows.length + parsed.invalid.length > MAX_IMPORT_ROWS) throw new ApiError(422, `A sheet can import at most ${MAX_IMPORT_ROWS} rows at a time`);
 
-  const [resolver, scoped, aliasNames, mappings, markets] = await Promise.all([
+  const [resolver, scoped, aliasNames, mappings, markets, masters] = await Promise.all([
     loadDealerResolver(),
     loadScopedDealers(ctx),
     loadDealerAliasNameMap(),
-    prisma.dealerMarketMapping.findMany({ select: { dealerId: true, district: true, marketText: true, market: { select: { name: true } } } }),
+    prisma.dealerMarketMapping.findMany({ select: { dealerId: true, district: true, districtId: true, marketText: true, market: { select: { name: true } } } }),
     prisma.market.findMany({ select: { name: true, nameKey: true } }),
+    loadDistrictCatalog(),
   ]);
   const inScope = new Set(scoped.map((d) => d.id));
+  // The District master decides every District cell, against the matched dealer's OWN state (current owner's group).
+  const states = await dealerStates(scoped.map((d) => d.id));
+  const resolveDistrict = (dealerId: string, text: string): ImportDistrictOutcome => {
+    const state = states.get(dealerId) ?? null;
+    const res = masters.catalog.resolve(text, state?.id ?? null);
+    switch (res.kind) {
+      case "OK": return { kind: "OK", districtId: res.districtId, name: res.name, viaAlias: res.viaAlias };
+      case "UNKNOWN": return { kind: "UNKNOWN" };
+      case "NO_STATE": return { kind: "INVALID", reason: `This dealer's state cannot be determined, so the District "${text}" cannot be assigned` };
+      case "INACTIVE": return { kind: "INVALID", reason: `District "${res.name}" is inactive` };
+      case "AMBIGUOUS": return { kind: "INVALID", reason: `District "${text}" matches more than one district (${res.names.join(", ")})` };
+      case "WRONG_STATE": return { kind: "INVALID", reason: `District "${res.name}" belongs to ${res.groupIds.map((g) => masters.groupName.get(g) ?? g).join(" / ")}, not this dealer's state (${state?.name ?? "—"})` };
+    }
+  };
   const resolve = (name: string) => classifyMatch(resolver.candidates(name).slice(0, 50).map((m) => ({
     dealerId: m.dealer.id, partyName: aliasNames.get(m.dealer.id) ?? m.dealer.name, matchType: m.matchType, score: m.score, inScope: inScope.has(m.dealer.id),
   } satisfies ImportCandidate & { inScope: boolean })));
@@ -249,6 +346,8 @@ async function planFromWorkbook(ctx: AuthContext, buffer: Buffer, sheet: string 
     rows: parsed.rows, invalid: parsed.invalid, resolve: wrapped, resolutions,
     currentMarketByDealer: new Map(mappings.map((m) => [m.dealerId, m.marketText ?? m.market?.name ?? null])),
     currentDistrictByDealer: new Map(mappings.map((m) => [m.dealerId, m.district])),
+    currentDistrictIdByDealer: new Map(mappings.map((m) => [m.dealerId, m.districtId])),
+    resolveDistrict,
     existingMarketByKey: new Map(markets.map((m) => [m.nameKey, m.name])),
   });
   return { sheetNames: names, sheet: chosen, needsSheet: false, error: null, plan, summary: summarizeImportPlan(plan) };
@@ -262,6 +361,8 @@ export async function previewTerritoryImport(ctx: AuthContext, buffer: Buffer, s
 
 export interface ImportResult {
   applied: number; noChange: number; skippedUnmatched: number; skippedAmbiguous: number; rejectedInvalid: number; duplicates: number; marketsCreated: number;
+  /** Rows whose District is not in the District master — skipped whole (their Market is not changed either). */
+  skippedUnknownDistrict: number;
 }
 
 /**
@@ -280,11 +381,22 @@ export async function commitTerritoryImport(ctx: AuthContext, buffer: Buffer, sh
   const result: ImportResult = {
     applied: apply.length, noChange: preview.plan.filter((r) => r.status === "MATCHED" && r.action === "NO_CHANGE").length,
     skippedUnmatched: count("UNMATCHED"), skippedAmbiguous: count("AMBIGUOUS"),
-    rejectedInvalid: count("INVALID") + count("CONFLICT"), duplicates: count("DUPLICATE"), marketsCreated: 0,
+    rejectedInvalid: count("INVALID") + count("CONFLICT"), duplicates: count("DUPLICATE"), marketsCreated: 0, skippedUnknownDistrict: count("UNKNOWN_DISTRICT"),
   };
   if (apply.length === 0) return result;
 
   await prisma.$transaction(async (tx) => {
+    // 0) Re-check every District against the master INSIDE the transaction (it may have changed since the plan was built): active, and of the dealer's current state.
+    const districtRows = apply.filter((r) => r.districtChanged && r.districtId);
+    if (districtRows.length) {
+      const fresh = await tx.district.findMany({ where: { id: { in: [...new Set(districtRows.map((r) => r.districtId!))] } }, select: { id: true, groupId: true, isActive: true } });
+      const freshById = new Map(fresh.map((d) => [d.id, d]));
+      const freshStates = await dealerStates(districtRows.map((r) => r.dealerId!), tx as unknown as typeof prisma);
+      for (const r of districtRows) {
+        const d = freshById.get(r.districtId!);
+        if (!d || !d.isActive || d.groupId !== freshStates.get(r.dealerId!)?.id) throw new ApiError(409, `The District "${r.districtName}" for ${r.partyName} is no longer valid. Nothing was imported — preview the file again.`);
+      }
+    }
     // 1) Markets named in the sheet that do not exist yet (source EXISTING; potential stays undecided — it is a MARKET-level value).
     const wanted = new Map<string, string>();
     for (const row of apply.filter((r) => r.marketChanged)) wanted.set(marketNameKey(row.marketName!), row.marketName!);
@@ -299,15 +411,15 @@ export async function commitTerritoryImport(ctx: AuthContext, buffer: Buffer, sh
     const existing = await tx.dealerMarketMapping.findMany({ where: { dealerId: { in: apply.map((r) => r.dealerId!) } }, select: { dealerId: true } });
     const existingIds = new Set(existing.map((m) => m.dealerId));
     const creates = apply.filter((r) => !existingIds.has(r.dealerId!));
-    if (creates.length) await tx.dealerMarketMapping.createMany({ data: creates.map((r) => ({ dealerId: r.dealerId!, marketId: r.marketChanged ? idByKey.get(marketNameKey(r.marketName!))! : null, district: r.districtChanged ? r.districtName! : null, updatedById: ctx.userId })) });
+    if (creates.length) await tx.dealerMarketMapping.createMany({ data: creates.map((r) => ({ dealerId: r.dealerId!, marketId: r.marketChanged ? idByKey.get(marketNameKey(r.marketName!))! : null, district: r.districtChanged ? r.districtName! : null, districtId: r.districtChanged ? r.districtId ?? null : null, updatedById: ctx.userId })) });
     for (const row of apply.filter((r) => existingIds.has(r.dealerId!))) {
       await tx.dealerMarketMapping.update({ where: { dealerId: row.dealerId! }, data: { ...(row.marketChanged ? { marketId: idByKey.get(marketNameKey(row.marketName!))!, marketText: null } : {}), // an import-set Market replaces a manual override; it is NOT a manual edit, so no history row
-         ...(row.districtChanged ? { district: row.districtName! } : {}), updatedById: ctx.userId } });
+         ...(row.districtChanged ? { district: row.districtName!, districtId: row.districtId ?? null } : {}), updatedById: ctx.userId } });
     }
     // 3) History: one audit row per changed dealer + one for the import itself.
     await tx.auditLog.createMany({ data: [
       ...apply.map((row) => ({ userId: ctx.userId, actorDesignation: ctx.designation ?? null, action: "UPDATE", entity: "dealerMarketMapping", entityId: row.dealerId!, summary: `Territory Mapping import · ${row.partyName} · ${[row.marketChanged ? `Market: ${row.currentMarket ?? "—"} → ${row.marketName}` : "", row.districtChanged ? `District: ${row.currentDistrict ?? "—"} → ${row.districtName}` : ""].filter(Boolean).join("; ")}` })),
-      { userId: ctx.userId, actorDesignation: ctx.designation ?? null, action: "CREATE", entity: "territoryMappingImport", entityId: null, summary: `Territory Mapping import (sheet "${preview.sheet}"): ${apply.length} applied, ${result.skippedUnmatched} unmatched, ${result.skippedAmbiguous} ambiguous, ${result.rejectedInvalid} invalid, ${result.marketsCreated} new market(s)` },
+      { userId: ctx.userId, actorDesignation: ctx.designation ?? null, action: "CREATE", entity: "territoryMappingImport", entityId: null, summary: `Territory Mapping import (sheet "${preview.sheet}"): ${apply.length} applied, ${result.skippedUnmatched} unmatched, ${result.skippedAmbiguous} ambiguous, ${result.rejectedInvalid} invalid, ${result.skippedUnknownDistrict} unknown district, ${result.marketsCreated} new market(s)` },
     ] });
   }, { timeout: 60_000, maxWait: 10_000 });
   return result;

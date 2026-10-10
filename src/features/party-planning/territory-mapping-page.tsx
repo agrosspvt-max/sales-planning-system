@@ -7,7 +7,7 @@ import { Check, Upload, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { dealerStatusLabel } from "@/lib/dealer-status";
-import { DISTRICT_MAX, POTENTIALS, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
+import { POTENTIALS, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,13 +20,18 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
 import { UnderlineTabs } from "@/components/ui/underline-tabs";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { PartyPlanModeLinks } from "./party-planning-page";
 import { fill, fillNodes, useLabels } from "./party-labels";
 
 /* ------------------------------------------- DTOs (mirror territory.server.ts) ------------------------------------------- */
 
 interface MarketDto { id: string; name: string; potential: Potential | null; source: string }
-interface DealerRow { dealerId: string; partyName: string; status: string; marketId: string | null; marketName: string | null; marketEdited: boolean; district: string | null; potential: Potential | null }
+interface DealerRow {
+  dealerId: string; partyName: string; status: string; marketId: string | null; marketName: string | null; marketEdited: boolean; potential: Potential | null;
+  district: string | null; districtId: string | null; stateId: string | null; stateName: string | null; districtReview: "LEGACY" | "WRONG_STATE" | null;
+}
+interface DistrictOption { id: string; name: string }
 interface DealerPage { items: DealerRow[]; total: number; page: number; pageSize: number; totalPages: number; mapped: number; unmapped: number }
 interface MarketRequest {
   id: string; marketName: string; potential: Potential; numberOfParties: number; status: "PENDING_RM" | "PENDING_ADMIN" | "APPROVED" | "REJECTED";
@@ -34,7 +39,7 @@ interface MarketRequest {
   rejectionStage: string | null; rejectionReason: string | null;
 }
 interface ImportPreview { sheetNames: string[]; sheet: string | null; needsSheet: boolean; error: string | null; plan: ImportPlanRow[]; summary: ImportSummary | null }
-interface ImportResult { applied: number; noChange: number; skippedUnmatched: number; skippedAmbiguous: number; rejectedInvalid: number; duplicates: number; marketsCreated: number }
+interface ImportResult { applied: number; noChange: number; skippedUnmatched: number; skippedAmbiguous: number; rejectedInvalid: number; duplicates: number; marketsCreated: number; skippedUnknownDistrict: number }
 
 const STATUS_VARIANT: Record<string, "success" | "muted" | "secondary" | "destructive"> = { ACTIVE: "success", INACTIVE: "muted", PENDING: "secondary", DEFAULTER: "destructive" };
 const REQUEST_VARIANT: Record<MarketRequest["status"], "secondary" | "success" | "destructive"> = { PENDING_RM: "secondary", PENDING_ADMIN: "secondary", APPROVED: "success", REJECTED: "destructive" };
@@ -82,13 +87,14 @@ function ExistingDealers() {
   };
   const T = useLabels({ counts: "party_planning.territory.msg.mapped_counts", pageOf: "party_planning.territory.msg.page_of", previous: "party_planning.common.previous", next: "party_planning.common.next" });
   const { data: markets } = useQuery<MarketDto[]>({ queryKey: ["territory-markets"], queryFn: () => api.get<MarketDto[]>("/api/territory-mapping/markets") });
+  const { data: districtsByState } = useQuery<Record<string, DistrictOption[]>>({ queryKey: ["territory-districts"], queryFn: () => api.get<Record<string, DistrictOption[]>>("/api/territory-mapping/districts") });
   const { data, isLoading } = useQuery<DealerPage>({
     queryKey: ["territory-dealers", search, market, page],
     queryFn: () => api.get<DealerPage>(`/api/territory-mapping/dealers?${new URLSearchParams({ search, market, page: String(page), pageSize: "25" })}`),
     placeholderData: keepPreviousData,
   });
   const save = useMutation({
-    mutationFn: (v: { dealerId: string; marketId?: string | null; potential?: Potential | null; district?: string | null }) => api.put(`/api/territory-mapping/dealers/${v.dealerId}`, { marketId: v.marketId, potential: v.potential, district: v.district }),
+    mutationFn: (v: { dealerId: string; marketId?: string | null; potential?: Potential | null }) => api.put(`/api/territory-mapping/dealers/${v.dealerId}`, { marketId: v.marketId, potential: v.potential }),
     onSuccess: () => { setError(null); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
     onError: (e) => setError((e as Error).message),
   });
@@ -110,17 +116,14 @@ function ExistingDealers() {
       <div className="overflow-auto rounded-lg border bg-background">
         <Table>
           <TableHeader><TableRow>
-            <TableHead className="w-48">{L.district}</TableHead><TableHead className="min-w-[22rem]">{L.market}</TableHead><TableHead className="w-28">{L.potential}</TableHead><TableHead>{L.party}</TableHead><TableHead className="w-32">{L.status}</TableHead>
+            <TableHead className="w-72">{L.district}</TableHead><TableHead className="min-w-[22rem]">{L.market}</TableHead><TableHead className="w-28">{L.potential}</TableHead><TableHead>{L.party}</TableHead><TableHead className="w-32">{L.status}</TableHead>
           </TableRow></TableHeader>
           <TableBody>
             {isLoading ? <TableRow><TableCell colSpan={5}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
               : (data?.items.length ?? 0) === 0 ? <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">{L.empty}</TableCell></TableRow>
                 : data!.items.map((row) => (
                   <TableRow key={row.dealerId}>
-                    <TableCell className="p-1">
-                      <Input key={`${row.dealerId}:${row.district ?? ""}`} className="h-8 w-full" aria-label={L.district} defaultValue={row.district ?? ""} placeholder="—" maxLength={DISTRICT_MAX} disabled={save.isPending}
-                        onBlur={(e) => { const v = e.target.value.trim(); if (v !== (row.district ?? "")) save.mutate({ dealerId: row.dealerId, district: v || null }); }} />
-                    </TableCell>
+                    <TableCell className="p-1 align-top"><DistrictCell key={`${row.dealerId}:${row.districtId ?? ""}:${row.district ?? ""}:${row.stateId ?? ""}`} row={row} options={row.stateId ? districtsByState?.[row.stateId] : undefined} /></TableCell>
                     <TableCell className="p-1"><MarketCell row={row} label={L.market} onError={setError} /></TableCell>
                     <TableCell className="p-1">
                       <NativeSelect className="h-8 w-full" aria-label={L.potential} value={row.potential ?? ""} disabled={save.isPending} placeholder="—"
@@ -172,6 +175,7 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
   const T = useLabels({ title: "party_planning.territory.import.title", applied: "party_planning.territory.import.applied", fileLabel: "party_planning.territory.import.file_label", note: "party_planning.territory.import.note", sheet: "party_planning.territory.import.sheet",
     selectSheet: "party_planning.territory.import.select_sheet", choose: "party_planning.territory.import.choose", confirm: "party_planning.territory.import.confirm", failed: "party_planning.territory.msg.import_failed",
     rApplied: "party_planning.territory.import.result_applied", createdOne: "party_planning.territory.import.result_created_one", createdMany: "party_planning.territory.import.result_created_many", rNoChange: "party_planning.territory.import.result_no_change",
+    rUnknownDistrict: "party_planning.territory.import.result_unknown_district", UNKNOWN_DISTRICT: "party_planning.territory.import.status_unknown_district", gUnknownDistrict: "party_planning.territory.import.group_unknown_district", sUnknownDistricts: "party_planning.territory.import.sum_unknown_districts", aliasNote: "party_planning.territory.import.alias_note",
     rUnmatched: "party_planning.territory.import.result_unmatched", rAmbiguous: "party_planning.territory.import.result_ambiguous", rInvalid: "party_planning.territory.import.result_invalid", rDuplicates: "party_planning.territory.import.result_duplicates",
     sMatched: "party_planning.territory.import.sum_matched", sUnmatched: "party_planning.territory.import.sum_unmatched", sAmbiguous: "party_planning.territory.import.sum_ambiguous", sToResolve: "party_planning.territory.import.sum_to_resolve", sInvalid: "party_planning.territory.import.sum_invalid",
     sDuplicates: "party_planning.territory.import.sum_duplicates", sNoChange: "party_planning.territory.import.sum_no_change", sNewMarkets: "party_planning.territory.import.sum_new_markets", sDistrict: "party_planning.territory.import.sum_district_updates", sWillApply: "party_planning.territory.import.sum_will_apply",
@@ -221,13 +225,14 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
               <li>{fill(T.rUnmatched, { count: result.skippedUnmatched })}</li>
               <li>{fill(T.rAmbiguous, { count: result.skippedAmbiguous })}</li>
               <li>{fill(T.rInvalid, { count: result.rejectedInvalid })}</li>
+              <li>{fill(T.rUnknownDistrict, { count: result.skippedUnknownDistrict })}</li>
               <li>{fill(T.rDuplicates, { count: result.duplicates })}</li>
             </ul>
           </div>
         ) : (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label>{fillNodes(T.fileLabel, { dealer: <b>Dealer</b>, market: <b>Market</b>, district: <b>District</b> })}</Label>
+              <Label>{fillNodes(T.fileLabel, { district: <b>District</b>, market: <b>Market</b>, party: <b>Party Name</b> })}</Label>
               <input ref={fileRef} type="file" accept=".xlsx,.xls" className="block text-sm"
                 onChange={(e) => { const f = e.target.files?.[0] ?? null; setFile(f); setPreview(null); setSheet(null); setError(null); if (f) previewMut.mutate({ file: f, sheet: null }); }} />
               <p className="text-xs text-muted-foreground">{T.note}</p>
@@ -246,12 +251,12 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
                   <span>{T.sMatched}: <b>{preview.summary.matched}</b></span><span>{T.sUnmatched}: <b>{preview.summary.unmatched}</b></span>
                   <span>{T.sAmbiguous}: <b>{preview.summary.ambiguous}</b> {fill(T.sToResolve, { count: unresolved })}</span><span>{T.sInvalid}: <b>{preview.summary.invalid + preview.summary.conflicts}</b></span>
                   <span>{T.sDuplicates}: <b>{preview.summary.duplicates}</b></span><span>{T.sNoChange}: <b>{preview.summary.noChange}</b></span>
-                  <span>{T.sNewMarkets}: <b>{preview.summary.newMarkets}</b></span><span>{T.sDistrict}: <b>{preview.summary.districtUpdates}</b></span><span>{T.sWillApply}: <b>{willApply}</b></span>
+                  <span>{T.sUnknownDistricts}: <b>{preview.summary.unknownDistricts}</b></span><span>{T.sNewMarkets}: <b>{preview.summary.newMarkets}</b></span><span>{T.sDistrict}: <b>{preview.summary.districtUpdates}</b></span><span>{T.sWillApply}: <b>{willApply}</b></span>
                 </div>
                 <PlanTable title={T.gMatched} rows={group("MATCHED")} render={(r) => (
                   <><TableCell>{r.excelDealer}</TableCell><TableCell>{r.partyName}</TableCell>
                     <TableCell>{r.currentDistrict || "—"}</TableCell>
-                    <TableCell>{r.districtName || <span className="text-muted-foreground">{T.notInSheet}</span>}</TableCell>
+                    <TableCell>{r.districtName ? <>{r.districtName}{r.districtViaAlias && <div className="text-xs text-muted-foreground">{fill(T.aliasNote, { name: r.districtName })}</div>}</> : <span className="text-muted-foreground">{T.notInSheet}</span>}</TableCell>
                     <TableCell>{r.currentMarket || "—"}</TableCell>
                     <TableCell>{r.marketName}{r.newMarket && <Badge variant="secondary" className="ml-2">{T.badgeNew}</Badge>}</TableCell>
                     <TableCell>{changeText(r)}</TableCell></>
@@ -264,6 +269,7 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
                     <TableCell>{picks[r.rowNumber] ? T.resolved : T.needsChoice}</TableCell></>
                 )} />
                 <PlanTable title={T.gUnmatched} rows={group("UNMATCHED")} head={[T.cExcelDealer, T.cDistrictMarket, T.cResult]} render={(r) => (<><TableCell>{r.excelDealer}</TableCell><TableCell>{districtMarket(r)}</TableCell><TableCell>{r.reason}</TableCell></>)} />
+                <PlanTable title={T.gUnknownDistrict} rows={group("UNKNOWN_DISTRICT")} head={[T.cExcelDealer, T.cDistrictMarket, T.cReason]} render={(r) => (<><TableCell>{r.excelDealer}</TableCell><TableCell>{districtMarket(r)}</TableCell><TableCell>{r.reason}</TableCell></>)} />
                 <PlanTable title={T.gInvalid} rows={plan.filter((r) => ["INVALID", "CONFLICT", "DUPLICATE"].includes(r.status))} head={[T.cExcelRow, T.cDealerDistrictMarket, T.cReason]}
                   render={(r) => (<><TableCell>{r.rowNumber} <Badge variant="muted" className="ml-1">{T[r.status]}</Badge></TableCell><TableCell>{r.excelDealer || "—"} · {r.excelDistrict || "—"} · {r.excelMarket || "—"}</TableCell><TableCell>{r.reason}</TableCell></>)} />
               </div>
@@ -277,6 +283,54 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+const CLEAR_DISTRICT = "__clear__";
+
+/**
+ * The dealer's District: a searchable dropdown of the ACTIVE districts of the dealer's own State, with an explicit Save (nothing is saved on
+ * pick or blur). The server re-validates state, status and scope. No state → no list and no assignment, with the reason shown. A value that is
+ * not a valid master district (legacy free text, or a district of another state after a reassignment) stays visible and is flagged for review.
+ */
+export function DistrictCell({ row, options }: { row: DealerRow; options: DistrictOption[] | undefined }) {
+  const qc = useQueryClient();
+  const T = useLabels({
+    placeholder: "party_planning.territory.district.placeholder", emptyText: "party_planning.territory.district.empty_text", clear: "party_planning.territory.district.clear", save: "party_planning.territory.district.save",
+    saved: "party_planning.territory.district.saved", aria: "party_planning.territory.district.aria", noState: "party_planning.territory.district.no_state", noStateShort: "party_planning.territory.district.no_state_short",
+    noneForState: "party_planning.territory.district.none_for_state", review: "party_planning.territory.district.review",
+    legacyTitle: "party_planning.territory.district.legacy_title", wrongStateTitle: "party_planning.territory.district.wrong_state_title", saving: "party_planning.common.saving",
+  });
+  const [pending, setPending] = useState<string | null>(null); // null = untouched · CLEAR_DISTRICT = remove · else a district id
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const current = row.districtId ?? "";
+  const dirty = pending !== null && (pending === CLEAR_DISTRICT ? current !== "" || !!row.district : pending !== current);
+  const save = useMutation({
+    mutationFn: () => api.put(`/api/territory-mapping/dealers/${row.dealerId}`, { districtId: pending === CLEAR_DISTRICT ? null : pending }),
+    onSuccess: () => { setPending(null); setNote({ ok: true, text: T.saved }); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
+    onError: (e) => setNote({ ok: false, text: (e as Error).message }),
+  });
+
+  const review = row.districtReview === "LEGACY" ? fill(T.legacyTitle, { value: row.district ?? "" }) : row.districtReview === "WRONG_STATE" ? fill(T.wrongStateTitle, { state: row.stateName ?? "—" }) : null;
+  const shown = review ? <div className="mt-1 flex items-center gap-1.5 text-xs"><Badge variant="warning" title={review}>{T.review}</Badge><span className="truncate text-muted-foreground" title={review}>{row.district}</span></div> : null;
+
+  if (!row.stateId) {
+    return <div className="space-y-1 px-2 py-1 text-xs"><div className="text-muted-foreground" title={T.noState}>{T.noStateShort}</div>{shown ?? (row.district ? <div>{row.district}</div> : null)}<div className="text-muted-foreground">{T.noState}</div></div>;
+  }
+  if (!options || options.length === 0) {
+    return <div className="space-y-1 px-2 py-1 text-xs"><div className="text-muted-foreground">{fill(T.noneForState, { state: row.stateName ?? "—" })}</div>{shown ?? (row.district ? <div>{row.district}</div> : null)}</div>;
+  }
+  const choices = [{ value: CLEAR_DISTRICT, label: T.clear }, ...options.map((o) => ({ value: o.id, label: o.name }))];
+  return (
+    <div className="space-y-1 px-1">
+      <div className="flex items-center gap-1">
+        <SearchableSelect className="min-w-0 flex-1" ariaLabel={fill(T.aria, { party: row.partyName })} options={choices} value={pending ?? current} placeholder={T.placeholder} emptyText={T.emptyText}
+          onChange={(v) => { setPending(v); setNote(null); }} />
+        <Button size="sm" className="shrink-0" disabled={!dirty || save.isPending} onClick={() => { setNote(null); save.mutate(); }}>{save.isPending ? T.saving : T.save}</Button>
+      </div>
+      {shown}
+      {note && <p role="status" className={`text-xs ${note.ok ? "text-success" : "text-destructive"}`}>{note.text}</p>}
+    </div>
   );
 }
 

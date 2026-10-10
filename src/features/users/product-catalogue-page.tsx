@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useLabel } from "@/features/labels/label-ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, PackageCheck, Loader2, Check, X, Download, Upload, Tag } from "lucide-react";
+import { ArrowLeft, Plus, PackageCheck, Loader2, Check, X, Download, Upload, Tag, MapPin } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ interface RefreshImpact {
 /** Users → Group → Product Catalogue. Group availability + group price + active/inactive over the Master. */
 export function ProductCataloguePage({ groupId }: { groupId: string }) {
   const qc = useQueryClient();
+  const districtsLabel = useLabel("state_catalogue.districts.open");
   const [addOpen, setAddOpen] = useState(false);
   const [edits, setEdits] = useState<Record<string, string>>({}); // productId -> in-progress price text
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -118,6 +120,7 @@ export function ProductCataloguePage({ groupId }: { groupId: string }) {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" asChild><Link href="/masters/users"><ArrowLeft className="h-4 w-4" /> Back</Link></Button>
+            <Button variant="outline" size="sm" asChild><Link href={`/groups/${groupId}/districts`}><MapPin className="h-4 w-4" /> {districtsLabel}</Link></Button>
             <Button variant="outline" size="sm" disabled={initMut.isPending} onClick={() => initMut.mutate()}>
               {initMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <PackageCheck className="h-4 w-4" />} Initialize From Master
             </Button>

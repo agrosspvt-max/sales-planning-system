@@ -34,6 +34,16 @@ export type PctMode = "sumOfRatios" | "ratioOfSums";
 export function storedMonth(d: RecoveryCalcDealer): RecoveryValue {
   return { plan: d.monthRecoveryPlan, running: d.monthRunningRecovery };
 }
+/**
+ * Date range shown under a week label in Week View, e.g. "1–7". The days come from the server's business-week definition
+ * (businessWeekDayRange: 1–7, 8–14, 15–22, 23–month end), so the label always matches the dates the week's data and lock cover.
+ */
+export function weekRangeLabel(w: { weekNo?: number; startDay: number; endDay: number } | undefined): string {
+  if (!w) return "";
+  // The last business week runs to the month end, whatever its length — shown as "End" rather than 28 / 29 / 30 / 31.
+  return w.weekNo === 4 ? `${w.startDay}–End` : `${w.startDay}–${w.endDay}`;
+}
+
 /** Read a dealer's stored values for a given WEEK (used by the read-only Territory view). */
 export function storedWeek(d: RecoveryCalcDealer, w: number): RecoveryValue {
   const wk = d.weeks[w];

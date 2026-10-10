@@ -21,7 +21,6 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { useLabel } from "@/features/labels/label-ui";
 import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { PartyPlanModeLinks } from "./party-planning-page";
 import { fill, fillNodes, useLabels } from "./party-labels";
 
 /* ------------------------------------------- DTOs (mirror territory.server.ts) ------------------------------------------- */
@@ -50,21 +49,18 @@ const dash = <span className="text-muted-foreground">—</span>;
 
 export function TerritoryMappingPage({ role }: { role: Role }) {
   const [tab, setTab] = useState<"existing" | "add">("existing");
-  const title = useLabel("party_planning.title");
-  const territory = useLabel("party_planning.nav.territory");
+  const territory = useLabel("party_planning.nav.territory"); // standalone module: its own title (it is no longer inside Party Planning)
   const tabExisting = useLabel("party_planning.territory.tab_existing");
   const tabAdd = useLabel("party_planning.territory.tab_add_market");
   const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.territory.subtitle" });
   return (
     <div className="space-y-5">
       <PageHeader
-        crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: title }, { label: territory }]}
-        title={title}
+        crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: territory }]}
+        title={territory}
         subtitle={T.subtitle}
       />
-      <PartyPlanModeLinks mode="territory">
-        <UnderlineTabs active={tab} onChange={(key) => setTab(key as "existing" | "add")} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }]} />
-      </PartyPlanModeLinks>
+      <UnderlineTabs active={tab} onChange={(key) => setTab(key as "existing" | "add")} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }]} />
       {tab === "existing" ? <ExistingDealers /> : <AddMarket role={role} />}
     </div>
   );

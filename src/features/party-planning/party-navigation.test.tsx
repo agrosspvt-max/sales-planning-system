@@ -1,4 +1,4 @@
-/** Party Planning navigation hierarchy: [Territory Mapping | Planning | Create Plan | View], with Seasonal | Monthly under Planning. */
+/** Party Planning navigation hierarchy: [Planning | View], with Seasonal | Monthly under Planning. Territory Mapping is NOT part of it (standalone module). */
 import assert from "node:assert/strict";
 import React from "react";
 import { readFileSync } from "node:fs";
@@ -22,30 +22,30 @@ const activePrimary = (html: string) => primaryOf(html).filter((a) => a.cls.incl
 const activeSecondary = (html: string) => secondaryOf(html).filter((a) => a.cls.includes("border-primary")).map((a) => a.label);
 
 // PRIMARY navigation is the same on every page: Seasonal Planning / Monthly Planning are no longer primary items.
-for (const mode of ["territory", "seasonal", "monthly", "create", "view"]) {
+for (const mode of ["seasonal", "monthly", "create", "view"]) {
   assert.deepEqual(primaryOf(render(mode)).map((a) => [a.label, a.href]), [
-    ["Territory Mapping", "/planning/party/territory"], ["Planning", "/planning/party/seasonal"], ["View", "/planning/party/view"],
+    ["Planning", "/planning/party/seasonal"], ["View", "/planning/party/view"],
   ], `primary navigation on ${mode}`);
   assert.ok(!primaryOf(render(mode)).some((a) => /Seasonal Planning|Monthly Planning/.test(a.label)));
 }
 // Which primary item is active per route.
-assert.deepEqual(activePrimary(render("territory")), ["Territory Mapping"]);
+assert.ok(!render("seasonal").includes("Territory Mapping"), "Territory Mapping is no longer inside Party Planning navigation");
 assert.deepEqual(activePrimary(render("seasonal")), ["Planning"]);
 assert.deepEqual(activePrimary(render("monthly")), ["Planning"], "Monthly keeps Planning active");
 assert.deepEqual(activePrimary(render("create")), [], "the legacy page has no active item — Create Plan is not in the navigation");
-for (const mode of ["territory", "seasonal", "monthly", "create", "view"]) assert.ok(!render(mode).includes("Create Plan"), `no "Create Plan" on ${mode}`);
+for (const mode of ["seasonal", "monthly", "create", "view"]) assert.ok(!render(mode).includes("Create Plan"), `no "Create Plan" on ${mode}`);
 assert.deepEqual(activePrimary(render("view")), ["View"]);
 // SECONDARY tabs exist only under Planning, in the Sales Planning underline style, route-based, with the right one active.
-for (const mode of ["territory", "create", "view"]) assert.equal(secondaryOf(render(mode)).length, 0, `no Seasonal / Monthly tabs on ${mode}`);
+for (const mode of ["create", "view"]) assert.equal(secondaryOf(render(mode)).length, 0, `no Seasonal / Monthly tabs on ${mode}`);
 assert.deepEqual(secondaryOf(render("seasonal")).map((a) => [a.label, a.href]), [["Seasonal", "/planning/party/seasonal?stage=create"], ["Monthly", "/planning/party/monthly?stage=create"]]);
 // PLAN LIFECYCLE switch (Create | Submitted | Approved | Older Plans): only under Planning, between the primary nav and Seasonal | Monthly, route-state links.
-for (const mode of ["territory", "create", "view"]) assert.equal(lifecycleOf(render(mode)).length, 0, `no lifecycle switch on ${mode}`);
+for (const mode of ["create", "view"]) assert.equal(lifecycleOf(render(mode)).length, 0, `no lifecycle switch on ${mode}`);
 for (const mode of ["seasonal", "monthly"]) {
   assert.deepEqual(lifecycleOf(render(mode)).map((a) => [a.label, a.href]), [["Create", `/planning/party/${mode}?stage=create`], ["Submitted", `/planning/party/${mode}?stage=submitted`], ["Approved", `/planning/party/${mode}?stage=approved`], ["Older Plans", `/planning/party/${mode}?stage=older`]], `lifecycle links on ${mode}`);
   for (const stage of ["create", "submitted", "approved", "older"]) assert.deepEqual(lifecycleOf(render(mode, stage)).filter((a) => a.cls.includes("bg-primary")).map((a) => a.label.toLowerCase().replace(" plans", "")), [stage], `${stage} is the active section`);
 }
 const html = render("monthly", "approved");
-assert.ok(html.indexOf("Territory Mapping") < html.indexOf("Create") && html.indexOf("Create") < html.indexOf(">Seasonal<"), "order: primary nav → lifecycle → Seasonal | Monthly");
+assert.ok(html.indexOf(">Planning<") < html.indexOf("Create") && html.indexOf("Create") < html.indexOf(">Seasonal<"), "order: primary nav → lifecycle → Seasonal | Monthly");
 assert.deepEqual(secondaryOf(render("monthly", "approved")).map((a) => a.href), ["/planning/party/seasonal?stage=approved", "/planning/party/monthly?stage=approved"], "switching Seasonal ↔ Monthly keeps the lifecycle section");
 assert.deepEqual(activeSecondary(render("seasonal")), ["Seasonal"]);
 assert.deepEqual(activeSecondary(render("monthly")), ["Monthly"]);
@@ -57,13 +57,15 @@ const tabs = readFileSync("src/components/ui/underline-tabs.tsx", "utf8");
 assert.ok(tabs.includes("flex gap-1 border-b") && tabs.includes(`border-b-2 px-3 py-2 text-sm font-medium transition-colors`) && tabs.includes(salesClasses[1]!) && tabs.includes(salesClasses[2]!), "identical styling to the Sales Planning Seasonal / Monthly / Yearly tabs");
 assert.ok(sales.includes('<div className="flex gap-1 border-b">'), "Sales Planning's own tab strip is unchanged");
 
-// Routes: every page still exists at its original URL and renders the right mode; Territory keeps its own [Existing Dealers | Add Market].
+// Routes: every Party Planning page still exists at its original URL; Territory Mapping is standalone (own route, own [Existing Dealers | Add Market]).
 const pageSource = (p: string) => readFileSync(p, "utf8");
 assert.ok(pageSource("src/features/party-planning/seasonal-planning-page.tsx").includes('<PartyPlanModeLinks mode="seasonal" stage='));
 assert.ok(pageSource("src/features/party-planning/monthly-planning-page.tsx").includes('<PartyPlanModeLinks mode="monthly" stage='));
 const territory = pageSource("src/features/party-planning/territory-mapping-page.tsx");
-assert.ok(territory.includes('<PartyPlanModeLinks mode="territory">') && territory.includes("<UnderlineTabs") && !territory.includes("onClick={() => setTab(key)}") && territory.includes("tab_existing") && territory.includes("tab_add_market"));
-for (const [route, text] of [["territory", "TerritoryMappingPage"], ["seasonal", "SeasonalPlanListPage"], ["monthly", "MonthlyPlanListPage"]] as const) assert.ok(pageSource(`src/app/(dashboard)/planning/party/${route}/page.tsx`).includes(text), `${route}: the list route is unchanged`);
+assert.ok(!territory.includes("PartyPlanModeLinks") && territory.includes("<UnderlineTabs") && !territory.includes("onClick={() => setTab(key)}") && territory.includes("tab_existing") && territory.includes("tab_add_market"));
+assert.ok(pageSource("src/app/(dashboard)/planning/territory-mapping/page.tsx").includes("TerritoryMappingPage"), "standalone Territory Mapping route");
+assert.ok(/redirect\("\/planning\/territory-mapping"\)/.test(pageSource("src/app/(dashboard)/planning/party/territory/page.tsx")), "the old Party Planning URL still works (redirect)");
+for (const [route, text] of [["seasonal", "SeasonalPlanListPage"], ["monthly", "MonthlyPlanListPage"]] as const) assert.ok(pageSource(`src/app/(dashboard)/planning/party/${route}/page.tsx`).includes(text), `${route}: the list route is unchanged`);
 // Detail routes: ONE plan by id (refresh-safe — the id comes from the URL and everything is loaded from it), under the same Planning navigation.
 for (const [route, text] of [["seasonal", "SeasonalPlanDetailPage"], ["monthly", "MonthlyPlanDetailPage"]] as const) {
   const detailRoute = pageSource(`src/app/(dashboard)/planning/party/${route}/[id]/page.tsx`);

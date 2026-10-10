@@ -60,7 +60,7 @@ assert.ok(renderToStaticMarkup(<parts.OpenButton href="/x" />).includes(">Open<"
 
 const navHtml = (stage = "create") => renderToStaticMarkup(<nav.PartyPlanModeLinks mode="seasonal" stage={stage} />);
 let html = navHtml();
-for (const t of ["Plan Type", "Create", "Submitted", "Approved", "Older Plans", "Seasonal", "Monthly", "Territory Mapping", "Planning", "View"]) assert.ok(html.includes(`>${t}<`), `default nav text: ${t}`);
+for (const t of ["Plan Type", "Create", "Submitted", "Approved", "Older Plans", "Seasonal", "Monthly", "Planning", "View"]) assert.ok(html.includes(`>${t}<`), `default nav text: ${t}`);
 assert.ok(html.includes('aria-label="Plan lifecycle"'));
 custom = { "party_planning.nav.plan_type": "Plan Kind", "party_planning.stage.older": "Archive", "party_planning.nav.plan_lifecycle_aria": "Lifecycle", "party_planning.nav.seasonal_tab": "Season Wise" };
 html = navHtml();

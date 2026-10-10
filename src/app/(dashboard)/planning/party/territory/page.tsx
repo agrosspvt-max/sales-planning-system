@@ -1,8 +1,6 @@
-import { auth } from "@/auth";
-import { TerritoryMappingPage } from "@/features/party-planning/territory-mapping-page";
+import { redirect } from "next/navigation";
 
-// Party Planning → Territory Mapping (Dealer → Market). Scope and permissions are enforced by the APIs.
-export default async function Page() {
-  const session = await auth();
-  return <TerritoryMappingPage role={session!.user.role} />;
+// Territory Mapping moved out of Party Planning to /planning/territory-mapping. This URL stays valid for bookmarks and old links.
+export default function Page() {
+  redirect("/planning/territory-mapping");
 }

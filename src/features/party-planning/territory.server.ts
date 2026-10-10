@@ -13,7 +13,7 @@ import { readWorkbook, sheetNames } from "@/lib/import/workbook";
 import { buildPage, type PageParams, type Paginated } from "@/lib/pagination";
 import { buildDistrictCatalog } from "@/lib/district-master";
 import {
-  POTENTIALS, buildImportPlan, classifyMatch, cleanDistrict, cleanMarketName, MARKET_NAME_MAX, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
+  POTENTIALS, buildImportPlan, classifyMatch, cleanMarketName, MARKET_NAME_MAX, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
   type ImportCandidate, type ImportDistrictOutcome, type ImportPlanRow, type ImportSummary, type MarketRequestStatus, type Potential,
 } from "@/lib/territory-mapping";
 

@@ -3,6 +3,7 @@
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import Link from "next/link";
+import { PartyLink } from "@/features/calendar/party-link";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { formatSchemeCurrency as formatCurrency } from "@/lib/utils";
@@ -18,7 +19,7 @@ const shortDate = (dk: string) => { const [, m, d] = dk.split("-").map(Number); 
  * Dashboard "Upcoming — Next 5 Days" card. Reuses /api/calendar/upcoming (scoped server-side), showing only
  * future conversions + notes. Conversions link to Scheme Planning; notes link to the calendar.
  */
-export function UpcomingCard() {
+export function UpcomingCard({ partyPlanningEnabled = false }: { partyPlanningEnabled?: boolean }) {
   const { data, isLoading } = useQuery<UpcomingItem[]>({ queryKey: ["calendar-upcoming"], queryFn: () => api.get("/api/calendar/upcoming") });
   const L = {
     title: useLabel("calendar.upcoming_days"),
@@ -54,11 +55,12 @@ export function UpcomingCard() {
                     <div className="text-xs text-muted-foreground">{it.event.numberOfSchemes} {it.event.numberOfSchemes === 1 ? L.scheme : L.schemes} · {formatCurrency(it.event.totalSchemeAmount)}</div>
                   </Link>
                 ) : it.kind === "PARTY_APPOINTMENT" && it.partyEvent ? (
-                  <Link href="/planning/party/view" className="min-w-0 flex-1 hover:underline">
+                  // Party Planning off (PARTY_PLANNING_ENABLED): the appointment stays listed but no longer links into the module.
+                  <PartyLink enabled={partyPlanningEnabled} className="min-w-0 flex-1">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.partyAppointment}</div>
                     <div className="truncate font-medium">{it.partyEvent.partyName}</div>
                     {it.partyEvent.marketName && <div className="text-xs text-muted-foreground">{L.market}: {it.partyEvent.marketName}</div>}
-                  </Link>
+                  </PartyLink>
                 ) : it.note ? (
                   <Link href="/planning/calendar" className="min-w-0 flex-1 hover:underline">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.note}</div>

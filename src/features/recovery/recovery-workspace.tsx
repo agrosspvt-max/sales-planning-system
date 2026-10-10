@@ -23,7 +23,7 @@ import { StatusBadge } from "@/features/planning/status-badge";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "@/features/planning/dealer-completion";
 import { DealerPlanningStatus } from "@/features/planning/dealer-status";
 import { useAutosaveMap } from "@/features/planning/use-autosave-map";
-import { recoveryMonthTotals, recoveryWeekTotals, weekTillDate, weekAll, storedWeek, type RecoveryValue } from "./recovery-calc";
+import { recoveryMonthTotals, recoveryWeekTotals, weekTillDate, weekAll, storedWeek, weekRangeLabel, type RecoveryValue } from "./recovery-calc";
 import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "@/features/planning/admin-edit-ui";
 import { RecoveryActions } from "./recovery-actions";
 import { RecoveryHistory } from "./recovery-history";
@@ -708,7 +708,10 @@ function WeekView({ detail, isAdmin }: { detail: RecoveryDetail; isAdmin: boolea
                 selected ? "border-primary bg-accent" : "border-input hover:bg-muted/60",
               )}
             >
-              <button type="button" className="font-medium" onClick={() => setWeekNo(wk)}>Week {wk}</button>
+              <button type="button" className="flex flex-col items-start leading-tight" onClick={() => setWeekNo(wk)}>
+                <span className="font-medium">Week {wk}</span>
+                {lock && <span className="text-[11px] font-normal text-muted-foreground" data-week-range>{weekRangeLabel(lock)}</span>}
+              </button>
               {isAdmin ? (
                 <button
                   type="button"

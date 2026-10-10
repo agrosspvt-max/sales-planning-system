@@ -1,10 +1,14 @@
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
 import { NextResponse } from "next/server";
+import { partyPlanningGuard } from "@/lib/party-planning-guard";
 
 const { auth: withAuth } = NextAuth(authConfig);
 
 export const middleware = withAuth((req) => {
+  // PARTY_PLANNING_ENABLED (fail-closed): a disabled Party Planning page / API is answered here, before any handler runs.
+  const disabled = partyPlanningGuard(req.nextUrl.pathname, req.url);
+  if (disabled) return disabled;
   // The `authorized` callback in authConfig decides access; this wrapper is
   // required so Next.js applies it as middleware.
   const headers = new Headers(req.headers);

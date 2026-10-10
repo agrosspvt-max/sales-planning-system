@@ -45,11 +45,10 @@ const fmtDate = (s: string | null) => (s ? formatSchemeDate(s) : "—");
 /* --------------------------- Module Create Plan | View toggle --------------------------- */
 
 // "create" is the legacy appointment-planning page (/planning/party): it is no longer a navigation item, so no primary item is active there.
-type PartyMode = "territory" | "seasonal" | "monthly" | "create" | "view";
+type PartyMode = "seasonal" | "monthly" | "create" | "view";
 
 // PRIMARY navigation. "Planning" opens the Seasonal tab (/planning/party/seasonal) and stays active for both of its tabs.
-const PRIMARY_LINKS: { key: "territory" | "planning" | "view"; href: string; labelKey: LabelKey }[] = [
-  { key: "territory", href: "/planning/party/territory", labelKey: "party_planning.nav.territory" },
+const PRIMARY_LINKS: { key: "planning" | "view"; href: string; labelKey: LabelKey }[] = [
   { key: "planning", href: "/planning/party/seasonal", labelKey: "party_planning.nav.planning" },
   { key: "view", href: "/planning/party/view", labelKey: "party_planning.nav.view" },
 ];
@@ -61,8 +60,8 @@ const PLANNING_TABS: { key: "seasonal" | "monthly"; href: string; labelKey: Labe
 ];
 
 /**
- * Party Planning navigation: [Territory Mapping | Planning | View]. Under Planning, the Sales Planning-style underline
- * tabs [Seasonal | Monthly] are shown; Territory Mapping renders its own [Existing Dealers | Add Market] switch below.
+ * Party Planning navigation: [Planning | View]. Under Planning, the Sales Planning-style underline tabs [Seasonal | Monthly] are shown.
+ * Territory Mapping is a standalone Create/View Plans module (/planning/territory-mapping) and no longer part of this navigation.
  */
 export function PartyPlanModeLinks({ mode, stage = "create", actions, children }: { mode: PartyMode; stage?: PlanStage; actions?: React.ReactNode; children?: React.ReactNode }) {
   const primary = mode === "seasonal" || mode === "monthly" ? "planning" : mode;

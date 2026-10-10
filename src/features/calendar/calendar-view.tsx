@@ -4,6 +4,7 @@ import { useTaggedDealersFirst } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import { PartyLink } from "@/features/calendar/party-link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { ChevronLeft, ChevronRight, Plus, Pencil, Trash2, RefreshCw, StickyNote } from "lucide-react";
@@ -54,7 +55,7 @@ const ENTRY_DOT: Record<CalendarEntryKind, string> = { TASK: "bg-primary", MEETI
 /** The `L` property holding each kind's visible label. */
 const KIND_LABEL_PROP: Record<CalendarEntryKind, string> = { TASK: "kindTask", MEETING: "kindMeeting", REMINDER: "kindReminder", OTHER: "kindOther" };
 
-export function CalendarView({ role }: { role: Role; userId: string }) {
+export function CalendarView({ role, partyPlanningEnabled = false }: { role: Role; userId: string; partyPlanningEnabled?: boolean }) {
   const taggedFirst = useTaggedDealersFirst();
   const qc = useQueryClient();
   const today = new Date();
@@ -297,6 +298,7 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
           payload={data}
           role={role}
           groupByOfficer={groupByOfficer}
+          partyPlanningEnabled={partyPlanningEnabled}
           labels={L}
           onClose={() => setOpenDate(null)}
           onChanged={invalidate}
@@ -308,7 +310,8 @@ export function CalendarView({ role }: { role: Role; userId: string }) {
 
 type Labels = Record<string, string>;
 
-function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entries, payload, role, groupByOfficer, labels: L, onClose, onChanged }: {
+function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entries, payload, role, groupByOfficer, partyPlanningEnabled, labels: L, onClose, onChanged }: {
+  partyPlanningEnabled: boolean;
   dateKey: string; title: string; events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[]; entries: CalendarEntryDto[];
   payload: CalendarPayload | undefined; role: Role; groupByOfficer: boolean; labels: Labels; onClose: () => void; onChanged: () => void;
 }) {
@@ -352,10 +355,10 @@ function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entr
             ? partyGroups.map((g) => (
                 <div key={`party-${g.salesOfficerId}`} className="space-y-2">
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.salesOfficerName}</div>
-                  {g.events.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} />)}
+                  {g.events.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} linked={partyPlanningEnabled} />)}
                 </div>
               ))
-            : partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} />)}
+            : partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} linked={partyPlanningEnabled} />)}
 
           {entries.map((e) => <EntryCard key={e.id} e={e} labels={L} onChanged={onChanged} />)}
 
@@ -498,13 +501,13 @@ function AddEntryForm({ kind, dateKey: dk, payload, labels: L, onCancel, onSaved
 }
 
 /** Party Appointment detail card — Party Name + Market. Links to Party Planning → View (read-only here). */
-function PartyAppointmentCard({ e, labels: L }: { e: PartyAppointmentEvent; labels: Labels }) {
+function PartyAppointmentCard({ e, labels: L, linked }: { e: PartyAppointmentEvent; labels: Labels; linked: boolean }) {
   return (
     <div className="rounded-md border bg-card p-3">
       <div className="mb-1 flex items-center justify-between gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.partyAppointment}</span>
       </div>
-      <Link href="/planning/party/view" className="font-medium text-primary hover:underline">{e.partyName}</Link>
+      <PartyLink enabled={linked} className="font-medium text-primary">{e.partyName}</PartyLink>
       {e.marketName && <div className="text-sm text-muted-foreground">{L.market}: {e.marketName}</div>}
     </div>
   );

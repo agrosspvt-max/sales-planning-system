@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ShoppingCart, Wallet, Gift, UsersRound, ArrowRight, type LucideIcon } from "lucide-react";
+import { ShoppingCart, Wallet, Gift, UsersRound, MapPin, ArrowRight, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,18 +19,24 @@ interface Module {
   description: string;
   icon: LucideIcon;
   available: boolean;
+  /** Badge shown on an unavailable card (default "Coming Soon"). */
+  unavailableLabel?: string;
 }
 
 /**
- * "Create/View Plans" landing — the single Planning entry. It lists the planning MODULES (Sales,
- * Recovery, Scheme, Party). Sales, Recovery & Party are functional and open into their own workspace,
- * which carries the internal [Create Plan | View] toggle; Scheme is gated behind SCHEME_PLANNING_ENABLED.
+ * "Create/View Plans" landing — the single Planning entry. It lists the planning MODULES in this order: Territory Mapping, Party
+ * Planning, Sales, Recovery, Scheme. Each opens its own workspace; Scheme is gated behind SCHEME_PLANNING_ENABLED. While
+ * PARTY_PLANNING_ENABLED is off the Party Planning card stays visible but disabled ("Temporarily Disabled", not a link); the server blocks
+ * its pages and APIs regardless of this card.
  * The optional `mode` is kept only for backward-compatible deep links and no longer changes the landing.
  */
-export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?: PlanningWorkspaceMode; schemePlanningEnabled?: boolean }) {
+export function PlanningModules({ mode, schemePlanningEnabled = false, partyPlanningEnabled = false }: { mode?: PlanningWorkspaceMode; schemePlanningEnabled?: boolean; partyPlanningEnabled?: boolean }) {
   const identity = useContext(PermissionContext);
   void mode;
   const modules: Module[] = [
+    { key: "territory", label: "Territory Mapping", href: "/planning/territory-mapping", description: "Map every existing dealer to its Market and District, and request new Markets for approval.", icon: MapPin, available: true },
+    // Party Planning stays listed when PARTY_PLANNING_ENABLED is off — as a disabled, non-navigating card.
+    { key: "party", label: "Party Planning", href: "/planning/party/seasonal", description: "Plan party visits and appointments, then submit them for admin approval.", icon: UsersRound, available: partyPlanningEnabled, unavailableLabel: "Temporarily Disabled" },
     {
       key: "sales",
       label: "Sales Planning",
@@ -42,7 +48,6 @@ export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?
     { key: "recovery", label: "Recovery Planning", href: "/planning/recovery", description: "Plan and track outstanding recovery from the Aging Report.", icon: Wallet, available: true },
     // Scheme Planning is gated behind SCHEME_PLANNING_ENABLED — shown as "Coming Soon" (disabled) until ready.
     { key: "scheme", label: "Scheme Planning", href: "/planning/scheme", description: "Plan dealers into schemes, get RM approval, and verify enrollment.", icon: Gift, available: schemePlanningEnabled },
-    { key: "party", label: "Party Planning", href: "/planning/party/seasonal", description: "Plan party visits and appointments, then submit them for admin approval.", icon: UsersRound, available: true },
   ];
 
   return (
@@ -59,7 +64,7 @@ export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?
             <Card
               className={cn(
                 "h-full transition-colors",
-                m.available ? "hover:border-primary/50 hover:bg-accent/40" : "opacity-70",
+                m.available ? "hover:border-primary/50 hover:bg-accent/40" : m.unavailableLabel ? "opacity-60" : "opacity-70",
               )}
             >
               <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
@@ -70,7 +75,7 @@ export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?
                 {m.available ? (
                   <ArrowRight className="h-4 w-4 text-muted-foreground" />
                 ) : (
-                  <Badge variant="muted">Coming Soon</Badge>
+                  <Badge variant="muted">{m.unavailableLabel ?? "Coming Soon"}</Badge>
                 )}
               </CardHeader>
               <CardContent>
@@ -83,7 +88,7 @@ export function PlanningModules({ mode, schemePlanningEnabled = false }: { mode?
               {inner}
             </Link>
           ) : (
-            <div key={m.key}>{inner}</div>
+            <div key={m.key} {...(m.unavailableLabel ? { "aria-disabled": true, title: `${m.label} is ${m.unavailableLabel.toLowerCase()}`, className: "cursor-not-allowed select-none" } : {})}>{inner}</div>
           );
         })}
       </div>

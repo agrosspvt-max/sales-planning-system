@@ -613,12 +613,12 @@ async function main() {
   /* ---- UI wiring: Territory Mapping is an ADDITION inside Party Planning; the appointment workflow is untouched ---- */
   {
     const page = readFileSync("src/features/party-planning/party-planning-page.tsx", "utf8");
-    assert.ok(page.includes('href: "/planning/party/territory"') && !page.includes('labelKey: "party_planning.nav.create_plan"') && page.includes('{ key: "view", href: "/planning/party/view"'), "Territory Mapping | Planning | View; no Create Plan item");
+    assert.ok(!page.includes('href: "/planning/party/territory"') && !page.includes('labelKey: "party_planning.nav.create_plan"') && page.includes('{ key: "view", href: "/planning/party/view"'), "Planning | View; Territory Mapping left the Party Planning nav; no Create Plan item");
     assert.ok(page.includes("export function PartyCreatePlanPage") && page.includes("export function PartyViewPage") && page.includes("/api/party-plans/save-draft"), "the appointment plan pages are still there");
     const ui = readFileSync("src/features/party-planning/territory-mapping-page.tsx", "utf8");
     for (const needle of ['"party_planning.territory.tab_existing"', '"party_planning.territory.tab_add_market"', "/api/territory-mapping/import/preview", "/api/territory-mapping/import/commit", "party_planning.territory.action.send_request"]) assert.ok(ui.includes(needle), needle);
     assert.ok(ui.indexOf("territory.col.market") < ui.indexOf("territory.col.potential") && ui.indexOf("territory.col.potential") < ui.indexOf("territory.col.party_name") && ui.indexOf("territory.col.party_name") < ui.indexOf("territory.col.status"), "columns: Market | Potential | Party Name | Status");
-    assert.ok(readFileSync("src/app/(dashboard)/planning/party/territory/page.tsx", "utf8").includes("TerritoryMappingPage"));
+    assert.ok(readFileSync("src/app/(dashboard)/planning/territory-mapping/page.tsx", "utf8").includes("TerritoryMappingPage"));
     // The legacy free-text marketName columns were not migrated or altered.
     const schema = readFileSync("prisma/schema.prisma", "utf8");
     assert.ok(/model PartyPlan[\s\S]*?marketName\s+String\?/.test(schema));

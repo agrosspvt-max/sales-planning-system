@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DraftPlans } from "@/components/dashboard/draft-plans";
 import { UpcomingCard } from "@/features/calendar/upcoming-card";
+import { isPartyPlanningEnabled } from "@/lib/feature-flags";
 import {
   Table,
   TableBody,
@@ -58,7 +59,7 @@ export default async function DashboardPage() {
         />
       </div>}
 
-      {calendarEnabled && (ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "calendar")) && <UpcomingCard />}
+      {calendarEnabled && (ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "calendar")) && <UpcomingCard partyPlanningEnabled={isPartyPlanningEnabled()} />}
 
       {(ctx.role !== Role.CUSTOM_ADMIN || hasAdminPermission(ctx, "salesPlanning")) && <DraftPlans role={ctx.role} />}
 

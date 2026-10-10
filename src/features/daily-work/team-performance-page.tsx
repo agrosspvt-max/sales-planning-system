@@ -10,6 +10,7 @@ import { RecoveryPaymentModeField } from "./recovery-payment-mode";
 import { type DailyWorkType, type RecoveryPaymentMode, currentBusinessDate, rowTaskType } from "@/lib/daily-work";
 import { formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -96,8 +97,8 @@ export function TeamPerformancePage() {
       <PageHeader crumbs={[{ label: L.planning }, { label: L.breadcrumb }]} title={L.title} subtitle={L.subtitle} />
 
       <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1.5"><Label>{L.dateFrom}</Label><Input type="date" value={from} onChange={(e) => setFrom(e.target.value || currentBusinessDate())} className="w-44" /></div>
-        <div className="space-y-1.5"><Label>{L.dateTo}</Label><Input type="date" value={to} onChange={(e) => setTo(e.target.value || currentBusinessDate())} className="w-44" /></div>
+        <div className="space-y-1.5"><Label>{L.dateFrom}</Label><DateInputDMY value={from} onChange={(v) => setFrom(v || currentBusinessDate())} className="w-44" aria-label={L.dateFrom} /></div>
+        <div className="space-y-1.5"><Label>{L.dateTo}</Label><DateInputDMY value={to} onChange={(v) => setTo(v || currentBusinessDate())} className="w-44" aria-label={L.dateTo} /></div>
       </div>
 
       {/* Team summary for the selected range. Counts are officer-days; averages exclude missing ratings. */}

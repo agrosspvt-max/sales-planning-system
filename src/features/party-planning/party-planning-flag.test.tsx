@@ -1,5 +1,5 @@
 /**
- * PARTY_PLANNING_ENABLED + the Create/View Plans reorganisation: the flag fails closed, is enforced server-side for Party Planning pages AND APIs,
+ * PARTY_PLANNING_ENABLED + the Create/View Plans reorganisation: the flag fails closed, is read by ONE helper in ONE (Node) runtime for the card, the pages AND the APIs,
  * and never touches Territory Mapping, Sales / Recovery / Scheme Planning, permissions or data.
  */
 import assert from "node:assert/strict";
@@ -8,8 +8,8 @@ import { join, sep } from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Role } from "@prisma/client";
-import { testLoader } from "@/features/dealer-tags/test-loader";
-import { isPartyPlanningEnabled, isPartyPlanningPath, PARTY_PLANNING_UNAVAILABLE_MESSAGE } from "@/lib/feature-flags";
+import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
+import { isPartyPlanningEnabled, PARTY_PLANNING_UNAVAILABLE_MESSAGE } from "@/lib/feature-flags";
 import { apiPermission } from "@/features/accounts/route-permissions";
 import { mayEnterPage, moduleForPage } from "@/features/accounts/permissions";
 
@@ -27,57 +27,94 @@ assert.equal(isPartyPlanningEnabled({}), false, "missing → disabled");
   if (before === undefined) delete process.env.PARTY_PLANNING_ENABLED; else process.env.PARTY_PLANNING_ENABLED = before;
 }
 
-// 2. Which paths belong to Party Planning — and which never do.
-for (const p of ["/planning/party", "/planning/party/", "/planning/party/seasonal", "/planning/party/seasonal/abc", "/planning/party/monthly", "/planning/party/monthly/abc", "/planning/party/view",
-  "/api/party-plans", "/api/party-plans/submit", "/api/party-plans/x/act", "/api/seasonal-plans", "/api/seasonal-plans/x/submit", "/api/seasonal-sheets/options", "/api/seasonal-sheets/x",
-  "/api/party-monthly-plans/x/appoint", "/api/party-monthly-plans/x/status", "/api/party-monthly-sheets", "/api/party-monthly-sheets/x/act"]) assert.equal(isPartyPlanningPath(p), true, `${p} is Party Planning`);
-for (const p of ["/planning/territory-mapping", "/planning/party/territory", "/planning/party/territory/", "/api/territory-mapping/dealers", "/api/territory-mapping/dealers/d1", "/api/territory-mapping/import/preview",
-  "/api/territory-mapping/import/commit", "/api/territory-mapping/markets", "/api/territory-mapping/districts", "/api/territory-mapping/market-requests", "/planning/create", "/planning/view", "/planning/sales", "/planning/sales/plans",
-  "/planning/recovery", "/planning/scheme", "/planning/scheme/plans", "/planning/party-unavailable", "/planning/calendar", "/api/calendar", "/api/seasons", "/api/planning/season-plans", "/api/scheme-plans", "/api/recovery/plans",
-  "/api/party-planning-other", "/api/seasonal-plansx", "/daily-work", "/dashboard"]) assert.equal(isPartyPlanningPath(p), false, `${p} is NOT Party Planning`);
-
-// 3. The server-side guard (what the middleware runs for every request).
-class FakeNextResponse {
-  constructor(public kind: string, public body: unknown, public init: { status?: number; headers?: Record<string, string> } = {}) {}
-  get status() { return this.init.status; } get headers() { return this.init.headers ?? {}; }
-  static json(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}) { return new FakeNextResponse("json", body, init); }
-  static rewrite(url: URL, init: { status?: number; headers?: Record<string, string> } = {}) { return new FakeNextResponse("rewrite", url.pathname, init); }
+// 2. ONE helper, ONE runtime: the flag is read in exactly one place, and never in the edge middleware (whose environment snapshot goes stale
+//    after a .env reload — the root cause of "card enabled, route unavailable").
+{
+  const walk0 = (dir: string): string[] => readdirSync(dir).flatMap((n) => { const p = join(dir, n); return statSync(p).isDirectory() ? walk0(p) : [p]; });
+  const readers = walk0("src").filter((f) => /\.(ts|tsx)$/.test(f) && !f.includes(".test.") && /PARTY_PLANNING_ENABLED/.test(readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")));
+  assert.deepEqual(readers, [join("src", "lib", "feature-flags.ts")], "only the helper names the variable");
+  assert.ok(!/party|feature-flags/i.test(read("src/middleware.ts")), "the edge middleware does not touch the flag");
 }
-const { partyPlanningGuard } = testLoader({ "next/server": { NextResponse: FakeNextResponse } })("src/lib/party-planning-guard.ts") as { partyPlanningGuard: (p: string, u: string, env: Record<string, string | undefined>) => FakeNextResponse | null };
-const guard = (path: string, flag: string | undefined) => partyPlanningGuard(path, `https://app.test${path}`, flag === undefined ? {} : { PARTY_PLANNING_ENABLED: flag });
-for (const flag of ["false", undefined, "", "banana", "1"]) {
-  const api = guard("/api/seasonal-plans", flag)!;
-  assert.deepEqual([api.kind, api.status, (api.body as { error: string }).error, (api.body as { code: string }).code], ["json", 503, PARTY_PLANNING_UNAVAILABLE_MESSAGE, "FEATURE_DISABLED"], `API blocked (flag ${JSON.stringify(flag)})`);
-  assert.match(api.headers["Cache-Control"]!, /no-store/, "a disabled answer is never cached");
-  const page = guard("/planning/party/monthly/abc", flag)!;
-  assert.deepEqual([page.kind, page.body, page.status], ["rewrite", "/planning/party-unavailable", 503], `page → friendly unavailable page (flag ${JSON.stringify(flag)})`);
-  assert.match(page.headers["Cache-Control"]!, /no-store/);
-  for (const write of ["/api/party-plans/submit", "/api/party-monthly-plans/x/appoint", "/api/seasonal-sheets/x/submit", "/api/party-monthly-sheets/x/act"]) assert.equal(guard(write, flag)!.status, 503, `write endpoint ${write} blocked`);
-  // Everything else keeps working while Party Planning is off.
-  for (const ok of ["/planning/territory-mapping", "/planning/party/territory", "/api/territory-mapping/dealers", "/api/territory-mapping/import/commit", "/api/territory-mapping/markets", "/planning/sales", "/api/planning/season-plans", "/planning/recovery", "/planning/scheme", "/api/scheme-plans", "/api/calendar", "/planning/create"]) assert.equal(guard(ok, flag), null, `${ok} untouched`);
-}
-for (const path of ["/api/seasonal-plans", "/planning/party/seasonal", "/api/party-plans/submit"]) assert.equal(guard(path, "true"), null, `${path} reachable when enabled`);
 
-// 4. Every API route that uses Party Planning code is covered (guards against a future route slipping outside the flag); Territory Mapping routes are not.
+// 3. API enforcement (Node runtime): disabled → 503 before authentication or any data access; enabled → exactly the normal requireAuth().
+const apiChecks = (async () => {
+  let authCalls = 0;
+  const { assertPartyPlanningEnabled, requirePartyAuth } = testLoader({ "@/lib/http": { ApiError: TestApiError, requireAuth: async () => { authCalls += 1; return { userId: "u1" }; } } })("src/lib/party-planning-access.ts") as {
+    assertPartyPlanningEnabled: (env: Record<string, string | undefined>) => void; requirePartyAuth: () => Promise<{ userId: string }>;
+  };
+  const before = process.env.PARTY_PLANNING_ENABLED;
+  try {
+    for (const off of [undefined, "", "false", "banana", "1", "yes"]) {
+      if (off === undefined) delete process.env.PARTY_PLANNING_ENABLED; else process.env.PARTY_PLANNING_ENABLED = off;
+      await assert.rejects(requirePartyAuth(), (e: unknown) => (e as TestApiError).status === 503 && (e as Error).message === PARTY_PLANNING_UNAVAILABLE_MESSAGE, `flag ${JSON.stringify(off)} → 503`);
+      assert.throws(() => assertPartyPlanningEnabled({ PARTY_PLANNING_ENABLED: off }), /temporarily unavailable/);
+    }
+    assert.equal(authCalls, 0, "a disabled request never reaches authentication or data");
+    // Toggling the live environment takes effect on the very next call (no restart-dependent snapshot in this runtime).
+    process.env.PARTY_PLANNING_ENABLED = "true";
+    assert.deepEqual(await requirePartyAuth(), { userId: "u1" }); assert.equal(authCalls, 1, "enabled: identical to requireAuth()");
+    process.env.PARTY_PLANNING_ENABLED = "false";
+    await assert.rejects(requirePartyAuth(), (e: unknown) => (e as TestApiError).status === 503);
+    process.env.PARTY_PLANNING_ENABLED = "true";
+    assert.deepEqual(await requirePartyAuth(), { userId: "u1" });
+
+    // A real Party Planning route end to end: 503 when disabled (service never called), normal result when enabled, authorization unchanged.
+    let serviceCalls = 0, authFails = false;
+    const access = load0();
+    function load0() {
+      return testLoader({
+        "next/server": {},
+        "@/lib/http": {
+          ApiError: TestApiError, ok: (v: unknown) => ({ status: 200, body: v }),
+          handle: (fn: () => Promise<unknown>) => fn().catch((e: TestApiError) => ({ status: e.status, body: { error: e.message } })),
+          requireAuth: async () => { authCalls += 1; if (authFails) throw new TestApiError(401, "Not authenticated"); return { userId: "u1" }; },
+        },
+        "@/features/party-planning/seasonal.server": { listSeasonalSheets: async () => { serviceCalls += 1; return ["sheet"]; }, createSeasonalSheet: async () => { serviceCalls += 1; return {}; } },
+      })("src/app/api/seasonal-sheets/route.ts") as { GET: (r: unknown) => Promise<{ status: number; body: unknown }>; POST: (r: unknown) => Promise<{ status: number; body: unknown }> };
+    }
+    const req = { nextUrl: { searchParams: new URLSearchParams() }, json: async () => ({}) };
+    process.env.PARTY_PLANNING_ENABLED = "false"; authCalls = 0;
+    const blockedGet = await access.GET(req), blockedPost = await access.POST(req);
+    assert.deepEqual([blockedGet.status, blockedPost.status, serviceCalls, authCalls], [503, 503, 0, 0], "disabled: reads AND writes are rejected, nothing runs");
+    process.env.PARTY_PLANNING_ENABLED = "true";
+    const okGet = await access.GET(req);
+    assert.deepEqual([okGet.status, okGet.body, serviceCalls], [200, ["sheet"], 1], "enabled: the route works as before");
+    authFails = true;
+    assert.equal((await access.GET(req)).status, 401, "enabled does NOT bypass authentication");
+
+    // The page gate (same helper as the card): enabled → no gate (the real page renders); disabled → the friendly unavailable page. Territory Mapping has no gate.
+    const { partyPlanningGate } = testLoader({
+      "next/link": { __esModule: true, default: ({ children }: { children: React.ReactNode }) => <a>{children}</a> },
+      "@/components/layout/page-header": { PageHeader: ({ subtitle }: { subtitle?: string }) => <p>{subtitle}</p> },
+      "@/components/ui/card": { Card: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, CardContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, CardHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, CardTitle: ({ children }: { children: React.ReactNode }) => <h3>{children}</h3> },
+      "@/components/ui/badge": { Badge: ({ children }: { children: React.ReactNode }) => <span>{children}</span> },
+      "@/components/ui/button": { Button: ({ children }: { children: React.ReactNode }) => <button>{children}</button> },
+    })("src/features/party-planning/party-planning-unavailable.tsx") as { partyPlanningGate: () => React.ReactNode | null };
+    process.env.PARTY_PLANNING_ENABLED = "true";
+    assert.equal(partyPlanningGate(), null, "enabled: no unavailable screen on /planning/party/*");
+    process.env.PARTY_PLANNING_ENABLED = "false";
+    assert.ok(renderToStaticMarkup(<>{partyPlanningGate()}</>).includes("temporarily unavailable"), "disabled: direct navigation shows the unavailable page");
+    process.env.PARTY_PLANNING_ENABLED = "true";
+    assert.equal(partyPlanningGate(), null, "and it follows the live value straight back");
+  } finally { if (before === undefined) delete process.env.PARTY_PLANNING_ENABLED; else process.env.PARTY_PLANNING_ENABLED = before; }
+})();
+
+// 4. Every API route that uses Party Planning code is behind requirePartyAuth (a future route cannot slip outside the flag); Territory Mapping routes are not.
 const walk = (dir: string): string[] => readdirSync(dir).flatMap((n) => { const p = join(dir, n); return statSync(p).isDirectory() ? walk(p) : [p]; });
 const routeOf = (file: string) => "/" + file.split(sep).slice(file.split(sep).indexOf("app") + 1, -1).join("/").replace(/\[[^\]]+\]/g, "x");
 let covered = 0, territory = 0;
 for (const file of walk("src/app/api").filter((f) => f.endsWith("route.ts"))) {
-  const route = routeOf(file);
-  const usesParty = /features\/party-planning\//.test(read(file)) && !route.startsWith("/api/territory-mapping");
-  if (usesParty) { assert.equal(isPartyPlanningPath(route), true, `${route} uses Party Planning code but is outside the flag`); covered += 1; }
-  if (route.startsWith("/api/territory-mapping")) { assert.equal(isPartyPlanningPath(route), false, `${route} must stay available`); territory += 1; }
+  const route = routeOf(file), src = read(file);
+  if (route.startsWith("/api/territory-mapping")) { assert.ok(!src.includes("requirePartyAuth"), `${route} must stay available`); territory += 1; continue; }
+  if (/features\/party-planning\//.test(src)) { assert.ok(src.includes("requirePartyAuth()") && !/\brequireAuth\(\)/.test(src), `${route} uses Party Planning code but is not behind the flag`); covered += 1; }
 }
 assert.ok(covered >= 20 && territory >= 9, `scanned ${covered} party routes and ${territory} territory routes`);
-// …and every Party Planning PAGE also carries the page-level gate (defence in depth beside the middleware).
+// …and every Party Planning PAGE carries the page-level gate (same helper, same runtime).
 const pageFiles = walk("src/app/(dashboard)/planning/party").filter((f) => f.endsWith("page.tsx") && !f.includes(`${sep}territory${sep}`));
 assert.equal(pageFiles.length, 6, "party, view, seasonal, seasonal/[id], monthly, monthly/[id]");
 for (const f of pageFiles) assert.ok(/const unavailable = partyPlanningGate\(\);[^\n]*\n\s*if \(unavailable\) return unavailable;/.test(read(f)), `${f} is gated`);
-
-// 5. The middleware runs the guard first; the flag/guard modules never touch the database, permissions or records.
-const mw = read("src/middleware.ts");
-assert.ok(mw.includes("partyPlanningGuard(req.nextUrl.pathname, req.url)") && mw.includes("if (disabled) return disabled;") && mw.indexOf("if (disabled) return disabled;") < mw.indexOf("NextResponse.next("), "middleware answers a disabled request before any handler");
-for (const f of ["src/lib/feature-flags.ts", "src/lib/party-planning-guard.ts"]) assert.ok(!/prisma|writeAudit|migrat/i.test(read(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")), `${f} touches no data`);
+assert.ok(read("src/features/party-planning/party-planning-unavailable.tsx").includes("isPartyPlanningEnabled()"), "the page gate uses the same helper as the card");
+for (const f of ["src/lib/feature-flags.ts", "src/lib/party-planning-access.ts"]) assert.ok(!/prisma|writeAudit|migrat/i.test(read(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")), `${f} touches no data`);
 assert.ok(!readdirSync("prisma/migrations").some((m) => /party_planning_flag/i.test(m)), "no migration");
 
 // 6. Create/View Plans landing: five cards in the required order; Territory Mapping is its own card.
@@ -149,4 +186,4 @@ for (const f of ["create", "view"]) assert.ok(read(`src/app/(dashboard)/planning
   assert.match(env, /PRODUCTION MUST SET PARTY_PLANNING_ENABLED="false"/);
   assert.ok(!/NEXT_PUBLIC_PARTY/.test(env) && !read("src/features/planning/planning-modules.tsx").includes("process.env"), "the variable is never exposed to the browser");
 }
-console.log("party-planning-flag.test.tsx — all assertions passed");
+apiChecks.then(() => console.log("party-planning-flag.test.tsx — all assertions passed")).catch((e) => { console.error(e); process.exit(1); });

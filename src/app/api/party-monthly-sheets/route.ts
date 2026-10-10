@@ -1,5 +1,6 @@
 import { type NextRequest } from "next/server";
-import { handle, ok, requireAuth } from "@/lib/http";
+import { requirePartyAuth } from "@/lib/party-planning-access";
+import { handle, ok } from "@/lib/http";
 import { createMonthlySheet, listMonthlySheets } from "@/features/party-planning/monthly.server";
 import { PLAN_STAGES, type PlanStage } from "@/lib/monthly-plan";
 
@@ -8,9 +9,9 @@ import { PLAN_STAGES, type PlanStage } from "@/lib/monthly-plan";
 export async function GET(req: NextRequest) {
   return handle(async () => {
     const q = req.nextUrl.searchParams;
-    return ok(await listMonthlySheets(await requireAuth(), { seasonId: q.get("season") || undefined, needsAction: q.get("needsAction") === "1", stage: (PLAN_STAGES as readonly string[]).includes(q.get("stage") ?? "") ? (q.get("stage") as PlanStage) : undefined }));
+    return ok(await listMonthlySheets(await requirePartyAuth(), { seasonId: q.get("season") || undefined, needsAction: q.get("needsAction") === "1", stage: (PLAN_STAGES as readonly string[]).includes(q.get("stage") ?? "") ? (q.get("stage") as PlanStage) : undefined }));
   });
 }
 export async function POST(req: NextRequest) {
-  return handle(async () => ok(await createMonthlySheet(await requireAuth(), await req.json())));
+  return handle(async () => ok(await createMonthlySheet(await requirePartyAuth(), await req.json())));
 }

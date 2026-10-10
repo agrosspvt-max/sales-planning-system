@@ -192,7 +192,7 @@ async function main() {
     compilerOptions: { module: ts.ModuleKind.CommonJS, esModuleInterop: true },
   }).outputText, { module: middlewareModule, exports: middlewareModule.exports, Headers,
     require: (name: string) => name === "next-auth" ? () => ({ auth: (handler: unknown) => handler }) :
-      name === "next/server" ? { NextResponse: { next: (init: unknown) => init } } : name === "@/lib/party-planning-guard" ? { partyPlanningGuard: () => null } : { authConfig: {} } });
+      name === "next/server" ? { NextResponse: { next: (init: unknown) => init } } : { authConfig: {} } });
   assert.equal(middlewareModule.exports.default, middlewareModule.exports.middleware);
   const forwarded = middlewareModule.exports.middleware({ headers: new Headers({ "x-account-request-path": "/api/users/me/access", "x-account-request-method": "GET" }), nextUrl: { pathname: "/api/accounts" }, method: "POST" });
   assert.equal(forwarded.request.headers.get("x-account-request-path"), "/api/accounts");

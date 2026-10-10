@@ -16,21 +16,12 @@ export const SCHEME_PLANNING_ENABLED = process.env.SCHEME_PLANNING_ENABLED === "
  * explicitly; local development sets it to "true". Territory Mapping is NOT part of this flag. Nothing here touches data or permissions.
  *
  * The value is read on every call (never captured in a module constant), so it always reflects the running environment.
+ * ONE helper, ONE runtime: the Create/View Plans card, the Party Planning pages (partyPlanningGate) and the Party Planning APIs
+ * (requirePartyAuth) all call it in the Node server runtime. It is deliberately NOT checked in the edge middleware: the edge keeps a stale
+ * snapshot of the environment after a `.env` reload, which made the routes say "unavailable" while the card said "enabled".
  */
 export function isPartyPlanningEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return env["PARTY_PLANNING_ENABLED"]?.trim().toLowerCase() === "true";
 }
 
 export const PARTY_PLANNING_UNAVAILABLE_MESSAGE = "Party Planning is temporarily unavailable.";
-
-/**
- * Whether a request path belongs to the Party Planning module: its pages (/planning/party and below) and its APIs (party plans, seasonal
- * plans / sheets, party monthly plans / sheets). Territory Mapping is deliberately outside it — its APIs live under /api/territory-mapping, its
- * standalone page is /planning/territory-mapping, and the old /planning/party/territory URL is only a redirect to it.
- */
-export function isPartyPlanningPath(pathname: string): boolean {
-  const p = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
-  if (p === "/planning/party/territory") return false; // legacy bookmark → redirects to the standalone Territory Mapping page
-  if (p === "/planning/party" || p.startsWith("/planning/party/")) return true;
-  return /^\/api\/(party-plans|party-monthly-plans|party-monthly-sheets|seasonal-plans|seasonal-sheets)(\/|$)/.test(p);
-}

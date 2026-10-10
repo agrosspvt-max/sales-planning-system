@@ -184,6 +184,7 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
     selfRating: useLabel("daily_work.review.self_rating"),
     reportPending: useLabel("daily_work.review.report_not_submitted"),
     close: useLabel("daily_work.action.cancel"),
+    unavailable: useLabel("daily_work.review.unavailable"),
   };
   const { data, isLoading, error } = useQuery<ReviewDetail>({
     queryKey: ["team-review", officerId, workDate],
@@ -197,7 +198,7 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
           <DialogTitle>{L.title}{data ? ` — ${data.officerName}` : ""}</DialogTitle>
         </DialogHeader>
         {isLoading ? <Skeleton className="h-64 w-full" /> : error || !data ? (
-          <p className="text-sm text-destructive">{(error as Error | null)?.message ?? "Unavailable."}</p>
+          <p className="text-sm text-destructive">{(error as Error | null)?.message ?? L.unavailable}</p>
         ) : (
           <div className="space-y-5">
             <p className="text-sm text-muted-foreground">{data.officerName} · {workDate}</p>
@@ -236,8 +237,14 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
 }
 
 /** A titled block holding either a compact Planned | Actual table or a one-line empty state (never a big blank box). */
-function ReadSection({ title, empty, children }: { title: string; empty?: boolean; children?: React.ReactNode }) {
-  const noData = useLabel("daily_work.review.no_data").replace("{section}", title);
+type SectionKey = "sales" | "recovery" | "appointment" | "scheme_conversion" | "visits" | "others";
+function ReadSection({ title, section, empty, children }: { title: string; section: SectionKey; empty?: boolean; children?: React.ReactNode }) {
+  // One editable empty-state label per section (Edit Labels → Daily Work Review).
+  const noDataLabels = {
+    sales: useLabel("daily_work.review.no_data_sales"), recovery: useLabel("daily_work.review.no_data_recovery"), appointment: useLabel("daily_work.review.no_data_appointment"),
+    scheme_conversion: useLabel("daily_work.review.no_data_scheme_conversion"), visits: useLabel("daily_work.review.no_data_visits"), others: useLabel("daily_work.review.no_data_others"),
+  };
+  const noData = noDataLabels[section];
   return (
     <section data-review-section={title}>
       <h3 className="mb-1.5 text-sm font-semibold">{title}</h3>
@@ -289,7 +296,7 @@ export function DealerSection({ title, rows, recovery = false, autoEntryIds = []
   };
   const typeText = (row: DealerRow) => (row.entryType === "SCHEME" ? C.schemeType : C.regular);
   return (
-    <ReadSection title={title} empty={rows.length === 0}>
+    <ReadSection title={title} section={recovery ? "recovery" : "sales"} empty={rows.length === 0}>
       <Table>
         <TableHeader><TableRow>
           <TableHead>{C.dealer}</TableHead><TableHead>{C.task}</TableHead>
@@ -320,7 +327,7 @@ export function AppointmentSection({ title, rows }: { title: string; rows: ApptR
   const C = useReviewColumns();
   const result = (status: string | null) => status === "APPOINTED" ? C.appointed : status === "NOT_APPOINTED" ? C.notAppointed : dash;
   return (
-    <ReadSection title={title} empty={rows.length === 0}>
+    <ReadSection title={title} section="appointment" empty={rows.length === 0}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.dealerClient}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
@@ -342,7 +349,7 @@ export function ConversionSection({ title, rows }: { title: string; rows: ConvRo
   const C = useReviewColumns();
   const result = (v: string | null) => v === "YES" ? C.yes : v === "NO" ? C.no : dash;
   return (
-    <ReadSection title={title} empty={rows.length === 0}>
+    <ReadSection title={title} section="scheme_conversion" empty={rows.length === 0}>
       <Table>
         <TableHeader><TableRow>
           <TableHead>{C.dealer}</TableHead><TableHead>{C.scheme}</TableHead>
@@ -372,7 +379,7 @@ export function VisitsSection({ title, summary }: { title: string; summary: Summ
     { label: C.newPartyVisits, planned: summary.newPartyVisits, actual: summary.actualNewPartyVisits },
   ];
   return (
-    <ReadSection title={title} empty={!summary.visitsEntered}>
+    <ReadSection title={title} section="visits" empty={!summary.visitsEntered}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.metric}</TableHead><TableHead className="text-right">{C.planned}</TableHead><TableHead className="text-right">{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
@@ -393,7 +400,7 @@ export function VisitsSection({ title, summary }: { title: string; summary: Summ
 export function OthersSection({ title, text }: { title: string; text: string }) {
   const C = useReviewColumns();
   return (
-    <ReadSection title={title} empty={text.trim() === ""}>
+    <ReadSection title={title} section="others" empty={text.trim() === ""}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.item}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>

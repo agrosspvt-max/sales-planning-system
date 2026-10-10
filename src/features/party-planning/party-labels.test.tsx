@@ -7,7 +7,7 @@ import { DEFAULT_LABELS, labelCatalog, resolveLabels, type LabelKey } from "@/fe
 import { testLoader } from "@/features/dealer-tags/test-loader";
 
 const dir = "src/features/party-planning";
-const pages = ["party-planning-page", "seasonal-planning-page", "seasonal-plan-list-page", "monthly-planning-page", "monthly-plan-list-page", "plan-list-parts", "territory-mapping-page"];
+const pages = ["party-planning-page", "seasonal-planning-page", "seasonal-plan-list-page", "monthly-planning-page", "monthly-plan-list-page", "plan-list-parts", "territory-mapping-page", "dealer-status-requests"];
 
 // 1. Every label key referenced by a page exists in the registry (no raw-key fallbacks), and all are catalogued under Party Planning.
 const referenced = new Set<string>();

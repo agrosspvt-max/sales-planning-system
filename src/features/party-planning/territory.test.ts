@@ -81,7 +81,7 @@ function makeDb() {
       findFirst: async ({ where }: { where: { id: string } }) => { const d = DEALERS.find((x) => x.id === where.id); return d ? { id: d.id, name: d.name, status: d.status } : null; },
     },
     dealerAlias: { findMany: async ({ where }: { where?: { systemDealerId?: { in: string[] } } }) => ALIASES.filter((a) => !where?.systemDealerId || where.systemDealerId.in.includes(a.systemDealerId)) },
-    user: { findMany: async ({ where }: { where: { id: { in: string[] } } }) => USERS.filter((u) => where.id.in.includes(u.id)) },
+    user: { findMany: async ({ where }: { where: { id?: { in: string[] }; role?: Role; isActive?: boolean } }) => USERS.filter((u) => (!where.id || where.id.in.includes(u.id)) && (!where.role || u.role === where.role)) },
     userGroup: { findMany: async ({ where }: { where?: { id?: { in: string[] } } } = {}) => GROUPS.filter((g) => !where?.id || where.id.in.includes(g.id)) },
     district: {
       findMany: async ({ where }: { where?: Row } = {}) => DISTRICTS.filter((d) => matches(d as Row, where)).map((d) => ({ ...d })),
@@ -126,6 +126,7 @@ function makeDb() {
       findMany: async ({ where }: { where: Row }) => t.requests.filter((r) => matches(r, where)).map(requester).sort((a, b) => (b.createdAt as Date).getTime() - (a.createdAt as Date).getTime()),
       update: async ({ where, data }: { where: Row; data: Row }) => { const r = t.requests.find((x) => matches(x, where))!; Object.assign(r, data); return requester(r); },
     },
+    dealerStatusRequest: { findMany: async () => [] as Row[] }, // Status Change Requests have their own contract test (dealer-status-request.test.ts)
     auditLog: { createMany: async ({ data }: { data: Row[] }) => { t.audit.push(...data); return { count: data.length }; } },
     // A real transaction: all-or-nothing. A failure restores the tables exactly as they were.
     $transaction: async <T,>(fn: (tx: unknown) => Promise<T>) => {
@@ -150,6 +151,7 @@ function loadService() {
   const load = testLoader({
     "@/lib/prisma": { prisma: db.prisma },
     "@/lib/http": { ApiError: TestApiError },
+    "@/features/sales-upload/alias.server": { listDealersForAlias: async () => ({ counts: {}, dealers: [] }) },
     "@/lib/audit": { writeAudit: async (p: Row) => { db.t.audit.push({ ...p }); } },
     "@/lib/scope": {
       getOfficerScope,
@@ -625,6 +627,50 @@ async function main() {
     const migration = readFileSync("prisma/migrations/20261007000000_territory_mapping/migration.sql", "utf8");
     assert.ok(!/^\s*(UPDATE|DELETE FROM|DROP|TRUNCATE)\b/im.test(migration) && !/ALTER TABLE "(?!DealerMarketMapping"|MarketRequest")/.test(migration), "the migration only creates new tables — no existing data is altered");
   }
+  /* ---- Role-based filters: Sales Officer (RM / Admin) and State (Admin), combined with Market by AND; counts follow them ---- */
+  {
+    const { service, t } = loadService();
+    t.markets.push({ id: "m-birra", name: "BIRRA", nameKey: "birra", potential: "A", source: "REQUESTED" }, { id: "m-pip", name: "Pipariya", nameKey: "pipariya", potential: "B", source: "REQUESTED" });
+    await service.updateDealerMapping(SO1, "d1", { marketId: "m-birra" });
+    await service.updateDealerMapping(SO1, "d2", { marketId: "m-pip" });
+    await service.updateDealerMapping(RM1, "d3", { marketId: "m-birra" });
+    await service.updateDealerMapping(ADMIN, "d4", { marketId: "m-birra" });
+    const ids = (r: { items: { dealerId: string }[] }) => r.items.map((x) => x.dealerId).sort().join(",");
+
+    // Filter choices per role (the screen shows exactly these controls).
+    const so = await service.listTerritoryFilterOptions(SO1);
+    assert.equal(JSON.stringify(so), JSON.stringify({ officers: [], states: [] }), "SO: no Sales Officer / State choices");
+    const rm = await service.listTerritoryFilterOptions(RM1);
+    assert.equal(rm.officers.map((o) => o.id).sort().join(","), "so1,so2", "RM: only the Sales Officers of their own team (no other group, no RM)");
+    assert.equal(rm.states.length, 0, "RM: no State filter");
+    const admin = await service.listTerritoryFilterOptions(ADMIN);
+    assert.equal(admin.officers.map((o) => o.id).sort().join(","), "so1,so2,so3", "Admin: every Sales Officer");
+    assert.equal(admin.states.map((g) => g.name).join(","), "Madhya Pradesh,Uttar Pradesh", "Admin: States come from the existing group master");
+
+    // SO: own dealers only; no way to reach another officer's / State.
+    assert.equal(ids(await service.listTerritoryDealers(SO1, { ...PAGE, market: "m-birra" })), "d1", "SO + Market");
+    assert.equal(await status(() => service.listTerritoryDealers(SO1, { ...PAGE, officer: "so2" })), 403, "SO cannot filter to another officer");
+    assert.equal(await status(() => service.listTerritoryDealers(SO1, { ...PAGE, state: "g1" })), 403, "SO has no State filter");
+    assert.equal(await status(() => service.listTerritoryDealers(SO1, { ...PAGE, officer: "so1" })), 0, "SO may name themself");
+
+    // RM: inside the team only.
+    assert.equal(ids(await service.listTerritoryDealers(RM1, { ...PAGE, officer: "so1", market: "m-birra" })), "d1", "RM: officer + market");
+    assert.equal(ids(await service.listTerritoryDealers(RM1, { ...PAGE, officer: "so2" })), "d3,d6", "RM: officer only");
+    assert.equal(await status(() => service.listTerritoryDealers(RM1, { ...PAGE, officer: "so3" })), 403, "RM cannot filter to another group's officer");
+    assert.equal(await status(() => service.listTerritoryDealers(RM1, { ...PAGE, state: "g1" })), 403, "RM has no State filter");
+    const rmCounts = await service.listTerritoryDealers(RM1, { ...PAGE, officer: "so1" });
+    assert.deepEqual([rmCounts.mapped, rmCounts.unmapped], [2, 1], "counts follow the Sales Officer filter");
+
+    // Admin: State + Sales Officer + Market combine with AND; defaults restore everything.
+    assert.equal(ids(await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "g1", officer: "so1", market: "m-birra" })), "d1", "State + officer + market");
+    assert.equal(ids(await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "g1", market: "m-birra" })), "d1,d3", "State + market (all officers)");
+    assert.equal(ids(await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "g2" })), "d4,d8", "State only (All officers / All markets)");
+    assert.equal(ids(await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "g2", officer: "so1" })), "", "an officer outside the chosen State matches nothing");
+    assert.equal((await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "", officer: "", market: "" })).total, 8, "All / All / All restores the full set");
+    const adminCounts = await service.listTerritoryDealers(ADMIN, { ...PAGE, state: "g1", market: "m-pip" });
+    assert.deepEqual([adminCounts.total, adminCounts.mapped, adminCounts.unmapped], [1, 3, 3], "counts are for the State (market filter does not change them)");
+  }
+
   console.log("territory.test.ts — all assertions passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });

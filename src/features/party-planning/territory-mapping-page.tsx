@@ -6,7 +6,6 @@ import { Role } from "@prisma/client";
 import { Check, Upload, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
-import { dealerStatusLabel } from "@/lib/dealer-status";
 import { POTENTIALS, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,6 +21,7 @@ import { useLabel } from "@/features/labels/label-ui";
 import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { fill, fillNodes, useLabels } from "./party-labels";
+import { StatusRequestCell, StatusRequestsTab } from "./dealer-status-requests";
 
 /* ------------------------------------------- DTOs (mirror territory.server.ts) ------------------------------------------- */
 
@@ -29,7 +29,9 @@ interface MarketDto { id: string; name: string; potential: Potential | null; sou
 interface DealerRow {
   dealerId: string; partyName: string; status: string; marketId: string | null; marketName: string | null; marketEdited: boolean; potential: Potential | null;
   district: string | null; districtId: string | null; stateId: string | null; stateName: string | null; districtReview: "LEGACY" | "WRONG_STATE" | null;
+  pendingStatusRequest?: { id: string; reason: "DOES_NOT_EXIST" | "PARTY_CLOSED" | "OTHER" } | null;
 }
+interface FilterOptions { officers: { id: string; name: string; groupId: string | null }[]; states: { id: string; name: string }[] }
 interface DistrictOption { id: string; name: string }
 interface DealerPage { items: DealerRow[]; total: number; page: number; pageSize: number; totalPages: number; mapped: number; unmapped: number }
 interface MarketRequest {
@@ -40,7 +42,6 @@ interface MarketRequest {
 interface ImportPreview { sheetNames: string[]; sheet: string | null; needsSheet: boolean; error: string | null; plan: ImportPlanRow[]; summary: ImportSummary | null }
 interface ImportResult { applied: number; noChange: number; skippedUnmatched: number; skippedAmbiguous: number; rejectedInvalid: number; duplicates: number; marketsCreated: number; skippedUnknownDistrict: number }
 
-const STATUS_VARIANT: Record<string, "success" | "muted" | "secondary" | "destructive"> = { ACTIVE: "success", INACTIVE: "muted", PENDING: "secondary", DEFAULTER: "destructive" };
 const REQUEST_VARIANT: Record<MarketRequest["status"], "secondary" | "success" | "destructive"> = { PENDING_RM: "secondary", PENDING_ADMIN: "secondary", APPROVED: "success", REJECTED: "destructive" };
 const dateText = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-IN", { dateStyle: "medium" }) : "—");
 const dash = <span className="text-muted-foreground">—</span>;
@@ -48,10 +49,12 @@ const dash = <span className="text-muted-foreground">—</span>;
 /* ===================================================== Page ===================================================== */
 
 export function TerritoryMappingPage({ role }: { role: Role }) {
-  const [tab, setTab] = useState<"existing" | "add">("existing");
+  const [tab, setTab] = useState<"existing" | "add" | "request">("existing");
+  const isAdmin = isAdministrativeRole(role);
   const territory = useLabel("party_planning.nav.territory"); // standalone module: its own title (it is no longer inside Party Planning)
   const tabExisting = useLabel("party_planning.territory.tab_existing");
   const tabAdd = useLabel("party_planning.territory.tab_add_market");
+  const tabRequest = useLabel("party_planning.territory.tab_request");
   const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.territory.subtitle" });
   return (
     <div className="space-y-5">
@@ -60,35 +63,48 @@ export function TerritoryMappingPage({ role }: { role: Role }) {
         title={territory}
         subtitle={T.subtitle}
       />
-      <UnderlineTabs active={tab} onChange={(key) => setTab(key as "existing" | "add")} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }]} />
-      {tab === "existing" ? <ExistingDealers /> : <AddMarket role={role} />}
+      <UnderlineTabs active={tab} onChange={(key) => setTab(key as "existing" | "add" | "request")} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }, ...(isAdmin ? [{ key: "request", label: tabRequest }] : [])]} />
+      {tab === "existing" ? <ExistingDealers role={role} /> : tab === "request" && isAdmin ? <StatusRequestsTab /> : <AddMarket role={role} />}
     </div>
   );
 }
 
 /* ============================================= Existing Dealers ============================================= */
 
-function ExistingDealers() {
+function ExistingDealers({ role }: { role: Role }) {
   const qc = useQueryClient();
-  const [search, setSearch] = useState("");
   const [market, setMarket] = useState("");
+  const [officer, setOfficer] = useState(""); // RM / Admin only
+  const [state, setState] = useState(""); // Admin only
   const [page, setPage] = useState(1);
+  const isAdmin = isAdministrativeRole(role);
+  const showOfficer = isAdmin || role === Role.REGIONAL_MANAGER;
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const L = {
     district: useLabel("party_planning.territory.col.district"), market: useLabel("party_planning.territory.col.market"), potential: useLabel("party_planning.territory.col.potential"),
     party: useLabel("party_planning.territory.col.party_name"), status: useLabel("party_planning.territory.col.status"),
-    importExcel: useLabel("party_planning.territory.action.import"), search: useLabel("party_planning.territory.search"),
+    importExcel: useLabel("party_planning.territory.action.import"),
+    officer: useLabel("party_planning.territory.filter.sales_officer"), allOfficers: useLabel("party_planning.territory.filter.all_sales_officers"), state: useLabel("party_planning.territory.filter.state"), allStates: useLabel("party_planning.territory.filter.all_states"),
+    searchMarket: useLabel("party_planning.territory.filter.search_market"), noMarkets: useLabel("party_planning.territory.filter.no_markets"),
     allMarkets: useLabel("party_planning.territory.all_markets"), unmapped: useLabel("party_planning.territory.unmapped"), empty: useLabel("party_planning.territory.empty"),
   };
   const T = useLabels({ counts: "party_planning.territory.msg.mapped_counts", pageOf: "party_planning.territory.msg.page_of", previous: "party_planning.common.previous", next: "party_planning.common.next" });
   const { data: markets } = useQuery<MarketDto[]>({ queryKey: ["territory-markets"], queryFn: () => api.get<MarketDto[]>("/api/territory-mapping/markets") });
   const { data: districtsByState } = useQuery<Record<string, DistrictOption[]>>({ queryKey: ["territory-districts"], queryFn: () => api.get<Record<string, DistrictOption[]>>("/api/territory-mapping/districts") });
   const { data, isLoading } = useQuery<DealerPage>({
-    queryKey: ["territory-dealers", search, market, page],
-    queryFn: () => api.get<DealerPage>(`/api/territory-mapping/dealers?${new URLSearchParams({ search, market, page: String(page), pageSize: "25" })}`),
+    queryKey: ["territory-dealers", market, officer, state, page],
+    // Every filter is applied by the server inside the caller's scope; the browser only ever receives one page.
+    queryFn: () => api.get<DealerPage>(`/api/territory-mapping/dealers?${new URLSearchParams({ market, officer, state, page: String(page), pageSize: "25" })}`),
     placeholderData: keepPreviousData,
   });
+  const { data: filterOptions } = useQuery<FilterOptions>({ queryKey: ["territory-filters"], queryFn: () => api.get<FilterOptions>("/api/territory-mapping/filters"), enabled: showOfficer });
+  // Admin: the officer list narrows to the chosen State. A selected officer who is no longer in the list is cleared (see changeState).
+  const officerChoices = (filterOptions?.officers ?? []).filter((o) => !state || o.groupId === state);
+  const changeState = (next: string) => {
+    setState(next); setPage(1);
+    if (officer && next && (filterOptions?.officers ?? []).find((o) => o.id === officer)?.groupId !== next) setOfficer("");
+  };
   const save = useMutation({
     mutationFn: (v: { dealerId: string; marketId?: string | null; potential?: Potential | null }) => api.put(`/api/territory-mapping/dealers/${v.dealerId}`, { marketId: v.marketId, potential: v.potential }),
     onSuccess: () => { setError(null); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
@@ -99,11 +115,22 @@ function ExistingDealers() {
     <div className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-wrap items-end gap-3">
-          <div className="space-y-1.5"><Label>{L.search}</Label><Input className="w-64" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder={L.search} /></div>
           <div className="space-y-1.5"><Label>{L.market}</Label>
-            <NativeSelect className="w-52" value={market} onChange={(e) => { setMarket(e.target.value); setPage(1); }}
+            <SearchableSelect className="w-60" ariaLabel={L.market} placeholder={L.searchMarket} emptyText={L.noMarkets} value={market} onChange={(v) => { setMarket(v); setPage(1); }}
               options={[{ value: "", label: L.allMarkets }, { value: "__none__", label: L.unmapped }, ...(markets ?? []).map((m) => ({ value: m.id, label: m.name }))]} />
           </div>
+          {showOfficer && (
+            <div className="space-y-1.5"><Label>{L.officer}</Label>
+              <NativeSelect className="w-52" value={officer} onChange={(e) => { setOfficer(e.target.value); setPage(1); }}
+                options={[{ value: "", label: L.allOfficers }, ...officerChoices.map((o) => ({ value: o.id, label: o.name }))]} />
+            </div>
+          )}
+          {isAdmin && (
+            <div className="space-y-1.5"><Label>{L.state}</Label>
+              <NativeSelect className="w-48" value={state} onChange={(e) => changeState(e.target.value)}
+                options={[{ value: "", label: L.allStates }, ...(filterOptions?.states ?? []).map((g) => ({ value: g.id, label: g.name }))]} />
+            </div>
+          )}
           {data && <span className="pb-2 text-sm text-muted-foreground">{fill(T.counts, { mapped: data.mapped, unmapped: data.unmapped })}</span>}
         </div>
         <Button variant="outline" onClick={() => setImportOpen(true)}><Upload className="h-4 w-4" /> {L.importExcel}</Button>
@@ -127,7 +154,7 @@ function ExistingDealers() {
                         onChange={(e) => save.mutate({ dealerId: row.dealerId, potential: (e.target.value || null) as Potential | null })} />
                     </TableCell>
                     <TableCell className="font-medium">{row.partyName}</TableCell>
-                    <TableCell><Badge variant={STATUS_VARIANT[row.status] ?? "muted"}>{dealerStatusLabel(row.status)}</Badge></TableCell>
+                    <TableCell><StatusRequestCell dealerId={row.dealerId} partyName={row.partyName} status={row.status} pending={row.pendingStatusRequest} canRequest={role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER} /></TableCell>
                   </TableRow>
                 ))}
           </TableBody>

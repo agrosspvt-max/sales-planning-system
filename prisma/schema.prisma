@@ -41,6 +41,8 @@ model User {
   dailyWorkAttendance      DailyWorkAttendance[]       @relation("DailyWorkAttendanceOfficer")
   dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
   marketRequests           MarketRequest[]             @relation("MarketRequestRequester")
+  dealerStatusRequested    DealerStatusRequest[]       @relation("DealerStatusRequester")
+  dealerStatusResolved     DealerStatusRequest[]       @relation("DealerStatusResolver")
   seasonalPlans            SeasonalPlan[]              @relation("SeasonalPlanOwner")
   partyMonthlyPlans        PartyMonthlyPlan[]          @relation("PartyMonthlyPlanOwner")
   seasonalSheets           SeasonalPlanSheet[]         @relation("SeasonalSheetOwner")
@@ -703,6 +705,7 @@ model Dealer {
   marketMapping             DealerMarketMapping?
   appointedFromMonthlyPlans PartyMonthlyPlan[]    @relation("PartyMonthlyAppointedDealer")
   marketEdits               TerritoryMarketEdit[]
+  statusRequests            DealerStatusRequest[]
 
   @@index([isActive])
   @@index([status])
@@ -2258,4 +2261,32 @@ model DistrictAlias {
 
   @@unique([groupId, aliasKey])
   @@index([districtId])
+}
+
+/// Dealer Status Change Request (Territory Mapping): an SO / RM reports that a dealer in their scope does not exist, is closed, or needs
+/// another status correction. It NEVER changes the dealer — Admin reviews it and makes any change through the existing Dealer Alias edit,
+/// then marks the request RESOLVED. Rows are never updated except PENDING → RESOLVED and never deleted (audit history).
+/// reason: DOES_NOT_EXIST | PARTY_CLOSED | OTHER (description required for OTHER). status: PENDING | RESOLVED.
+/// A partial unique index (migration SQL) allows at most ONE PENDING request per dealer.
+model DealerStatusRequest {
+  id              String    @id @default(cuid())
+  dealerId        String
+  statusAtRequest String
+  reason          String
+  description     String?
+  requestedById   String
+  requestedByRole Role
+  status          String    @default("PENDING")
+  resolvedById    String?
+  resolvedAt      DateTime?
+  resolutionNotes String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  dealer          Dealer    @relation(fields: [dealerId], references: [id])
+  requestedBy     User      @relation("DealerStatusRequester", fields: [requestedById], references: [id])
+  resolvedBy      User?     @relation("DealerStatusResolver", fields: [resolvedById], references: [id])
+
+  @@index([status, createdAt])
+  @@index([dealerId, status])
+  @@index([requestedById])
 }

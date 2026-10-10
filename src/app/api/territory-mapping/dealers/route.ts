@@ -8,6 +8,6 @@ export async function GET(req: NextRequest) {
   return handle(async () => {
     const ctx = await requireAuth();
     const params = parsePageParams(req.nextUrl.searchParams);
-    return ok(await listTerritoryDealers(ctx, { ...params, market: req.nextUrl.searchParams.get("market") ?? "" }));
+    return ok(await listTerritoryDealers(ctx, { ...params, market: req.nextUrl.searchParams.get("market") ?? "", officer: req.nextUrl.searchParams.get("officer") ?? "", state: req.nextUrl.searchParams.get("state") ?? "" }));
   });
 }

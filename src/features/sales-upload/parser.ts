@@ -8,12 +8,15 @@ import { tightKey } from "@/lib/match-key";
  *
  *   Col A (Group Name) · Col B (Particulars) · Col C (Qty) · Col D (Value)
  *   - Rows 0–2 are headers.
- *   - A row with a dealer total (blank Qty in Col C) is a DEALER header (dealer name in Col B;
- *     its Col A group may be blank for later dealers in the same Tally group).
- *   - A row with an empty Col A and a non-empty Col B is a PRODUCT row for the current dealer.
+ *   - A row with a Group Name in Col A (dealer name in Col B) is a DEALER header; its Col C/D are
+ *     the dealer's own totals and are ignored.
+ *   - A row with an empty Col A and a non-empty Col B is a PRODUCT row for the current dealer —
+ *     whatever its Col C / Col D hold. Tally leaves Qty blank on value-only lines (returns, credit
+ *     notes, discounts) and writes negative amounts, so Qty / Amount are never used to classify.
  *
  * Product names carry pack info (e.g. "CHIMA 10X500GM") which is stripped to the base name.
- * Quantities carry units ("5 Kg") which are reduced to a number. Amount is taken verbatim.
+ * Quantities carry units ("5 Kg") which are reduced to a number (blank → 0). Amount is taken
+ * verbatim, sign included, independently of the quantity.
  * Duplicate products under one dealer are merged (qty and amount summed).
  */
 
@@ -107,11 +110,12 @@ export function parseSalesWorkbook(buffer: Buffer): ParsedSalesWorkbook {
     if (!region && !particulars) continue;
     if (TOTAL_LABEL.test(particulars)) continue;
 
-    // Tally writes a Group Name only for the first dealer in some groups. Subsequent dealer
-    // headers have an empty Group Name but the same structural marker: no product quantity in
-    // Col C and a dealer total in Col D. Relying on Col A silently turned those dealers into
-    // product rows under the preceding dealer, so they never reached the shared resolver.
-    const isDealerHeader = !!particulars && (hasCellValue(region) || !hasCellValue(row[2] ?? null));
+    // Only a Group Name in Col A marks a dealer header. A blank Qty must NOT: value-only product rows
+    // (returns, credit notes, discounts) have a blank Qty and would otherwise become fake dealers, taking
+    // every product that follows them away from the real dealer. Verified against the Tally exports on
+    // file: every dealer row has a Group Name (also when it repeats the previous dealer's) and no
+    // product row does.
+    const isDealerHeader = !!particulars && hasCellValue(region);
     if (isDealerHeader) {
       // Dealer header row — its Col C/D are the dealer's own totals, ignored.
       current = { rawName: particulars, products: [] };

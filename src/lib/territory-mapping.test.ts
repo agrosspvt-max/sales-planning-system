@@ -1,6 +1,6 @@
 /** Pure Territory Mapping rules: normalization, Add Market validation, sheet parsing and the import plan (no DB). */
 import assert from "node:assert/strict";
-import { buildImportPlan, classifyMatch, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest, type ImportCandidate, type ResolvedName } from "./territory-mapping";
+import { buildImportPlan, classifyMatch, serialNumber, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest, type ImportCandidate, type ResolvedName } from "./territory-mapping";
 
 let passed = 0;
 const test = (name: string, fn: () => void) => { fn(); passed += 1; console.log(`  ok  ${name}`); };
@@ -130,6 +130,14 @@ test("District differences make duplicate rows a conflict; unmatched / ambiguous
   const mixed = plan([{ dealer: "U", market: "M", district: "D" }, { dealer: "B", market: "M", district: "D" }, { dealer: "O", market: "M", district: "D" }],
     { B: { kind: "MANY", candidates: [cand("d2"), cand("d3")], anyInScope: true }, O: single("d9", false) });
   assert.deepEqual(mixed.map((r) => [r.status, r.districtChanged, r.marketChanged, r.excelDistrict]), [["UNMATCHED", undefined, undefined, "D"], ["AMBIGUOUS", undefined, undefined, "D"], ["INVALID", undefined, undefined, "D"]]);
+});
+
+test("S.No continues across pages: (page − 1) × pageSize + rowIndex + 1", () => {
+  assert.deepEqual([0, 1, 24].map((i) => serialNumber(1, 25, i)), [1, 2, 25], "page 1: 1–25");
+  assert.deepEqual([0, 24].map((i) => serialNumber(2, 25, i)), [26, 50], "page 2: 26–50");
+  assert.deepEqual([0, 4].map((i) => serialNumber(7, 25, i)), [151, 155], "page 7 of 155 records: 151–155 (5 rows)");
+  assert.equal(serialNumber(1, 25, 0), 1, "a filter that resets to page 1 restarts at 1");
+  assert.equal(serialNumber(1, 10, 3), 4, "an unpaginated list is just rowIndex + 1");
 });
 
 console.log(`\n${passed} territory-mapping rule tests passed`);

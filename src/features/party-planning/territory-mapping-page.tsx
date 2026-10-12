@@ -6,7 +6,7 @@ import { Role } from "@prisma/client";
 import { Check, Upload, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
-import { POTENTIALS, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
+import { POTENTIALS, serialNumber, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,6 +22,7 @@ import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { fill, fillNodes, useLabels } from "./party-labels";
 import { StatusRequestCell, StatusRequestsTab } from "./dealer-status-requests";
+import type { DealerStatusReason } from "@/lib/dealer-status-request";
 
 /* ------------------------------------------- DTOs (mirror territory.server.ts) ------------------------------------------- */
 
@@ -29,7 +30,7 @@ interface MarketDto { id: string; name: string; potential: Potential | null; sou
 interface DealerRow {
   dealerId: string; partyName: string; status: string; marketId: string | null; marketName: string | null; marketEdited: boolean; potential: Potential | null;
   district: string | null; districtId: string | null; stateId: string | null; stateName: string | null; districtReview: "LEGACY" | "WRONG_STATE" | null;
-  pendingStatusRequest?: { id: string; reason: "DOES_NOT_EXIST" | "PARTY_CLOSED" | "OTHER" } | null;
+  pendingStatusRequest?: { id: string; reason: DealerStatusReason } | null;
 }
 interface FilterOptions { officers: { id: string; name: string; groupId: string | null }[]; states: { id: string; name: string }[] }
 interface DistrictOption { id: string; name: string }
@@ -63,6 +64,7 @@ export function TerritoryMappingPage({ role }: { role: Role }) {
         crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: territory }]}
         title={territory}
         subtitle={T.subtitle}
+        pinned={false} // the table column headings are the pinned element on this page, not the title
       />
       <UnderlineTabs active={tab} onChange={(key) => setTab(key as "existing" | "add" | "request")} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }, ...(isAdmin ? [{ key: "request", label: tabRequest }] : [])]} />
       {tab === "existing" ? <ExistingDealers role={role} /> : tab === "request" && isAdmin ? <StatusRequestsTab /> : <AddMarket role={role} />}
@@ -83,7 +85,7 @@ function ExistingDealers({ role }: { role: Role }) {
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const L = {
-    district: useLabel("party_planning.territory.col.district"), market: useLabel("party_planning.territory.col.market"), potential: useLabel("party_planning.territory.col.potential"),
+    serial: useLabel("party_planning.territory.col.serial_no"), district: useLabel("party_planning.territory.col.district"), market: useLabel("party_planning.territory.col.market"), potential: useLabel("party_planning.territory.col.potential"),
     party: useLabel("party_planning.territory.col.party_name"), status: useLabel("party_planning.territory.col.status"),
     importExcel: useLabel("party_planning.territory.action.import"),
     officer: useLabel("party_planning.territory.filter.sales_officer"), allOfficers: useLabel("party_planning.territory.filter.all_sales_officers"), state: useLabel("party_planning.territory.filter.state"), allStates: useLabel("party_planning.territory.filter.all_states"),
@@ -137,24 +139,29 @@ function ExistingDealers({ role }: { role: Role }) {
         <Button variant="outline" onClick={() => setImportOpen(true)}><Upload className="h-4 w-4" /> {L.importExcel}</Button>
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
-      <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+      {/* One scroll region: the page itself (the app's <main>). The wrapper adds no overflow, so the column-name row pins to the top of the content area. */}
+      {/* `w-fit`: the table is only as wide as its content, so spare room is never spread into big blank gaps between columns (it still scrolls sideways when it genuinely overflows). */}
+      {/* Fills the content width, one set of column rules for every screen size (this table only): S.No / Potential / Status compact, District wide enough for its selector + Save, Market sized to its own names + Edited tag (`w-[1%]` shrink-to-fit; the cell wrapper caps it at 8rem and wraps beyond), Party Name takes whatever is left and wraps. Every body cell uses the same horizontal gutter (px-3) as its heading, so headings and content line up. Below `min-w-[56rem]` the page scrolls sideways (sticky headings stay with their columns). */}
+      <div className="w-full min-w-[56rem] rounded-lg border bg-background">
+        <Table stickyHeader externalScroll>
           <TableHeader><TableRow>
-            <TableHead className="w-72">{L.district}</TableHead><TableHead className="min-w-[22rem]">{L.market}</TableHead><TableHead className="w-28">{L.potential}</TableHead><TableHead>{L.party}</TableHead><TableHead className="w-32">{L.status}</TableHead>
+            <TableHead className="w-14">{L.serial}</TableHead><TableHead className="w-72">{L.district}</TableHead><TableHead className="w-[1%]">{L.market}</TableHead><TableHead className="w-32">{L.potential}</TableHead><TableHead>{L.party}</TableHead><TableHead className="w-24">{L.status}</TableHead>
           </TableRow></TableHeader>
           <TableBody>
-            {isLoading ? <TableRow><TableCell colSpan={5}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-              : (data?.items.length ?? 0) === 0 ? <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">{L.empty}</TableCell></TableRow>
-                : data!.items.map((row) => (
+            {isLoading ? <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+              : (data?.items.length ?? 0) === 0 ? <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">{L.empty}</TableCell></TableRow>
+                : data!.items.map((row, i) => (
                   <TableRow key={row.dealerId}>
-                    <TableCell className="p-1 align-top"><DistrictCell key={`${row.dealerId}:${row.districtId ?? ""}:${row.district ?? ""}:${row.stateId ?? ""}`} row={row} options={row.stateId ? districtsByState?.[row.stateId] : undefined} /></TableCell>
-                    <TableCell className="p-1"><MarketCell row={row} label={L.market} onError={setError} /></TableCell>
-                    <TableCell className="p-1">
+                    {/* From the RETURNED page's own metadata, so rows kept on screen while the next page loads keep their own numbers. */}
+                    <TableCell className="tabular-nums text-muted-foreground">{serialNumber(data!.page, data!.pageSize, i)}</TableCell>
+                    <TableCell className="px-3 py-1.5 align-top"><DistrictCell key={`${row.dealerId}:${row.districtId ?? ""}:${row.district ?? ""}:${row.stateId ?? ""}`} row={row} options={row.stateId ? districtsByState?.[row.stateId] : undefined} /></TableCell>
+                    <TableCell className="px-3 py-1.5"><MarketCell row={row} label={L.market} onError={setError} /></TableCell>
+                    <TableCell className="px-3 py-1.5">
                       <NativeSelect className="h-8 w-full" aria-label={L.potential} value={row.potential ?? ""} disabled={save.isPending} placeholder="—"
                         options={POTENTIALS.map((p) => ({ value: p, label: p }))}
                         onChange={(e) => save.mutate({ dealerId: row.dealerId, potential: (e.target.value || null) as Potential | null })} />
                     </TableCell>
-                    <TableCell className="font-medium">{row.partyName}</TableCell>
+                    <TableCell className="font-medium"><div className="whitespace-normal break-words">{row.partyName}</div></TableCell>
                     <TableCell><StatusRequestCell dealerId={row.dealerId} partyName={row.partyName} status={row.status} pending={row.pendingStatusRequest} canRequest={role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER} /></TableCell>
                   </TableRow>
                 ))}
@@ -361,86 +368,114 @@ export function DistrictCell({ row, options }: { row: DealerRow; options: Distri
 const dateTimeFull = (iso: string) => new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 
 /**
- * TEMPORARY: the Market of an Existing Dealer is a free-text value the user can correct. Click → edit → Save → confirmation naming the dealer,
- * the current and the new Market → saved with its history. "Edited" (shown once any manual change exists) opens that dealer's full history.
- * This is not a Market master record; Seasonal / Monthly Planning keep their own searchable Market selectors.
+ * TEMPORARY: the Market of an Existing Dealer is a free-text value the user can correct. The table cell shows only the saved name; clicking it opens ONE
+ * small popup with steps — Edit Market → confirmation (dealer, current and new Market) → saved with its history — and the dealer's edit history is a
+ * step of the same popup. Cancel / Escape / dismiss discard the draft without a request. This is not a Market master record; Seasonal / Monthly Planning
+ * keep their own searchable Market selectors.
  */
-function MarketCell({ row, label, onError }: { row: DealerRow; label: string; onError: (message: string | null) => void }) {
+export function MarketCell({ row, label, onError }: { row: DealerRow; label: string; onError: (message: string | null) => void }) {
   const qc = useQueryClient();
-  const [editing, setEditing] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const [step, setStep] = useState<"edit" | "confirm" | "history">("edit");
   const [draft, setDraft] = useState("");
-  const [confirming, setConfirming] = useState(false);
-  const [history, setHistory] = useState(false);
-  const current = row.marketName ?? "";
-  const T = useLabels({ save: "party_planning.common.save", cancel: "party_planning.common.cancel", edit: "party_planning.territory.aria.edit_market", edited: "party_planning.territory.badge.edited", title: "party_planning.territory.dialog.change_title",
-    dealer: "party_planning.territory.dialog.dealer", currentMarket: "party_planning.territory.dialog.current_market", newMarket: "party_planning.territory.dialog.new_market", saving: "party_planning.common.saving", confirm: "party_planning.territory.dialog.confirm_change" });
+  // The Market the user saw WHEN THE POPUP OPENED: sent as `expectedMarket`, so a background refresh that changes the row cannot silently bypass the server's stale-value check.
+  const [expected, setExpected] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const T = useLabels({ save: "party_planning.common.save", cancel: "party_planning.common.cancel", back: "party_planning.territory.sr.back", edit: "party_planning.territory.aria.edit_market", editTitle: "party_planning.territory.dialog.edit_market_title", title: "party_planning.territory.dialog.change_title",
+    dealer: "party_planning.territory.dialog.dealer", currentMarket: "party_planning.territory.dialog.current_market", newMarket: "party_planning.territory.dialog.new_market", saving: "party_planning.common.saving", confirm: "party_planning.territory.dialog.confirm_change",
+    viewHistory: "party_planning.territory.history.open", edited: "party_planning.territory.badge.edited", historyTitle: "party_planning.territory.history.title", close: "party_planning.common.close" });
+  const current = expected ?? "";
+  const clean = draft.trim().replace(/\s+/g, " ");
+  const unchanged = !clean || clean.toLowerCase() === current.toLowerCase();
+  const reset = () => { setOpen(false); setStep("edit"); setError(null); };
   const change = useMutation({
-    mutationFn: () => api.post(`/api/territory-mapping/dealers/${row.dealerId}/market`, { expectedMarket: row.marketName, market: draft }),
-    onSuccess: () => { onError(null); setConfirming(false); setEditing(false); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); qc.invalidateQueries({ queryKey: ["territory-market-history", row.dealerId] }); },
-    onError: (e) => { setConfirming(false); setEditing(false); onError((e as Error).message); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
+    mutationFn: () => api.post(`/api/territory-mapping/dealers/${row.dealerId}/market`, { expectedMarket: expected, market: draft }),
+    onSuccess: () => { onError(null); reset(); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); qc.invalidateQueries({ queryKey: ["territory-market-history", row.dealerId] }); },
+    // Failures (validation, stale-value conflict, permissions) stay INSIDE the popup with the draft kept; the table refreshes in the background.
+    onError: (e) => { setError((e as Error).message); setStep("edit"); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
   });
-  const unchanged = !draft.trim() || draft.trim().replace(/\s+/g, " ").toLowerCase() === current.toLowerCase();
+  const openPopup = (first: "edit" | "history" = "edit") => { setExpected(row.marketName); setDraft(row.marketName ?? ""); setStep(first); setError(null); setOpen(true); };
+  // Cancel / Escape / overlay / ✕ all discard the draft without a request — except while a save is pending.
+  const dismiss = () => { if (!change.isPending) reset(); };
+  const goConfirm = () => { if (!unchanged && !change.isPending) { setError(null); setStep("confirm"); } };
   return (
-    <div className="flex items-center gap-2 px-2">
-      {editing ? (
-        <>
-          <Input className="h-8 min-w-[12rem] flex-1" aria-label={label} value={draft} maxLength={120} autoFocus onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !unchanged) setConfirming(true); if (e.key === "Escape") setEditing(false); }} />
-          <Button size="sm" className="shrink-0" disabled={unchanged} onClick={() => setConfirming(true)}>{T.save}</Button>
-          <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setEditing(false)}>{T.cancel}</Button>
-        </>
-      ) : (
-        <>
-          <button type="button" className="rounded px-1 py-1 text-left hover:bg-muted" aria-label={fill(T.edit, { label })} onClick={() => { setDraft(current); setEditing(true); }}>{row.marketName ?? <span className="text-muted-foreground">—</span>}</button>
-          {row.marketEdited && <button type="button" onClick={() => setHistory(true)} className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted-foreground hover:text-foreground">{T.edited}</button>}
-        </>
-      )}
-      {confirming && (
-        <Dialog open onOpenChange={(o) => { if (!o && !change.isPending) setConfirming(false); }}>
-          <DialogContent>
-            <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
-            <dl className="space-y-2 text-sm">
-              <div><dt className="text-muted-foreground">{T.dealer}</dt><dd className="font-medium">{row.partyName}</dd></div>
-              <div><dt className="text-muted-foreground">{T.currentMarket}</dt><dd className="font-medium">{row.marketName ?? "—"}</dd></div>
-              <div><dt className="text-muted-foreground">{T.newMarket}</dt><dd className="font-medium">{draft.trim().replace(/\s+/g, " ")}</dd></div>
-            </dl>
-            <DialogFooter>
-              <Button variant="outline" disabled={change.isPending} onClick={() => setConfirming(false)}>{T.cancel}</Button>
-              <Button disabled={change.isPending} onClick={() => change.mutate()}>{change.isPending ? T.saving : T.confirm}</Button>
-            </DialogFooter>
+    <>
+      {/* The cell: the saved Market name (click → edit popup) and, once a manual edit is on record, a compact "Edited" tag (click → that party's Market history). No input or edit controls live in the row. */}
+      <div className="flex w-max max-w-[8rem] flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        <button ref={trigger} type="button" className="-ml-1 whitespace-normal break-words rounded px-1 py-1 text-left hover:bg-muted" aria-label={fill(T.edit, { label })} onClick={() => openPopup("edit")}>{row.marketName ?? <span className="text-muted-foreground">—</span>}</button>
+        {row.marketEdited && <button type="button" onClick={() => openPopup("history")} className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted-foreground hover:text-foreground">{T.edited}</button>}
+      </div>
+      {open && (
+        <Dialog open onOpenChange={(o) => { if (!o) dismiss(); }}>
+          <DialogContent className="max-w-sm" onCloseAutoFocus={(e) => { e.preventDefault(); trigger.current?.focus(); }}>
+            {step === "history" ? (
+              <>
+                <DialogHeader><DialogTitle>{T.historyTitle}</DialogTitle></DialogHeader>
+                <MarketHistoryBody dealerId={row.dealerId} />
+                <DialogFooter><Button variant="outline" onClick={() => setStep("edit")}>{T.back}</Button></DialogFooter>
+              </>
+            ) : step === "confirm" ? (
+              <>
+                <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
+                <dl className="space-y-2 text-sm">
+                  <div><dt className="text-muted-foreground">{T.dealer}</dt><dd className="font-medium">{row.partyName}</dd></div>
+                  <div><dt className="text-muted-foreground">{T.currentMarket}</dt><dd className="font-medium">{expected ?? "—"}</dd></div>
+                  <div><dt className="text-muted-foreground">{T.newMarket}</dt><dd className="font-medium">{clean}</dd></div>
+                </dl>
+                <DialogFooter>
+                  <Button variant="outline" disabled={change.isPending} onClick={() => setStep("edit")}>{T.back}</Button>
+                  <Button disabled={change.isPending} onClick={() => change.mutate()}>{change.isPending ? T.saving : T.confirm}</Button>
+                </DialogFooter>
+              </>
+            ) : (
+              <>
+                <DialogHeader>
+                  <DialogTitle>{T.editTitle}</DialogTitle>
+                  <p className="text-sm text-muted-foreground">{row.partyName}</p>
+                </DialogHeader>
+                <div className="space-y-1.5">
+                  <Label>{label}</Label>
+                  <Input aria-label={label} value={draft} maxLength={120} autoFocus onChange={(e) => { setDraft(e.target.value); setError(null); }} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); goConfirm(); } }} />
+                  {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+                </div>
+                <DialogFooter className="sm:items-center sm:justify-between">
+                  {row.marketEdited ? <button type="button" className="text-left text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline" onClick={() => setStep("history")}>{T.viewHistory}</button> : <span />}
+                  <div className="flex flex-col-reverse gap-2 sm:flex-row">
+                    <Button variant="outline" disabled={change.isPending} onClick={dismiss}>{T.cancel}</Button>
+                    <Button disabled={unchanged || change.isPending} onClick={goConfirm}>{T.save}</Button>
+                  </div>
+                </DialogFooter>
+              </>
+            )}
           </DialogContent>
         </Dialog>
       )}
-      {history && <MarketHistoryDialog dealerId={row.dealerId} onClose={() => setHistory(false)} />}
-    </div>
+    </>
   );
 }
 
-function MarketHistoryDialog({ dealerId, onClose }: { dealerId: string; onClose: () => void }) {
-  const T = useLabels({ title: "party_planning.territory.history.title", dealer: "party_planning.territory.dialog.dealer", previous: "party_planning.territory.history.previous", new: "party_planning.territory.history.new", by: "party_planning.territory.history.edited_by", at: "party_planning.territory.history.date_time", close: "party_planning.common.close" });
+/** The dealer's Market edit history, shown as a step inside the Market popup (never a second dialog on top). */
+function MarketHistoryBody({ dealerId }: { dealerId: string }) {
+  const T = useLabels({ dealer: "party_planning.territory.dialog.dealer", previous: "party_planning.territory.history.previous", new: "party_planning.territory.history.new", by: "party_planning.territory.history.edited_by", at: "party_planning.territory.history.date_time" });
   const { data, isLoading, error } = useQuery<{ dealerName: string; edits: { id: string; previousMarket: string | null; newMarket: string; editedByName: string; editedAt: string }[] }>({
     queryKey: ["territory-market-history", dealerId], queryFn: () => api.get(`/api/territory-mapping/dealers/${dealerId}/market-history`),
   });
+  if (isLoading) return <Skeleton className="h-16 w-full" />;
+  if (error) return <p className="text-sm text-destructive">{(error as Error).message}</p>;
   return (
-    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
-      <DialogContent className="max-h-[80vh] overflow-y-auto">
-        <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
-        {isLoading ? <Skeleton className="h-16 w-full" /> : error ? <p className="text-sm text-destructive">{(error as Error).message}</p> : (
-          <div className="space-y-3 text-sm">
-            <div><span className="text-muted-foreground">{T.dealer}</span><div className="font-medium">{data!.dealerName}</div></div>
-            <ol className="space-y-3">
-              {data!.edits.map((e, i) => (
-                <li key={e.id} className="rounded-md border p-3">
-                  <div className="font-medium">{i + 1}.</div>
-                  <div>{fill(T.previous, { value: e.previousMarket ?? "—" })}</div><div>{fill(T.new, { value: e.newMarket })}</div>
-                  <div>{fill(T.by, { value: e.editedByName })}</div><div>{fill(T.at, { value: dateTimeFull(e.editedAt) })}</div>
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
-        <DialogFooter><Button variant="outline" onClick={onClose}>{T.close}</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <div className="max-h-[50vh] space-y-3 overflow-y-auto text-sm">
+      <div><span className="text-muted-foreground">{T.dealer}</span><div className="font-medium">{data!.dealerName}</div></div>
+      <ol className="space-y-3">
+        {data!.edits.map((e, i) => (
+          <li key={e.id} className="rounded-md border p-3">
+            <div className="font-medium">{i + 1}.</div>
+            <div>{fill(T.previous, { value: e.previousMarket ?? "—" })}</div><div>{fill(T.new, { value: e.newMarket })}</div>
+            <div>{fill(T.by, { value: e.editedByName })}</div><div>{fill(T.at, { value: dateTimeFull(e.editedAt) })}</div>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
@@ -477,7 +512,7 @@ export function AddMarket({ role }: { role: Role }) {
   const [rejecting, setRejecting] = useState<MarketRequest | null>(null);
   const [adding, setAdding] = useState(false);
   const L = {
-    name: useLabel("party_planning.territory.field.market_name"), potential: useLabel("party_planning.territory.field.market_potential"),
+    serial: useLabel("party_planning.territory.col.serial_no"), name: useLabel("party_planning.territory.field.market_name"), potential: useLabel("party_planning.territory.field.market_potential"),
     district: useLabel("party_planning.territory.col.district"), parties: useLabel("party_planning.territory.field.number_of_parties"), send: useLabel("party_planning.territory.action.send_request"),
   };
   const T = useLabels({ sent: "party_planning.territory.msg.request_sent", review: "party_planning.territory.view.review", mine: "party_planning.territory.view.mine", history: "party_planning.territory.view.history", requestedBy: "party_planning.common.requested_by",
@@ -529,17 +564,18 @@ export function AddMarket({ role }: { role: Role }) {
         </div>
         {(!canRequest || !adding) && error && <p className="text-sm text-destructive">{error}</p>}
         {notice && !adding && <p className="text-sm text-success">{notice}</p>}
-        <div className="overflow-auto rounded-lg border bg-background">
-          <Table>
+        <div className="w-max min-w-full rounded-lg border bg-background">
+          <Table stickyHeader externalScroll>
             <TableHeader><TableRow>
-              <TableHead>{L.district}</TableHead><TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><TableHead>{T.requestedBy}</TableHead><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
+              <TableHead className="w-14">{L.serial}</TableHead><TableHead>{L.district}</TableHead><TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><TableHead>{T.requestedBy}</TableHead><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
               {view === "review" && <TableHead className="text-right">{T.action}</TableHead>}
             </TableRow></TableHeader>
             <TableBody>
-              {isLoading ? <TableRow><TableCell colSpan={view === "review" ? 9 : 8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-                : (requests?.length ?? 0) === 0 ? <TableRow><TableCell colSpan={view === "review" ? 9 : 8} className="py-8 text-center text-muted-foreground">{T.empty}</TableCell></TableRow>
-                  : requests!.map((r) => (
+              {isLoading ? <TableRow><TableCell colSpan={view === "review" ? 10 : 9}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                : (requests?.length ?? 0) === 0 ? <TableRow><TableCell colSpan={view === "review" ? 10 : 9} className="py-8 text-center text-muted-foreground">{T.empty}</TableCell></TableRow>
+                  : requests!.map((r, i) => (
                     <TableRow key={r.id}>
+                      <TableCell className="tabular-nums text-muted-foreground">{i + 1}</TableCell>
                       <TableCell>{r.districtName ?? dash}</TableCell><TableCell className="font-medium">{r.marketName}</TableCell><TableCell>{r.potential}</TableCell><TableCell>{r.numberOfParties}</TableCell>
                       <TableCell>{r.requesterName}</TableCell><TableCell className="whitespace-nowrap">{dateText(r.createdAt)}</TableCell>
                       <TableCell><Badge variant={REQUEST_VARIANT[r.status]}>{T[r.status]}</Badge></TableCell>

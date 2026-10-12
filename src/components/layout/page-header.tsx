@@ -22,6 +22,8 @@ interface PageHeaderProps {
   /** Explicit breadcrumb trail (profile pages). Overrides the path-based default. */
   crumbs?: Crumb[];
   className?: string;
+  /** Default true: the header stays pinned (sticky, glass) at the top of the content area. A page whose own table column headings should be the pinned element passes false, so this header scrolls away with the page. */
+  pinned?: boolean;
   /** Optional secondary toolbar (filters, tabs) that stays sticky with the header. */
   children?: React.ReactNode;
 }
@@ -45,6 +47,7 @@ export function PageHeader({
   showBreadcrumbs = true,
   crumbs,
   className,
+  pinned = true,
   children,
 }: PageHeaderProps) {
   const pathname = usePathname();
@@ -74,7 +77,8 @@ export function PageHeader({
     <div
       className={cn(
         // Compact on phones (dense data app), full spacing from md up so desktop is unchanged.
-        "sticky top-0 z-20 -mx-4 -mt-4 mb-2 border-b bg-muted/20 px-4 py-2 backdrop-blur md:-mx-6 md:-mt-6 md:mb-4 md:px-6 md:py-3",
+        "-mx-4 -mt-4 mb-2 border-b bg-muted/20 px-4 py-2 md:-mx-6 md:-mt-6 md:mb-4 md:px-6 md:py-3",
+        pinned && "sticky top-0 z-20 backdrop-blur",
         className,
       )}
     >

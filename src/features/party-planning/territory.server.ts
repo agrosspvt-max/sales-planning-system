@@ -690,7 +690,8 @@ export async function createDealerStatusRequest(ctx: AuthContext, raw: unknown):
   const problem = validateStatusRequest({ reason: input.reason, description: input.description });
   if (problem) throw new ApiError(422, problem);
   const reason = input.reason as DealerStatusReason;
-  const description = cleanRequestText(input.description) || null;
+  // Only "Other" stores a reason text — a stray description sent with another choice is dropped, never persisted.
+  const description = reason === "OTHER" ? cleanRequestText(input.description) || null : null;
 
   const dealer = await assertDealerInScope(ctx, input.dealerId); // server-side scope: 404 unknown, 403 outside the caller's dealers
   let created: StatusRequestRow;

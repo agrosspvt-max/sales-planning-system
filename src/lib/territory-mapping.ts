@@ -217,3 +217,6 @@ export function summarizeImportPlan(plan: readonly ImportPlanRow[]): ImportSumma
     newMarkets: new Set(apply.filter((r) => r.newMarket).map((r) => marketNameKey(r.marketName!))).size,
   };
 }
+
+/** Display position of a row in a paginated list: numbering continues across pages (page 2 of 25 starts at 26). Not a stored ID. */
+export const serialNumber = (page: number, pageSize: number, rowIndex: number): number => (page - 1) * pageSize + rowIndex + 1;

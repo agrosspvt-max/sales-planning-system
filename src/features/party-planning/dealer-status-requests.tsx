@@ -23,7 +23,9 @@ const dateText = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString
 /** The reason labels, resolved through the label system (editable under Edit Labels). */
 function useReasonLabels(): Record<DealerStatusReason, string> {
   return useLabels({
-    DOES_NOT_EXIST: "party_planning.territory.sr.reason.does_not_exist", PARTY_CLOSED: "party_planning.territory.sr.reason.party_closed", OTHER: "party_planning.territory.sr.reason.other",
+    INACTIVE: "party_planning.territory.sr.reason.inactive", LEGAL: "party_planning.territory.sr.reason.legal", PARTY_IN_PLANNING: "party_planning.territory.sr.reason.party_in_planning", OTHER: "party_planning.territory.sr.reason.other",
+    // Older requests keep their original wording (no longer selectable).
+    DOES_NOT_EXIST: "party_planning.territory.sr.reason.does_not_exist", PARTY_CLOSED: "party_planning.territory.sr.reason.party_closed",
   });
 }
 
@@ -53,7 +55,8 @@ export function StatusRequestCell({ dealerId, partyName, status, pending, canReq
 
   const close = () => { setOpen(false); setStep("form"); setReason(""); setDescription(""); setError(null); };
   const submit = useMutation({
-    mutationFn: () => api.post("/api/territory-mapping/status-requests", { dealerId, reason, description: description.trim() || undefined }),
+    // The reason text belongs to "Other" only — never sent with another choice, even if it was typed before switching.
+    mutationFn: () => api.post("/api/territory-mapping/status-requests", { dealerId, reason, description: reason === "OTHER" ? description.trim() || undefined : undefined }),
     onSuccess: () => { close(); setNotice(T.sent); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); qc.invalidateQueries({ queryKey: ["dealer-status-requests"] }); },
     onError: (e) => { setError((e as Error).message); setStep("form"); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
   });
@@ -61,7 +64,7 @@ export function StatusRequestCell({ dealerId, partyName, status, pending, canReq
   const badge = <Badge variant={STATUS_VARIANT[status] ?? "muted"}>{dealerStatusLabel(status)}</Badge>;
   if (pending) {
     return (
-      <div className="space-y-1" title={fill(T.hint, { reason: reasons[pending.reason] })}>
+      <div className="space-y-1" title={fill(T.hint, { reason: reasons[pending.reason] ?? pending.reason })}>
         {badge}
         <div><Badge variant="warning" className="text-[10px]">{T.badge}</Badge></div>
       </div>
@@ -69,7 +72,7 @@ export function StatusRequestCell({ dealerId, partyName, status, pending, canReq
   }
   if (!canRequest) return badge;
 
-  const next = () => { const problem = validateStatusRequest({ reason, description }); if (problem) setError(problem); else { setError(null); setStep("confirm"); } };
+  const next = () => { const problem = validateStatusRequest({ reason, description: reason === "OTHER" ? description : "" }); if (problem) setError(problem); else { setError(null); setStep("confirm"); } };
   return (
     <>
       <button type="button" className="rounded hover:opacity-80" aria-label={fill(T.aria, { dealer: partyName })} onClick={() => { setNotice(null); setOpen(true); }}>{badge}</button>
@@ -81,7 +84,7 @@ export function StatusRequestCell({ dealerId, partyName, status, pending, canReq
               <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
               <p className="text-sm text-muted-foreground">{fill(T.intro, { dealer: partyName })}</p>
               <div className="space-y-3">
-                <NativeSelect value={reason} placeholder={T.select} onChange={(e) => { setReason(e.target.value); setError(null); }}
+                <NativeSelect value={reason} placeholder={T.select} onChange={(e) => { setReason(e.target.value); if (e.target.value !== "OTHER") setDescription(""); setError(null); }}
                   options={DEALER_STATUS_REASONS.map((r) => ({ value: r, label: reasons[r] }))} aria-label={T.title} />
                 {reason === "OTHER" && (
                   <div className="space-y-1.5"><Label>{T.describe} *</Label>

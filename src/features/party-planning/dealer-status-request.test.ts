@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { Prisma, Role } from "@prisma/client";
 import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
 import { DEFAULT_LABELS } from "@/features/labels/labels";
-import { validateStatusRequest } from "@/lib/dealer-status-request";
+import { DEALER_STATUS_REASONS, validateStatusRequest } from "@/lib/dealer-status-request";
 import type { AuthContext } from "@/lib/http";
 
 type Row = Record<string, unknown>;
@@ -104,8 +104,10 @@ const status = async (fn: () => Promise<unknown>) => { try { await fn(); return 
 
 async function main() {
   /* ---- validation rules ---- */
-  assert.equal(validateStatusRequest({ reason: "DOES_NOT_EXIST" }), null);
-  assert.equal(validateStatusRequest({ reason: "PARTY_CLOSED", description: "shop shut" }), null);
+  for (const r of ["INACTIVE", "LEGAL", "PARTY_IN_PLANNING"]) assert.equal(validateStatusRequest({ reason: r }), null, `${r} needs no reason text`);
+  assert.equal(validateStatusRequest({ reason: "LEGAL", description: "x".repeat(900) }), null, "text sent with a non-Other choice is ignored, not validated");
+  assert.ok(validateStatusRequest({ reason: "DOES_NOT_EXIST" }) && validateStatusRequest({ reason: "PARTY_CLOSED" }), "legacy values cannot be chosen for a NEW request");
+  assert.deepEqual(DEALER_STATUS_REASONS, ["INACTIVE", "LEGAL", "PARTY_IN_PLANNING", "OTHER"], "the four options, in order");
   assert.ok(validateStatusRequest({ reason: "OTHER" }), "Other requires a description");
   assert.ok(validateStatusRequest({ reason: "OTHER", description: "   " }), "whitespace is not a description");
   assert.equal(validateStatusRequest({ reason: "OTHER", description: "Merged with another party" }), null);
@@ -115,8 +117,8 @@ async function main() {
   {
     const { service, t } = load();
     const before = JSON.stringify(t.dealers);
-    const r = await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "PARTY_CLOSED" });
-    assert.deepEqual([r.status, r.reason, r.statusAtRequest, r.requestedByRole, r.requestedByName, r.partyName], ["PENDING", "PARTY_CLOSED", "ACTIVE", Role.SALES_OFFICER, "Officer One", "ABC Traders"]);
+    const r = await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "INACTIVE" });
+    assert.deepEqual([r.status, r.reason, r.statusAtRequest, r.requestedByRole, r.requestedByName, r.partyName], ["PENDING", "INACTIVE", "ACTIVE", Role.SALES_OFFICER, "Officer One", "ABC Traders"]);
     const row = t.requests[0]!;
     assert.deepEqual([row.dealerId, row.requestedById, row.requestedByRole, row.status, row.resolvedById], ["d1", "so1", Role.SALES_OFFICER, "PENDING", null], "persisted: dealer, requester + role, state");
     assert.ok(row.createdAt instanceof Date, "request timestamp");
@@ -131,18 +133,18 @@ async function main() {
   /* ---- scope, roles, input ---- */
   {
     const { service, t } = load();
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d3", reason: "PARTY_CLOSED" })), 403, "SO cannot request for another officer's dealer");
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d4", reason: "PARTY_CLOSED" })), 403, "nor another group's");
-    assert.equal(await status(() => service.createDealerStatusRequest(RM1, { dealerId: "d4", reason: "PARTY_CLOSED" })), 403, "RM cannot request outside their group");
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "nope", reason: "PARTY_CLOSED" })), 404, "unknown dealer id");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d3", reason: "INACTIVE" })), 403, "SO cannot request for another officer's dealer");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d4", reason: "INACTIVE" })), 403, "nor another group's");
+    assert.equal(await status(() => service.createDealerStatusRequest(RM1, { dealerId: "d4", reason: "INACTIVE" })), 403, "RM cannot request outside their group");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "nope", reason: "INACTIVE" })), 404, "unknown dealer id");
     t.dealers.find((d) => d.id === "d2")!.deletedAt = new Date();
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d2", reason: "PARTY_CLOSED" })), 404, "deleted dealer");
-    assert.equal(await status(() => service.createDealerStatusRequest(ADMIN, { dealerId: "d1", reason: "PARTY_CLOSED" })), 403, "Admin does not use the request workflow");
-    assert.equal(await status(() => service.createDealerStatusRequest({ ...SO1, role: undefined } as unknown as AuthContext, { dealerId: "d1", reason: "PARTY_CLOSED" })), 403, "no role / unauthenticated context");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d2", reason: "INACTIVE" })), 404, "deleted dealer");
+    assert.equal(await status(() => service.createDealerStatusRequest(ADMIN, { dealerId: "d1", reason: "INACTIVE" })), 403, "Admin does not use the request workflow");
+    assert.equal(await status(() => service.createDealerStatusRequest({ ...SO1, role: undefined } as unknown as AuthContext, { dealerId: "d1", reason: "INACTIVE" })), 403, "no role / unauthenticated context");
     assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "OTHER" })), 422, "Other without a description");
     assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "OTHER", description: "x".repeat(501) })), 422, "description too long");
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "INACTIVE" })), 422, "unknown reason");
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { reason: "PARTY_CLOSED" })), 422, "missing dealer id");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "BOGUS" })), 422, "unknown reason");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { reason: "INACTIVE" })), 422, "missing dealer id");
     assert.equal(await status(() => service.createDealerStatusRequest(SO1, null)), 422, "empty body");
     assert.equal(t.requests.length, 0, "every refused request left nothing behind");
     assert.equal(t.dealerWrites, 0);
@@ -151,22 +153,22 @@ async function main() {
   /* ---- duplicates ---- */
   {
     const { service, t } = load();
-    await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "PARTY_CLOSED" });
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "PARTY_CLOSED" })), 409, "same dealer + reason");
-    assert.equal(await status(() => service.createDealerStatusRequest(RM1, { dealerId: "d1", reason: "DOES_NOT_EXIST" })), 409, "one open request per dealer, whoever raises it");
+    await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "INACTIVE" });
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "INACTIVE" })), 409, "same dealer + reason");
+    assert.equal(await status(() => service.createDealerStatusRequest(RM1, { dealerId: "d1", reason: "LEGAL" })), 409, "one open request per dealer, whoever raises it");
     assert.equal(t.requests.length, 1);
     t.raceNext = true; // two submits pass the check at the same moment: the unique index decides, and it surfaces as a conflict, not a 500
     assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "OTHER", description: "x" })), 409, "concurrent duplicate");
     assert.equal(t.requests.length, 1);
     await service.resolveDealerStatusRequest(ADMIN, "req1", {});
-    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "PARTY_CLOSED" })), 0, "after resolution a new request is allowed");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "INACTIVE" })), 0, "after resolution a new request is allowed");
     assert.equal(t.requests.length, 2, "…and the first one is kept");
   }
 
   /* ---- Admin-only access ---- */
   {
     const { service, t } = load();
-    await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "DOES_NOT_EXIST" });
+    await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "LEGAL" });
     for (const [who, c] of [["SO", SO1], ["RM", RM1], ["Custom Admin without manage", CUSTOM_NO_PERM]] as const) {
       assert.equal(await status(() => service.listDealerStatusRequests(c, "pending")), 403, `${who} cannot list`);
       assert.equal(await status(() => service.resolveDealerStatusRequest(c, "req1", {})), 403, `${who} cannot resolve`);
@@ -175,7 +177,7 @@ async function main() {
     assert.equal(await status(() => service.listDealerStatusRequests({ ...ADMIN, role: undefined } as unknown as AuthContext, "pending")), 403, "no role");
     assert.equal(await status(() => service.listDealerStatusRequests(CUSTOM_MANAGE, "pending")), 0, "Custom Admin WITH Party Planning manage can");
     const pending = await service.listDealerStatusRequests(ADMIN, "pending");
-    assert.deepEqual(pending.map((p) => [p.partyName, p.reason, p.status, p.requestedByName, p.currentStatus]), [["ABC Traders", "DOES_NOT_EXIST", "PENDING", "Officer One", "ACTIVE"]]);
+    assert.deepEqual(pending.map((p) => [p.partyName, p.reason, p.status, p.requestedByName, p.currentStatus]), [["ABC Traders", "LEGAL", "PENDING", "Officer One", "ACTIVE"]]);
     assert.equal(pending[0]!.editDealer?.id, "d1", "carries the Dealer Alias edit-dialog prefill");
     assert.equal(JSON.stringify(t.loaderCalls.at(-1)), JSON.stringify(["d1"]), "fed by the Dealer Alias page's own list loader, narrowed to the requested dealers (no second dealer-data path)");
   }
@@ -205,7 +207,7 @@ async function main() {
   /* ---- editing the dealer (Dealer Alias save flow) never resolves the request ---- */
   {
     const { service, manage, t } = load();
-    await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "PARTY_CLOSED" });
+    await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "INACTIVE" });
     // Opening / cancelling the dialog makes no call at all, so the request is simply untouched.
     assert.equal(t.requests[0]!.status, "PENDING");
     // Failed updates (unknown dealer, officer outside the group, invalid body) → request still PENDING.
@@ -223,6 +225,42 @@ async function main() {
     assert.equal(await status(() => manage.editDealer(SO1, "d1", { name: "Hack", status: "INACTIVE" })), 403, "SO / RM can never edit dealers (request endpoints included)");
     await service.resolveDealerStatusRequest(ADMIN, "req1", {});
     assert.equal(t.requests[0]!.status, "RESOLVED", "only the explicit Resolve action resolves it");
+  }
+
+  /* ---- the four choices: each submits and persists; Other carries a reason; stale text is never stored; legacy history stays readable ---- */
+  {
+    const { service, t } = load();
+    const before = JSON.stringify(t.dealers);
+    for (const [i, r] of ["INACTIVE", "LEGAL", "PARTY_IN_PLANNING"].entries()) {
+      const dealerId = ["d1", "d2", "d3"][i]!; const ctx = dealerId === "d3" ? RM1 : SO1;
+      // A reason text left over from "Other" (the user typed it, then switched) must not be saved with another choice.
+      const saved = await service.createDealerStatusRequest(ctx, { dealerId, reason: r, description: "stale text from Other" });
+      assert.deepEqual([saved.reason, saved.description, saved.status], [r, null, "PENDING"], `${r}: saved with no reason text`);
+      assert.equal(t.requests.at(-1)!.reason, r, `${r} persisted as the stable value`);
+    }
+    const other = await service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "OTHER", description: "x" }).catch((e) => e);
+    assert.equal(other.status, 409, "d1 already has an open request (one per dealer)");
+    t.requests.length = 0; t.dealers.push({ id: "d9", name: "Nine", status: "ACTIVE", owner: "so1", deletedAt: null });
+    const withOther = await service.createDealerStatusRequest(SO1, { dealerId: "d9", reason: "OTHER", description: "  Shifted   to cold storage " });
+    assert.deepEqual([withOther.reason, withOther.description], ["OTHER", "Shifted to cold storage"], "Other: the (normalised) reason is stored and returned");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "OTHER", description: "   " })), 422, "whitespace-only reason rejected");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "OTHER", description: "x".repeat(501) })), 422, "500-character limit kept");
+    assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "OTHER", description: "x".repeat(500) })), 0, "exactly 500 is allowed");
+    for (const legacy of ["DOES_NOT_EXIST", "PARTY_CLOSED"]) assert.equal(await status(() => service.createDealerStatusRequest(SO1, { dealerId: "d2", reason: legacy })), 422, `${legacy} can no longer be submitted`);
+    assert.equal(JSON.stringify(t.dealers.filter((d) => d.id !== "d9")), before, "submitting any choice leaves every dealer's status untouched");
+    assert.equal(t.dealerWrites, 0);
+
+    // Historical requests (saved before the change) stay readable under their original meaning, pending or resolved — and can still be resolved.
+    const h = load();
+    h.t.requests.push(
+      { id: "old1", dealerId: "d1", statusAtRequest: "ACTIVE", reason: "DOES_NOT_EXIST", description: null, requestedById: "so1", requestedByRole: Role.SALES_OFFICER, status: "PENDING", resolvedById: null, resolvedAt: null, resolutionNotes: null, createdAt: new Date(1000) },
+      { id: "old2", dealerId: "d2", statusAtRequest: "ACTIVE", reason: "PARTY_CLOSED", description: "shop shut", requestedById: "so1", requestedByRole: Role.SALES_OFFICER, status: "RESOLVED", resolvedById: "admin", resolvedAt: new Date(2000), resolutionNotes: null, createdAt: new Date(500) },
+    );
+    const pend = await h.service.listDealerStatusRequests(ADMIN, "pending");
+    assert.deepEqual(pend.map((p) => [p.id, p.reason]), [["old1", "DOES_NOT_EXIST"]], "legacy pending request keeps DOES_NOT_EXIST");
+    assert.deepEqual((await h.service.listDealerStatusRequests(ADMIN, "resolved")).map((p) => [p.reason, p.description]), [["PARTY_CLOSED", "shop shut"]], "legacy resolved request keeps PARTY_CLOSED and its text");
+    assert.equal(await status(() => h.service.resolveDealerStatusRequest(ADMIN, "old1", {})), 0, "a legacy pending request can still be resolved");
+    assert.equal(await status(() => h.service.createDealerStatusRequest(SO1, { dealerId: "d1", reason: "LEGAL" })), 0, "…after which a new-style request is allowed");
   }
 
   /* ---- wiring: routes, tab, dialog reuse ---- */

@@ -525,12 +525,14 @@ async function main() {
   /* ---- UI wiring of the temporary Market edit (source-level) ---- */
   {
     const ui = readFileSync("src/features/party-planning/territory-mapping-page.tsx", "utf8");
-    const cell = ui.slice(ui.indexOf("function MarketCell"), ui.indexOf("function MarketHistoryDialog"));
-    assert.equal((cell.match(/change\.mutate\(/g) ?? []).length, 1, "the only save path is the confirmation dialog's Confirm button");
+    const cell = ui.slice(ui.indexOf("function MarketCell"), ui.indexOf("function MarketHistoryBody"));
+    assert.equal((cell.match(/change\.mutate\(/g) ?? []).length, 1, "the only save path is the confirmation step's Confirm button");
     assert.ok(cell.includes("onClick={() => change.mutate()}") && cell.includes("T.confirm") && DEFAULT_LABELS["party_planning.territory.dialog.confirm_change"] === "Confirm Change", "Confirm Change button");
-    assert.ok(cell.includes("setConfirming(true)") && ["{T.title}", "{T.currentMarket}", "{T.newMarket}", "{row.partyName}"].every((x) => cell.includes(x)) && DEFAULT_LABELS["party_planning.territory.dialog.change_title"] === "Change Market for this dealer?" && DEFAULT_LABELS["party_planning.territory.dialog.current_market"] === "Current Market" && DEFAULT_LABELS["party_planning.territory.dialog.new_market"] === "New Market", "Save only opens a confirmation naming dealer, current and new Market");
-    assert.ok(cell.includes("onClick={() => setEditing(false)}") && cell.includes("onClick={() => setConfirming(false)}"), "Cancel (edit and confirmation) only closes — it does not call the save mutation");
-    assert.ok(cell.includes("T.edited") && cell.includes("setHistory(true)") && DEFAULT_LABELS["party_planning.territory.badge.edited"] === "Edited" && DEFAULT_LABELS["party_planning.territory.history.title"] === "Market Edit History", "Edited indicator opens the history");
+    assert.ok(cell.includes('setStep("confirm")') && ["{T.title}", "{T.currentMarket}", "{T.newMarket}", "{row.partyName}"].every((x) => cell.includes(x)) && DEFAULT_LABELS["party_planning.territory.dialog.change_title"] === "Change Market for this dealer?" && DEFAULT_LABELS["party_planning.territory.dialog.edit_market_title"] === "Edit Market", "party + previous/new Market confirmation, as a step of the same popup");
+    assert.ok(cell.includes("onClick={dismiss}") && cell.includes("if (!change.isPending) reset()") && cell.includes("expectedMarket: expected"), "Cancel only closes (never saves), is blocked while saving, and the stale-value guard uses the Market captured when the popup opened");
+    assert.ok(cell.includes('setStep("history")') && cell.includes("<MarketHistoryBody") && DEFAULT_LABELS["party_planning.territory.history.title"] === "Market Edit History", "history stays reachable — inside the popup");
+    assert.ok(cell.includes("row.marketEdited &&") && cell.includes('openPopup("history")') && cell.includes("T.edited") && DEFAULT_LABELS["party_planning.territory.badge.edited"] === "Edited", "the Edited tag (from persisted history) opens that party's history");
+    assert.equal((cell.match(/<Dialog /g) ?? []).length, 1, "one dialog only — edit, confirmation and history are steps, never overlapping dialogs");
     assert.ok(!/aria-label=\{L\.market\} value=\{row\.marketId/.test(ui), "the Market dropdown is gone from the Existing Dealers rows");
     assert.ok(ui.includes("<DistrictCell") && !ui.includes("district: v.district"), "District editing goes through the explicit-Save dropdown, not a blur-saving text box");
     // Seasonal / Monthly keep their searchable Market selectors and never see the editable Market.

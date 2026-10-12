@@ -56,13 +56,20 @@ async function main() {
   requests = [REQ("1"), REQ("2"), REQ("3")]; html = render();
   assert.ok(/<\/table><\/div><div class="border-t p-2"><button>\+ Add Market<\/button><\/div>/.test(html) && html.lastIndexOf("Market 3") < html.lastIndexOf("+ Add Market"), "below the last row, so it moves down as the table grows");
   const heads = [...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]);
-  assert.equal(heads.join("|"), "District|Market Name|Market Potential|No. of Parties|Requested by|Date|Status|Decision", "District is the first column");
-  assert.ok(/<td[^>]*>Rajgarh<\/td><td[^>]*>Market 1<\/td>/.test(html), "each row shows its District Master name first");
+  assert.equal(heads.join("|"), "S.No|District|Market Name|Market Potential|No. of Parties|Requested by|Date|Status|Decision", "S.No is the first column, then District");
+  assert.ok(/<td[^>]*>1<\/td><td[^>]*>Rajgarh<\/td><td[^>]*>Market 1<\/td>/.test(html), "each row: S.No, then its District Master name, then the Market");
+  assert.equal([...html.matchAll(/<tr[^>]*><td[^>]*>(\d+)<\/td>/g)].map((m) => m[1]).join(","), "1,2,3", "unpaginated list: rowIndex + 1");
   requests = [{ ...REQ("legacy"), districtId: null, districtName: null }]; html = render();
-  assert.ok(/<td[^>]*><span class="text-muted-foreground">—<\/span><\/td><td[^>]*>Market legacy<\/td>/.test(html), "a request made before District existed shows \"—\"");
+  assert.ok(/<td[^>]*>1<\/td><td[^>]*><span class="text-muted-foreground">—<\/span><\/td><td[^>]*>Market legacy<\/td>/.test(html), "a request made before District existed shows \"—\"");
   requests = [REQ("1"), REQ("2"), REQ("3")]; html = render();
   for (const col of ["Market Name", "Market Potential", "No. of Parties", "Requested by", "Date", "Status", "Decision"]) assert.ok(html.includes(`>${col}</th>`), `column ${col}`);
   assert.ok(html.includes("To review") === false && html.includes("My requests") && html.includes("History"), "SO: My requests + History tabs");
+  // empty / loading rows span every column: 9 for SO views, 10 where the Action column exists (RM "To review")
+  requests = []; assert.ok(render().includes('colSpan="9"') && !render().includes('colSpan="10"'), "SO empty row: 9 columns");
+  hooks.length = 0; const rmHtml = render(Role.REGIONAL_MANAGER); hooks.length = 0;
+  assert.ok(rmHtml.includes('colSpan="10"'), "RM review empty row: 10 columns (with Action)");
+  assert.equal([...rmHtml.matchAll(/<th(?:\s[^>]*)?>/g)].length, 10, "RM review has 10 headings");
+  requests = [REQ("1"), REQ("2"), REQ("3")];
   // permissions unchanged: SO + RM can request; Admin cannot
   assert.equal(count("+ Add Market"), 1);
   render(Role.REGIONAL_MANAGER); assert.equal(count("+ Add Market"), 1); assert.ok(render(Role.REGIONAL_MANAGER).includes("To review"));
@@ -106,6 +113,18 @@ async function main() {
   assert.ok(html.includes("This request has already been decided.") && invalidations > invBefore && posts.length === 0, "conflict: message shown, list refreshed, nothing recorded");
   btn("Approve").onClick!(); await tick(); render(Role.REGIONAL_MANAGER);
   assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/territory-mapping/market-requests/1/act", body: { action: "approve" } }], "approval uses the existing act endpoint");
+  // Pinned column headings: this page's title scrolls away; both tables pin their column-name row against the page's own scroller.
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync("src/features/party-planning/territory-mapping-page.tsx", "utf8");
+  assert.ok(/<PageHeader[\s\S]*?pinned=\{false\}/.test(page), "Territory Mapping's title is not pinned");
+  assert.equal((page.match(/<Table stickyHeader externalScroll>/g) ?? []).length, 2, "Existing Dealers and Vacant Market tables pin their headings");
+  assert.ok(!/overflow-auto rounded-lg border bg-background">\s*<Table stickyHeader/.test(page), "no overflow wrapper around the pinned tables (it would become a second scroll region)");
+  assert.ok(/<div className="w-full min-w-\[56rem\] rounded-lg border bg-background">\s*<Table stickyHeader externalScroll>/.test(page) && !page.includes("w-fit rounded-lg"), "Existing Markets fills the content width (no w-fit); it scrolls sideways only below 56rem");
+  assert.ok(["w-14\">{L.serial}", "w-72\">{L.district}", "w-[1%]\">{L.market}", "w-32\">{L.potential}", "w-24\">{L.status}"].every((x) => page.includes(`<TableHead className="${x}</TableHead>`)) && page.includes("<TableHead>{L.party}</TableHead>"), "one coherent set of widths: S.No / Potential / Status compact, District for its selector, Market shrink-to-fit, Party Name takes the rest");
+  assert.ok(!page.includes("sm:w-[26%]") && !page.includes("w-[15%]"), "the isolated mobile-only Market width is gone");
+  assert.ok(!/<TableCell className="p-1[ "]/.test(page.slice(page.indexOf("function ExistingDealers"), page.indexOf("function DistrictCell") > 0 ? page.indexOf("function DistrictCell") : undefined)), "Existing Markets body cells share the headings' px-3 gutter (no p-1 cells)");
+  assert.ok(page.includes("flex w-max max-w-[8rem] flex-wrap"), "the Market cell is as wide as its name + tag, capped at 8rem and wrapping beyond");
+  for (const f of ["performance-page", "team-performance-page"]) assert.ok(!readFileSync(`src/features/daily-work/${f}.tsx`, "utf8").includes("pinned={false}"), "other pages keep their pinned header");
   console.log("territory-add-market-ui.test.tsx — all assertions passed");
 }
 main().catch((e) => { console.error(e); process.exit(1); });

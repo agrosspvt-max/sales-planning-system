@@ -509,7 +509,8 @@ export function AddMarket({ role }: { role: Role }) {
   const act = useMutation({
     mutationFn: (v: { id: string; action: "approve" | "reject"; reason?: string }) => api.post(`/api/territory-mapping/market-requests/${v.id}/act`, { action: v.action, reason: v.reason }),
     onSuccess: () => { setRejecting(null); qc.invalidateQueries({ queryKey: ["market-requests"] }); qc.invalidateQueries({ queryKey: ["territory-markets"] }); },
-    onError: (e) => setError((e as Error).message),
+    // e.g. "already decided" (another reviewer got there first): show it and refresh, so the row on screen is current.
+    onError: (e) => { setError((e as Error).message); qc.invalidateQueries({ queryKey: ["market-requests"] }); },
   });
 
   const views: { key: typeof view; label: string }[] = [

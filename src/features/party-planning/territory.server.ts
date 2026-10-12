@@ -527,14 +527,22 @@ export async function createMarketRequest(ctx: AuthContext, raw: unknown): Promi
 
   // SO → their RM first; an RM (or an SO with no RM in their group) goes straight to Admin review.
   const rmId = ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId) : null;
-  const created = await prisma.$transaction(async (tx) => {
-    const row = await tx.marketRequest.create({
-      data: { requesterId: ctx.userId, marketName, nameKey, potential, numberOfParties, districtId: district.id, status: rmId ? "PENDING_RM" : "PENDING_ADMIN" },
-      include: REQUEST_INCLUDE,
+  // The request and its audit row commit together or not at all. The pre-checks above give a friendly message, but only the database's partial unique
+  // index ("one open request per name") stops two simultaneous submits — its violation is reported as the same conflict.
+  let created: RequestRow;
+  try {
+    created = await prisma.$transaction(async (tx) => {
+      const row = await tx.marketRequest.create({
+        data: { requesterId: ctx.userId, marketName, nameKey, potential, numberOfParties, districtId: district.id, status: rmId ? "PENDING_RM" : "PENDING_ADMIN" },
+        include: REQUEST_INCLUDE,
+      });
+      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "marketRequest", entityId: row.id, summary: `Requested Market "${marketName}" (Potential ${potential}, ${numberOfParties} parties)` }, tx);
+      return row;
     });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "marketRequest", entityId: row.id, summary: `Requested Market "${marketName}" (Potential ${potential}, ${numberOfParties} parties)` }, tx);
-    return row;
-  });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw new ApiError(409, `A request for the Market "${marketName}" is already pending.`);
+    throw e;
+  }
   return (await toRequestDtos([created]))[0]!;
 }
 
@@ -580,34 +588,48 @@ export async function actOnMarketRequest(ctx: AuthContext, id: string, raw: unkn
   if (!isRm && !isAdmin) throw new ApiError(403, "Only a Regional Manager or Admin can review Market requests");
   if (isAdmin) assertAdminPermission(ctx, "partyPlanning", action === "approve" ? "approve" : "reject");
 
-  const updated = await prisma.$transaction(async (tx) => {
-    const request = await tx.marketRequest.findUnique({ where: { id }, include: REQUEST_INCLUDE });
-    if (!request) throw new ApiError(404, "Market request not found");
-    const now = new Date();
-    if (isRm) {
-      if (request.status !== "PENDING_RM") throw new ApiError(409, "This request is not waiting for RM review");
-      const scope = await getOfficerScope(ctx, tx);
-      if (request.requesterId === ctx.userId || !scope.ids.includes(request.requesterId)) throw new ApiError(403, "This request is outside your team");
-      const data = action === "approve"
-        ? { status: "PENDING_ADMIN", rmDecision: "APPROVED", rmDecidedById: ctx.userId, rmDecidedAt: now }
-        : { status: "REJECTED", rmDecision: "REJECTED", rmDecidedById: ctx.userId, rmDecidedAt: now, rejectionStage: "RM", rejectionReason: reason };
-      const row = await tx.marketRequest.update({ where: { id }, data, include: REQUEST_INCLUDE });
-      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `RM ${action === "approve" ? "approved" : "rejected"} Market request "${request.marketName}"${action === "reject" ? ` — ${reason}` : ""}` }, tx);
+  let updated: RequestRow;
+  try {
+    updated = await prisma.$transaction(async (tx) => {
+      const request = await tx.marketRequest.findUnique({ where: { id }, include: REQUEST_INCLUDE });
+      if (!request) throw new ApiError(404, "Market request not found");
+      const now = new Date();
+      // A decision is a compare-and-set on the status read above: if another reviewer decided in the meantime the write matches no row and this one is refused
+      // (409), so two simultaneous decisions can never both succeed or overwrite each other.
+      const decide = async (expected: string, data: Prisma.MarketRequestUncheckedUpdateManyInput): Promise<RequestRow> => {
+        const { count } = await tx.marketRequest.updateMany({ where: { id, status: expected }, data });
+        if (count !== 1) throw new ApiError(409, "This request has already been decided. Refresh to see its current status.");
+        return (await tx.marketRequest.findUnique({ where: { id }, include: REQUEST_INCLUDE }))!;
+      };
+      if (isRm) {
+        if (request.status !== "PENDING_RM") throw new ApiError(409, "This request is not waiting for RM review");
+        const scope = await getOfficerScope(ctx, tx);
+        if (request.requesterId === ctx.userId || !scope.ids.includes(request.requesterId)) throw new ApiError(403, "This request is outside your team");
+        const data = action === "approve"
+          ? { status: "PENDING_ADMIN", rmDecision: "APPROVED", rmDecidedById: ctx.userId, rmDecidedAt: now }
+          : { status: "REJECTED", rmDecision: "REJECTED", rmDecidedById: ctx.userId, rmDecidedAt: now, rejectionStage: "RM", rejectionReason: reason };
+        const row = await decide("PENDING_RM", data);
+        await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `RM ${action === "approve" ? "approved" : "rejected"} Market request "${request.marketName}"${action === "reject" ? ` — ${reason}` : ""}` }, tx);
+        return row;
+      }
+      if (request.status !== "PENDING_ADMIN") throw new ApiError(409, "This request is not waiting for Admin review");
+      if (action === "reject") {
+        const row = await decide("PENDING_ADMIN", { status: "REJECTED", adminDecision: "REJECTED", adminDecidedById: ctx.userId, adminDecidedAt: now, rejectionStage: "ADMIN", rejectionReason: reason });
+        await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `Admin rejected Market request "${request.marketName}" — ${reason}` }, tx);
+        return row;
+      }
+      // Final approval is the ONLY point at which the Market becomes real / usable.
+      if (await tx.market.findUnique({ where: { nameKey: request.nameKey }, select: { id: true } })) throw new ApiError(409, `The Market "${request.marketName}" already exists.`);
+      const market = await tx.market.create({ data: { name: request.marketName, nameKey: request.nameKey, potential: request.potential, source: "REQUESTED", expectedParties: request.numberOfParties, createdById: request.requesterId }, select: { id: true } });
+      const row = await decide("PENDING_ADMIN", { status: "APPROVED", adminDecision: "APPROVED", adminDecidedById: ctx.userId, adminDecidedAt: now, marketId: market.id });
+      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "market", entityId: market.id, summary: `Admin approved Market request "${request.marketName}" (Potential ${request.potential})` }, tx);
       return row;
-    }
-    if (request.status !== "PENDING_ADMIN") throw new ApiError(409, "This request is not waiting for Admin review");
-    if (action === "reject") {
-      const row = await tx.marketRequest.update({ where: { id }, data: { status: "REJECTED", adminDecision: "REJECTED", adminDecidedById: ctx.userId, adminDecidedAt: now, rejectionStage: "ADMIN", rejectionReason: reason }, include: REQUEST_INCLUDE });
-      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `Admin rejected Market request "${request.marketName}" — ${reason}` }, tx);
-      return row;
-    }
-    // Final approval is the ONLY point at which the Market becomes real / usable.
-    if (await tx.market.findUnique({ where: { nameKey: request.nameKey }, select: { id: true } })) throw new ApiError(409, `The Market "${request.marketName}" already exists.`);
-    const market = await tx.market.create({ data: { name: request.marketName, nameKey: request.nameKey, potential: request.potential, source: "REQUESTED", expectedParties: request.numberOfParties, createdById: request.requesterId }, select: { id: true } });
-    const row = await tx.marketRequest.update({ where: { id }, data: { status: "APPROVED", adminDecision: "APPROVED", adminDecidedById: ctx.userId, adminDecidedAt: now, marketId: market.id }, include: REQUEST_INCLUDE });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "market", entityId: market.id, summary: `Admin approved Market request "${request.marketName}" (Potential ${request.potential})` }, tx);
-    return row;
-  });
+    });
+  } catch (e) {
+    // Two Admins approving at once: the loser's Market insert hits the unique name — a conflict, not a crash (its whole transaction rolled back).
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw new ApiError(409, "This request has already been decided, or its Market already exists. Refresh to see its current status.");
+    throw e;
+  }
   return (await toRequestDtos([updated]))[0]!;
 }
 

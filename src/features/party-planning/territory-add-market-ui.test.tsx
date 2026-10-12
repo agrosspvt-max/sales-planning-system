@@ -98,6 +98,14 @@ async function main() {
   assert.ok(html.includes("Your State could not be identified") && btn("Send Request").disabled === true && searchables[0]!.options.length === 0, "no State: message + blocked");
   districtData = { stateName: "Madhya Pradesh", districts: [] }; html = render();
   assert.ok(html.includes("No active districts are set up for Madhya Pradesh") && btn("Send Request").disabled === true, "no districts: message + blocked");
+  // Review: a decision that loses a race shows the server's conflict message and refreshes the list (the row would otherwise stay stale); a normal approval posts once.
+  hooks.length = 0; posts.length = 0; requests = [REQ("1")]; districtData = { stateName: "Madhya Pradesh", districts: [{ id: "dist-raj", name: "Rajgarh" }] };
+  render(Role.REGIONAL_MANAGER);
+  const invBefore = invalidations; failNext = "This request has already been decided. Refresh to see its current status.";
+  btn("Approve").onClick!(); await tick(); html = render(Role.REGIONAL_MANAGER);
+  assert.ok(html.includes("This request has already been decided.") && invalidations > invBefore && posts.length === 0, "conflict: message shown, list refreshed, nothing recorded");
+  btn("Approve").onClick!(); await tick(); render(Role.REGIONAL_MANAGER);
+  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/territory-mapping/market-requests/1/act", body: { action: "approve" } }], "approval uses the existing act endpoint");
   console.log("territory-add-market-ui.test.tsx — all assertions passed");
 }
 main().catch((e) => { console.error(e); process.exit(1); });

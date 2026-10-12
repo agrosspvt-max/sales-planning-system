@@ -31,6 +31,7 @@
     "test:historical-daybook:db": "node --import tsx src/features/historical-daybook/historical-daybook.integration.ts",
     "test:accounts": "node --import tsx src/features/accounts/accounts.test.ts",
     "test:accounts:db": "node --import tsx src/features/accounts/accounts.integration.ts",
+    "test:market-requests:db": "node --import tsx src/features/party-planning/market-request.integration.ts",
     "test:accounts:http": "node --import tsx src/features/accounts/accounts.http.integration.ts"
   },
   "prisma": {

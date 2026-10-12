@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Role } from "@prisma/client";
+import { Prisma, Role } from "@prisma/client";
 import { DEFAULT_LABELS } from "@/features/labels/labels";
 import * as XLSX from "xlsx";
 import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
@@ -49,6 +49,7 @@ function makeDb() {
   const t = {
     mappings: [] as Row[], markets: [] as Row[], requests: [] as Row[], audit: [] as Row[], edits: [] as Row[],
     clock: 0, dealerWrites: 0, // any write to a Dealer table row would bump this
+    failAudit: false, raceNext: false, staleStatus: null as string | null, // test hooks: fail the next audit write, hide an open duplicate from the pre-check once, serve a stale status once
   };
   let seq = 0;
   const id = (p: string) => `${p}${++seq}`;
@@ -120,9 +121,13 @@ function makeDb() {
       create: async ({ data }: { data: Row }) => { if (failNextEdit) { failNextEdit = false; throw new Error("boom"); } const row = { id: id("edit"), editedAt: new Date(Date.UTC(2026, 9, 8, 12, 0, ++t.clock)), ...data }; t.edits.push(row); return { ...row }; },
     },
     marketRequest: {
-      findFirst: async ({ where }: { where: Row }) => { const r = t.requests.find((x) => matches(x, where)); return r ? { ...r } : null; },
-      create: async ({ data }: { data: Row }) => { const row = { id: id("req"), rmDecision: null, rmDecidedById: null, rmDecidedAt: null, adminDecision: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null, marketId: null, createdAt: new Date(), ...data }; t.requests.push(row); return requester(row); },
-      findUnique: async ({ where }: { where: Row }) => { const r = t.requests.find((x) => matches(x, where)); return r ? requester(r) : null; },
+      findFirst: async ({ where }: { where: Row }) => { if (t.raceNext) { t.raceNext = false; return null; } const r = t.requests.find((x) => matches(x, where)); return r ? { ...r } : null; },
+      create: async ({ data }: { data: Row }) => {
+        // The partial unique index "one open request per name".
+        if (t.requests.some((x) => x.nameKey === data.nameKey && ["PENDING_RM", "PENDING_ADMIN"].includes(String(x.status)) && ["PENDING_RM", "PENDING_ADMIN"].includes(String(data.status)))) throw new Prisma.PrismaClientKnownRequestError("unique", { code: "P2002", clientVersion: "test" });
+        const row = { id: id("req"), rmDecision: null, rmDecidedById: null, rmDecidedAt: null, adminDecision: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null, marketId: null, createdAt: new Date(), ...data }; t.requests.push(row); return requester(row); },
+      findUnique: async ({ where }: { where: Row }) => { const r = t.requests.find((x) => matches(x, where)); if (r && t.staleStatus) { const stale = t.staleStatus; t.staleStatus = null; return requester({ ...r, status: stale }); } return r ? requester(r) : null; },
+      updateMany: async ({ where, data }: { where: Row; data: Row }) => { const hit = t.requests.filter((x) => matches(x, where)); hit.forEach((r) => Object.assign(r, data)); return { count: hit.length }; },
       findMany: async ({ where }: { where: Row }) => t.requests.filter((r) => matches(r, where)).map(requester).sort((a, b) => (b.createdAt as Date).getTime() - (a.createdAt as Date).getTime()),
       update: async ({ where, data }: { where: Row; data: Row }) => { const r = t.requests.find((x) => matches(x, where))!; Object.assign(r, data); return requester(r); },
     },
@@ -152,7 +157,7 @@ function loadService() {
     "@/lib/prisma": { prisma: db.prisma },
     "@/lib/http": { ApiError: TestApiError },
     "@/features/sales-upload/alias.server": { listDealersForAlias: async () => ({ counts: {}, dealers: [] }) },
-    "@/lib/audit": { writeAudit: async (p: Row) => { db.t.audit.push({ ...p }); } },
+    "@/lib/audit": { writeAudit: async (p: Row) => { if (db.t.failAudit) { db.t.failAudit = false; throw new Error("injected audit failure"); } db.t.audit.push({ ...p }); } },
     "@/lib/scope": {
       getOfficerScope,
       getCurrentOwnerByDealer: async (ids: string[]) => new Map(ids.filter((i) => owners.has(i)).map((i) => [i, owners.get(i)!])),
@@ -720,6 +725,64 @@ async function main() {
     t.requests.push({ id: "legacy", requesterId: "so1", marketName: "Old Market", nameKey: "old market", potential: "C", numberOfParties: 1, status: "APPROVED", rmDecision: "APPROVED", rmDecidedById: "rm1", rmDecidedAt: new Date(), adminDecision: "APPROVED", adminDecidedById: "admin", adminDecidedAt: new Date(), rejectionStage: null, rejectionReason: null, marketId: null, districtId: null, createdAt: new Date(0) }); // as the database returns a pre-existing row: districtId NULL
     const old = (await service.listMarketRequests(SO1, "history")).find((r) => r.id === "legacy")!;
     assert.deepEqual([old.districtId, old.districtName, old.marketName], [null, null, "Old Market"], "older requests: no district, nothing invented");
+  }
+
+  /* ---- Add Market: submission is only a request; atomic writes; safe under retries and concurrent decisions ---- */
+  {
+    const { service, t } = loadService();
+    const body = (name: string) => ({ districtId: "dist-raj", marketName: name, potential: "A", numberOfParties: "3" }); // the form sends the party count as a string
+    // Submission creates a request, never a usable Market; routing is unchanged (SO → RM → Admin; RM's own and an RM-less SO go straight to Admin).
+    const soReq = await service.createMarketRequest(SO1, body("test"));
+    assert.deepEqual([soReq.status, t.markets.length, t.requests.length, t.audit.filter((a) => a.entity === "marketRequest").length], ["PENDING_RM", 0, 1, 1], "SO: request + audit saved, no Market yet");
+    assert.equal((await service.createMarketRequest(RM1, body("rm own"))).status, "PENDING_ADMIN", "RM's own request goes straight to Admin");
+    const rm2 = USERS.find((u) => u.id === "rm2")!; const rm2Group = rm2.groupId; rm2.groupId = "g-none"; // the group has no RM
+    assert.equal((await service.createMarketRequest(SO3, { ...body("lonely"), districtId: "dist-kan" })).status, "PENDING_ADMIN", "an SO with no RM in the group goes straight to Admin");
+    rm2.groupId = rm2Group;
+    assert.equal(t.markets.length, 0, "no Market exists before final Admin approval");
+
+    // Who may decide: SO never; RM not their own and not outside their team; RM cannot do the Admin step.
+    assert.equal(await status(() => service.actOnMarketRequest(SO1, soReq.id, { action: "approve" })), 403, "an SO cannot approve");
+    assert.equal(await status(() => service.actOnMarketRequest(RM1, t.requests.find((r) => r.marketName === "rm own")!.id as string, { action: "approve" })), 409, "an RM cannot approve at the Admin stage (nor their own request)");
+    assert.equal(await status(() => service.actOnMarketRequest(RM2, soReq.id, { action: "approve" })), 403, "an RM of another team cannot approve");
+    assert.equal(await status(() => service.actOnMarketRequest(ADMIN, soReq.id, { action: "approve" })), 409, "Admin cannot skip the RM stage");
+    assert.equal(await status(() => service.actOnMarketRequest(RM1, soReq.id, { action: "reject" })), 422, "a rejection needs a reason");
+
+    // Double click / retry: the pre-check is bypassed (a concurrent twin), the database's unique index still refuses the second → 409, one row.
+    t.raceNext = true;
+    assert.equal(await status(() => service.createMarketRequest(SO1, body("TEST"))), 409, "simultaneous duplicate submit: conflict, not a second request");
+    assert.equal(t.requests.filter((r) => r.nameKey === "test").length, 1, "exactly one open request for the name");
+    assert.equal(await status(() => service.createMarketRequest(SO1, body("test"))), 409, "a plain retry is refused by the existing duplicate check");
+
+    // Atomic submit: a failing audit write leaves NO request behind, and the user can retry.
+    t.failAudit = true;
+    await assert.rejects(() => service.createMarketRequest(SO1, body("atomic")), /injected audit failure/);
+    assert.equal(t.requests.some((r) => r.nameKey === "atomic"), false, "request rolled back with its audit");
+    assert.equal((await service.createMarketRequest(SO1, body("atomic"))).status, "PENDING_RM", "retry after the failure succeeds");
+
+    // RM approval, then final Admin approval: Market created and linked only here; atomic with its audit.
+    await service.actOnMarketRequest(RM1, soReq.id, { action: "approve" });
+    t.failAudit = true;
+    await assert.rejects(() => service.actOnMarketRequest(ADMIN, soReq.id, { action: "approve" }), /injected audit failure/);
+    assert.deepEqual([t.markets.length, t.requests.find((r) => r.id === soReq.id)!.status], [0, "PENDING_ADMIN"], "failed final approval: no Market, request still pending");
+    const done = await service.actOnMarketRequest(ADMIN, soReq.id, { action: "approve" });
+    const market = t.markets.find((m) => m.name === "test")!;
+    assert.deepEqual([done.status, t.markets.length, done.marketId === market.id], ["APPROVED", 1, true], "final approval creates exactly one Market and links it");
+
+    // Concurrent / repeated decisions: only one wins; the loser gets a conflict and changes nothing.
+    assert.equal(await status(() => service.actOnMarketRequest(ADMIN, soReq.id, { action: "approve" })), 409, "approving twice: second refused");
+    assert.equal(await status(() => service.actOnMarketRequest(ADMIN, soReq.id, { action: "reject", reason: "late" })), 409, "reject after approve: refused");
+    const other = await service.createMarketRequest(RM1, body("race decide"));
+    t.staleStatus = "PENDING_ADMIN"; // a reviewer who read the request before it was decided
+    await service.actOnMarketRequest(ADMIN, other.id, { action: "approve" }); // (this call consumes the hook on its own read…)
+    t.staleStatus = "PENDING_ADMIN";
+    assert.equal(await status(() => service.actOnMarketRequest(ADMIN, other.id, { action: "reject", reason: "second reviewer" })), 409, "a stale read cannot overwrite a decision (compare-and-set)");
+    const finalRow = t.requests.find((r) => r.id === other.id)!;
+    assert.deepEqual([finalRow.status, finalRow.rejectionReason], ["APPROVED", null], "the first decision stands untouched");
+    t.markets.push({ id: "m-dup", name: "Collide", nameKey: "collide" });
+    const collide = await service.createMarketRequest(RM1, body("collide x"));
+    t.requests.find((r) => r.id === collide.id)!.nameKey = "collide"; // the Market name appeared after the request was filed
+    assert.equal(await status(() => service.actOnMarketRequest(ADMIN, collide.id, { action: "approve" })), 409, "Market name taken meanwhile: conflict, request stays pending");
+    assert.equal(t.requests.find((r) => r.id === collide.id)!.status, "PENDING_ADMIN");
   }
 
   console.log("territory.test.ts — all assertions passed");

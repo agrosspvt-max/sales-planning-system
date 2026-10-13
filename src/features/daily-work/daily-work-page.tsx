@@ -1,4 +1,6 @@
 "use client";
+import { BillingTaskPanel } from "./billing-task-ui";
+import type { BillingTaskDto } from "./billing-task.server";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 
@@ -58,6 +60,8 @@ interface Payload {
   applicableSchemesByDealer: Record<string, SchemeOption[]>; cnTasks?: CnTask[]; materializedCnTasks?: CnTask[]; dealers: DealerDto[];
   /** Daily Work entry ids that came from a Calendar Daily Task (Task Type "Calendar"). */
   calendarEntryIds?: string[];
+  /** Billing Exception tasks inside today's editable Recovery rows, and every row carrying a Billing Exception contribution (Task Type label, all views). */
+  billingTasks?: BillingTaskDto[]; billingEntryIds?: string[];
 }
 interface AvailableDealer { id: string; name: string; monthlyPlan: number; actual: number; pending: number }
 
@@ -608,6 +612,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     taskType: useLabel("daily_work.col.task_type"),
     taskTypeAuto: useLabel("daily_work.task_type.auto"),
     taskTypeCalendar: useLabel("daily_work.task_type.calendar"),
+    taskTypeBilling: useLabel("daily_work.task_type.billing_exception"),
     taskTypeManual: useLabel("daily_work.task_type.manual"),
     taskTypeNone: useLabel("daily_work.combined.none"),
   };
@@ -641,6 +646,16 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     return new Set((data?.dealers ?? []).filter((d) => ids.has(d.entryId)).map((d) => d.dealerId));
   }, [data?.calendarEntryIds, data?.dealers]);
   const rowTaskTypeOf = (dealerId: string): TaskType => rowTaskType(autoDealerIds.has(dealerId), calendarDealerIds.has(dealerId));
+  // A row carrying a Billing Exception contribution (its own source link) is labelled "Billing Exception" — alongside any CN / Calendar label, never instead of it.
+  const billingDealerIds = useMemo(() => {
+    const ids = new Set(data?.billingEntryIds ?? []);
+    return new Set((data?.dealers ?? []).filter((d) => ids.has(d.entryId)).map((d) => d.dealerId));
+  }, [data?.billingEntryIds, data?.dealers]);
+  const taskTypeCell = (dealerId: string): string => {
+    const base = taskTypeText(rowTaskTypeOf(dealerId), taskTypeL);
+    if (!billingDealerIds.has(dealerId)) return base;
+    return rowTaskTypeOf(dealerId) === "MANUAL" ? L.taskTypeBilling : `${base} + ${L.taskTypeBilling}`;
+  };
   const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.taskTypeNone, calendar: L.taskTypeCalendar };
 
   const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", section, workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
@@ -759,9 +774,9 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                 const rowAutoTasks = (data?.materializedCnTasks ?? []).filter((task) => task.dealerId === r.dealerId);
                 return (
                   <TableRow data-dealer-id={r.dealerId} key={r.entryId}>
-                    <TableCell className={cn("font-medium", compactRecovery && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
+                    <TableCell className={cn("font-medium", compactRecovery && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} />{!isSales && !showTaskType && billingDealerIds.has(r.dealerId) && <span className="ml-2 rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-normal text-purple-700 dark:text-purple-300">{L.taskTypeBilling}</span>}</TableCell>
                     {/* Task Type — derived from the authoritative Auto Task contribution link (Daily Plan only). */}
-                    {showTaskType && <TableCell>{taskTypeText(rowTaskTypeOf(r.dealerId), taskTypeL)}</TableCell>}
+                    {showTaskType && <TableCell data-task-type>{taskTypeCell(r.dealerId)}</TableCell>}
                     {/* Monthly plan + pending are SOURCED and non-editable. */}
                     <TableCell className="text-right tabular-nums">{money(r.monthlyPlan)}</TableCell>
                     <TableCell className="text-right tabular-nums">{money(r.pending)}</TableCell>
@@ -845,6 +860,10 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
           </div>
         )}
       </div>
+
+      {!isSales && view === DailyWorkView.PLAN && (data?.billingTasks?.length ?? 0) > 0 && (
+        <BillingTaskPanel tasks={data!.billingTasks!} locked={locked} onChanged={invalidate} />
+      )}
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 

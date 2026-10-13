@@ -23,6 +23,8 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
     return modules[resource] ? [modules[resource], read ? "read" : p.endsWith("/status") ? "delete" : writeAction(method)] : null;
   }
   if (p === "audit") return ["audit", "read"];
+  // Recording a Billing Exception is its OWN action: a read (or export) grant never allows it.
+  if (p.startsWith("reports/last-payment/billing-exceptions") && !read) return ["lastPaymentReport", "create"];
   if (p === "reports/last-payment" || p.startsWith("reports/last-payment/")) return ["lastPaymentReport", p.endsWith("/export") ? "export" : "read"];
   if (p.startsWith("reports")) return ["reports", p.endsWith("/export") ? "export" : "read"];
   if (p.startsWith("calendar")) return ["calendar", read ? "read" : writeAction(method)];
@@ -35,6 +37,8 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
     if (p.endsWith("admin-view") || p.endsWith("review")) return read ? ["dailyWork", "read"] : null;
     return null; // Existing employee plan/actual/submit/rating flows are not administrative actions.
   }
+  // Billing Exception tasks: the responsible officer acts on them (service-checked); an administrative viewer may READ the originating exception. No administrative write.
+  if (p.startsWith("billing-exception-tasks")) return read ? ["lastPaymentReport", "read"] : null;
   if (p.startsWith("cn-requests")) {
     if (read) return ["cnRequests", "read"];
     if (p.endsWith("/act")) return ["cnRequests", "reject"];

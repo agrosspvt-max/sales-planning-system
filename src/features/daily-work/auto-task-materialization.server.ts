@@ -6,6 +6,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { lockDailyWorkDay, type DailyWorkDayState } from "./day-lock.server";
+import { materializeDueBillingTasksInTransaction } from "./billing-task.server";
 
 type DueTask = {
   sourceKind: "PAYMENT_EVENT" | "LEGACY_REQUEST";
@@ -40,6 +41,20 @@ export interface MaterializationResult {
  * page loads, Recovery reads, submissions and reschedules serialize without changing CN taskStatus semantics.
  */
 export async function materializeDueDailyWorkTasksInTransaction(
+  tx: Prisma.TransactionClient,
+  officerId: string,
+  workDate: string,
+  day: DailyWorkDayState,
+): Promise<MaterializationResult> {
+  const cn = await materializeDueCnTasksInTransaction(tx, officerId, workDate, day);
+  if (cn.finalized) return cn;
+  // Billing Exception tasks are a separate source with their own link / contribution; they ride the same lock, read paths and submit gates, and their count joins the total
+  // (a newly materialized task blocks finalization exactly like a CN task).
+  const billing = await materializeDueBillingTasksInTransaction(tx, officerId, workDate, day);
+  return { materializedTasks: cn.materializedTasks + billing.materialized, affectedDealers: cn.affectedDealers + billing.affectedDealers, finalized: false };
+}
+
+async function materializeDueCnTasksInTransaction(
   tx: Prisma.TransactionClient,
   officerId: string,
   workDate: string,

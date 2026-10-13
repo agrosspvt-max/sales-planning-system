@@ -59,4 +59,6 @@ export interface HistoricalResult {
   excluded: number;
   duplicates: number;
   alreadyImported: boolean;
+  /** Set when the import was saved but Billing Exceptions could not be re-checked against the new receipts (they are re-checked later). */
+  billingExceptionWarning?: string;
 }

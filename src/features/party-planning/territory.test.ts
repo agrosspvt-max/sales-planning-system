@@ -537,7 +537,7 @@ async function main() {
     assert.ok(ui.includes("<DistrictCell") && !ui.includes("district: v.district"), "District editing goes through the explicit-Save dropdown, not a blur-saving text box");
     // Seasonal / Monthly keep their searchable Market selectors and never see the editable Market.
     const seasonal = readFileSync("src/features/party-planning/seasonal-planning-page.tsx", "utf8"), monthly = readFileSync("src/features/party-planning/monthly-planning-page.tsx", "utf8");
-    assert.ok(seasonal.includes("seasonal-add-markets") && seasonal.includes("/api/territory-mapping/markets"), "Seasonal Market selector: datalist of the Market master");
+    assert.ok(seasonal.includes("seasonal-add-markets") && seasonal.includes("/api/seasonal-sheets/${sheetId}/markets") && !seasonal.includes("/api/territory-mapping/markets"), "Seasonal Market selector: datalist of the planner's OWN eligible Markets (scoped endpoint), never the global Market master");
     assert.ok(!seasonal.includes("MarketCell") && !monthly.includes("MarketCell") && !seasonal.includes("market-history") && !monthly.includes("market-history") && !monthly.includes("marketText"));
     for (const f of ["seasonal.server.ts", "monthly.server.ts"]) assert.ok(!readFileSync(`src/features/party-planning/${f}`, "utf8").includes("marketText"), `${f} never reads the manual override`);
   }

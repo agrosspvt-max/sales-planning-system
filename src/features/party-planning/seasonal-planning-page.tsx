@@ -23,9 +23,14 @@ import { fill, useLabels } from "./party-labels";
 
 /* ------------------------------------------- DTOs (mirror seasonal.server.ts) ------------------------------------------- */
 
-interface Market { id: string; name: string }
+/** `id` is null for a territory name with no Market record yet — it is then selected by `territoryMappingId` and the server resolves the record on save. */
+interface Market { id: string | null; territoryMappingId: string | null; name: string }
+interface EligibleMarkets { markets: Market[] }
+const optionKey = (m: Market) => m.id ?? `territory:${m.territoryMappingId}`;
+/** The save payload for a chosen option: the Market id, or the owner's territory mapping + the name shown (the server re-verifies both). */
+const choiceBody = (m: Market) => (m.id ? { marketId: m.id } : { territoryMappingId: m.territoryMappingId, expectedMarket: m.name });
 interface Plan {
-  id: string; seasonName: string; ownerName: string; marketId: string; marketName: string;
+  id: string; sheetId: string; seasonName: string; ownerName: string; marketId: string; marketName: string;
   type: "Existing" | "New" | null; marketPotential: string | null; status: "—" | "Pending" | "Appointed"; appointmentDate: string | null;
   approvalStatus: ApprovalStatus; rejectionStage: string | null; rejectionReason: string | null;
   rmDecidedByName: string | null; rmDecidedAt: string | null; adminDecidedByName: string | null; adminDecidedAt: string | null; createdAt: string; editable: boolean; canReview: boolean;
@@ -36,13 +41,37 @@ const dash = <span className="text-muted-foreground">—</span>;
 const dateText = (iso: string | null) => (iso ? new Date(iso.length === 10 ? `${iso}T00:00:00` : iso).toLocaleDateString("en-IN", { dateStyle: "medium" }) : null);
 
 /** Market picker: type to search the Phase-1 Market list; the chosen Market is resolved to its id (only an existing Market is accepted). */
-function MarketInput({ markets, value, onChange, listId, className }: { markets: Market[]; value: string; onChange: (text: string, marketId: string | null) => void; listId: string; className?: string }) {
+function MarketInput({ markets, value, onChange, listId, className }: { markets: Market[]; value: string; onChange: (text: string, market: Market | null) => void; listId: string; className?: string }) {
   const placeholder = useLabel("party_planning.seasonal.placeholder.search_market");
-  const resolve = (text: string) => markets.find((m) => marketNameKey(m.name) === marketNameKey(text))?.id ?? null;
+  const resolve = (text: string) => markets.find((m) => marketNameKey(m.name) === marketNameKey(text)) ?? null;
   return (
     <>
       <Input className={className} list={listId} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value, resolve(e.target.value))} />
-      <datalist id={listId}>{markets.map((m) => <option key={m.id} value={m.name} />)}</datalist>
+      <datalist id={listId}>{markets.map((m) => <option key={optionKey(m)} value={m.name} />)}</datalist>
+    </>
+  );
+}
+
+/**
+ * The Markets THIS planner may choose for this Seasonal Plan: their Existing Markets + their approved Vacant Markets (server-resolved from the signed-in
+ * user and the plan — never the global Market list, never a browser-supplied officer). Its own cache key per plan, and fetched afresh every time a
+ * dialog opens, so a new dealer mapping or a final approval shows up without reloading the page.
+ */
+function useEligibleMarkets(sheetId: string) {
+  return useQuery<EligibleMarkets>({
+    queryKey: ["seasonal-eligible-markets", sheetId], queryFn: () => api.get<EligibleMarkets>(`/api/seasonal-sheets/${sheetId}/markets`),
+    staleTime: 0, gcTime: 0, refetchOnMount: "always",
+  });
+}
+
+/** Loading / error / empty states for the Market field; the choices render only when there is something to choose from. */
+function MarketChoices({ q, children }: { q: ReturnType<typeof useEligibleMarkets>; children: (markets: Market[]) => React.ReactNode }) {
+  const T = useLabels({ loading: "party_planning.seasonal.markets.loading", error: "party_planning.seasonal.markets.error", empty: "party_planning.seasonal.markets.empty" });
+  if (q.isLoading) return <p role="status" className="text-sm text-muted-foreground">{T.loading}</p>;
+  if (q.error || !q.data) return <p role="alert" className="text-sm text-destructive">{fill(T.error, { message: (q.error as Error | null)?.message ?? "" })}</p>;
+  return (
+    <>
+      {q.data.markets.length === 0 ? <p role="status" className="text-sm text-muted-foreground">{T.empty}</p> : children(q.data.markets)}
     </>
   );
 }
@@ -80,7 +109,6 @@ export function SeasonalPlanDetailPage({ role, sheetId, stage = "create" }: { ro
     emptySubmitted: "party_planning.seasonal.empty_entries_submitted", emptyApproved: "party_planning.seasonal.empty_entries_approved", emptyOlder: "party_planning.seasonal.empty_entries_older" });
 
   const { data: detail, isLoading, error: loadError } = useQuery<SheetDetail>({ queryKey: ["seasonal-sheet", sheetId, stage], queryFn: () => api.get<SheetDetail>(`/api/seasonal-sheets/${sheetId}?stage=${stage}`) });
-  const { data: markets } = useQuery<Market[]>({ queryKey: ["territory-markets"], queryFn: () => api.get<Market[]>("/api/territory-mapping/markets") });
   const allPlans = detail?.plans;
   const plans = allPlans;
   const refresh = () => { qc.invalidateQueries({ queryKey: ["seasonal-sheet", sheetId] }); qc.invalidateQueries({ queryKey: ["seasonal-sheets"] }); };
@@ -159,22 +187,23 @@ export function SeasonalPlanDetailPage({ role, sheetId, stage = "create" }: { ro
         )}
       </div>
 
-      {adding && <AddPlanDialog sheetId={sheetId} markets={markets ?? []} onClose={() => setAdding(false)} onAdded={() => { setAdding(false); refresh(); }} />}
-      {editing && <EditDialog plan={editing} markets={markets ?? []} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
+      {adding && <AddPlanDialog sheetId={sheetId} onClose={() => setAdding(false)} onAdded={() => { setAdding(false); refresh(); }} />}
+      {editing && <EditDialog plan={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
       {rejecting && <RejectDialog plan={rejecting} pending={act.isPending} error={error} onCancel={() => setRejecting(null)} onConfirm={(reason) => act.mutate({ id: rejecting.id, action: "reject", reason })} />}
     </div>
   );
 }
 
 /** Add a Market to THIS Seasonal Plan: the searchable Market selector; POST /api/seasonal-plans { sheetId, marketId }. */
-function AddPlanDialog({ sheetId, markets, onClose, onAdded }: { sheetId: string; markets: Market[]; onClose: () => void; onAdded: () => void }) {
+function AddPlanDialog({ sheetId, onClose, onAdded }: { sheetId: string; onClose: () => void; onAdded: () => void }) {
+  const eligible = useEligibleMarkets(sheetId);
   const [text, setText] = useState("");
-  const [marketId, setMarketId] = useState<string | null>(null);
+  const [choice, setChoice] = useState<Market | null>(null);
   const [error, setError] = useState<string | null>(null);
   const T = useLabels({ title: "party_planning.action.add_market", market: "party_planning.seasonal.col.market", select: "party_planning.seasonal.validation.select_market", cancel: "party_planning.common.cancel", addPlan: "party_planning.seasonal.action.add_plan" });
-  const create = useMutation({ mutationFn: () => api.post("/api/seasonal-plans", { sheetId, marketId }), onSuccess: onAdded, onError: (e) => setError((e as Error).message) });
+  const create = useMutation({ mutationFn: () => api.post("/api/seasonal-plans", { sheetId, ...choiceBody(choice!) }), onSuccess: onAdded, onError: (e) => setError((e as Error).message) });
   const submit = () => {
-    if (!marketId) { setError(T.select); return; }
+    if (!choice) { setError(T.select); return; }
     setError(null); create.mutate();
   };
   return (
@@ -182,35 +211,36 @@ function AddPlanDialog({ sheetId, markets, onClose, onAdded }: { sheetId: string
       <DialogContent className="max-w-md">
         <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
         <div className="space-y-3">
-          <div className="space-y-1.5"><Label>{T.market} *</Label><MarketInput listId="seasonal-add-markets" markets={markets} value={text} onChange={(t, id) => { setText(t); setMarketId(id); setError(null); }} /></div>
+          <div className="space-y-1.5"><Label>{T.market} *</Label><MarketChoices q={eligible}>{(markets) => <MarketInput listId="seasonal-add-markets" markets={markets} value={text} onChange={(t, m) => { setText(t); setChoice(m); setError(null); }} />}</MarketChoices></div>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{T.cancel}</Button>
-          <Button disabled={create.isPending} onClick={submit}>{T.addPlan}</Button>
+          <Button disabled={create.isPending || !eligible.data || eligible.data.markets.length === 0} onClick={submit}>{T.addPlan}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
 
-function EditDialog({ plan, markets, onClose, onSaved }: { plan: Plan; markets: Market[]; onClose: () => void; onSaved: () => void }) {
+function EditDialog({ plan, onClose, onSaved }: { plan: Plan; onClose: () => void; onSaved: () => void }) {
+  const eligible = useEligibleMarkets(plan.sheetId);
   const [text, setText] = useState(plan.marketName);
-  const [marketId, setMarketId] = useState<string | null>(plan.marketId);
+  const [choice, setChoice] = useState<Market | null>({ id: plan.marketId, territoryMappingId: null, name: plan.marketName });
   const [error, setError] = useState<string | null>(null);
   const T = useLabels({ title: "party_planning.seasonal.dialog.edit_title", market: "party_planning.seasonal.col.market", cancel: "party_planning.common.cancel", save: "party_planning.common.save" });
-  const save = useMutation({ mutationFn: () => api.put(`/api/seasonal-plans/${plan.id}`, { marketId }), onSuccess: onSaved, onError: (e) => setError((e as Error).message) });
+  const save = useMutation({ mutationFn: () => api.put(`/api/seasonal-plans/${plan.id}`, choiceBody(choice!)), onSuccess: onSaved, onError: (e) => setError((e as Error).message) });
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
         <div className="space-y-3">
-          <div className="space-y-1.5"><Label>{T.market} *</Label><MarketInput listId="seasonal-edit-markets" markets={markets} value={text} onChange={(t, id) => { setText(t); setMarketId(id); }} /></div>
+          <div className="space-y-1.5"><Label>{T.market} *</Label><MarketChoices q={eligible}>{(markets) => <MarketInput listId="seasonal-edit-markets" markets={markets} value={text} onChange={(t, m) => { setText(t); setChoice(m); }} />}</MarketChoices></div>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{T.cancel}</Button>
-          <Button disabled={!marketId || save.isPending} onClick={() => save.mutate()}>{T.save}</Button>
+          <Button disabled={!choice || save.isPending || !eligible.data} onClick={() => save.mutate()}>{T.save}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

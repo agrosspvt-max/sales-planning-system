@@ -12,6 +12,7 @@ import {
   projectConversionEvents, type ConversionEvent, type ConversionEventInput,
   projectPartyAppointmentEvents, type PartyAppointmentEvent, type PartyAppointmentInput,
 } from "@/lib/calendar";
+import { loadCalendarBillingTasks, type CalendarBillingTaskDto } from "@/features/daily-work/billing-task-visibility.server";
 import { getCalendarEnabled } from "@/lib/recovery-config";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 
@@ -213,6 +214,8 @@ async function loadEntries(ctx: AuthContext, gte: Date, lt: Date, ownerIds: stri
 
 export interface CalendarPayload {
   events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[]; entries: CalendarEntryDto[];
+  /** Scheduled Billing Exception recovery tasks (read-only projection of the ONE task row; see billing-task-visibility.server.ts). */
+  billingTasks: CalendarBillingTaskDto[];
   canFilterOfficers: boolean; officers: CalendarOfficerOption[]; states: CalendarStateOption[];
   view: CalendarView; canTeamView: boolean; taskSections: string[]; paymentModes: string[];
   /** The caller's OWN assigned dealers (for the Daily Task form's Sales / Recovery dealer choice). [] when they cannot add tasks. */
@@ -239,6 +242,7 @@ export async function calendarMonth(ctx: AuthContext, opts: { year: number; mont
   const partyEvents = projectPartyAppointmentEvents(await loadPartyAppointments(gte, lt, ownerIds));
   const notes = await loadNotes(ctx, gte, lt, ownerIds);
   const entries = await loadEntries(ctx, gte, lt, ownerIds);
+  const billingTasks = await loadCalendarBillingTasks(ctx, gte, lt, ownerIds);
   // Filter options come from the caller's scope ONLY (never the whole company): Sales Officers AND Regional Managers.
   const canFilterOfficers = ctx.role !== Role.SALES_OFFICER && !(isRm && effectiveView === "mine");
   const options = canFilterOfficers ? await officerOptions(ctx) : [];
@@ -246,7 +250,7 @@ export async function calendarMonth(ctx: AuthContext, opts: { year: number; mont
   const myDealers = canOwnDailyTask(ctx.role) ? await loadMyDealers(ctx.userId) : [];
   return {
     myDealers,
-    events, partyEvents, notes, entries, canFilterOfficers,
+    events, partyEvents, notes, entries, billingTasks, canFilterOfficers,
     officers: options.map((o) => ({ id: o.id, name: o.name, role: o.role, roleLabel: roleLabel(o.role), groupId: o.group?.id ?? null })),
     states, view: effectiveView, canTeamView: isRm, taskSections: [...MANDATORY_SECTIONS], paymentModes: [...RECOVERY_PAYMENT_MODES],
   };
@@ -273,15 +277,16 @@ async function officerOptions(ctx: AuthContext): Promise<{ id: string; name: str
 }
 
 export interface UpcomingItem {
-  kind: "CONVERSION" | "PARTY_APPOINTMENT" | "NOTE";
+  kind: "CONVERSION" | "PARTY_APPOINTMENT" | "NOTE" | "BILLING_TASK";
   dateKey: string;
+  billingTask?: CalendarBillingTaskDto;
   event?: ConversionEvent;
   partyEvent?: PartyAppointmentEvent;
   note?: CalendarNoteDto;
 }
 
 /** Sort priority within a day: conversions first, then party appointments, then notes. */
-const UPCOMING_KIND_ORDER: Record<UpcomingItem["kind"], number> = { CONVERSION: 0, PARTY_APPOINTMENT: 1, NOTE: 2 };
+const UPCOMING_KIND_ORDER: Record<UpcomingItem["kind"], number> = { CONVERSION: 0, PARTY_APPOINTMENT: 1, BILLING_TASK: 2, NOTE: 3 };
 
 /** Upcoming conversions + party appointments + notes within [today, today+days) for the caller's scope —
  *  future-only, sorted by date then kind. */
@@ -297,9 +302,11 @@ export async function calendarUpcoming(ctx: AuthContext, days = 5): Promise<Upco
   const events = projectConversionEvents(rows.map((r) => toInput(r, upcomingAliasNames)));
   const partyEvents = projectPartyAppointmentEvents(await loadPartyAppointments(gte, lt, ownerIds));
   const notes = await loadNotes(ctx, gte, lt);
+  const billingTasks = await loadCalendarBillingTasks(ctx, gte, lt, ownerIds);
   const items: UpcomingItem[] = [
     ...events.map((e): UpcomingItem => ({ kind: "CONVERSION", dateKey: e.dateKey, event: e })),
     ...partyEvents.map((e): UpcomingItem => ({ kind: "PARTY_APPOINTMENT", dateKey: e.dateKey, partyEvent: e })),
+    ...billingTasks.map((t): UpcomingItem => ({ kind: "BILLING_TASK", dateKey: t.dateKey, billingTask: t })),
     ...notes.map((n): UpcomingItem => ({ kind: "NOTE", dateKey: n.dateKey, note: n })),
   ];
   return items.sort((a, b) => (a.dateKey === b.dateKey ? UPCOMING_KIND_ORDER[a.kind] - UPCOMING_KIND_ORDER[b.kind] : a.dateKey.localeCompare(b.dateKey)));

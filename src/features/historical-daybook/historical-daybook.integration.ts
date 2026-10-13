@@ -60,7 +60,7 @@ async function operationalSnapshot() {
   const out: Record<string, string> = {};
   for (const { tablename } of tables) {
     if (
-      ["LastPaymentImport", "LastPaymentReceipt", "AuditLog", "_prisma_migrations"].includes(
+      ["LastPaymentImport", "LastPaymentReceipt", "DealerPaymentReceipt", "DealerLastPayment", "AuditLog", "_prisma_migrations"].includes(
         tablename,
       )
     )
@@ -819,7 +819,7 @@ async function run() {
   assert.equal(Number(monthlyRow.monthRecoveryPlan), 30000);
   const afterMonthly = await operationalSnapshot();
   for (const table of Object.keys(beforeNormal))
-    if (table !== "RecoveryPlanDealer")
+    if (table !== "RecoveryPlanDealer" && table !== "LastPaymentJob") // LastPaymentJob = the additive durable hand-off written WITH the monthly commit (no Recovery value is read or changed by it)
       assert.equal(
         afterMonthly[table],
         beforeNormal[table],

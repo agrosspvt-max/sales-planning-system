@@ -10,7 +10,7 @@ import { TestApiError, testLoader } from "@/features/dealer-tags/test-loader";
 import { navForRole } from "@/features/navigation/nav";
 import { resolveNavState } from "@/features/navigation/nav-state";
 import {
-  DAYBOOK_UPLOAD_AUDIT_ENTITY, DAYBOOK_UPLOAD_AUDIT_PREFIX, applyFilterStep, formatLastUpdate, applyPaymentAging, applyReportFilters, buildPaymentAging, cascadedFilterOptions, pruneReportFilters, reportFilterOptions, sameReportFilters, type ReportFilterable, calendarDaysBetween, daysSincePayment, matchesPaymentAging, parseAgingDays, parseLastPaymentReportParams,
+  DAYBOOK_UPLOAD_AUDIT_ENTITY, DAY_BUCKETS, bucketOfAging, dayBucketAsAging, dayBucketOf, summarizeDays, DAYBOOK_UPLOAD_AUDIT_PREFIX, applyFilterStep, formatLastUpdate, applyPaymentAging, applyReportFilters, buildPaymentAging, cascadedFilterOptions, pruneReportFilters, reportFilterOptions, sameReportFilters, type ReportFilterable, calendarDaysBetween, daysSincePayment, matchesPaymentAging, parseAgingDays, parseLastPaymentReportParams,
   parsePaymentAging, paymentAgingLabel, paymentAgingToParams, sortByDays, type PaymentAgingFilter,
 } from "@/lib/last-payment-report";
 import { lastPaymentMonthEnd } from "@/lib/last-payment";
@@ -22,10 +22,11 @@ const officers: Record<string, { name: string; territory: string; group: string 
   arjun: { name: "Arjun Yadav", territory: "BHOPAL", group: "MP" }, sunil: { name: "Sunil", territory: "RAIPUR", group: "CG" },
   chhitranjan: { name: "Chhitranjan", territory: "INDORE", group: "MP" }, "rm-1": { name: "RM One", territory: "HQ", group: "MP" },
   rahul: { name: "Rahul Patidar", territory: "LUCKNOW", group: "UP" },
+  ghost: { name: "Gita Inactive", territory: "NAGPUR", group: "MH" }, // owns only the INACTIVE dealer d-i (listed for administrators; outside the SO / RM fixtures' scope)
 };
 // dealerId → open assignments (the LAST entry is the most recent = the CURRENT owner, as resolveCurrentOwner decides).
 const openAssignments: Record<string, string[]> = {
-  "d-a": ["arjun"], "d-b": ["sunil"], "d-c": ["chhitranjan"], "d-d": ["rahul"], "d-e": ["rm-1"], "d-h": ["arjun", "rahul"], "d-i": ["arjun"],
+  "d-a": ["arjun"], "d-b": ["sunil"], "d-c": ["chhitranjan"], "d-d": ["rahul"], "d-e": ["rm-1"], "d-h": ["arjun", "rahul"], "d-i": ["ghost"],
 };
 const dealers = [
   // `status` = the existing Dealer.status (the report's dataset keeps its existing isActive gate, so INACTIVE dealers stay out).
@@ -60,6 +61,7 @@ const currentOwner = (dealerId: string) => openAssignments[dealerId]?.at(-1);
 let audits: { entity: string; summary: string | null; createdAt: Date }[] = [];
 let imports: { createdAt: Date }[] = [];
 const newest = <T extends { createdAt: Date }>(rows: T[]) => [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ?? null;
+const currentExceptions: { dealerId: string }[] = []; // CURRENT billing exceptions (the report only COUNTS them per dealer)
 let queries = { legacy: 0, history: 0, dealers: 0 };
 let lookedUp: string[] = []; // the dealer ids the (single) Last Payment lookup was asked about
 const prisma = {
@@ -78,6 +80,10 @@ const prisma = {
       newest(audits.filter((a) => a.entity === where.entity && (a.summary ?? "").startsWith(where.summary.startsWith))),
   },
   lastPaymentImport: { findFirst: async () => newest(imports) },
+  // The persistent latest-payment state (empty here → the report falls back to the previous source, which is what this suite pins; persistence has its own suite).
+  dealerLastPayment: { findMany: async () => [] },
+  dealerPaymentReceipt: { findMany: async () => [] },
+  billingException: { groupBy: async ({ where }: { where: { dealerId: { in: string[] } } }) => [...new Set(currentExceptions.map((e) => e.dealerId))].filter((id) => where.dealerId.in.includes(id)).map((dealerId) => ({ dealerId, _count: { _all: currentExceptions.filter((e) => e.dealerId === dealerId).length } })) },
   lastPaymentReceipt: {
     findMany: async ({ where }: { where: { dealerId: { in: string[] }; receiptDate: { lte: Date } } }) => {
       queries.history++;
@@ -115,7 +121,7 @@ async function service() {
   const byId = Object.fromEntries(adminReport.items.map((r) => [r.dealerId, r]));
 
   // 3, 16 — dealer information comes from the authoritative sources: dealer (alias-preferred name) + CURRENT owner.
-  assert.deepEqual(plain(byId["d-a"]), { dealerId: "d-a", party: "Alpha Traders", status: "ACTIVE", state: "MP", territory: "BHOPAL", salesOfficer: "Arjun Yadav", lastPaymentDate: "2026-10-02", amount: 50000, days: 3 });
+  assert.deepEqual(plain(byId["d-a"]), { dealerId: "d-a", party: "Alpha Traders", status: "ACTIVE", state: "MP", territory: "BHOPAL", salesOfficer: "Arjun Yadav", lastPaymentDate: "2026-10-02", amount: 50000, days: 3, billingStatus: "OPEN", currentExceptions: 0 });
   assert.equal(byId["d-b"].party, "Beta Alias", "alias-preferred display name");
   assert.deepEqual([byId["d-c"].state, byId["d-c"].territory, byId["d-c"].salesOfficer], ["MP", "INDORE", "Chhitranjan"]);
   assert.deepEqual([byId["d-h"].salesOfficer, byId["d-h"].state], ["Rahul Patidar", "UP"], "a reassigned dealer reports its CURRENT owner");
@@ -166,18 +172,18 @@ async function service() {
   for (const list of [asc, desc]) {
     const firstEmpty = list.findIndex((r) => r.days === null);
     assert.ok(list.slice(firstEmpty).every((r) => r.days === null), "no-payment dealers are contiguous at the end");
-    assert.equal(list.length - firstEmpty, 3);
+    assert.equal(list.length - firstEmpty, 4);
   }
   const numeric = sortByDays([{ days: 10, party: "a", dealerId: "1" }, { days: 9, party: "b", dealerId: "2" }, { days: 2, party: "c", dealerId: "3" }, { days: 100, party: "d", dealerId: "4" }, { days: null, party: "e", dealerId: "5" }], "days_asc");
   assert.deepEqual(numeric.map((r) => r.days), [2, 9, 10, 100, null], "10 sorts after 9 (numeric, not lexicographic)");
 
   // 12–14 — scope: the existing officer scope, enforced by the query and on each dealer's current owner.
-  assert.deepEqual(ids(adminReport.items), ["d-a", "d-b", "d-c", "d-d", "d-e", "d-f", "d-h"], "Admin: every active dealer (inactive excluded)");
+  assert.deepEqual(ids(adminReport.items), ["d-a", "d-b", "d-c", "d-d", "d-e", "d-f", "d-h", "d-i"], "Admin: every Dealer Master record, ACTIVE AND INACTIVE (soft-deleted ones stay hidden)");
   assert.deepEqual(ids((await run(rm)).items), ["d-a", "d-b", "d-c", "d-e"], "RM: own + team dealers only; the reassigned dealer's current owner is out of scope");
   assert.deepEqual(ids((await run(so)).items), ["d-a"], "Sales Officer: own dealers only");
   // 15 — scope cannot be widened through parameters.
   const hostile = parseLastPaymentReportParams(new URLSearchParams("officerId=rahul&scope=all&dealerId=d-d&search=&sort=days_asc"));
-  assert.deepEqual(Object.keys(hostile).sort(), ["filters", "page", "pageSize", "paymentAging", "search", "sort"], "only search/sort/page/pageSize/filters/paymentAging exist");
+  assert.deepEqual(Object.keys(hostile).sort(), ["dayBucket", "filters", "page", "pageSize", "paymentAging", "search", "sort"], "only search/sort/page/pageSize/filters/paymentAging/dayBucket exist");
   assert.deepEqual(plain(hostile.filters), {}, "officerId/scope/dealerId are not filter parameters and are ignored");
   assert.deepEqual(ids(plain(await report.getLastPaymentReport(rm, hostile, TODAY)).items), ["d-a", "d-b", "d-c", "d-e"]);
   assert.deepEqual(ids(plain(await report.getLastPaymentReport(so, hostile, TODAY)).items), ["d-a"]);
@@ -188,10 +194,10 @@ async function service() {
   assert.deepEqual(ids((await run(admin, { search: "beta alias" })).items), ["d-b"]);
   assert.deepEqual((await run(admin, { search: "a", sort: "days_asc" })).items.filter((r) => r.days !== null).map((r) => r.days), [0, 3, 4, 20], "search and Days sorting combine");
   assert.deepEqual((await run(admin, { search: "ALPHA" })).items.map((r) => r.dealerId), ["d-a"], "case-insensitive");
-  assert.deepEqual((await run(admin, { search: "" })).items.length, 7);
+  assert.deepEqual((await run(admin, { search: "" })).items.length, 8);
   // paging is server-side
   const paged = await run(admin, { pageSize: 3, page: 2, sort: "days_asc" });
-  assert.deepEqual([paged.page, paged.totalPages, paged.total, paged.items.length], [2, 3, 7, 3]);
+  assert.deepEqual([paged.page, paged.totalPages, paged.total, paged.items.length], [2, 3, 8, 3]);
 
   // Performance: one batched receipt lookup however many dealers, never per dealer.
   queries = { legacy: 0, history: 0, dealers: 0 };
@@ -201,11 +207,11 @@ async function service() {
 
 /* ---------------------------------- column filters ---------------------------------- */
 async function filters() {
-  const ALL = ["d-a", "d-b", "d-c", "d-e", "d-f", "d-h"].concat(["d-d"]).sort();
+  const ALL = ["d-a", "d-b", "d-c", "d-e", "d-f", "d-h", "d-i"].concat(["d-d"]).sort();
   const f = async (c: AuthContext, filter: Record<string, string[]>, over = {}) => run(c, { filters: filter, ...over });
   const unfiltered = await run(admin);
   const rowsOf = (r: { items: { dealerId: string }[] }) => ids(r.items);
-  assert.deepEqual(rowsOf(unfiltered), ALL.filter((x) => x !== "d-i"), "baseline: Admin scope");
+  assert.deepEqual(rowsOf(unfiltered), ALL, "baseline: Admin scope (Dealer Master incl. inactive)");
 
   // 5–8, 9 — each filter supports several selections, OR-ed within the column.
   assert.deepEqual(rowsOf(await f(admin, { party: ["d-a", "d-b"] })), ["d-a", "d-b"], "Party OR");
@@ -250,10 +256,10 @@ async function filters() {
   // 18 — options are built from the caller's scoped dataset only.
   const values = (o: { value: string }[]) => o.map((x) => x.value).sort();
   const adminOpts = unfiltered.options;
-  assert.deepEqual(values(adminOpts.officer), ["arjun", "chhitranjan", "rahul", "rm-1", "sunil"]);
-  assert.deepEqual(values(adminOpts.state), ["CG", "MP", "UP"]);
-  assert.deepEqual(values(adminOpts.territory), ["BHOPAL", "HQ", "INDORE", "LUCKNOW", "RAIPUR"]);
-  assert.deepEqual(values(adminOpts.party), ["d-a", "d-b", "d-c", "d-d", "d-e", "d-f", "d-h"], "Admin Party options: every dealer in scope, including those with no officer");
+  assert.deepEqual(values(adminOpts.officer), ["arjun", "chhitranjan", "ghost", "rahul", "rm-1", "sunil"]);
+  assert.deepEqual(values(adminOpts.state), ["CG", "MH", "MP", "UP"]);
+  assert.deepEqual(values(adminOpts.territory), ["BHOPAL", "HQ", "INDORE", "LUCKNOW", "NAGPUR", "RAIPUR"]);
+  assert.deepEqual(values(adminOpts.party), ["d-a", "d-b", "d-c", "d-d", "d-e", "d-f", "d-h", "d-i"], "Admin Party options: every dealer in scope, including those with no officer");
   assert.equal(adminOpts.party.find((p) => p.value === "d-b")?.label, "Beta Alias", "Party options use the displayed name");
   const rmOpts = (await run(rm)).options;
   assert.deepEqual(values(rmOpts.officer), ["arjun", "chhitranjan", "rm-1", "sunil"], "RM options: no officer outside RM scope");
@@ -382,7 +388,7 @@ async function paymentAging() {
     assert.equal(parsePaymentAging(new URLSearchParams(bad)), null, `invalid URL ignored: ${bad}`);
   }
   assert.deepEqual(plain(parseLastPaymentReportParams(new URLSearchParams("state=CG&sort=days_asc&search=x&paymentAgingOperator=gt&paymentAgingValue=45"))),
-    { search: "x", sort: "days_asc", page: 1, pageSize: 50, filters: { state: ["CG"] }, paymentAging: gt(45) }, "aging sits beside — never replaces — the other parameters");
+    { search: "x", sort: "days_asc", page: 1, pageSize: 50, filters: { state: ["CG"] }, paymentAging: gt(45), dayBucket: null }, "aging sits beside — never replaces — the other parameters");
   assert.equal(paymentAgingLabel(gt(45)), "> 45"); assert.equal(paymentAgingLabel({ operator: "between", from: 30, to: 60 }), "30–60");
   assert.deepEqual(applyPaymentAging([{ days: 5 }, { days: null }, { days: 50 }], gt(10)), [{ days: 50 }]);
 }
@@ -406,7 +412,7 @@ async function cascading() {
   same(labels(opts({ state: ["UP"] }).territory), ["BARABANKI", "GORAKHPUR", "LUCKNOW"], "UP territories only");
   same(labels(opts({ state: ["UP"] }).officer), ["Deepak", "Santosh", "Vinay"], "UP officers only");
   same(labels(opts({ state: ["UP"] }).party), ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"], "UP dealers only");
-  assert.deepEqual(Object.keys(opts({ state: ["UP"] })).sort(), ["officer", "party", "state", "status", "territory"], "no filter disappears");
+  assert.deepEqual(Object.keys(opts({ state: ["UP"] })).sort(), ["authBy", "billing", "officer", "party", "state", "status", "territory"], "no filter disappears");
   same(labels(opts({ state: ["UP"] }).state), ["CG", "MP", "UP"], "a column's own options are not narrowed by itself (more values can be added)");
   // 4–5 — State + Territory narrows Sales Officer and Party.
   same(labels(opts({ state: ["UP"], territory: ["LUCKNOW"] }).officer), ["Santosh", "Vinay"], "UP + LUCKNOW officers");
@@ -465,10 +471,74 @@ async function cascading() {
   // Last Payment values are untouched by cascading.
   const before = Object.fromEntries((await run(admin)).items.map((r) => [r.dealerId, r]));
   for (const row of (await filtersOf(admin, { state: ["MP"], territory: ["BHOPAL"] })).items) assert.deepEqual(plain(row), plain(before[row.dealerId]), `${row.dealerId} unchanged`);
+  // Billing Status header filter: the report's own computed status, over the FULL result set (before paging), combined with the other filters, and carried into the export.
+  {
+    const everyone = (await run(admin, { pageSize: 200 })).items as { dealerId: string; billingStatus: string; state: string | null }[];
+    const present = [...new Set(everyone.map((r) => r.billingStatus))];
+    assert.ok(present.length >= 2, "the fixture spans several Billing Statuses");
+    for (const st of present) {
+      const want = everyone.filter((r) => r.billingStatus === st).map((r) => r.dealerId).sort();
+      const got = await run(admin, { pageSize: 200, filters: { billing: [st] } });
+      assert.deepEqual(ids(got.items).sort(), want, `Billing Status = ${st}`);
+      assert.equal(got.total, want.length);
+      // before pagination: one row per page → totals and page counts describe the filtered set, and every page holds only that status
+      const paged = await run(admin, { pageSize: 1, page: 1, filters: { billing: [st] } });
+      assert.deepEqual([paged.total, paged.totalPages], [want.length, want.length], `${st}: totals / page counts follow the filter`);
+      const exported = (await report.getLastPaymentReportExport(admin, params({ filters: { billing: [st] } }), TODAY)).rows;
+      assert.deepEqual(plain(exported).map((r: { dealerId: string }) => r.dealerId).sort(), want, `${st}: the export respects the filter`);
+    }
+    const [first, second] = present as [string, string];
+    assert.equal((await run(admin, { pageSize: 200, filters: { billing: [first, second] } })).total, everyone.filter((r) => r.billingStatus === first || r.billingStatus === second).length, "several choices are OR-ed");
+    const withState = await run(admin, { pageSize: 200, filters: { billing: [first], state: ["MP"] } });
+    assert.deepEqual(ids(withState.items).sort(), everyone.filter((r) => r.billingStatus === first && r.state === "MP").map((r) => r.dealerId).sort(), "combined with the other filters");
+    const withSearch = await run(admin, { pageSize: 200, search: "alpha", filters: { billing: [first] } });
+    assert.ok(withSearch.items.every((r: { party: string; billingStatus: string }) => /alpha/i.test(r.party) && r.billingStatus === first), "combined with search");
+    assert.equal((await run(admin, { pageSize: 200, filters: { billing: ["NOT_A_STATUS"] } })).total, 0, "an unknown value matches nothing (never widens)");
+    assert.deepEqual(plain((await run(admin)).options.billing).map((o: { label: string }) => o.label), ["Open", "Blocked", "Billing Exception", "Unavailable"], "the four choices");
+    assert.equal((await run(rm, { pageSize: 200, filters: { billing: [first] } })).items.every((r: { dealerId: string }) => ["d-a", "d-b", "d-c", "d-e"].includes(r.dealerId)), true, "the filter never widens a role's scope");
+  }
+  // Days summary panel: exact boundaries, counts before the quick filter, quick filter = table + export, never counting missing Days.
+  {
+    const B = dayBucketOf;
+    assert.deepEqual([0, 30, 31, 44, 45, 60, 61, 90, 91, 400].map(B), ["0-30", "0-30", "31-44", "31-44", "45-60", "45-60", "61-90", "61-90", "91+", "91+"], "boundaries 0/30/31/44/45/60/61/90/91");
+    assert.deepEqual([B(null), B(undefined), B(-1), B(Number.NaN)], [null, null, null, null], "missing Days is never 0 and never in a bucket");
+    const sm = summarizeDays([{ dealerId: "a", days: 0 }, { dealerId: "b", days: null }, { dealerId: "a", days: 0 }, { dealerId: "c", days: 91 }]);
+    assert.deepEqual([sm.total, sm.buckets["0-30"], sm.buckets["91+"]], [3, 1, 1], "unique dealer ids; a dealer without Days counts in All only");
+    assert.deepEqual(DAY_BUCKETS.map((b) => b.label), ["30 Days or Less", "31–44 Days", "45–60 Days", "61–90 Days", "90+ Days"]);
+    assert.equal(bucketOfAging(dayBucketAsAging("61-90")), "61-90"); assert.equal(bucketOfAging({ operator: "gt", value: 45 }), null);
+    const everyone = (await run(admin, { pageSize: 200 })).items as { dealerId: string; days: number | null; party: string; state: string | null }[];
+    const sum = (await run(admin, { pageSize: 200 })).summary;
+    assert.equal(sum.total, everyone.length, "All Dealers = every dealer in scope (unavailable included)");
+    for (const b of DAY_BUCKETS) {
+      const want = everyone.filter((r) => dayBucketOf(r.days) === b.key).map((r) => r.dealerId).sort();
+      assert.equal(sum.buckets[b.key], want.length, `${b.label}: count`);
+      const got = await run(admin, { pageSize: 200, dayBucket: b.key });
+      assert.deepEqual(ids(got.items).sort(), want, `${b.label}: table = the counted dealers`);
+      assert.equal(got.total, sum.buckets[b.key], `${b.label}: table total equals the summary count`);
+      assert.deepEqual(plain(got.summary), plain(sum), `${b.label}: counts are taken BEFORE the quick filter (other buckets stay available)`);
+      const paged = await run(admin, { pageSize: 1, page: 1, dayBucket: b.key });
+      assert.equal(paged.total, want.length, `${b.label}: pagination total`);
+      if (want.length > 0) assert.equal(paged.totalPages, want.length, `${b.label}: page count`);
+      assert.deepEqual(plain((await report.getLastPaymentReportExport(admin, params({ dayBucket: b.key }), TODAY)).rows).map((r: { dealerId: string }) => r.dealerId).sort(), want, `${b.label}: export respects the quick filter`);
+    }
+    // counts respect search, column filters, Billing Status and the manual Days constraint (before the quick filter)
+    const mp = await run(admin, { pageSize: 200, filters: { state: ["MP"] } });
+    assert.equal(mp.summary.total, mp.total, "state filter narrows the summary");
+    const alpha = await run(admin, { pageSize: 200, search: "alpha" });
+    assert.equal(alpha.summary.total, alpha.items.length, "search narrows the summary");
+    const manual = await run(admin, { pageSize: 200, paymentAging: { operator: "between", from: 0, to: 60 } });
+    assert.ok(DAY_BUCKETS.filter((b) => b.max === null || b.min > 60).every((b) => manual.summary.buckets[b.key] === 0) && manual.summary.total === manual.total, "a manual Days constraint narrows the summary");
+    const within = await run(admin, { pageSize: 200, paymentAging: { operator: "between", from: 0, to: 60 }, dayBucket: "45-60" });
+    assert.ok(within.items.every((r: { days: number | null }) => r.days !== null && r.days >= 45 && r.days <= 60) && within.total === manual.summary.buckets["45-60"], "the bucket applies inside the manual constraint; displayed count = resulting table");
+    const bs = await run(admin, { pageSize: 200, filters: { billing: ["UNAVAILABLE"] } });
+    assert.ok(bs.summary.total === bs.total && Object.values(bs.summary.buckets).every((n) => n === 0), "unavailable payments are in All Dealers only");
+    const rmSum = (await run(rm, { pageSize: 200 })).summary;
+    assert.equal(rmSum.total, 4, "scope: an RM's summary counts only their team");
+  }
   // Page wiring: all four filters stay visible; the page adopts the server's applied (pruned) selections.
   const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
   assert.ok(page.includes("sameReportFilters(cleaned, pending)") && page.includes("setPending(cleaned)") && page.includes("!optionsQuery.isPlaceholderData"), "an invalid child selection is cleared from the PENDING state");
-  assert.equal((page.match(/<ColumnFilterHeader/g) ?? []).length, 1, "the four filters are still rendered (one mapped header), never hidden");
+  assert.equal((page.match(/<ColumnFilterHeader/g) ?? []).length, 3, "the mapped column filters plus the Billing Status and Authorized By header filters (same component), never hidden");
 }
 
 /* ---------------------------------- Status column + cascading Status filter ---------------------------------- */
@@ -515,7 +585,7 @@ async function statusFilter() {
   const all = await run(admin);
   const byId = Object.fromEntries(all.items.map((r) => [r.dealerId, r]));
   // 1 — the column carries each dealer's CURRENT Dealer.status.
-  assert.deepEqual(Object.fromEntries(all.items.map((r) => [r.dealerId, r.status])), { "d-a": "ACTIVE", "d-b": "ACTIVE", "d-c": "DEFAULTER", "d-d": "ACTIVE", "d-e": "PENDING", "d-f": "ACTIVE", "d-h": "ACTIVE" });
+  assert.deepEqual(Object.fromEntries(all.items.map((r) => [r.dealerId, r.status])), { "d-a": "ACTIVE", "d-b": "ACTIVE", "d-c": "DEFAULTER", "d-d": "ACTIVE", "d-e": "PENDING", "d-f": "ACTIVE", "d-h": "ACTIVE", "d-i": "INACTIVE" });
   dealers.find((d) => d.id === "d-c")!.status = "ACTIVE"; // master data changes → the report follows (no cached copy)
   assert.equal((await run(admin)).items.find((r) => r.dealerId === "d-c")!.status, "ACTIVE", "reflects the dealer's current status");
   dealers.find((d) => d.id === "d-c")!.status = "DEFAULTER";
@@ -523,7 +593,7 @@ async function statusFilter() {
   assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"] })).items), ["d-a", "d-b", "d-d", "d-f", "d-h"]);
   assert.deepEqual(ids((await f(admin, { status: ["DEFAULTER", "PENDING"] })).items), ["d-c", "d-e"], "Status OR");
   assert.deepEqual(ids((await f(admin, { status: ["ACTIVE"], state: ["MP"] })).items), ["d-a"], "Status AND State");
-  assert.deepEqual(ids((await f(admin, { status: ["INACTIVE"] })).items), [], "Inactive dealers are outside this report's existing dataset");
+  assert.deepEqual(ids((await f(admin, { status: ["INACTIVE"] })).items), ["d-i"], "Inactive dealers are part of the report (Dealer Master); the Status filter finds them");
   // 3 — Status participates in the cascade on the real dataset.
   const mpActive = await f(admin, { state: ["MP"], status: ["ACTIVE"] });
   assert.deepEqual(mpActive.options.territory.map((o) => o.value).sort(), ["BHOPAL"], "State + Status → territories");
@@ -636,7 +706,7 @@ async function exportTests() {
     const ws = wb.worksheets[0]!;
     const cell = (r: number, c: number) => { const v = ws.getCell(r, c).value; return v == null || v === "" ? null : (v as string | number); };
     const headerRow = 4; // title (1), Last Update (2), blank (3), headers (4)
-    const headers = Array.from({ length: 8 }, (_, i) => String(cell(headerRow, i + 1)));
+    const headers = Array.from({ length: 9 }, (_, i) => String(cell(headerRow, i + 1)));
     const rows: Sheet["rows"] = [];
     for (let r = headerRow + 1; r <= ws.rowCount; r++) rows.push(Object.fromEntries(headers.map((h, i) => [h, cell(r, i + 1)])));
     return { status: 200, title: String(cell(1, 1)), meta: [String(cell(2, 1))], headers, rows, filename: res.init.headers?.["Content-Disposition"], contentType: res.init.headers?.["Content-Type"] };
@@ -649,10 +719,10 @@ async function exportTests() {
   assert.equal(all.status, 200); assert.match(all.contentType!, /spreadsheetml/); assert.match(all.filename!, /Last_Payment_Report\.xlsx/);
   assert.equal(all.title, "Last Payment Report");
   assert.deepEqual(all.meta, ["Last Update: 06/10/2026"], "the SAME Last Update the page shows (Day Book upload date, India date) above the table");
-  assert.deepEqual(all.headers, ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Amount", "Days"], "same columns and order as the UI");
-  assert.equal(all.rows.length, 7, "all authorized dealers");
+  assert.deepEqual(all.headers, ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Amount", "Days", "Billing Status"], "same columns and order as the UI (Billing Status appended)");
+  assert.equal(all.rows.length, 8, "all authorized dealers (Dealer Master incl. inactive)");
   const pageHtml = await draw(admin);
-  assert.deepEqual([...pageHtml.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).slice(0, 8), all.headers, "export headers == UI headers");
+  assert.deepEqual([...pageHtml.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).slice(0, 9), all.headers.filter((h) => h !== "Amount"), "export headers == UI headers (the UI shows the amount under the date; the Excel keeps both columns)");
   const a = all.rows.find((r) => r["Party"] === "Alpha Traders")!;
   assert.deepEqual([a["Status"], a["State"], a["Territory"], a["Sales Officer"], a["Last Payment Date"], a["Amount"], a["Days"]], ["Active", "MP", "BHOPAL", "Arjun Yadav", "02/10/2026", 50000, 3], "display labels, DD/MM/YYYY, numeric amount/days — the page's calculated values");
   const e = all.rows.find((r) => r["Party"] === "Epsilon RM Dealer")!;
@@ -678,10 +748,10 @@ async function exportTests() {
 
   // 8 + 13 — a result that spans several UI pages exports ALL of it; the paged report itself is unchanged.
   const paged = await run(admin, { pageSize: 3, page: 1 });
-  assert.equal(paged.items.length, 3); assert.equal(paged.total, 7); assert.equal(paged.totalPages, 3);
-  assert.equal((await exportFile("pageSize=3&page=1")).rows.length, 7, "pageSize / page are ignored by the export: all 7, not the 3 on page 1");
-  assert.equal((await exportFile("pageSize=3&page=3")).rows.length, 7, "…and not the last page's 1 row either");
-  assert.deepEqual(plain((await run(admin, { pageSize: 3, page: 3 })).items.length), 1, "the UI still paginates normally");
+  assert.equal(paged.items.length, 3); assert.equal(paged.total, 8); assert.equal(paged.totalPages, 3);
+  assert.equal((await exportFile("pageSize=3&page=1")).rows.length, 8, "pageSize / page are ignored by the export: all 8, not the 3 on page 1");
+  assert.equal((await exportFile("pageSize=3&page=3")).rows.length, 8, "…and not the last page's 2 rows either");
+  assert.deepEqual(plain((await run(admin, { pageSize: 3, page: 3 })).items.length), 2, "the UI still paginates normally");
 
   // 11 — scope: only what the caller may already see; hostile scope parameters are ignored / match nothing.
   assert.deepEqual(parties(await exportFile("", rm)), ["Alpha Traders", "Beta Alias", "Epsilon RM Dealer", "Gamma Agro"], "RM: own team only");
@@ -803,7 +873,8 @@ function sidebar() {
 let requested = ""; let requestedOptions = ""; let urlQuery = ""; let servedOptions: unknown; let preset: Record<number, unknown> = {}; let stateCall = 0; let served: unknown = { items: [], total: 0, page: 1, pageSize: 50, totalPages: 1 };
 const pageLoad = testLoader({
   // useState order: 0 search, 1 sort, 2 page, 3 pending filters, 4 Payment Aging, 5 applied filters, 6 applying
-  react: { ...React, useState: (initial: unknown) => { const i = stateCall++; return [i < 7 && i in preset ? preset[i] : initial, () => {}]; } },
+  // The page wrapper owns 2 states (main tab, Billing Exception sub-tab); the Last Payment view's own states follow: 2 + (0 search … 6 applying).
+  react: { ...React, useState: (initial: unknown) => { const i = stateCall++ - 2; return [i >= 0 && i < 7 && i in preset ? preset[i] : initial, () => {}]; } },
   "next/navigation": { useSearchParams: () => new URLSearchParams(urlQuery) },
   "@tanstack/react-query": { keepPreviousData: {}, useQuery: ({ queryKey, queryFn }: { queryKey: unknown[]; queryFn: () => unknown }) => { void queryFn(); return queryKey[0] === "last-payment-report-options" ? { data: servedOptions, isLoading: false, isFetching: false, isPlaceholderData: false, error: null } : { data: served, isLoading: false, isFetching: false, isPlaceholderData: false, error: null }; } },
   "@/lib/api-client": { api: { get: async (url: string) => { if (url.includes("optionsOnly=1")) requestedOptions = url; else requested = url; return {}; } } },
@@ -818,14 +889,14 @@ async function page() {
   let html = await draw(admin);
   // 1 — the page renders; columns appear in the required order.
   assert.ok(html.includes("Last Payment Report"));
-  assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()), ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Amount", "Days"]);
+  assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()), ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Days", "Billing Status"]);
   const row = (id: string) => (html.match(new RegExp(`<tr[^>]*data-dealer-id="${id}"[^>]*>(.*?)</tr>`)) ?? [])[1] ?? "";
   const cells = (id: string) => [...row(id).matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim());
   // 3, 6 — formatting conventions: date, ₹ currency, Days.
-  assert.deepEqual(cells("d-a"), ["Alpha Traders", "Active", "MP", "BHOPAL", "Arjun Yadav", "2 Oct 2026", "₹50,000", "3"]);
+  assert.deepEqual(cells("d-a"), ["Alpha Traders", "Active", "MP", "BHOPAL", "Arjun Yadav", "2 Oct 2026₹50,000", "3", "Open"]);
   // 8 — empty representation.
-  assert.deepEqual(cells("d-e"), ["Epsilon RM Dealer", "Pending", "MP", "HQ", "RM One", "—", "—", "—"]);
-  assert.deepEqual(cells("d-f"), ["Zeta Unassigned", "Active", "—", "—", "—", "—", "—", "—"], "a dealer with no owner shows empty values");
+  assert.deepEqual(cells("d-e"), ["Epsilon RM Dealer", "Pending", "MP", "HQ", "RM One", "—", "—", "Unavailable"]);
+  assert.deepEqual(cells("d-f"), ["Zeta Unassigned", "Active", "—", "—", "—", "—", "—", "Unavailable"], "a dealer with no owner shows empty values");
   // 9, 10 — the clickable Days header with a direction indicator (default: most days first).
   assert.ok(html.includes('aria-label="Sort by Days"') && html.includes('aria-sort="descending"') && html.includes('aria-label="descending"'));
   html = await draw(admin, { sort: "days_asc" }, { 1: "days_asc" });
@@ -837,7 +908,7 @@ async function page() {
   assert.ok((await draw(admin, { search: "zzz" })).includes("No dealers found."));
   // 1–4 — Party / State / Territory / Sales Officer are clickable filters; Last Payment Date and Amount are not; Days sorts.
   html = await draw(admin);
-  assert.deepEqual([...new Set([...html.matchAll(/aria-label="Filter by ([^"]+)"/g)].map((m) => m[1]))], ["Party", "Status", "State", "Territory", "Sales Officer", "Payment Aging"]);
+  assert.deepEqual([...new Set([...html.matchAll(/aria-label="Filter by ([^"]+)"/g)].map((m) => m[1]))], ["Party", "Status", "State", "Territory", "Sales Officer", "Payment Aging", "Billing Status"]);
   assert.ok(!html.includes("Filter by Last Payment Date") && !html.includes("Filter by Amount") && !html.includes("Filter by Days"));
   assert.ok(/<th[^>]*>Last Payment Date<\/th>/.test(html) || /<th[^>]*text-right[^>]*>Last Payment Date<\/th>/.test(html), "Last Payment Date stays a plain header");
   // 16, 17 — active filters show their count; the Days sort and search state are untouched by them.
@@ -883,7 +954,7 @@ async function page() {
   await draw(admin);
   assert.ok(![...new URL(requested, "http://x").searchParams.keys()].some((k) => k.startsWith("paymentAging")), "cleared → no aging parameters");
   // handlers: applying/clearing aging only edits aging (+ page 1); sort / search / column filters never touch it.
-  assert.ok(/onChange=\{\(next\) => \{ setAging\(next\); setPage\(1\); \}\}/.test(pageSource), "aging change only sets aging and page 1");
+  assert.ok(/setBucket\(exact\);[^}]*setAging\(exact \? null : next\);\s*setPage\(1\);/.test(pageSource), "aging change only sets aging (+ the matching quick-filter selection) and page 1");
   const sortBtn = pageSource.slice(pageSource.indexOf('aria-label="Sort by Days"'), pageSource.indexOf("<PaymentAgingFilterControl"));
   assert.ok(/setSort\(/.test(sortBtn) && !/setAging|setPending|setApplied|setSearch/.test(sortBtn), "sorting never clears aging");
   assert.ok(!/setSort|setSearch|setPending|setApplied/.test(pageSource.slice(pageSource.indexOf("<PaymentAgingFilterControl"), pageSource.indexOf("</TableHead>", pageSource.indexOf("<PaymentAgingFilterControl")))), "applying aging never resets sort / search / filters");
@@ -899,7 +970,7 @@ function wiring() {
   const read = (p: string) => readFileSync(p, "utf8");
   const server = read("src/features/reports/last-payment-report.server.ts");
   // 19 — a single calculation: the report imports the existing helper and has no receipt query/selection of its own.
-  assert.ok(server.includes('import { latestReceiptAsOfByDealer } from "@/lib/last-payment.server"'));
+  assert.ok(server.includes('import { loadEffectiveLastPayments } from "@/lib/dealer-last-payment.server"') && read("src/lib/dealer-last-payment.server.ts").includes('import { latestReceiptAsOfByDealer } from "./last-payment.server"'), "the report reads the persistent latest payment; the previous source stays only as the pre-backfill fallback and Recovery's as-of source");
   assert.ok(!/lastPaymentReceipt|RecoveryPlanDealer|latestReceiptAsOf\(|\$queryRaw/.test(server.replace(/latestReceiptAsOfByDealer/g, "")), "no second Last Payment implementation");
   const route = read("src/app/api/reports/last-payment/route.ts");
   assert.ok(route.includes("await requireAuth()") && route.includes("parseLastPaymentReportParams") && !/officer|scope/i.test(route.replace(/ctx|Scope comes from/g, "")), "scope is the session's; the route reads no officer parameter");

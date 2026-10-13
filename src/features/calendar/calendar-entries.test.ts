@@ -80,6 +80,7 @@ function load(current: { ctx: AuthContext | null }) {
       assertOfficerInScope: async (c: AuthContext, id: string) => { const s = scopeOf(c); if (!s.all && !s.ids.includes(id)) throw new ApiError(403, "no access"); },
       getCurrentDealerIds: async (officerId: string) => Object.entries(DEALERS).filter(([, d]) => d.officer === officerId).map(([id]) => id),
     },
+    "@/features/daily-work/billing-task-visibility.server": { loadCalendarBillingTasks: async () => [] }, // own suite: billing-calendar.test.ts
     "@/lib/calendar": localRequire(resolve("src/lib/calendar.ts")),
   };
   void current;

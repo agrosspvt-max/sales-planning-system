@@ -6,6 +6,8 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { getCurrentManagerId, getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { isAdministrativeRole, assertAdminPermission } from "@/features/accounts/permissions";
+import { assertMarketEligible, listEligibleMarkets, resolveTerritoryMarket, type SeasonalMarketOptions } from "./seasonal-markets.server";
+import { MARKET_NAME_MAX } from "@/lib/territory-mapping";
 import { getSeasonInfo, isSeasonOpen, listOpenSeasonInfos, type SeasonInfo } from "./season-info.server";
 import {
   canReviewNow, derivedType, displayStatus, finalApprovalFields, isEditable, reviewTransition, seasonalSheetStatus, shownMarketPotential, shownMarketSource, submitTarget,
@@ -186,17 +188,52 @@ async function toDtos(ctx: AuthContext, rows: PlanRow[], viewer?: Viewer): Promi
 /* ------------------------------------------------ owner writes ------------------------------------------------ */
 
 // Only these fields are read from the browser: anything else (ownerId, type, potential, status, season …) is stripped and ignored.
-const createInput = z.object({ sheetId: z.string().min(1, "Open a Seasonal Plan first"), marketId: z.string().min(1, "Select a Market") });
-const updateInput = z.object({ marketId: z.string().min(1).optional() });
+// A Market is selected EITHER by its id OR — for a displayed territory name with no Market record yet — by the owner's territory mapping + the name shown.
+const marketChoice = {
+  marketId: z.string().min(1).optional(), territoryMappingId: z.string().min(1).optional(), expectedMarket: z.string().trim().min(1).max(MARKET_NAME_MAX).optional(),
+};
+const createInput = z.object({ sheetId: z.string().min(1, "Open a Seasonal Plan first"), ...marketChoice });
+const updateInput = z.object(marketChoice);
+type MarketChoice = { marketId?: string; territoryMappingId?: string; expectedMarket?: string };
+function assertChoice(c: MarketChoice): void {
+  const byMapping = c.territoryMappingId !== undefined || c.expectedMarket !== undefined;
+  if (byMapping && (c.marketId !== undefined || !c.territoryMappingId || !c.expectedMarket)) throw new ApiError(422, "Select a valid Market");
+  if (!byMapping && !c.marketId) throw new ApiError(422, "Select a Market");
+}
 
-async function requireMarket(marketId: string): Promise<{ id: string; name: string }> {
+/** The Market must exist AND be one of the OWNER's eligible Markets (their Existing Markets or approved Vacant Markets — see seasonal-markets.server). */
+async function requireMarket(marketId: string, ownerId: string): Promise<{ id: string; name: string }> {
   const market = await prisma.market.findUnique({ where: { id: marketId }, select: { id: true, name: true } });
   if (!market) throw new ApiError(422, "Select a valid Market");
+  await assertMarketEligible(ownerId, market.id);
   return market;
 }
+type Tx = Prisma.TransactionClient;
+/** Resolve the chosen Market for a SAVE (inside its transaction): by id (must be eligible) or by the owner's territory mapping (re-verified, canonical Market found / created). */
+async function resolveMarket(tx: Tx, ctx: AuthContext, ownerId: string, c: MarketChoice): Promise<{ id: string; name: string }> {
+  if (c.territoryMappingId) return resolveTerritoryMarket(tx, ctx, ownerId, c.territoryMappingId, c.expectedMarket!);
+  return requireMarket(c.marketId!, ownerId);
+}
+/** Serialize writers of ONE Seasonal Plan (row lock on its sheet, held until commit) so the "market appears once" check below cannot be raced. */
+const lockSheet = (tx: Tx, sheetId: string) => tx.seasonalPlanSheet.updateMany({ where: { id: sheetId }, data: { updatedAt: new Date() } });
+/** Two saves that both create the same brand-new Market race on its unique name: the loser rolls back whole and, retried once, finds the winner's Market. */
+async function withMarketRetry<T>(run: () => Promise<T>): Promise<T> {
+  try { return await run(); } catch (e) { if ((e as { code?: string } | null)?.code === "P2002") return run(); throw e; }
+}
+
+/**
+ * The Markets the caller may choose when adding / editing rows of ONE of their Seasonal Plans. The owner is the authenticated user and must own the
+ * plan (anyone else's plan looks missing) — a browser-supplied officer id is never read.
+ */
+export async function listSeasonalMarketOptions(ctx: AuthContext, sheetId: string): Promise<SeasonalMarketOptions> {
+  assertPlanner(ctx);
+  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id: sheetId }, select: { id: true, ownerId: true } });
+  if (!sheet || sheet.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
+  return listEligibleMarkets(sheet.ownerId);
+}
 /** A market appears once in a Seasonal Plan (owner + season): a second row for it would be an indistinguishable duplicate. */
-async function assertMarketFree(sheetId: string, marketId: string, exceptId?: string): Promise<void> {
-  const clash = await prisma.seasonalPlan.findFirst({ where: { sheetId, marketId, ...(exceptId ? { id: { not: exceptId } } : {}) }, select: { id: true } });
+async function assertMarketFree(db: Pick<Tx, "seasonalPlan">, sheetId: string, marketId: string, exceptId?: string): Promise<void> {
+  const clash = await db.seasonalPlan.findFirst({ where: { sheetId, marketId, ...(exceptId ? { id: { not: exceptId } } : {}) }, select: { id: true } });
   if (clash) throw new ApiError(409, "This market is already in your Seasonal Plan");
 }
 async function ownPlan(ctx: AuthContext, id: string): Promise<PlanRow> {
@@ -214,13 +251,16 @@ export async function createSeasonalPlan(ctx: AuthContext, raw: unknown): Promis
   const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id: parsed.data.sheetId }, select: { id: true, ownerId: true, seasonId: true, season: { select: { name: true, year: true, status: true } } } });
   if (!sheet || sheet.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
   if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
-  const market = await requireMarket(parsed.data.marketId);
-  await assertMarketFree(sheet.id, market.id);
-  const created = await prisma.$transaction(async (tx) => {
+  const choice = { marketId: parsed.data.marketId, territoryMappingId: parsed.data.territoryMappingId, expectedMarket: parsed.data.expectedMarket };
+  assertChoice(choice);
+  const created = await withMarketRetry(() => prisma.$transaction(async (tx) => {
+    await lockSheet(tx, sheet.id);
+    const market = await resolveMarket(tx, ctx, sheet.ownerId, choice);
+    await assertMarketFree(tx, sheet.id, market.id);
     const row = await tx.seasonalPlan.create({ data: { sheetId: sheet.id, seasonId: sheet.seasonId, ownerId: ctx.userId, marketId: market.id }, include });
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "seasonalPlan", entityId: row.id, summary: `Seasonal Plan drafted · ${sheet.season.name} ${sheet.season.year} · ${market.name}` }, tx);
     return row;
-  });
+  }));
   return (await toDtos(ctx, [created]))[0]!;
 }
 
@@ -229,15 +269,23 @@ export async function updateSeasonalPlan(ctx: AuthContext, id: string, raw: unkn
   const plan = await ownPlan(ctx, id);
   if (!isEditable(plan.approvalStatus)) throw new ApiError(409, "Only a draft or rejected Seasonal Plan can be edited");
   const parsed = updateInput.safeParse(raw ?? {});
-  if (!parsed.success || parsed.data.marketId === undefined) throw new ApiError(422, "Nothing to update");
-  const data: { marketId?: string } = {};
-  if (parsed.data.marketId !== undefined) { data.marketId = (await requireMarket(parsed.data.marketId)).id; await assertMarketFree(plan.sheetId, data.marketId, id); }
+  if (!parsed.success || (parsed.data.marketId === undefined && parsed.data.territoryMappingId === undefined)) throw new ApiError(422, "Nothing to update");
+  const choice = { marketId: parsed.data.marketId, territoryMappingId: parsed.data.territoryMappingId, expectedMarket: parsed.data.expectedMarket };
+  assertChoice(choice);
+  // Only a CHANGED Market is checked against the owner's territory: a row keeping its saved Market stays valid even if eligibility has since changed.
+  const unchanged = choice.marketId !== undefined && choice.marketId === plan.marketId;
   if (!(await isSeasonOpen(plan.seasonId))) throw new ApiError(409, SEASON_CLOSED);
-  const updated = await prisma.$transaction(async (tx) => {
+  const updated = await withMarketRetry(() => prisma.$transaction(async (tx) => {
+    await lockSheet(tx, plan.sheetId);
+    const data: { marketId?: string } = {};
+    if (!unchanged) {
+      const market = await resolveMarket(tx, ctx, plan.ownerId, choice);
+      if (market.id !== plan.marketId) { await assertMarketFree(tx, plan.sheetId, market.id, id); data.marketId = market.id; }
+    }
     const row = await tx.seasonalPlan.update({ where: { id }, data, include });
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan edited · ${row.market.name}` }, tx);
     return row;
-  });
+  }));
   return (await toDtos(ctx, [updated]))[0]!;
 }
 

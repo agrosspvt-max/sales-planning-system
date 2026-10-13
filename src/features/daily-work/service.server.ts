@@ -24,6 +24,7 @@ import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
+import { billingTasksForEntries, billingLinkedEntryIds, countUnconfirmedBillingTasks, BILLING_CONTRIBUTION_UNION, type BillingTaskDto } from "./billing-task.server";
 import {
   currentBusinessDate, monthNameForDate, performanceSectionTotals, performanceRowValue, isPerformanceMetric, PERFORMANCE_METRIC_INFO, type PerformanceMetric, type PerformanceUnit, type PerformanceEntryRow, type PerformanceSectionTotals, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
@@ -175,6 +176,8 @@ export interface DailyWorkPayload {
   materializedCnTasks: CnTaskDto[]; // current editable Recovery-row tasks; exposed only for exact rescheduling
   autoTaskEntryIds: string[]; // historical/current contribution links used only to display each row's Task Type
   calendarEntryIds: string[]; // rows created from a Calendar Daily Task → Task Type "Calendar"
+  billingTasks: BillingTaskDto[]; // Recovery (plan): Billing Exception tasks inside the current editable rows (confirm / reschedule / details act on these)
+  billingEntryIds: string[]; // rows carrying a Billing Exception contribution → Task Type "Billing Exception" (plan, report and review views)
   dealers: DailyWorkDealerDto[];
 }
 
@@ -550,6 +553,9 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
   const autoTaskEntryIds = section === "RECOVERY" && mode === "REPORT"
     ? await autoTaskEntryIdsForReport(officerId, dailyRows.map((row) => row.id))
     : [];
+  const [billingTasks, billingEntryIds] = section === "RECOVERY"
+    ? await Promise.all([mode === "PLAN" ? billingTasksForEntries(officerId, dailyRows.map((row) => row.id), workDate) : Promise.resolve([] as BillingTaskDto[]), billingLinkedEntryIds(dailyRows.map((row) => row.id))])
+    : [[] as BillingTaskDto[], [] as string[]];
 
   return {
     section,
@@ -563,6 +569,8 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     materializedCnTasks,
     autoTaskEntryIds,
     calendarEntryIds,
+    billingTasks,
+    billingEntryIds,
     dealers,
   };
 }
@@ -612,6 +620,7 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
           UNION ALL
           SELECT "legacyDailyWorkEntryId" AS "entryId", "legacyDailyWorkContribution" AS "contribution"
           FROM "CnRequest" WHERE "legacyDailyWorkEntryId" IS NOT NULL
+          ${BILLING_CONTRIBUTION_UNION}
         ) t
         JOIN "DailyWorkEntry" e ON e."id" = t."entryId"
         WHERE e."officerId" = ${officerId} AND e."workDate" = ${workDate}::date
@@ -1306,7 +1315,8 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
       // Submitting Daily Work must NOT implicitly confirm an Auto Task. Every materialized Auto Task in the current
       // editable batch must have been explicitly confirmed first (this never completes the payment task).
       const unconfirmed = await countUnconfirmedMaterializedTasks(tx, officerId, workDate, day.currentBatchId);
-      if (unconfirmed > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
+      const unconfirmedBilling = await countUnconfirmedBillingTasks(tx, officerId, workDate, day.currentBatchId);
+      if (unconfirmed + unconfirmedBilling > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
     }
     const [data, noPlanSet] = await Promise.all([
       sectionDataPresence(officerId, workDate, day.currentBatchId, tx),

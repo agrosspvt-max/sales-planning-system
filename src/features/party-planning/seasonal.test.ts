@@ -67,6 +67,7 @@ function makeDb() {
       create: async ({ data }: Row) => { const row = { id: `sh${++seq}`, ...data, createdAt: tick(), updatedAt: tick() }; t.sheets.push(row); return sheetView(row); },
       findUnique: async ({ where }: Row) => { const r = t.sheets.find((x) => matches(x, where)); return r ? sheetView(r) : null; },
       findMany: async ({ where }: Row) => t.sheets.filter((r) => matches(r, where)).map(sheetView),
+      updateMany: async ({ where }: Row) => ({ count: t.sheets.filter((r) => matches(r, where)).length }), // the real database's row lock (a no-op here)
     },
     seasonalPlan: {
       create: async ({ data }: Row) => { const row = { id: `p${++seq}`, ...defaults, ...data, createdAt: tick(), updatedAt: tick() }; t.plans.push(row); return planView(row); },
@@ -101,6 +102,8 @@ function loadService() {
       getOfficerScope,
       getCurrentManagerId: async (officerId: string) => { const me = USERS.find((u) => u.id === officerId); return USERS.find((u) => u.role === Role.REGIONAL_MANAGER && u.groupId === me?.groupId && u.id !== officerId)?.id ?? null; },
     },
+    // Market eligibility (the owner's territory) has its own contract test (seasonal-market-scope.test.ts); here every existing Market is selectable so these tests keep exercising the plan / approval rules.
+    "./seasonal-markets.server": { assertMarketEligible: async () => undefined, listEligibleMarkets: async () => ({ markets: [] }), resolveTerritoryMarket: async () => { throw new Error("not used here"); } },
     // The Seasons module's rules, as the real helpers behave: ANY open season, by id — there is no "current season" anywhere.
     "./season-info.server": {
       getSeasonInfo: async (id: string) => { const s = seasonInfo(id); return s ? { ...s } : null; },

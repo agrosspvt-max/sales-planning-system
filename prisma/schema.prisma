@@ -43,6 +43,8 @@ model User {
   marketRequests           MarketRequest[]             @relation("MarketRequestRequester")
   dealerStatusRequested    DealerStatusRequest[]       @relation("DealerStatusRequester")
   dealerStatusResolved     DealerStatusRequest[]       @relation("DealerStatusResolver")
+  billingExceptionsCreated BillingException[]
+  billingTasks             BillingExceptionTask[]
   seasonalPlans            SeasonalPlan[]              @relation("SeasonalPlanOwner")
   partyMonthlyPlans        PartyMonthlyPlan[]          @relation("PartyMonthlyPlanOwner")
   seasonalSheets           SeasonalPlanSheet[]         @relation("SeasonalSheetOwner")
@@ -706,6 +708,10 @@ model Dealer {
   appointedFromMonthlyPlans PartyMonthlyPlan[]    @relation("PartyMonthlyAppointedDealer")
   marketEdits               TerritoryMarketEdit[]
   statusRequests            DealerStatusRequest[]
+  billingExceptions         BillingException[]
+  paymentReceipts           DealerPaymentReceipt[]
+  billingTasks              BillingExceptionTask[]
+  lastPayment               DealerLastPayment?
 
   @@index([isActive])
   @@index([status])
@@ -2294,4 +2300,149 @@ model DealerStatusRequest {
   @@index([status, createdAt])
   @@index([dealerId, status])
   @@index([requestedById])
+}
+
+/// Last Payment Report → Billing Exception. One row per RECORDED exception (a dealer may have many). The `snap*` columns are the report
+/// context captured ONCE at creation (Days computed by the server from the shared Last Payment source — never client-supplied) and are never
+/// rewritten; only the lifecycle columns (status / resolved*) change, when the dealer's live Days falls to 45 or less. Rows are never deleted
+/// (Restrict foreign keys), so History survives. Informational record only — nothing here blocks or changes billing.
+model BillingException {
+  id                  String    @id @default(cuid())
+  dealerId            String
+  /// "Date of Billing" entered on the form (calendar date).
+  billingDate         DateTime  @db.Date
+  billNo              String
+  /// One of the two fixed authorizing-person choices (validated in the service; not a user account).
+  authPerson          String
+  createdById         String
+  createdAt           DateTime  @default(now())
+  /// Idempotency key of ONE logical Save (generated when the form opens): a retry / double click re-delivers the same key; a deliberate second exception uses a new one.
+  requestId           String
+  /// CURRENT | RESOLVED
+  status              String    @default("CURRENT")
+  resolvedAt          DateTime?
+  /// PAYMENT_RECEIVED (live Days fell to 45 or less).
+  resolutionReason    String?
+  /// The live Days at the moment of resolution (lifecycle metadata; the creation Days stays in snapDays).
+  resolvedDays        Int?
+  snapDays            Int
+  snapLastPaymentDate DateTime? @db.Date
+  snapAmount          Decimal?  @db.Decimal(14, 2)
+  snapParty           String
+  snapDealerStatus    String
+  snapState           String?
+  snapTerritory       String?
+  snapSalesOfficer    String?
+  /// Display/filter snapshot only — access is always decided from the dealer's CURRENT owner, never from this column.
+  snapSalesOfficerId  String?
+  /// The exception's own billing / payment-condition amount (NOT the dealer's previous payment and never a receipt). NULL = an exception recorded before this field existed (not invented).
+  billingAmount       Decimal?  @db.Decimal(14, 2)
+  /// "Is there any payment condition?" — true = Yes, false = No, NULL = recorded before the question existed.
+  paymentCondition    Boolean?
+  /// The promised recovery date (Yes only; NULL for No / legacy). A promise, not proof of payment.
+  paymentDate         DateTime? @db.Date
+  /// The PROMISED RECOVERY amount (Yes only; NULL for No and for exceptions recorded before it existed). Separate from billingAmount; it is the planned value of the Recovery task. A promise, not a payment.
+  paymentAmount       Decimal?  @db.Decimal(14, 2)
+  dealer              Dealer    @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+  createdBy           User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  task                BillingExceptionTask?
+
+  @@unique([createdById, requestId])
+  @@index([status, createdAt])
+  @@index([dealerId, status])
+  @@index([dealerId, createdAt])
+}
+
+/// ACCEPTED receipt ledger — the authoritative, import-independent record of every payment accepted for a dealer (Last Payment Report). Deactivating or replacing a
+/// LastPaymentImport never removes a row. Identity = (dealer, date, amount, occurrence): `occurrence` is the 1-based index of an IDENTICAL receipt within ONE source
+/// file, so genuine repeated rows keep their multiplicity while the same receipt re-delivered by a retry / identical file / overlapping file / another import kind
+/// maps onto the same key and is accepted once (a file's multiplicity can only ADD occurrences). Voucher numbers are kept for provenance only (not unique).
+model DealerPaymentReceipt {
+  id            String   @id @default(cuid())
+  dealerId      String
+  receiptDate   DateTime @db.Date
+  amount        Decimal  @db.Decimal(14, 2)
+  occurrence    Int
+  /// REGULAR | HISTORICAL | LEGACY_SNAPSHOT (a stored per-plan summary: fallback only, never added to individual receipts of its date)
+  sourceKind    String
+  /// The import that FIRST accepted it (provenance; no foreign key so the ledger never depends on that batch).
+  importId      String?
+  sourceOrder   Int?
+  voucherNumber String?
+  createdAt     DateTime @default(now())
+  dealer        Dealer   @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+
+  @@unique([dealerId, receiptDate, amount, occurrence])
+  @@index([dealerId, receiptDate])
+}
+
+/// ONE persistent latest-payment state per dealer (the Last Payment Report's source): the newest qualifying receipt date and the SUM of the accepted receipts of that
+/// date, derived from DealerPaymentReceipt by the shared newest-date selector and written together. `asOfDate` = the business date it was computed for.
+model DealerLastPayment {
+  dealerId    String   @id
+  paymentDate DateTime @db.Date
+  amount      Decimal  @db.Decimal(14, 2)
+  /// RECEIPTS | LEGACY_SNAPSHOT (the winning date has no individual receipt)
+  basis       String
+  asOfDate    DateTime @db.Date
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  dealer      Dealer   @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+}
+
+/// The Daily Work → Recovery task of a Billing Exception with a payment condition (Yes). A genuine, separate task source (not a CN payment event, not a Calendar
+/// entry). At most ONE per exception (unique). `officerId` = the responsible Sales Officer = the dealer's authoritative CURRENT assignment (re-routed while the task
+/// is not yet in Daily Work). `promisedDate` is the Admin's date and never changes; `taskDate` is the current schedule (the owner may reschedule). Once linked, the
+/// Daily Work entry / contribution make the amount added to Today's Plan exactly once and reversible. A task is a PLAN, not a payment: nothing here creates a receipt.
+model BillingExceptionTask {
+  id                    String           @id @default(cuid())
+  billingExceptionId    String           @unique
+  dealerId              String
+  officerId             String
+  amount                Decimal          @db.Decimal(14, 2)
+  promisedDate          DateTime         @db.Date
+  taskDate              DateTime         @db.Date
+  rescheduled           Boolean          @default(false)
+  dailyWorkEntryId      String?
+  dailyWorkContribution Decimal?         @db.Decimal(14, 2)
+  dailyWorkConfirmed    Boolean          @default(false)
+  materializedAt        DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  billingException      BillingException @relation(fields: [billingExceptionId], references: [id], onDelete: Restrict)
+  dealer                Dealer           @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+  officer               User             @relation(fields: [officerId], references: [id], onDelete: Restrict)
+
+  @@index([officerId, taskDate])
+  @@index([dealerId])
+  @@index([dailyWorkEntryId])
+}
+
+/// DURABLE hand-off of ONE regular Day Book upload to Last Payment processing. Written in the SAME transaction as the monthly Recovery commit (an additive insert — no Recovery
+/// value is read or changed by it), so the resolved receipts survive any later failure, restart or lost request. Processing (permanent ledger, latest payment, retained import,
+/// billing reconciliation) is idempotent and retried automatically; it never replays the monthly Recovery update.
+model LastPaymentJob {
+  id             String    @id @default(cuid())
+  kind           String    @default("REGULAR_DAYBOOK")
+  /// The Recovery month the upload was for (same value as LastPaymentImport.scopeKey).
+  scopeKey       String
+  workbookName   String
+  /// Hash of the uploaded file's bytes (the same sourceFileHash the retained import uses).
+  sourceFileHash String
+  uploadedById   String
+  /// PENDING (not processed yet) · FAILED (an attempt failed; retried automatically) · DONE.
+  status         String    @default("PENDING")
+  /// { paymentReceipts[], recoveryReceipts[], expected[] } — resolved dealer ids, ISO dates and amounts. Never a credential.
+  payload        Json
+  attempts       Int       @default(0)
+  lastError      String?
+  lastAttemptAt  DateTime?
+  /// PROCESSED, or SUPERSEDED when a newer upload of the same month had already been processed (then only the permanent ledger is fed).
+  outcome        String?
+  importId       String?
+  createdAt      DateTime  @default(now())
+  completedAt    DateTime?
+
+  @@index([status, createdAt])
+  @@index([scopeKey, createdAt])
 }

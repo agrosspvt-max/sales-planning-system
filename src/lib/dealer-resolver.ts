@@ -50,12 +50,13 @@ export interface DealerResolver {
   candidates(rawName: string): DealerMatchResult[];
 }
 
-export async function loadDealerResolver(db: Pick<Prisma.TransactionClient, "dealer" | "dealerAlias"> = prisma): Promise<DealerResolver> {
+export async function loadDealerResolver(db: Pick<Prisma.TransactionClient, "dealer" | "dealerAlias"> = prisma, opts: { includeInactive?: boolean } = {}): Promise<DealerResolver> {
   const [dealerRows, aliasRows] = await Promise.all([
     // Matching gates on isActive (source of truth: status !== "INACTIVE"). Pending, Active AND
     // Defaulter dealers all participate in uploads/matching/recovery; only Inactive is excluded.
     // (Planning eligibility is enforced separately — see the DEFAULTER exclusions in planning queries.)
-    db.dealer.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
+    // `includeInactive` (Last Payment's own consumer only): every non-deleted Dealer Master record, so an inactive dealer's payment is still attributed to its id.
+    db.dealer.findMany({ where: opts.includeInactive ? { deletedAt: null } : { isActive: true }, select: { id: true, name: true } }),
     db.dealerAlias.findMany({ select: { tallyKey: true, tallyName: true, systemDealerId: true } }),
   ]);
   const dealers: DealerMatch[] = decorate(dealerRows as { id: string; name: string }[]).map((dealer) => ({

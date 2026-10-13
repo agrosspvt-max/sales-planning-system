@@ -3,7 +3,7 @@ import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 
 import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Check, ArrowLeft, ArrowRight, ChevronRight } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
@@ -22,7 +22,7 @@ interface Analysis {
   matched: MatchedLine[];
   skipped: SkippedLine[];
 }
-interface CommitResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number; receiptHistoryWarning?: string }
+interface CommitResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number; receiptHistoryWarning?: string; billingExceptionWarning?: string; lastPayment?: { status: "COMPLETE" | "PENDING_RETRY"; receipts: number; paymentOnlyDealers: number; diagnostic?: string } }
 
 const fmt = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(n);
 
@@ -40,6 +40,7 @@ export function DaybookUploadWizard() {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [result, setResult] = useState<CommitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const { data: months } = useQuery<{ id: string; label: string }[]>({
     queryKey: ["sales-upload-months"],
@@ -70,7 +71,11 @@ export function DaybookUploadWizard() {
       if (!res.ok) throw new Error(body.error ?? "Commit failed");
       return body as CommitResult;
     },
-    onSuccess: (r) => { setResult(r); setStep("done"); setError(null); },
+    onSuccess: (r) => {
+      setResult(r); setStep("done"); setError(null);
+      // The same upload also moved Last Payment / Billing Status / exceptions / Recovery views: refresh them (no manual synchronization).
+      for (const key of ["last-payment-report", "last-payment-report-options", "billing-exceptions", "billing-exceptions-options", "recovery", "calendar"]) void queryClient.invalidateQueries({ queryKey: [key] });
+    },
     onError: (e) => setError((e as Error).message),
   });
 
@@ -156,7 +161,9 @@ export function DaybookUploadWizard() {
         {step === "done" && result && (
           <div className="space-y-3">
             <p className="flex items-center gap-2 font-medium text-success"><Check className="h-5 w-5" /> Day Book imported for {result.monthName} — {result.dealersUpdated} dealer(s) updated (Receipts {fmt(result.receiptTotal)}, SR/CR {fmt(result.srCrTotal)}).</p>
+            {result.lastPayment?.status === "COMPLETE" && <p className="text-sm text-muted-foreground">Last Payment Report updated ({result.lastPayment.receipts} receipt(s){result.lastPayment.paymentOnlyDealers > 0 ? `, ${result.lastPayment.paymentOnlyDealers} inactive dealer(s) recorded for the Last Payment Report only` : ""}).</p>}
             {result.receiptHistoryWarning && <p role="alert" className="text-sm text-amber-600">{result.receiptHistoryWarning}</p>}
+            {result.billingExceptionWarning && <p role="alert" className="text-sm text-amber-600">{result.billingExceptionWarning}</p>}
             <Button variant="outline" onClick={() => { setStep("upload"); setFile(null); setAnalysis(null); setResult(null); }}>Upload another</Button>
           </div>
         )}

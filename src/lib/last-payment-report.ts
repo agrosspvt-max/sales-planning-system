@@ -22,9 +22,14 @@ export interface LastPaymentReportRow {
   amount: number | null;
   /** Calendar days from lastPaymentDate to today; null when there is no payment (never invented). */
   days: number | null;
+  /** Derived on the server from the SAME `days` (see billingStatusOf): Open (≤ 45) | Blocked | Billing Exception | Unavailable (no payment date). */
+  billingStatus: BillingStatus;
+  /** How many CURRENT billing exceptions the dealer has (0 when none). Only meaningful while Days > 45. */
+  currentExceptions: number;
 }
 
 import { dealerStatusLabel } from "./dealer-status";
+import { BILLING_STATUS_LABEL, type BillingStatus } from "./billing-exception";
 
 const DAY_MS = 86_400_000;
 const utcMidnight = (isoDate: string) => Date.parse(`${isoDate.slice(0, 10)}T00:00:00Z`);
@@ -62,8 +67,24 @@ export function matchesParty(party: string, search: string): boolean {
 
 /* ------------------------------ column filters (Party / State / Territory / Sales Officer) ------------------------------ */
 
-export type ReportFilterKey = "party" | "status" | "state" | "territory" | "officer";
-export const REPORT_FILTER_KEYS: readonly ReportFilterKey[] = ["party", "status", "state", "territory", "officer"];
+/** `billing` = the computed Billing Status (Last Payment tab's header filter). Unlike the other keys it is not master data: it is applied to the derived rows, after the payment lookup. */
+/** `authBy` = the Auth Person saved on each exception (Billing Exception tabs only; applied to exception rows, one row per exception). */
+export type ReportFilterKey = "party" | "status" | "state" | "territory" | "officer" | "billing" | "authBy";
+export const REPORT_FILTER_KEYS: readonly ReportFilterKey[] = ["party", "status", "state", "territory", "officer", "billing", "authBy"];
+export const AUTH_FILTER_OPTIONS: { value: string; label: string }[] = [{ value: "Varun sir", label: "Varun sir" }, { value: "Tej Sir", label: "Tej Sir" }];
+/** Narrow exception rows to the selected Auth Person(s) (OR within the column). Each exception is judged on its OWN saved value; no selection = no filtering. */
+export function applyAuthByFilter<T extends { authPerson: string | null }>(rows: readonly T[], filters: ReportFilters): T[] {
+  const selected = filters.authBy ?? [];
+  return selected.length === 0 ? [...rows] : rows.filter((r) => r.authPerson !== null && selected.includes(r.authPerson));
+}
+export const BILLING_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: "OPEN", label: "Open" }, { value: "BLOCKED", label: "Blocked" }, { value: "BILLING_EXCEPTION", label: "Billing Exception" }, { value: "UNAVAILABLE", label: "Unavailable" },
+];
+/** Narrow derived rows to the selected Billing Status values (OR within the column). No selection = no filtering. */
+export function applyBillingStatusFilter<T extends { billingStatus: string }>(rows: readonly T[], filters: ReportFilters): T[] {
+  const selected = filters.billing ?? [];
+  return selected.length === 0 ? [...rows] : rows.filter((r) => selected.includes(r.billingStatus));
+}
 export type ReportFilters = Partial<Record<ReportFilterKey, string[]>>;
 
 /** The master-data part of a report row — what the column filters read. Filter values: dealer id, status, state, territory, officer id. */
@@ -83,7 +104,7 @@ const filterValue = (row: ReportFilterable, key: ReportFilterKey): string =>
 
 /** OR within a column, AND across columns. A row missing a column's value never matches an active filter on it. */
 export function applyReportFilters<T extends ReportFilterable>(rows: readonly T[], filters: ReportFilters): T[] {
-  const active = REPORT_FILTER_KEYS.filter((key) => (filters[key]?.length ?? 0) > 0);
+  const active = REPORT_FILTER_KEYS.filter((key) => key !== "billing" && key !== "authBy" && (filters[key]?.length ?? 0) > 0); // master-data columns only; Billing Status is applied to the derived rows
   if (active.length === 0) return [...rows];
   return rows.filter((row) => active.every((key) => { const v = filterValue(row, key); return v !== "" && filters[key]!.includes(v); }));
 }
@@ -104,6 +125,8 @@ export function reportFilterOptions(rows: readonly ReportFilterable[]): ReportFi
     state: collect("state", (r) => r.state),
     territory: collect("territory", (r) => r.territory),
     officer: collect("officer", (r) => r.salesOfficer),
+    billing: BILLING_FILTER_OPTIONS,
+    authBy: AUTH_FILTER_OPTIONS,
   };
 }
 
@@ -177,6 +200,51 @@ export function parsePaymentAging(sp: URLSearchParams): PaymentAgingFilter | nul
   return "filter" in built ? built.filter : null;
 }
 
+/* ------------------------------ Days summary panel (quick filter) ------------------------------ */
+
+export type DayBucketKey = "0-30" | "31-44" | "45-60" | "61-90" | "91+";
+/** The summary panel's day ranges, in display order. Inclusive bounds on the report's own Days; `max: null` = open-ended. */
+export const DAY_BUCKETS: readonly { key: DayBucketKey; label: string; min: number; max: number | null }[] = [
+  { key: "0-30", label: "30 Days or Less", min: 0, max: 30 },
+  { key: "31-44", label: "31–44 Days", min: 31, max: 44 },
+  { key: "45-60", label: "45–60 Days", min: 45, max: 60 },
+  { key: "61-90", label: "61–90 Days", min: 61, max: 90 },
+  { key: "91+", label: "90+ Days", min: 91, max: null },
+];
+export const DAY_BUCKET_KEYS: readonly string[] = DAY_BUCKETS.map((b) => b.key);
+export const parseDayBucket = (value: string | null | undefined): DayBucketKey | null => (value && DAY_BUCKET_KEYS.includes(value) ? (value as DayBucketKey) : null);
+/** The bucket a Days value falls in. Missing Days (no payment date) belongs to NO bucket — it is never treated as 0. */
+export function dayBucketOf(days: number | null | undefined): DayBucketKey | null {
+  if (days === null || days === undefined || !Number.isFinite(days) || days < 0) return null;
+  return DAY_BUCKETS.find((b) => days >= b.min && (b.max === null || days <= b.max))?.key ?? null;
+}
+export interface DaySummary { total: number; buckets: Record<DayBucketKey, number> }
+/** Counts over the rows passed in (one row per dealer): `total` = every row, each bucket = rows whose Days fall in it. */
+export function summarizeDays(rows: readonly { dealerId: string; days: number | null }[]): DaySummary {
+  const buckets: Record<DayBucketKey, number> = { "0-30": 0, "31-44": 0, "45-60": 0, "61-90": 0, "91+": 0 };
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.dealerId)) continue; // each unique dealer id once
+    seen.add(row.dealerId);
+    const key = dayBucketOf(row.days);
+    if (key) buckets[key]++;
+  }
+  return { total: seen.size, buckets };
+}
+export function applyDayBucket<T extends { days: number | null }>(rows: readonly T[], bucket: DayBucketKey | null | undefined): T[] {
+  return bucket ? rows.filter((r) => dayBucketOf(r.days) === bucket) : [...rows];
+}
+/** The same range expressed as the Days column's own filter (the quick filter and the column filter are one control). */
+export function dayBucketAsAging(bucket: DayBucketKey): PaymentAgingFilter {
+  const b = DAY_BUCKETS.find((x) => x.key === bucket)!;
+  return b.max === null ? { operator: "gt", value: b.min - 1 } : { operator: "between", from: b.min, to: b.max };
+}
+/** The bucket a Days column filter is exactly equal to, if any. */
+export function bucketOfAging(filter: PaymentAgingFilter | null): DayBucketKey | null {
+  if (!filter) return null;
+  return DAY_BUCKETS.find((b) => { const a = dayBucketAsAging(b.key); return a.operator === filter.operator && JSON.stringify(a) === JSON.stringify(filter); })?.key ?? null;
+}
+
 /* ------------------------------ cascading (dependent) filters ------------------------------ */
 
 /**
@@ -202,6 +270,8 @@ export function pruneReportFilters(rows: readonly ReportFilterable[], filters: R
     const values = selected.filter((value) => !known.has(value) || compatible.has(value));
     if (values.length > 0) kept[key] = values;
   }
+  if ((filters.authBy?.length ?? 0) > 0) kept.authBy = filters.authBy;
+  if ((filters.billing?.length ?? 0) > 0) kept.billing = filters.billing; // not part of the master-data cascade; an unknown value simply matches nothing
   return kept;
 }
 
@@ -268,6 +338,7 @@ export const EXPORT_COLUMNS: readonly { key: string; label: string; format: "tex
   { key: "lastPaymentDate", label: "Last Payment Date", format: "text" },
   { key: "amount", label: "Amount", format: "currency" },
   { key: "days", label: "Days", format: "number" },
+  { key: "billingStatus", label: "Billing Status", format: "text" },
 ];
 
 /** Report rows → export rows using the ALREADY-CALCULATED values (nothing is recomputed). Missing values are blank cells. */
@@ -282,6 +353,7 @@ export function toExportRows(rows: readonly LastPaymentReportRow[]): ({ id: stri
     lastPaymentDate: formatLastUpdate(r.lastPaymentDate) ?? "", // DD/MM/YYYY, like the page
     amount: r.amount ?? "",
     days: r.days ?? "",
+    billingStatus: BILLING_STATUS_LABEL[r.billingStatus],
   }));
 }
 
@@ -293,6 +365,8 @@ export interface LastPaymentReportParams {
   filters: ReportFilters;
   /** Payment Aging (Days) filter, or null. Applied after the scoped dealers' Days are derived; never widens scope. */
   paymentAging: PaymentAgingFilter | null;
+  /** The summary panel's selected day range (quick filter), or null. Applied AFTER the summary counts are taken. */
+  dayBucket: DayBucketKey | null;
 }
 
 /**
@@ -309,5 +383,5 @@ export function parseLastPaymentReportParams(sp: URLSearchParams): LastPaymentRe
     const values = [...new Set(sp.getAll(key).map((v) => v.trim()).filter(Boolean))].slice(0, 500);
     if (values.length) filters[key] = values;
   }
-  return { search: (sp.get("search") ?? "").trim().slice(0, 100), sort, page, pageSize: Math.min(200, Math.max(1, rawSize)), filters, paymentAging: parsePaymentAging(sp) };
+  return { search: (sp.get("search") ?? "").trim().slice(0, 100), sort, page, pageSize: Math.min(200, Math.max(1, rawSize)), filters, paymentAging: parsePaymentAging(sp), dayBucket: parseDayBucket(sp.get("bucket")) };
 }

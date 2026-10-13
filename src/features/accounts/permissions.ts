@@ -27,7 +27,7 @@ export const ADMIN_MODULES = [
   { id: "performance", label: "Performance", group: "Insights", href: "/performance", actions: ["read", "attendance"] },
   { id: "reports", label: "Reports", group: "Insights", href: "/reports", actions: ["read", "export"] },
   // Its own module (the longest-href match in moduleForPage wins over "/reports"), so it can be granted/revoked independently of Reports.
-  { id: "lastPaymentReport", label: "Last Payment Report", group: "Insights", href: "/reports/last-payment", actions: ["read", "export"] },
+  { id: "lastPaymentReport", label: "Last Payment Report", group: "Insights", href: "/reports/last-payment", actions: ["read", "export", "create"] },
   { id: "announcements", label: "Announcements", group: "Insights", href: "/announcements", actions: READ },
   { id: "audit", label: "Audit Logs", group: "Insights", href: "/audit", actions: READ },
   { id: "products", label: "Product Master", group: "Master Data", href: "/masters/products", actions: [...CRUD, "merge"] },
@@ -72,6 +72,15 @@ export function assertAdminPermission(identity: PermissionIdentity, module: Admi
   if (identity.role === Role.CUSTOM_ADMIN && !hasAdminPermission(identity, module, action)) {
     throw new ApiError(403, `Permission required: ${module} / ${action}`);
   }
+}
+/**
+ * Who may RECORD a Billing Exception (Last Payment Report → Billing Status). Decided only from the authenticated role + stored permissions — never from a
+ * designation or display name: Super Admin, or a Custom Admin explicitly granted Last Payment Report "read" AND "create". Sales Officers, Regional Managers and
+ * every other role are always denied; a view / export grant or the generic Reports module never implies it. Used by the API service and (as presentation only) the UI.
+ */
+export function canCreateBillingException(identity: PermissionIdentity): boolean {
+  if (identity.role === Role.SUPER_ADMIN) return true;
+  return identity.role === Role.CUSTOM_ADMIN && hasAdminPermission(identity, "lastPaymentReport", "create");
 }
 /** Existing season selector shared by planning/report screens; it never grants management access. */
 export function canReadSeasonOptions(identity: PermissionIdentity): boolean {

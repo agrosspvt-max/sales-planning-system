@@ -47,6 +47,13 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
       materializeDueCalendarTasks: async () => ({ materialized: 0 }),
       calendarLinkedEntryIds: async () => [],
     },
+    // Billing Exception tasks (own DB-backed suite: billing-task.integration.ts + billing-task.test.ts); inert here.
+    "./billing-task.server": {
+      billingTasksForEntries: async () => [],
+      billingLinkedEntryIds: async () => [],
+      countUnconfirmedBillingTasks: async () => 0,
+      BILLING_CONTRIBUTION_UNION: Prisma.empty,
+    },
     // The Auto Tasks visibility flag defaults OFF; a stub keeps status reads DB-double-free.
     "@/lib/recovery-config": {
       getAutoTasksEnabled: async () => false,

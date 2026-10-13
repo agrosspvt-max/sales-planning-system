@@ -340,7 +340,8 @@ test("combined rows render neutral labels for dealer-level fields while individu
   const salesRecovery = section("function DailyWorkSection(", "function MaterializedTaskRescheduleDialog(");
   assert.match(salesRecovery, /<TableCell>\{combined\.dealerLabel\}<\/TableCell>\s*\{showTaskType && <TableCell>\{L\.none\}<\/TableCell>\}/);
   assert.match(salesRecovery, /money\(combined\.todaysPlan\)[\s\S]*?<TableCell>\{L\.none\}<\/TableCell>/, "Sales/Recovery Type summary is neutral");
-  assert.match(salesRecovery, /taskTypeText\(rowTaskTypeOf\(r\.dealerId\), taskTypeL\)/, "individual Task Type stays derived");
+  assert.match(salesRecovery, /taskTypeCell\(r\.dealerId\)/, "individual Task Type stays derived");
+  assert.match(salesRecovery, /taskTypeText\(rowTaskTypeOf\(dealerId\), taskTypeL\)/, "…from the same CN / Calendar derivation, plus the Billing Exception label as its own source");
   assert.match(salesRecovery, /options=\{typeOptions\}/, "individual Sales/Recovery Type stays selectable");
 
   const appointment = section("function AppointmentSection(", "function ConversionSection(");

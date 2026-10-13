@@ -87,7 +87,7 @@ async function main() {
   assert.equal(ADMIN_MODULES.some((m) => (m.href as string) === "/account-management" || (m.id as string) === "accountManagement"), false, "Account Management stays owner-only: never in the catalogue");
   // Last Payment Report is a real permission entry with its meaningful actions, in the Insights group next to Reports.
   const lpr = ADMIN_MODULES.find((m) => m.id === "lastPaymentReport")!;
-  assert.deepEqual([lpr.label, lpr.group, lpr.href, [...lpr.actions]], ["Last Payment Report", "Insights", "/reports/last-payment", ["read", "export"]]);
+  assert.deepEqual([lpr.label, lpr.group, lpr.href, [...lpr.actions]], ["Last Payment Report", "Insights", "/reports/last-payment", ["read", "export", "create"]]);
   assert.equal(new Set(ADMIN_MODULES.map((m) => m.id)).size, ADMIN_MODULES.length, "module ids are unique");
   const ui = readFileSync("src/features/accounts/accounts-page.tsx", "utf8");
   assert.ok(ui.includes("ADMIN_MODULES.filter(m => m.group === group)") && ui.includes("setPermissions(Object.fromEntries(ADMIN_MODULES.map(m => [m.id, [...m.actions]])))") && ui.includes("onClick={() => setPermissions({})}"), "the permission tree, Select All and Clear All are all derived from ADMIN_MODULES");
@@ -112,6 +112,26 @@ async function main() {
   assertApiAccess(custom({ lastPaymentReport: ["read"] }), "/api/reports/last-payment", "GET");
   deny(() => assertApiAccess(custom({ lastPaymentReport: ["read"] }), "/api/reports/last-payment/export", "GET"));
   assertApiAccess(custom({ lastPaymentReport: ["read", "export"] }), "/api/reports/last-payment/export", "GET");
+  // Who may record a Billing Exception: decided from role + stored permissions only (never designation / name).
+  {
+    const { canCreateBillingException } = await import("./permissions");
+    const as = (role: Role, permissions?: AdminPermissions, extra: Record<string, unknown> = {}) => canCreateBillingException({ role, permissions, ...extra } as never);
+    assert.equal(as(Role.SUPER_ADMIN), true);
+    assert.equal(as(Role.CUSTOM_ADMIN, { lastPaymentReport: ["read", "create"] }), true);
+    for (const perms of [{ lastPaymentReport: ["read"] }, { lastPaymentReport: ["read", "export"] }, { lastPaymentReport: ["create"] }, { reports: ["read", "export", "create"] }, {}] as AdminPermissions[]) assert.equal(as(Role.CUSTOM_ADMIN, perms), false, JSON.stringify(perms));
+    assert.equal(as(Role.SALES_OFFICER, { lastPaymentReport: ["read", "create"] }, { designation: "Super Admin" }), false, "SO never");
+    assert.equal(as(Role.REGIONAL_MANAGER, { lastPaymentReport: ["read", "create"] }), false, "RM never");
+    assert.ok(readFileSync("src/features/accounts/accounts-page.tsx", "utf8").includes('"Create Billing Exception"'), "Account Management labels the grant 'Create Billing Exception'");
+  }
+  // Billing Exception: recording one is its OWN grant (create); reading / exporting never allows it.
+  assert.deepEqual(apiPermission("/api/reports/last-payment/billing-exceptions", "POST"), ["lastPaymentReport", "create"]);
+  assert.deepEqual(apiPermission("/api/reports/last-payment/billing-exceptions", "GET"), ["lastPaymentReport", "read"]);
+  assert.deepEqual(apiPermission("/api/reports/last-payment/billing-exceptions/abc", "GET"), ["lastPaymentReport", "read"]);
+  assert.deepEqual(apiPermission("/api/reports/last-payment/billing-exceptions/export", "GET"), ["lastPaymentReport", "export"]);
+  deny(() => assertApiAccess(custom({ lastPaymentReport: ["read", "export"] }), "/api/reports/last-payment/billing-exceptions", "POST"));
+  deny(() => assertApiAccess(custom({ reports: ["read", "export", "create"] }), "/api/reports/last-payment/billing-exceptions", "POST"));
+  assertApiAccess(custom({ lastPaymentReport: ["read", "create"] }), "/api/reports/last-payment/billing-exceptions", "POST");
+  assertApiAccess(custom({ lastPaymentReport: ["read"] }), "/api/reports/last-payment/billing-exceptions", "GET");
   // Existing assignments are preserved verbatim (no auto-grant): an account that already has a set of permissions keeps exactly that set.
   const existing: AdminPermissions = { reports: ["read", "export"], cnRequests: ["read"] };
   assert.equal(hasAdminPermission(custom(existing), "lastPaymentReport"), false, "no silent elevation for existing accounts");
@@ -160,6 +180,8 @@ async function main() {
   const base = { name: "Rahul", username: "controller", password: "local-test-only", designation: "Ops", isActive: true };
   assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "export"] } }).success, true);
   assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["export"] } }).success, false, "export needs module access");
+  assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "create"] } }).success, true, "create (Billing Exception) is a grantable action");
+  assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["create"] } }).success, false, "create needs module access");
   assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "delete"] } }).success, false, "no invented actions");
   for (const bad of [{ ...input, designation: " " }, { ...input, password: "" }, { ...input, role: "SUPER_ADMIN" }, { ...input, permissions: { accountManagement: ["read"] } }, { ...input, permissions: { cnRequests: ["approve"] } }]) {
     assert.equal(account.createAccountSchema.safeParse(bad).success, false);

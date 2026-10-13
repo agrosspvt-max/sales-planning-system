@@ -3,11 +3,13 @@ import { prisma } from "@/lib/prisma";
 import type { AuthContext } from "@/lib/http";
 import { getCurrentOwnerByDealer, getOfficerScope } from "@/lib/scope";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
-import { latestReceiptAsOfByDealer } from "@/lib/last-payment.server";
+import { loadEffectiveLastPayments } from "@/lib/dealer-last-payment.server";
+import { billingStatusOf } from "@/lib/billing-exception";
 import { currentBusinessDate } from "@/lib/daily-work";
+import { kickPendingLastPaymentJobs } from "./last-payment-jobs-kick.server";
 import { buildPage, type Paginated } from "@/lib/pagination";
 import {
-  DAYBOOK_UPLOAD_AUDIT_ENTITY, DAYBOOK_UPLOAD_AUDIT_PREFIX, applyPaymentAging, applyReportFilters, cascadedFilterOptions, daysSincePayment, matchesParty, pruneReportFilters, sortByDays,
+  DAYBOOK_UPLOAD_AUDIT_ENTITY, DAYBOOK_UPLOAD_AUDIT_PREFIX, applyBillingStatusFilter, applyDayBucket, applyPaymentAging, summarizeDays, type DaySummary, applyReportFilters, cascadedFilterOptions, daysSincePayment, matchesParty, pruneReportFilters, sortByDays,
   type LastPaymentReportParams, type LastPaymentReportRow, type ReportFilterable, type ReportFilterOptions, type ReportFilters,
 } from "@/lib/last-payment-report";
 
@@ -27,6 +29,16 @@ export async function loadLastDayBookUpdate(): Promise<string | null> {
   return newest ? currentBusinessDate(newest) : null;
 }
 
+/** The effective Last Payment of each dealer as of `today` and its Days — the ONE place the report, the billing status and the exception service read it from. */
+export interface PaymentSnapshot { date: string | null; amount: number | null; days: number | null }
+export async function paymentSnapshotByDealer(dealerIds: string[], today: string, db?: Parameters<typeof loadEffectiveLastPayments>[2]): Promise<Map<string, PaymentSnapshot>> {
+  const payments = await loadEffectiveLastPayments(dealerIds, today, db);
+  return new Map(dealerIds.map((id) => {
+    const payment = payments.get(id);
+    return [id, { date: payment?.date ?? null, amount: payment?.date ? (payment.amount ?? 0) : null, days: daysSincePayment(payment?.date, today) }];
+  }));
+}
+
 /**
  * Last Payment Report — a read-only, scoped presentation of the SAME Last Payment value Recovery Planning shows.
  *
@@ -43,10 +55,11 @@ export async function getLastPaymentReport(
   ctx: AuthContext,
   params: LastPaymentReportParams,
   today: string = currentBusinessDate(),
-): Promise<Paginated<LastPaymentReportRow> & { options: ReportFilterOptions; appliedFilters: ReportFilters; lastUpdate: string | null }> {
-  const { sorted, options, appliedFilters } = await buildLastPaymentReport(ctx, params, today);
+): Promise<Paginated<LastPaymentReportRow> & { options: ReportFilterOptions; appliedFilters: ReportFilters; lastUpdate: string | null; summary: DaySummary }> {
+  kickPendingLastPaymentJobs(); // best effort: an interrupted Day Book hand-off is finished in the background (never blocks or changes this read)
+  const { sorted, options, appliedFilters, summary } = await buildLastPaymentReport(ctx, params, today);
   const start = (params.page - 1) * params.pageSize;
-  return { ...buildPage(sorted.slice(start, start + params.pageSize), sorted.length, { page: params.page, pageSize: params.pageSize, search: params.search }), options, appliedFilters, lastUpdate: await loadLastDayBookUpdate() };
+  return { summary, ...buildPage(sorted.slice(start, start + params.pageSize), sorted.length, { page: params.page, pageSize: params.pageSize, search: params.search }), options, appliedFilters, lastUpdate: await loadLastDayBookUpdate() };
 }
 
 /**
@@ -77,13 +90,18 @@ export async function getLastPaymentReportOptions(
   return { options: cascadedFilterOptions(base, appliedFilters), appliedFilters };
 }
 
-/** The shared pipeline: authorized dealers → filters → Last Payment → Payment Aging → Days sort. NOT paginated. */
-async function buildLastPaymentReport(
+/**
+ * The shared pipeline: authorized dealers → filters → Last Payment → Payment Aging → Days sort. NOT paginated.
+ * `onlyDealerIds` narrows the authorized dataset (never widens it) — Billing Exception → Current uses it to run this SAME pipeline
+ * over just the dealers that have current exceptions.
+ */
+export async function buildLastPaymentReport(
   ctx: AuthContext,
   params: LastPaymentReportParams,
   today: string,
-): Promise<{ sorted: LastPaymentReportRow[]; options: ReportFilterOptions; appliedFilters: ReportFilters }> {
-  const base = await loadAuthorizedRows(ctx);
+  onlyDealerIds?: readonly string[],
+): Promise<{ sorted: LastPaymentReportRow[]; options: ReportFilterOptions; appliedFilters: ReportFilters; summary: DaySummary; officerIdByDealer: Map<string, string | null> }> {
+  const base = await loadAuthorizedRows(ctx, onlyDealerIds);
   // CASCADING filters: incompatible selections (State UP → MP leaves Territory LUCKNOW) are dropped, and every dropdown lists only
   // what exists together with the OTHER active filters — all computed from the caller's authorized `base` rows, so no option
   // (or selection) can ever reach outside their scope. `appliedFilters` tells the page what was actually applied.
@@ -94,9 +112,11 @@ async function buildLastPaymentReport(
   // lookup so they narrow the work as well.
   const matched = applyReportFilters(base.filter((row) => matchesParty(row.party, params.search)), appliedFilters);
   // Last Payment: one batched lookup of the EXISTING source for the remaining dealers — no per-dealer queries.
-  const payments = await latestReceiptAsOfByDealer(matched.map((d) => d.dealerId), new Date(`${today}T00:00:00.000Z`));
+  const matchedIds = matched.map((d) => d.dealerId);
+  const payments = await paymentSnapshotByDealer(matchedIds, today);
+  const exceptionCounts = await currentExceptionCounts(matchedIds);
   const rows: LastPaymentReportRow[] = matched.map((d) => {
-    const payment = payments.get(d.dealerId);
+    const payment = payments.get(d.dealerId)!;
     return {
       dealerId: d.dealerId,
       party: d.party,
@@ -104,24 +124,38 @@ async function buildLastPaymentReport(
       state: d.state,
       territory: d.territory,
       salesOfficer: d.salesOfficer,
-      lastPaymentDate: payment?.date ?? null,
-      amount: payment?.date ? (payment.amount ?? 0) : null,
-      days: daysSincePayment(payment?.date, today),
+      lastPaymentDate: payment.date,
+      amount: payment.amount,
+      days: payment.days,
+      billingStatus: billingStatusOf(payment.days, exceptionCounts.get(d.dealerId) ?? 0), // from the SAME days value — never a second calculation
+      currentExceptions: exceptionCounts.get(d.dealerId) ?? 0,
     };
   });
 
   // Payment Aging filters the derived Days (null Days never matches); sorting is independent of it.
-  const sorted = sortByDays(applyPaymentAging(rows, params.paymentAging), params.sort);
-  return { sorted, options, appliedFilters };
+  // Billing Status (header filter) → Payment Aging → sort, all BEFORE pagination, so totals and page counts describe the filtered set.
+  // The summary counts are taken BEFORE the quick filter (so every bucket stays visible and switchable) but AFTER search, column filters, Billing Status and the manual Days constraint.
+  const constrained = applyPaymentAging(applyBillingStatusFilter(rows, appliedFilters), params.paymentAging);
+  const summary = summarizeDays(constrained);
+  const sorted = sortByDays(applyDayBucket(constrained, params.dayBucket), params.sort);
+  return { sorted, options, appliedFilters, summary, officerIdByDealer: new Map(base.map((d) => [d.dealerId, d.salesOfficerId])) };
+}
+
+/** Number of CURRENT billing exceptions per dealer (dealers without one are absent). One grouped query for the whole page of dealers. */
+async function currentExceptionCounts(dealerIds: string[]): Promise<Map<string, number>> {
+  if (dealerIds.length === 0) return new Map();
+  const groups = await prisma.billingException.groupBy({ by: ["dealerId"], where: { status: "CURRENT", dealerId: { in: dealerIds } }, _count: { _all: true } });
+  return new Map(groups.map((g) => [g.dealerId, g._count._all]));
 }
 
 /** The caller's authorized dealers with their master data (alias-preferred name, status, and the CURRENT owner's state / territory / name). */
-async function loadAuthorizedRows(ctx: AuthContext): Promise<ReportFilterable[]> {
+export async function loadAuthorizedRows(ctx: AuthContext, onlyDealerIds?: readonly string[]): Promise<ReportFilterable[]> {
   const scope = await getOfficerScope(ctx);
   const dealers = await prisma.dealer.findMany({
     where: {
+      // Dealer Master (soft-deleted records stay hidden). Active AND inactive dealers are listed — visibility, not matching eligibility: an inactive dealer keeps its payment data.
       deletedAt: null,
-      isActive: true,
+      ...(onlyDealerIds ? { id: { in: [...onlyDealerIds] } } : {}),
       ...(scope.all ? {} : { assignments: { some: { officerId: { in: scope.ids }, effectiveTo: null } } }),
     },
     select: { id: true, name: true, status: true }, // status = the existing authoritative Dealer.status

@@ -90,6 +90,7 @@ function loadService() {
     "@/lib/http": { ApiError: class extends Error { constructor(public status: number, message: string) { super(message); } } },
     "@/lib/audit": { writeAudit: async () => undefined },
     "@/lib/daily-work": { currentBusinessDate: () => "2026-09-29" },
+    "./billing-task.server": { materializeDueBillingTasksInTransaction: async () => ({ materialized: 0, affectedDealers: 0 }) }, // its own suite
     "./day-lock.server": { lockDailyWorkDay: async () => ({ currentBatchId: "batch-current", status: "OPEN", selfRating: null, finalizedAt: null }) },
   };
   runInNewContext(code, { exports, console, Buffer, require: (id: string) => id in mocks ? mocks[id] : localRequire(id) }, { filename });

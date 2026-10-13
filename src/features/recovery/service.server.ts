@@ -2,7 +2,7 @@ import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 import { recoveryCalendar, type MonthIdentity } from "@/lib/season-calendar";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -21,7 +21,8 @@ import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser"
 import { aggregateDaybookByDealer, type ClassifiedDaybookRow } from "@/lib/daybook-aggregate";
 import { latestReceiptAsOfByDealer } from "@/lib/last-payment.server";
 import { lastPaymentMonthEnd } from "@/lib/last-payment";
-import { retainRegularReceipts, type RegularReceipt } from "@/features/historical-daybook/service.server";
+import { preserveBeforeDaybookCommit, processLastPaymentJob, processPendingLastPaymentJobs, type LastPaymentJobPayload, type PaymentReceiptInput, type RegularReceipt } from "@/features/historical-daybook/service.server";
+import { reconcileBillingExceptionsSafely } from "@/features/reports/billing-exception.server";
 import { zeroPopulationDealers } from "@/lib/recovery-population";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1872,10 +1873,16 @@ export interface DaybookAnalysis {
   matched: DaybookMatchedLine[];
   skipped: DaybookSkippedLine[];
 }
-export interface DaybookResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number; receiptHistoryWarning?: string }
+/** `COMPLETE` = Last Payment is permanent; `PENDING_RETRY` = Recovery is saved, Last Payment processing failed and is retried automatically (next upload) from the durably stored receipts. */
+export interface LastPaymentStatus { status: "COMPLETE" | "PENDING_RETRY"; jobId: string; receipts: number; paymentOnlyDealers: number; diagnostic?: string }
+export interface DaybookResult { monthName: string; dealersUpdated: number; receiptTotal: number; srCrTotal: number; dealersCleared: number; receiptHistoryWarning?: string; billingExceptionWarning?: string; lastPayment: LastPaymentStatus }
 
 interface DaybookResolution {
   receipts: RegularReceipt[];
+  /** Last Payment's OWN consumer: every dated receipt attributed to a Dealer Master id — inactive dealers and dealers without a plan this month included. Recovery never reads it. */
+  paymentReceipts: RegularReceipt[];
+  /** Receipt names matched ONLY for Last Payment (inactive dealers): reported, never created and never part of Recovery. */
+  paymentOnlyNames: string[];
   monthName: string;
   seasonName: string;
   totalRows: number;
@@ -1895,12 +1902,13 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
   })) as { name: string; season: { name: string; year: number } } | null;
   if (!month) throw new ApiError(422, "The selected Recovery Month does not exist");
 
-  const [resolver, plans] = await Promise.all([
+  const [resolver, plans, paymentResolver] = await Promise.all([
     loadDealerResolver(),
     prisma.recoveryPlan.findMany({
       where: { seasonMonthId },
       select: { id: true, officerId: true, officer: { select: { name: true } }, dealers: { select: { id: true, dealerId: true, dealer: { select: { name: true } } } } },
     }),
+    loadDealerResolver(prisma, { includeInactive: true }), // the SAME matching rules over every non-deleted dealer — consulted only for rows Recovery's resolver cannot match
   ]);
   // dealerId → the plan + (existing) RecoveryPlanDealer row it maps to for this month. A dealer belongs
   // to exactly one officer, hence one plan.
@@ -1941,15 +1949,26 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
   const unknownSet = new Set<string>();
   const classified: ClassifiedDaybookRow[] = [];
   const receipts: RegularReceipt[] = [];
+  const paymentReceipts: RegularReceipt[] = [];
+  const paymentOnly = new Set<string>();
+  const activeIds = new Set(resolver.dealers.map((d) => d.id));
   for (const [sourceOrder, row] of parsed.rows.entries()) {
     const isSr = isSrCrVoucher(row.vchType);
     const isRcpt = isReceiptVoucher(row.vchType);
     if (!isSr && !isRcpt) continue; // other voucher types don't contribute to SR/CR, Live Recovery or Receipts
     const match = resolver.resolveWithReason(row.particulars);
     if (!match) {
+      // Last Payment only: an INACTIVE Dealer Master record still owns its payment (never created automatically, never part of Recovery).
+      const inactive = isRcpt && row.date && row.creditAmount > 0 ? paymentResolver.resolveWithReason(row.particulars) : null;
+      if (inactive && !activeIds.has(inactive.dealer.id)) {
+        paymentReceipts.push({ dealerId: inactive.dealer.id, date: row.date!, amount: row.creditAmount, sourceOrder });
+        paymentOnly.add(`${inactive.dealer.name}`);
+        continue;
+      }
       unknownSet.add(row.particulars);
       continue;
     }
+    if (isRcpt && row.date && row.creditAmount > 0) paymentReceipts.push({ dealerId: match.dealer.id, date: row.date, amount: row.creditAmount, sourceOrder });
     classified.push({ dealerId: match.dealer.id, isReceipt: isRcpt, isSrCr: isSr, date: row.date, creditAmount: row.creditAmount });
     if (isRcpt && row.date && rpdByDealer.has(match.dealer.id)) receipts.push({ dealerId: match.dealer.id, date: row.date, amount: row.creditAmount, sourceOrder });
   }
@@ -1969,7 +1988,7 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
   }
 
   return {
-    receipts,
+    receipts, paymentReceipts, paymentOnlyNames: [...paymentOnly],
     monthName: month.name,
     seasonName: `${month.season.name} ${month.season.year}`,
     totalRows: parsed.totalRows,
@@ -1991,7 +2010,8 @@ export async function analyzeDaybook(ctx: AuthContext, buffer: Buffer, filename:
   const matched = [...res.matched.entries()].map(([dealerId, m]) => ({ dealerId, dealerName: m.dealerName, officerName: m.officerName, receipt: m.receipt, srCr: m.srCr }));
   const skipped: DaybookSkippedLine[] = [
     ...res.skippedUnknown.map((name) => ({ dealerName: name, reason: "Unknown Alias — no Dealer Master match" })),
-    ...res.skippedNoPlan.map((s) => ({ dealerName: s.dealerName, reason: "Not in a Recovery Plan for this month" })),
+    ...res.skippedNoPlan.map((s) => ({ dealerName: s.dealerName, reason: "Not in a Recovery Plan for this month (its receipts are still recorded for the Last Payment Report)" })),
+    ...res.paymentOnlyNames.map((name) => ({ dealerName: name, reason: "Inactive dealer — not part of Recovery; its receipts are recorded for the Last Payment Report only" })),
   ];
   const receiptTotal = matched.reduce((t, m) => t + m.receipt, 0);
   const srCrTotal = matched.reduce((t, m) => t + m.srCr, 0);
@@ -2019,6 +2039,18 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
   const res = await resolveDaybook(parsed, input.seasonMonthId);
 
   const matched = [...res.matched.entries()].map(([dealerId, m]) => ({ dealerId, ...m }));
+  // BEFORE any Recovery change: make the payments the report shows today permanent (the monthly commit resets the per-plan snapshots). If this cannot be done nothing has changed yet.
+  try { await preserveBeforeDaybookCommit(res.monthRpdIds, res.paymentReceipts.map((r) => r.dealerId)); }
+  catch (error) {
+    console.error("[daybook] Last Payment preparation failed", error instanceof Error ? error.name : "Unknown error");
+    throw new ApiError(503, "The Day Book was NOT imported: existing Last Payment data could not be preserved first. Nothing was changed — please upload the same file again.");
+  }
+  const toInput = (list: RegularReceipt[]): PaymentReceiptInput[] => list.map((r) => ({ dealerId: r.dealerId, date: r.date.toISOString().slice(0, 10), amount: r.amount, sourceOrder: r.sourceOrder }));
+  const jobPayload: LastPaymentJobPayload = {
+    paymentReceipts: toInput(res.paymentReceipts), recoveryReceipts: toInput(res.receipts),
+    expected: matched.map((m) => ({ planId: m.planId, dealerId: m.dealerId, receipt: m.receipt, srCr: m.srCr, lastReceiptDate: m.lastReceiptDate ? m.lastReceiptDate.toISOString().slice(0, 10) : null, lastReceiptAmount: m.lastReceiptAmount })),
+  };
+  let jobId = "";
   await prisma.$transaction(
     async (tx: Tx) => {
       // Reset the two Daybook-owned columns for the WHOLE month first (clears any prior upload).
@@ -2042,18 +2074,21 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
           await tx.$executeRaw`UPDATE "RecoveryPlanDealer" SET "lastReceiptDate" = ${m.lastReceiptDate}::date, "lastReceiptAmount" = ${m.lastReceiptAmount} WHERE "recoveryPlanId" = ${m.planId} AND "dealerId" = ${m.dealerId}`;
         }
       }
+      // Durable hand-off (additive; reads and changes no Recovery value): the resolved receipts are stored with the SAME commit, so Last Payment processing can always be
+      // (re)done from them — after a failure, a lost request or a restart — without ever replaying the monthly update.
+      const job = await tx.lastPaymentJob.create({ data: { scopeKey: input.seasonMonthId, workbookName: filename, sourceFileHash: createHash("sha256").update(buffer).digest("hex"), uploadedById: ctx.userId, payload: jobPayload as never }, select: { id: true } });
+      jobId = job.id;
     },
     { timeout: 60000, maxWait: 10000 },
   );
 
-  // Informational history is isolated from the original financial transaction. A retention failure
-  // must never replay or roll back the already-successful monthly SR/CR/Live Recovery operation.
+  // Last Payment is isolated from the (already committed) financial transaction: a failure here can never roll back or replay the monthly SR/CR / Live Recovery operation. Earlier
+  // failed uploads are retried first (oldest first), then this upload's own job; a failure leaves the durable job FAILED and is retried by the next upload.
   let receiptHistoryWarning: string | undefined;
-  try { await retainRegularReceipts(ctx, buffer, filename, input.seasonMonthId, res.receipts, matched); }
-  catch (error) {
-    console.error("[daybook] Isolated receipt retention failed", error instanceof Error ? error.name : "Unknown error");
-    receiptHistoryWarning = "Monthly Day Book values were saved, but individual Last Payment receipt history could not be retained. Retry this same upload to retain history; monthly totals will not accumulate.";
-  }
+  await processPendingLastPaymentJobs({ exceptJobId: jobId });
+  const lp = await processLastPaymentJob(jobId);
+  const lastPayment: LastPaymentStatus = { status: lp.status === "DONE" ? "COMPLETE" : "PENDING_RETRY", jobId, receipts: res.paymentReceipts.length, paymentOnlyDealers: res.paymentOnlyNames.length, ...(lp.error ? { diagnostic: lp.error } : {}) };
+  if (lp.status !== "DONE") receiptHistoryWarning = `Monthly Day Book values were saved, but Last Payment processing did not complete (${lp.error ?? "unknown error"}). Nothing needs to be uploaded again: the receipts are stored and processing is retried automatically with the next Day Book upload.`;
   const receiptTotal = matched.reduce((t, m) => t + m.receipt, 0);
   const srCrTotal = matched.reduce((t, m) => t + m.srCr, 0);
   await writeAudit({
@@ -2063,5 +2098,9 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
     summary: `Day Book upload for ${res.seasonName} · ${res.monthName} (${filename}): ${matched.length} dealer(s) updated — Receipts ₹${Math.round(receiptTotal)}, SR/CR ₹${Math.round(srCrTotal)}`,
   });
 
-  return { monthName: res.monthName, dealersUpdated: matched.length, receiptTotal, srCrTotal, dealersCleared: res.monthRpdIds.length, ...(receiptHistoryWarning ? { receiptHistoryWarning } : {}) };
+  // Billing Exceptions: the dealer's effective Last Payment may have changed (monthly snapshot columns above, retained receipts just now). Re-check EVERY dealer with a
+  // current exception — independent of this upload's matched dealers — AFTER the financial commit; it can only warn, never undo or replay it.
+  const billingExceptionWarning = await reconcileBillingExceptionsSafely({ userId: ctx.userId, designation: ctx.designation });
+
+  return { monthName: res.monthName, dealersUpdated: matched.length, receiptTotal, srCrTotal, dealersCleared: res.monthRpdIds.length, ...(receiptHistoryWarning ? { receiptHistoryWarning } : {}), lastPayment, ...(billingExceptionWarning ? { billingExceptionWarning } : {}) };
 }

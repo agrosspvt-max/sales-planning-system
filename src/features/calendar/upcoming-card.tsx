@@ -30,6 +30,7 @@ export function UpcomingCard({ partyPlanningEnabled = false }: { partyPlanningEn
     schemes: useLabel("calendar.schemes"),
     partyAppointment: useLabel("calendar.party_appointment"),
     market: useLabel("calendar.market"),
+    billingTask: useLabel("daily_work.task_type.billing_exception"),
   };
 
   return (
@@ -46,7 +47,7 @@ export function UpcomingCard({ partyPlanningEnabled = false }: { partyPlanningEn
         ) : (
           <ul className="space-y-2"><DealerOrder>
             {data!.map((it, i) => (
-              <li data-dealer-id={it.event?.dealerId} key={i} className="flex items-start gap-3 border-b pb-2 text-sm last:border-0 last:pb-0">
+              <li data-dealer-id={it.event?.dealerId ?? it.billingTask?.dealerId} key={i} className="flex items-start gap-3 border-b pb-2 text-sm last:border-0 last:pb-0">
                 <span className="w-12 shrink-0 pt-0.5 text-xs font-medium text-muted-foreground tabular-nums">{shortDate(it.dateKey)}</span>
                 {it.kind === "CONVERSION" && it.event ? (
                   <Link href="/planning/scheme/plans" className="min-w-0 flex-1 hover:underline">
@@ -61,6 +62,12 @@ export function UpcomingCard({ partyPlanningEnabled = false }: { partyPlanningEn
                     <div className="truncate font-medium">{it.partyEvent.partyName}</div>
                     {it.partyEvent.marketName && <div className="text-xs text-muted-foreground">{L.market}: {it.partyEvent.marketName}</div>}
                   </PartyLink>
+                ) : it.kind === "BILLING_TASK" && it.billingTask ? (
+                  <Link href="/planning/calendar" className="min-w-0 flex-1 hover:underline">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.billingTask}</div>
+                    <div className="truncate font-medium"><DealerName id={it.billingTask.dealerId} name={it.billingTask.dealerName} /></div>
+                    <div className="text-xs text-muted-foreground">{formatCurrency(it.billingTask.amount)} · {it.billingTask.ownerName}</div>
+                  </Link>
                 ) : it.note ? (
                   <Link href="/planning/calendar" className="min-w-0 flex-1 hover:underline">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.note}</div>

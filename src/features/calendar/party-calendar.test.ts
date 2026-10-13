@@ -101,6 +101,7 @@ function loadCalendarServer(prisma: object, scope: Scope) {
       getCurrentDealerIds: async () => [],
     },
     "@/lib/recovery-config": { getCalendarEnabled: async () => true },
+    "@/features/daily-work/billing-task-visibility.server": { loadCalendarBillingTasks: async () => [] }, // own suite: billing-task.integration.ts
     // Use the REAL calendar lib (projection + ranges) so we test the true integration.
     "@/lib/calendar": localRequire(resolve("src/lib", "calendar.ts")),
   };

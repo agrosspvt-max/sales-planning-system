@@ -21,6 +21,8 @@ import { PageHeader } from "@/components/layout/page-header";
 import { useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
 import { dateKey, groupEventsByOfficer, type ConversionEvent, type ConversionStatus, type PartyAppointmentEvent } from "@/lib/calendar";
+import { BillingTaskDetailDialog } from "@/features/daily-work/billing-task-ui";
+import type { CalendarBillingTaskDto } from "@/features/daily-work/billing-task-visibility.server";
 import type { CalendarPayload, CalendarNoteDto, CalendarEntryDto, CalendarEntryKind } from "@/features/calendar/calendar.server";
 
 const STATUS_META: Record<ConversionStatus, { key: LabelKey; variant: "muted" | "secondary" | "default" | "success" | "warning" | "destructive" }> = {
@@ -116,6 +118,14 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
     save: useLabel("calendar.save"),
     delete: useLabel("calendar.delete"),
     inDailyWork: useLabel("calendar.in_daily_work"),
+    billingTask: useLabel("daily_work.task_type.billing_exception"),
+    btScheduled: useLabel("calendar.billing_task.scheduled"),
+    btOverdue: useLabel("calendar.billing_task.overdue"),
+    btInDailyWork: useLabel("calendar.billing_task.in_daily_work"),
+    btConfirmed: useLabel("calendar.billing_task.confirmed"),
+    btRescheduled: useLabel("calendar.billing_task.rescheduled"),
+    btScheduledDate: useLabel("calendar.billing_task.scheduled_date"),
+    btDetails: useLabel("calendar.billing_task.details"),
     taskPastDate: useLabel("calendar.task_past_date"),
     noDealers: useLabel("calendar.no_dealers"),
     secSALES: useLabel("daily_work.section.sales"),
@@ -151,6 +161,11 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
   const entriesByDate = useMemo(() => {
     const m = new Map<string, CalendarEntryDto[]>();
     for (const e of data?.entries ?? []) { const a = m.get(e.dateKey) ?? []; a.push(e); m.set(e.dateKey, a); }
+    return m;
+  }, [data]);
+  const billingByDate = useMemo(() => {
+    const m = new Map<string, CalendarBillingTaskDto[]>();
+    for (const t of data?.billingTasks ?? []) { const a = m.get(t.dateKey) ?? []; a.push(t); m.set(t.dateKey, a); }
     return m;
   }, [data]);
   const partyEventsByDate = useMemo(() => {
@@ -241,9 +256,11 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
               const partyEvs = partyEventsByDate.get(dk) ?? [];
               const notes = notesByDate.get(dk) ?? [];
               const dayEntries = entriesByDate.get(dk) ?? [];
-              const totalEvs = evs.length + partyEvs.length + dayEntries.length;
+              const dayBilling = billingByDate.get(dk) ?? [];
+              const totalEvs = evs.length + partyEvs.length + dayEntries.length + dayBilling.length;
               const shownParty = partyEvs.slice(0, Math.max(0, 2 - evs.length));
-              const shownEntries = dayEntries.slice(0, Math.max(0, 2 - evs.length - shownParty.length));
+              const shownBilling = dayBilling.slice(0, Math.max(0, 2 - evs.length - shownParty.length));
+              const shownEntries = dayEntries.slice(0, Math.max(0, 2 - evs.length - shownParty.length - shownBilling.length));
               const isToday = dk === todayKey;
               return (
                 <button
@@ -272,6 +289,12 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
                         <span className="truncate">{groupByOfficer ? e.salesOfficerName : e.partyName}</span>
                       </div>
                     ))}
+                    {shownBilling.map((t) => (
+                      <div key={t.id} data-testid="calendar-billing-chip" className="flex items-center gap-1 truncate rounded bg-purple-500/10 px-1 py-0.5 text-[11px] leading-tight">
+                        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", t.status === "OVERDUE" ? "bg-destructive" : "bg-purple-500")} />
+                        <span className="truncate">{groupByOfficer ? `${t.ownerName} · ${L.billingTask}` : <DealerName id={t.dealerId} name={t.dealerName} />}</span>
+                      </div>
+                    ))}
                     {shownEntries.map((e) => (
                       <div key={e.id} className="flex items-center gap-1 truncate rounded bg-muted/60 px-1 py-0.5 text-[11px] leading-tight">
                         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", ENTRY_DOT[e.kind])} />
@@ -295,6 +318,7 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
           partyEvents={partyEventsByDate.get(openDate) ?? []}
           notes={notesByDate.get(openDate) ?? []}
           entries={entriesByDate.get(openDate) ?? []}
+          billingTasks={billingByDate.get(openDate) ?? []}
           payload={data}
           role={role}
           groupByOfficer={groupByOfficer}
@@ -310,9 +334,9 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
 
 type Labels = Record<string, string>;
 
-function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entries, payload, role, groupByOfficer, partyPlanningEnabled, labels: L, onClose, onChanged }: {
+function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entries, billingTasks, payload, role, groupByOfficer, partyPlanningEnabled, labels: L, onClose, onChanged }: {
   partyPlanningEnabled: boolean;
-  dateKey: string; title: string; events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[]; entries: CalendarEntryDto[];
+  dateKey: string; title: string; events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[]; entries: CalendarEntryDto[]; billingTasks: CalendarBillingTaskDto[];
   payload: CalendarPayload | undefined; role: Role; groupByOfficer: boolean; labels: Labels; onClose: () => void; onChanged: () => void;
 }) {
   const groups = groupByOfficer ? groupEventsByOfficer(events) : null;
@@ -339,7 +363,7 @@ function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entr
           </div>
           {adding && <AddEntryForm kind={adding} dateKey={dk} payload={payload} labels={L} onCancel={() => setAdding(null)} onSaved={() => { setAdding(null); onChanged(); }} />}
 
-          {events.length === 0 && partyEvents.length === 0 && notes.length === 0 && entries.length === 0 && <p className="text-sm text-muted-foreground">{L.noEvents}</p>}
+          {events.length === 0 && partyEvents.length === 0 && notes.length === 0 && entries.length === 0 && billingTasks.length === 0 && <p className="text-sm text-muted-foreground">{L.noEvents}</p>}
 
           {groups
             ? groups.map((g) => (
@@ -360,6 +384,7 @@ function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entr
               ))
             : partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} linked={partyPlanningEnabled} />)}
 
+          {billingTasks.map((t) => <BillingTaskCard key={t.id} t={t} labels={L} />)}
           {entries.map((e) => <EntryCard key={e.id} e={e} labels={L} onChanged={onChanged} />)}
 
           {/* Existing notes keep working (view / edit / delete); new entries are added through the four actions above. */}
@@ -368,6 +393,31 @@ function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entr
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.cancel}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** A scheduled Billing Exception recovery task — a read-only view of the ONE task (the same row the Sales Officer sees in Daily Work); details open the originating exception. */
+function BillingTaskCard({ t, labels: L }: { t: CalendarBillingTaskDto; labels: Labels }) {
+  const [open, setOpen] = useState(false);
+  const statusLabel = t.status === "IN_DAILY_WORK" ? L.btInDailyWork : t.status === "OVERDUE" ? L.btOverdue : L.btScheduled;
+  const dmy = (dk: string) => dk.split("-").reverse().join("/");
+  return (
+    <div className="rounded-md border bg-card p-3" data-testid="calendar-billing-task">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"><span className="h-2 w-2 rounded-full bg-purple-500" />{L.billingTask}</span>
+        <div className="flex items-center gap-1">
+          {t.rescheduled && <Badge variant="muted">{L.btRescheduled}</Badge>}
+          {t.confirmed && <Badge variant="success">{L.btConfirmed}</Badge>}
+          <Badge variant={t.status === "OVERDUE" ? "destructive" : t.status === "IN_DAILY_WORK" ? "success" : "secondary"}>{statusLabel}</Badge>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-sm">
+        <div className="font-medium"><DealerName id={t.dealerId} name={t.dealerName} /> — {formatCurrency(t.amount)}</div>
+        <div className="text-muted-foreground">{L.salesOfficer}: {t.ownerName} · {L.btScheduledDate}: {dmy(t.dateKey)}</div>
+      </div>
+      <div className="mt-1 flex justify-end"><Button variant="ghost" size="sm" onClick={() => setOpen(true)}>{L.btDetails}</Button></div>
+      {open && <BillingTaskDetailDialog id={t.id} onClose={() => setOpen(false)} />}
+    </div>
   );
 }
 

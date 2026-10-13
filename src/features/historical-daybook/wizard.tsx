@@ -135,6 +135,7 @@ export function HistoricalDaybookWizard() {
               {result.imported} retained · {result.excluded} explicitly excluded ·{" "}
               {result.duplicates} confirmed duplicates. Batch: {result.importId}
             </p>
+            {result.billingExceptionWarning && <p role="alert" className="text-sm text-amber-600">{result.billingExceptionWarning}</p>}
             <Button
               variant="outline"
               onClick={() => {

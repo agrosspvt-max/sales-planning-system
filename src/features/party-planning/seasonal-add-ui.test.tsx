@@ -15,8 +15,10 @@ let plans: unknown[] = [];
 let selects: { value?: string; options: { value: string; label: string }[]; onChange?: (e: unknown) => void }[] = [];
 let sheet: Record<string, unknown> = { id: "sh1", seasonName: "Kharif 2026", seasonOpen: true, ownerName: "Officer One", status: "Draft", own: true };
 const season = { id: "s1", name: "Kharif", year: 2026, period: "Apr 2026 → Nov 2026", months: [{ name: "April" }] };
-const MARKETS = [{ id: "m-pip", name: "Pipariya" }, { id: "m-bar", name: "Bareli" }];
-let buttons: { children?: React.ReactNode; onClick?: () => void }[] = [];
+let eligible: { data?: { markets: { id: string | null; territoryMappingId: string | null; name: string }[] }; isLoading?: boolean; error?: Error } = {};
+const eligibleQueries: { queryKey: unknown[]; staleTime?: number; gcTime?: number; refetchOnMount?: unknown }[] = [];
+const MARKETS = [{ id: "m-pip", territoryMappingId: null, name: "Pipariya" }, { id: "m-bar", territoryMappingId: null, name: "Bareli" }];
+let buttons: { children?: React.ReactNode; onClick?: () => void; "aria-label"?: string }[] = [];
 let inputs: { placeholder?: string; value?: string; onChange?: (e: { target: { value: string } }) => void; list?: string }[] = [];
 
 const overrides = {
@@ -33,8 +35,10 @@ const overrides = {
   "./party-planning-page": { PartyPlanModeLinks: () => null },
   "@/components/layout/page-header": { PageHeader: ({ title, subtitle }: { title: string; subtitle?: string }) => <h1>{title}<p>{subtitle}</p></h1> },
   "@tanstack/react-query": {
-    useQuery: ({ queryKey }: { queryKey: string[] }) => {
-      if (queryKey[0] === "territory-markets") return { data: MARKETS };
+    useQuery: (o: { queryKey: string[]; staleTime?: number; gcTime?: number; refetchOnMount?: unknown }) => {
+      const { queryKey } = o;
+      if (queryKey[0] === "seasonal-eligible-markets") { eligibleQueries.push(o); return { isLoading: false, ...eligible }; }
+      if (queryKey[0] === "territory-markets") throw new Error("Seasonal Planning must not read the global Market list");
       return { data: { sheet, season, plans }, isLoading: false }; // ["seasonal-sheet", id, search]
     },
     useQueryClient: () => ({ invalidateQueries: () => { invalidations += 1; } }),
@@ -70,6 +74,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const PLAN = { id: "p1", sheetId: "sh1", canReview: false, seasonName: "Kharif", ownerName: "Officer One", marketId: "m-pip", marketName: "Pipariya", type: "Existing", marketPotential: "B", status: "—", appointmentDate: null, approvalStatus: "DRAFT", rejectionStage: null, rejectionReason: null, rmDecidedByName: null, rmDecidedAt: null, adminDecidedByName: null, adminDecidedAt: null, createdAt: "2026-10-07T00:00:00.000Z", editable: true };
 
 async function main() {
+  eligible = { data: { markets: MARKETS } };
   // 1) Empty list: no inline form, the empty state carries ONE "+ Add Market" button.
   let html = render();
   assert.ok(html.includes("No Seasonal Plans here yet."));
@@ -152,10 +157,39 @@ async function main() {
   assert.equal(buttons.filter((b) => String(b.children).includes("Reject")).length, 1);
   assert.equal(buttons.filter((b) => String(b.children).includes("Submit")).length, 0, "…and no owner actions on someone else's plan");
 
+  // 7b) Eligibility states: scoped query per plan, fresh on every open; loading / error / empty never fall back to a global list.
+  sheet = { ...sheet, own: true, ownerName: "Officer One" }; plans = []; hooks = [];
+  eligibleQueries.length = 0; render(); click("Add Market"); render();
+  const q = eligibleQueries.at(-1)!;
+  assert.equal(JSON.stringify(q.queryKey), JSON.stringify(["seasonal-eligible-markets", "sh1"]), "its own cache key, per Seasonal Plan");
+  assert.equal(JSON.stringify([q.staleTime, q.gcTime, q.refetchOnMount]), JSON.stringify([0, 0, "always"]), "refetched every time the dialog opens (recent mappings / approvals appear)");
+  eligible = { isLoading: true }; hooks = []; render(); click("Add Market"); html = render();
+  assert.ok(html.includes("Loading the markets in your territory…") && !html.includes("<datalist"), "loading state, no list");
+  assert.equal(buttons.filter((b) => String(b.children).includes("Add Plan")).length, 1);
+  eligible = { error: new Error("Seasonal Plan not found") }; hooks = []; render(); click("Add Market"); html = render();
+  assert.ok(html.includes("Could not load your markets. Seasonal Plan not found") && !html.includes("<datalist") && !html.includes('<option value="Pipariya"'), "error state — and the global list is never shown instead");
+  eligible = { data: { markets: [] } }; hooks = []; render(); click("Add Market"); html = render();
+  assert.ok(html.includes("No markets are available for your territory yet.") && !html.includes("<datalist"), "empty eligibility: a clear message, nothing to pick");
+  // Karuamor: an edited territory name with no Market record is selectable (id null + the owner's mapping), next to a normal Market and an approved Vacant one
+  eligible = { data: { markets: [{ id: "m-bor", territoryMappingId: null, name: "Boring Road" }, { id: null, territoryMappingId: "mp7", name: "Karuamor" }] } }; hooks = []; render(); click("Add Market"); html = render();
+  assert.ok(html.includes('<option value="Karuamor"') && html.includes('<option value="Boring Road"') && !html.includes('<option value="Pipariya"') && !html.includes("not selectable"), "both are offered; no 'not selectable' warning exists any more");
+  (overrides["@/lib/api-client"].api as { post: unknown }).post = async (url: string, body: unknown) => { posts.push({ url, body }); return {}; }; // (an earlier step swapped in a failing post)
+  type("Search Market…", "karuamor"); render(); posts.length = 0;
+  click("Add Plan"); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/seasonal-plans", body: { sheetId: "sh1", territoryMappingId: "mp7", expectedMarket: "Karuamor" } }], "a territory name is saved by its mapping reference + the name shown — never a fake Market id, never typed text");
+  hooks = []; render(); click("Add Market"); render(); type("Search Market…", "Boring Road"); render(); posts.length = 0; click("Add Plan"); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/seasonal-plans", body: { sheetId: "sh1", marketId: "m-bor" } }], "an ordinary Market still posts its id");
+  // Edit uses the SAME scoped list for the plan's own sheet
+  eligible = { data: { markets: MARKETS } }; hooks = []; plans = [PLAN]; eligibleQueries.length = 0; render(); buttons.find((b) => b["aria-label"] === "Edit")!.onClick!(); html = render();
+  assert.equal(JSON.stringify(eligibleQueries.at(-1)!.queryKey), JSON.stringify(["seasonal-eligible-markets", "sh1"]), "Edit dialog: scoped by the plan's sheet");
+  assert.ok(inputs.some((i) => i.list === "seasonal-edit-markets"));
+  hooks = []; plans = [];
+
   // 8) Source-level guards: it is NOT the Territory Mapping request, and nothing server-side changed.
   const src = readFileSync("src/features/party-planning/seasonal-planning-page.tsx", "utf8");
   assert.ok(!src.includes("market-requests") && !src.includes("territory-mapping/market-requests"), "no Market Request / approval workflow is invoked from Seasonal Planning");
-  assert.equal(count(src, 'api.post("/api/seasonal-plans", { sheetId, marketId })'), 1, "one create call, in the popup");
+  assert.equal(count(src, 'api.post("/api/seasonal-plans", { sheetId, ...choiceBody(choice!) })'), 1, "one create call, in the popup");
+  assert.ok(!src.includes("/api/territory-mapping/markets") && !src.includes("territory-markets") && src.includes("/api/seasonal-sheets/${sheetId}/markets"), "choices come from the scoped endpoint, never the global Market list");
   // Create is the persistent workspace: Add Market + Submit all only there; other sections are read-only views of the same plan.
   sheet = { ...sheet, seasonOpen: true, own: true }; plans = [PLAN, { ...PLAN, id: "p2", editable: false }];
   render(Role.SALES_OFFICER, "create");

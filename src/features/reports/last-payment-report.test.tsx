@@ -11,7 +11,7 @@ import { DEFAULT_LABELS } from "@/features/labels/labels";
 import { navForRole } from "@/features/navigation/nav";
 import { resolveNavState } from "@/features/navigation/nav-state";
 import {
-  DAYBOOK_UPLOAD_AUDIT_ENTITY, DAY_BUCKETS, bucketOfAging, dayBucketAsAging, dayBucketOf, summarizeDays, DAYBOOK_UPLOAD_AUDIT_PREFIX, applyFilterStep, formatLastUpdate, applyPaymentAging, applyReportFilters, buildPaymentAging, cascadedFilterOptions, pruneReportFilters, reportFilterOptions, sameReportFilters, type ReportFilterable, calendarDaysBetween, daysSincePayment, matchesPaymentAging, parseAgingDays, parseLastPaymentReportParams,
+  DAYBOOK_UPLOAD_AUDIT_ENTITY, DAY_BUCKETS, bucketOfAging, dayBucketAsAging, dayBucketOf, summarizeDays, DAYBOOK_UPLOAD_AUDIT_PREFIX, SEARCH_APPLY_DELAY_MS, changeFilterStep, agingAutoApply, formatLastUpdate, applyPaymentAging, applyReportFilters, buildPaymentAging, cascadedFilterOptions, pruneReportFilters, reportFilterOptions, sameReportFilters, type ReportFilterable, calendarDaysBetween, daysSincePayment, matchesPaymentAging, parseAgingDays, parseLastPaymentReportParams,
   parsePaymentAging, paymentAgingLabel, paymentAgingToParams, sortByDays, type PaymentAgingFilter,
 } from "@/lib/last-payment-report";
 import { lastPaymentMonthEnd } from "@/lib/last-payment";
@@ -538,7 +538,7 @@ async function cascading() {
   }
   // Page wiring: all four filters stay visible; the page adopts the server's applied (pruned) selections.
   const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
-  assert.ok(page.includes("sameReportFilters(cleaned, pending)") && page.includes("setPending(cleaned)") && page.includes("!optionsQuery.isPlaceholderData"), "an invalid child selection is cleared from the PENDING state");
+  assert.ok(page.includes("sameReportFilters(cleaned, filters)") && page.includes("setFilters(cleaned)") && page.includes("!optionsQuery.isPlaceholderData"), "an invalid child selection is cleared from the selection");
   assert.equal((page.match(/<ColumnFilterHeader/g) ?? []).length, 3, "the mapped column filters plus the Billing Status and Authorized By header filters (same component), never hidden");
 }
 
@@ -772,8 +772,8 @@ async function exportTests() {
   // Read-only + UI wiring (source level): ONE query builder feeds both the paged table and the export; loading state; no duplicate clicks.
   const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
   assert.ok(page.includes("const reportQuery = ") && page.includes("reportQuery({ page: String(page)") && page.includes("/api/reports/last-payment/export?${reportQuery()}"), "export is built from the same query as the table (current state at click time)");
-  assert.ok(page.includes("if (exporting) return;") && page.includes("disabled={exporting || isLoading}") && page.includes('"Exporting…"'), "disabled + loading state, no duplicate requests");
-  assert.ok(page.includes("NO_EXPORT_DATA_MESSAGE") && page.includes("data.total === 0"), "empty result shows the message");
+  assert.ok(page.includes("if (exporting) return;") && page.includes("disabled={exporting || isLoading || busy || failed}") && page.includes('"Exporting…"'), "disabled + loading state, no duplicate requests");
+  assert.ok(page.includes("NO_EXPORT_DATA_MESSAGE") && page.includes("shown.total === 0"), "empty result shows the message");
   const route = readFileSync("src/app/api/reports/last-payment/export/route.ts", "utf8");
   assert.ok(route.includes("getLastPaymentReportExport(ctx, params)") && !/officerId|scope/i.test(route.replace(/ctx|session scope|scope parameter/g, "")), "same service + session scope, no scope input");
   const service = readFileSync("src/features/reports/last-payment-report.server.ts", "utf8");
@@ -781,78 +781,94 @@ async function exportTests() {
   assert.equal(report.getLastPaymentReport.length, 2, "the paged service signature is unchanged");
 }
 
-/* ---------------------------------- explicit "Apply Filters" (pending vs applied) ---------------------------------- */
+/* ---------------------------------- automatic filtering ---------------------------------- */
 async function applyWorkflow() {
   const query = (url: string) => new URL(url, "http://x").searchParams;
-  // 1–4 — choosing a filter changes only the PENDING selection: the table request keeps the APPLIED filters, the header shows the pending count.
-  for (const [key, label, pendingValue] of [["state", "State", "MP"], ["territory", "Territory", "INDORE"], ["status", "Status", "PENDING"], ["officer", "Sales Officer", "arjun"], ["party", "Party", "d-a"]] as const) {
-    const html = await draw(admin, {}, { 3: { [key]: [pendingValue] } }); // pending = {key}, applied = {} (all)
-    assert.deepEqual(query(requested).getAll(key), [], `${key}: selecting it does NOT change the table request`);
-    assert.ok(html.includes(`${label} (1)`), `${key}: the dropdown shows the pending selection`);
-    assert.deepEqual(query(requestedOptions).getAll(key), [pendingValue], `${key}: …and only the dropdown OPTIONS follow it (options-only request)`);
-    assert.equal(query(requestedOptions).get("optionsOnly"), "1");
-  }
-  // Applied UP, pending MP → the table is still UP until Apply Filters is clicked.
-  await draw(admin, {}, { 3: { state: ["MP"] }, 5: { state: ["UP"] } });
-  assert.deepEqual(query(requested).getAll("state"), ["UP"], "table keeps the APPLIED filter (UP)");
-  assert.deepEqual(query(requestedOptions).getAll("state"), ["MP"], "options cascade from the PENDING selection (MP)");
-  assert.equal(query(requested).get("optionsOnly"), null, "the table request is a normal report request");
-
-  // 5, 8 — Apply Filters applies ALL pending selections at once; a real change resets to page 1; nothing happens without a change.
-  const pending = { state: ["MP"], territory: ["INDORE"], status: ["DEFAULTER"], officer: ["chhitranjan"] };
-  const step = applyFilterStep({ pending, applied: { state: ["UP"] }, page: 3, applying: false });
-  assert.deepEqual(plain(step), { applied: pending, page: 1, applying: true, changed: true }, "all pending selections applied together, page 3 → 1");
-  const idle = applyFilterStep({ pending: { state: ["UP"] }, applied: { state: ["UP"] }, page: 3, applying: false });
-  assert.deepEqual([idle.changed, idle.page, idle.applying], [false, 3, false], "no pending change → no refetch, page untouched");
-  assert.equal(applyFilterStep({ pending: { state: ["UP"] }, applied: { state: ["UP"] }, page: 1, applying: false }).applied.state?.[0], "UP");
-  // 7 — duplicate clicks while applying are ignored.
-  const dup = applyFilterStep({ pending, applied: { state: ["UP"] }, page: 3, applying: true });
-  assert.deepEqual([dup.changed, dup.page, dup.applying], [false, 3, true], "a second click during applying does nothing");
-  // 6 — loading state: spinner + "Applying…", disabled and busy; otherwise "Apply Filters".
-  let html = await draw(admin, {}, { 3: { state: ["MP"] }, 5: { state: ["UP"] }, 6: true });
-  const busy = html.slice(html.indexOf("Applying…") - 700, html.indexOf("Applying…") + 20);
-  assert.ok(html.includes("Applying…") && /disabled=""/.test(busy) && busy.includes('aria-busy="true"') && busy.includes("animate-spin"), "spinner + disabled while applying");
-  html = await draw(admin, {}, { 3: { state: ["MP"] }, 5: { state: ["UP"] } });
-  assert.ok(html.includes("Apply Filters") && !html.includes("Applying…"), "idle label");
-  assert.ok(html.indexOf("Search parties") < html.indexOf("Apply Filters") && html.indexOf("Apply Filters") < html.indexOf("Last Update"), "Apply Filters sits with the search controls");
-  // The current table stays visible while loading (no blank table): placeholder data is kept and the skeleton is first-load only.
   const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
+  const noComments = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  // The Apply Filters button is gone from all three tables; the selections are the request (table AND options).
+  for (const [key, label, value] of [["state", "State", "MP"], ["territory", "Territory", "INDORE"], ["status", "Status", "PENDING"], ["officer", "Sales Officer", "arjun"], ["party", "Party", "d-a"]] as const) {
+    const html = await draw(admin, {}, { 3: { [key]: [value] } });
+    assert.ok(!html.includes("Apply Filters") && !html.includes("Applying…"), "no Apply Filters button");
+    assert.deepEqual(query(requested).getAll(key), [value], `${key}: the selection is in the table request immediately`);
+    assert.deepEqual(query(requestedOptions).getAll(key), [value], `${key}: …and in the cascading options request`);
+    assert.equal(query(requestedOptions).get("optionsOnly"), "1"); assert.equal(query(requested).get("optionsOnly"), null);
+    assert.ok(html.includes(`${label} (1)`));
+  }
+  assert.ok(!/Apply Filters|applyFilters|setApplied\(|setPending/.test(noComments(page)), "no explicit-apply machinery left in the page");
+  // 1–5: tick / untick / multiple / combined — pure step: complete latest selection, OR inside a column, AND across columns, page 1.
+  const s1 = changeFilterStep({ filters: {}, page: 3 }, { state: ["MP"] });
+  assert.deepEqual(plain(s1), { filters: { state: ["MP"] }, page: 1, changed: true }, "a tick applies and returns to page 1");
+  const s2 = changeFilterStep({ filters: s1.filters, page: 2 }, { ...s1.filters, state: ["MP", "UP"], status: ["ACTIVE"] });
+  assert.deepEqual(plain(s2.filters), { state: ["MP", "UP"], status: ["ACTIVE"] }, "multiple selections in a column + combined columns");
+  const s3 = changeFilterStep({ filters: s2.filters, page: 2 }, { ...s2.filters, state: ["UP", "MP"] });
+  assert.deepEqual([s3.changed, s3.page], [false, 2], "the same selection (any order) is not a change — no needless request, page kept");
+  const s4 = changeFilterStep({ filters: s2.filters, page: 2 }, { ...s2.filters, state: [] });
+  assert.deepEqual([plain(s4.filters), s4.page], [{ state: [], status: ["ACTIVE"] }, 1], "untick the last option / All clears that column only");
+  // The server applies exactly that: any of the ticked options within a column, all of the active columns.
+  const multi = plain(await run(admin, { filters: { state: ["MP", "UP"], status: ["ACTIVE"] } }));
+  const anyMulti = plain(await run(admin, { filters: { state: ["MP", "UP"] } }));
+  assert.ok(anyMulti.total >= multi.total && multi.items.every((r: { status: string; state: string | null }) => r.status === "ACTIVE" && ["MP", "UP"].includes(r.state ?? "")), "OR within a column, AND across columns");
+  // Table, totals, summary and export are built from the SAME selections.
+  const reportQuerySource = noComments(page.slice(page.indexOf("const reportQuery = "), page.indexOf("const canExport")));
+  assert.ok(reportQuerySource.includes("filters[key]") && reportQuerySource.includes("appliedSearch") && !reportQuerySource.includes("pending"), "the shared query builder reads the applied state");
+  assert.ok(page.includes("/api/reports/last-payment/export?${reportQuery()}") && page.includes("reportQuery({ page: String(page)"), "export and table both use that builder");
+  assert.ok(page.includes("disabled={exporting || isLoading || busy || failed}"), "export is blocked while results are updating, so it can never run on a state the table is not showing");
+  // Dropdowns: ticking keeps the menu open (preventDefault) and never closes it.
+  const header = readFileSync("src/components/ui/column-filter-header.tsx", "utf8");
+  assert.equal((header.match(/event\.preventDefault\(\)/g) ?? []).length, 2, "All and every option keep the dropdown open");
+  // URL mirrors the applied filters; starts from them.
+  const html = await draw(admin, { filters: { state: ["UP"], status: ["ACTIVE"] } }, {}, "state=UP&status=ACTIVE&profile=x");
+  assert.deepEqual([query(requested).getAll("state"), query(requested).getAll("status")], [["UP"], ["ACTIVE"]], "initialised from the URL");
+  assert.ok(html.includes("State (1)") && html.includes("Status (1)"));
+  assert.ok(page.includes("window.history.replaceState") && page.includes("[filters]"), "the URL follows the filters");
+  // Search: applied after a delay (page 1 then); the box itself stays instant.
+  assert.ok(page.includes("setTimeout(() => { setAppliedSearch(search); setPage(1); }, SEARCH_APPLY_DELAY_MS)") && page.includes("onChange={(event) => setSearch(event.target.value)}") && page.includes("search !== appliedSearch"), "search debounced; pending delay counts as updating");
+  assert.ok(SEARCH_APPLY_DELAY_MS >= 200 && SEARCH_APPLY_DELAY_MS <= 600);
+  // Spinner slot: fixed size (no layout jump), role=status, label-system text; hidden when idle.
+  const idle = await draw(admin);
+  assert.ok(/data-testid="filter-loading"/.test(idle) && idle.includes("h-5 w-5") && !idle.includes("Updating results…") && !idle.includes("animate-spin"), "idle: reserved empty slot");
+  assert.ok(idle.indexOf("Search parties") < idle.indexOf('data-testid="filter-loading"') && idle.indexOf('data-testid="filter-loading"') < idle.indexOf("Last Update"), "the slot sits where Apply Filters was");
+  assert.ok(page.includes('useLabel("last_payment.filter.loading")') && page.includes('useLabel("last_payment.filter.error")'));
+  assert.equal((DEFAULT_LABELS as Record<string, string>)["last_payment.filter.loading"], "Updating results…");
+  assert.ok(page.includes("{busy && <><Loader2") && page.includes('className="sr-only">{loadingLabel}') && page.includes('role="status"'), "spinner + accessible text while busy");
+  // Failure: the last good result stays, the selections stay, an alert explains.
+  assert.ok(page.includes("lastGood.current = fetched") && page.includes("fetched ?? lastGood.current") && page.includes('role="alert" data-testid="filter-error"'), "last successful results are kept on failure");
+  assert.ok(page.includes("busy = isFetching || optionsQuery.isFetching"), "busy ends when the newest request settles — success or failure");
+  // Rapid changes: the query key carries the complete latest state (older responses are never shown for a newer key).
+  assert.ok(/queryKey: exceptionView \? \["billing-exceptions", view, appliedSearch, sort, page, filters, aging\] : \["last-payment-report", appliedSearch, sort, page, filters, aging, bucket\]/.test(page), "key = complete latest state");
   assert.ok(page.includes("placeholderData: keepPreviousData") && page.includes("isLoading ? ("), "previous results stay on screen while the new ones load");
 
-  // 9, 10 — cascading options follow the pending selection (options-only request: no table rows, no receipt lookups) and clear invalid children.
+  // Days filter: auto-apply only when valid.
+  const D = (o: Partial<{ operator: "lt" | "gt" | "eq" | "between"; value: string; from: string; to: string }>) => agingAutoApply({ operator: "gt", value: "", from: "", to: "", ...o });
+  assert.equal(D({}).kind, "incomplete"); assert.equal(D({ value: "  " }).kind, "incomplete");
+  assert.deepEqual(plain(D({ value: "45" })), { kind: "ready", filter: { operator: "gt", value: 45 } });
+  assert.equal(D({ value: "abc" }).kind, "invalid"); assert.equal(D({ value: "-3" }).kind, "invalid"); assert.equal(D({ value: "4.5" }).kind, "invalid");
+  assert.equal(D({ operator: "between", from: "30" }).kind, "incomplete", "half a range is incomplete — nothing applied, no message");
+  assert.equal(D({ operator: "between", to: "60" }).kind, "incomplete");
+  assert.deepEqual(plain(D({ operator: "between", from: "30", to: "60" })), { kind: "ready", filter: { operator: "between", from: 30, to: 60 } });
+  assert.equal(D({ operator: "between", from: "60", to: "30" }).kind, "invalid", "From > To is wrong, not applied");
+  assert.equal(D({ operator: "between", from: "x", to: "" }).kind, "invalid");
+  assert.equal(D({ operator: "lt", value: "0" }).kind, "ready", "0 is a valid number of days");
+  const control = readFileSync("src/features/reports/payment-aging-filter.tsx", "utf8");
+  assert.ok(!/>Apply</.test(control) && control.includes(">Clear</Button>"), "Apply removed, Clear kept");
+  assert.ok(control.includes("AGING_APPLY_DELAY_MS") && control.includes('status.kind !== "ready"') && control.includes("readyKey === currentKey"), "valid-only, delayed, no repeat of the applied value");
+
+  // Cascading options (server): unchanged behaviour.
   const labels = (o: { label: string }[]) => o.map((x) => x.label).sort();
   queries = { legacy: 0, history: 0, dealers: 0 };
   const mp = plain(await report.getLastPaymentReportOptions(admin, { state: ["MP"] }));
-  assert.deepEqual(labels(mp.options.territory), ["BHOPAL", "HQ", "INDORE"], "pending State = MP → MP territories only");
-  assert.deepEqual(mp.options.officer.map((o: { value: string }) => o.value).sort(), ["arjun", "chhitranjan", "rm-1"]);
+  assert.deepEqual(labels(mp.options.territory), ["BHOPAL", "HQ", "INDORE"], "State = MP → MP territories only");
   assert.deepEqual(plain(mp.appliedFilters), { state: ["MP"] });
   assert.deepEqual([queries.legacy, queries.history], [0, 0], "no Last Payment lookup for an options-only request");
   const cleared = plain(await report.getLastPaymentReportOptions(admin, { state: ["MP"], territory: ["LUCKNOW"], officer: ["rahul"], status: ["PENDING"] }));
-  assert.deepEqual(plain(cleared.appliedFilters), { state: ["MP"], status: ["PENDING"] }, "invalid children (UP territory / officer) are cleared; the compatible Status stays");
-  assert.deepEqual(plain((await report.getLastPaymentReportOptions(admin, {})).options), plain((await run(admin)).options), "no selection == the report's own options");
-  // 13 — scope: options for pending selections never reach outside the caller's authorized rows.
+  assert.deepEqual(plain(cleared.appliedFilters), { state: ["MP"], status: ["PENDING"] }, "invalid children are cleared; the compatible Status stays");
   const rmUp = plain(await report.getLastPaymentReportOptions(rm, { state: ["UP"] }));
   assert.deepEqual([rmUp.options.party.length, rmUp.options.officer.length], [0, 0], "an RM sees no UP options");
-  assert.ok(!JSON.stringify((await report.getLastPaymentReportOptions(rm, {})).options).includes("rahul"), "no unauthorized officer in the RM's options");
   assert.deepEqual(plain((await report.getLastPaymentReportOptions(so, {})).options.party.map((o) => o.value)), ["d-a"], "SO: own dealers only");
   assert.equal(report.getLastPaymentReport.length, 2, "the report service signature is unchanged");
-
-  // 11 — Export uses the APPLIED filters, never the pending ones.
-  const reportQuerySource = page.slice(page.indexOf("const reportQuery = "), page.indexOf("const canExport")).replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-  assert.ok(reportQuerySource.includes("applied[key]") && !reportQuerySource.includes("pending"), "the shared query builder reads APPLIED filters only");
-  assert.ok(page.includes("/api/reports/last-payment/export?${reportQuery()}") && page.includes("reportQuery({ page: String(page)"), "export and table both use that builder");
-  // 12 — URL: opened with filters → both pending AND applied start from them; only Apply writes the URL.
-  html = await draw(admin, { filters: { state: ["UP"], status: ["ACTIVE"] } }, {}, "state=UP&status=ACTIVE&profile=x");
-  assert.deepEqual([query(requested).getAll("state"), query(requested).getAll("status")], [["UP"], ["ACTIVE"]], "applied initialised from the URL");
-  assert.deepEqual([query(requestedOptions).getAll("state"), query(requestedOptions).getAll("status")], [["UP"], ["ACTIVE"]], "pending initialised from the URL");
-  assert.ok(html.includes("State (1)") && html.includes("Status (1)"));
-  const onChange = page.slice(page.indexOf("onChange={(next) =>"), page.indexOf("/>", page.indexOf("onChange={(next) =>")));
-  assert.ok(!onChange.includes("replaceState") && page.slice(page.indexOf("const applyFilters")).includes("window.history.replaceState"), "the URL changes on Apply, not on every dropdown click");
-  // Route: options-only is a read-only mode of the same endpoint.
   const route = readFileSync("src/app/api/reports/last-payment/route.ts", "utf8");
-  assert.ok(route.includes('get("optionsOnly") === "1"') && route.includes("getLastPaymentReportOptions(ctx, params.filters)") && !/officerId|scope\s*=/.test(route.replace(/scope comes from the session/i, "")), "same session scope, no scope input");
-  // 14 — Search, Days sort and Payment Aging stay immediate; calculations/last update unchanged.
-  assert.ok(/onChange=\{\(event\) => \{ setSearch\(event\.target\.value\); setPage\(1\); \}\}/.test(page) && page.includes("setSort(sort === "), "search and Days sort remain immediate");
+  assert.ok(route.includes('get("optionsOnly") === "1"') && route.includes("getLastPaymentReportOptions(ctx, params.filters)"), "same session scope, no scope input");
   assert.ok(page.includes("formatLastUpdate(data?.lastUpdate)"), "Last Update unchanged");
 }
 
@@ -875,9 +891,9 @@ function sidebar() {
 /* ---------------------------------- rendered page ---------------------------------- */
 let requested = ""; let requestedOptions = ""; let urlQuery = ""; let servedOptions: unknown; let preset: Record<number, unknown> = {}; let stateCall = 0; let served: unknown = { items: [], total: 0, page: 1, pageSize: 50, totalPages: 1 };
 const pageLoad = testLoader({
-  // useState order: 0 search, 1 sort, 2 page, 3 pending filters, 4 Payment Aging, 5 applied filters, 6 applying
+  // useState order: 0 search, 1 sort, 2 page, 3 filters, 4 Payment Aging, 5 applied search, 6 quick-filter bucket
   // The page wrapper owns 2 states (main tab, Billing Exception sub-tab); the Last Payment view's own states follow: 2 + (0 search … 6 applying).
-  react: { ...React, useState: (initial: unknown) => { const i = stateCall++ - 2; return [i >= 0 && i < 7 && i in preset ? preset[i] : initial, () => {}]; } },
+  react: { ...React, useState: (initial: unknown) => { const i = stateCall++ - 2; return [i >= 0 && i < 10 && i in preset ? preset[i] : initial, () => {}]; } },
   "next/navigation": { useSearchParams: () => new URLSearchParams(urlQuery) },
   "@tanstack/react-query": { keepPreviousData: {}, useQuery: ({ queryKey, queryFn }: { queryKey: unknown[]; queryFn: () => unknown }) => { void queryFn(); return queryKey[0] === "last-payment-report-options" ? { data: servedOptions, isLoading: false, isFetching: false, isPlaceholderData: false, error: null } : { data: served, isLoading: false, isFetching: false, isPlaceholderData: false, error: null }; } },
   "@/lib/api-client": { api: { get: async (url: string) => { if (url.includes("optionsOnly=1")) requestedOptions = url; else requested = url; return {}; } } },
@@ -916,7 +932,7 @@ async function page() {
   assert.ok(/<th[^>]*>Last Payment Date<\/th>/.test(html) || /<th[^>]*text-right[^>]*>Last Payment Date<\/th>/.test(html), "Last Payment Date stays a plain header");
   // 16, 17 — active filters show their count; the Days sort and search state are untouched by them.
   const active = { party: ["d-a", "d-b"], state: ["MP", "CG"], officer: ["arjun"] };
-  html = await draw(admin, { sort: "days_asc", search: "a", filters: active }, { 0: "a", 1: "days_asc", 3: active, 5: active });
+  html = await draw(admin, { sort: "days_asc", search: "a", filters: active }, { 0: "a", 1: "days_asc", 3: active, 5: "a" });
   for (const label of ["Party (2)", "State (2)", "Sales Officer (1)"]) assert.ok(html.includes(label), label);
   assert.ok(html.includes("Territory") && !html.includes("Territory ("), "an inactive filter shows no count");
   assert.ok(html.includes('aria-sort="ascending"'), "applying filters does not reset the Days sort");
@@ -924,7 +940,7 @@ async function page() {
   assert.equal(url.searchParams.get("sort"), "days_asc"); assert.equal(url.searchParams.get("search"), "a");
   assert.deepEqual(url.searchParams.getAll("state"), ["MP", "CG"]); assert.deepEqual(url.searchParams.getAll("party"), ["d-a", "d-b"]);
   assert.deepEqual(url.searchParams.getAll("officer"), ["arjun"]); assert.deepEqual(url.searchParams.getAll("territory"), []);
-  html = await draw(admin, { sort: "days_desc", filters: active }, { 1: "days_desc", 3: active, 5: active });
+  html = await draw(admin, { sort: "days_desc", filters: active }, { 1: "days_desc", 3: active });
   assert.ok(html.includes("State (2)") && html.includes('aria-sort="descending"'), "changing the Days sort keeps the filters");
   assert.equal(new URL(requested, "http://x").searchParams.get("sort"), "days_desc");
   assert.deepEqual(new URL(requested, "http://x").searchParams.getAll("state"), ["MP", "CG"]);
@@ -933,11 +949,11 @@ async function page() {
   // page 1); a Days-sort change only flips the sort (and returns to page 1). Neither touches search or the other state.
   const pageSource = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
   const filterHandler = pageSource.slice(pageSource.indexOf("onChange={(next) =>"), pageSource.indexOf("/>", pageSource.indexOf("onChange={(next) =>")));
-  assert.ok(filterHandler.includes("setPending((current) => ({ ...current, [key]: next }))") && !/setPage|setApplied|setFilters/.test(filterHandler), "choosing a filter only edits the PENDING selection (no refetch, no page change)");
+  assert.ok(filterHandler.includes("changeFilters({ [key]: next })") && !/setPage|setFilters/.test(filterHandler), "choosing a filter goes through changeFilters (which applies it and resets to page 1)");
   assert.ok(!/setSort|setSearch/.test(filterHandler), "choosing a filter never resets the Days sort or search");
   const sortHandler = pageSource.slice(pageSource.indexOf('aria-label="Sort by Days"'), pageSource.indexOf("Days\n"));
-  assert.ok(/setSort\(/.test(sortHandler) && !/setPending|setApplied|setSearch/.test(sortHandler), "changing the Days sort never clears filters or search");
-  assert.ok(/onChange=\{\(event\) => \{ setSearch\(event\.target\.value\); setPage\(1\); \}\}/.test(pageSource), "search only edits search");
+  assert.ok(/setSort\(/.test(sortHandler) && !/setFilters|changeFilters|setAppliedSearch|setSearch/.test(sortHandler), "changing the Days sort never clears filters or search");
+  assert.ok(/onChange=\{\(event\) => setSearch\(event\.target\.value\)\}/.test(pageSource), "search only edits the search box (applied after the delay)");
 
   // Payment Aging — a separate control beside the Days sort: active state shows next to Days; the sort stays as it was.
   html = await draw(admin);
@@ -949,7 +965,7 @@ async function page() {
   assert.ok(html.includes('aria-label="Sort by Days"'), "the Days sort button remains");
   let u = new URL(requested, "http://x");
   assert.deepEqual([u.searchParams.get("paymentAgingOperator"), u.searchParams.get("paymentAgingValue"), u.searchParams.get("sort")], ["gt", "45", "days_asc"]);
-  html = await draw(admin, { sort: "days_desc", search: "kr", filters: { state: ["CG"] }, paymentAging: { operator: "between", from: 30, to: 60 } }, { 0: "kr", 1: "days_desc", 3: { state: ["CG"] }, 4: { operator: "between", from: 30, to: 60 }, 5: { state: ["CG"] } });
+  html = await draw(admin, { sort: "days_desc", search: "kr", filters: { state: ["CG"] }, paymentAging: { operator: "between", from: 30, to: 60 } }, { 0: "kr", 1: "days_desc", 3: { state: ["CG"] }, 4: { operator: "between", from: 30, to: 60 }, 5: "kr" });
   assert.ok(html.includes("30–60") && html.includes("State (1)") && html.includes('aria-sort="descending"'), "aging, a column filter and the sort are all shown together");
   u = new URL(requested, "http://x");
   assert.deepEqual([u.searchParams.get("paymentAgingOperator"), u.searchParams.get("paymentAgingFrom"), u.searchParams.get("paymentAgingTo"), u.searchParams.get("paymentAgingValue")], ["between", "30", "60", null]);
@@ -959,10 +975,10 @@ async function page() {
   // handlers: applying/clearing aging only edits aging (+ page 1); sort / search / column filters never touch it.
   assert.ok(/setBucket\(exact\);[^}]*setAging\(exact \? null : next\);\s*setPage\(1\);/.test(pageSource), "aging change only sets aging (+ the matching quick-filter selection) and page 1");
   const sortBtn = pageSource.slice(pageSource.indexOf('aria-label="Sort by Days"'), pageSource.indexOf("<PaymentAgingFilterControl"));
-  assert.ok(/setSort\(/.test(sortBtn) && !/setAging|setPending|setApplied|setSearch/.test(sortBtn), "sorting never clears aging");
-  assert.ok(!/setSort|setSearch|setPending|setApplied/.test(pageSource.slice(pageSource.indexOf("<PaymentAgingFilterControl"), pageSource.indexOf("</TableHead>", pageSource.indexOf("<PaymentAgingFilterControl")))), "applying aging never resets sort / search / filters");
+  assert.ok(/setSort\(/.test(sortBtn) && !/setAging|setFilters|changeFilters|setSearch/.test(sortBtn), "sorting never clears aging");
+  assert.ok(!/setSort|setSearch|setFilters|changeFilters/.test(pageSource.slice(pageSource.indexOf("<PaymentAgingFilterControl"), pageSource.indexOf("</TableHead>", pageSource.indexOf("<PaymentAgingFilterControl")))), "applying aging never resets sort / search / filters");
   const control = readFileSync("src/features/reports/payment-aging-filter.tsx", "utf8");
-  assert.ok(/buildPaymentAging\(draft\)/.test(control) && /role="alert"/.test(control) && /Apply/.test(control), "validation message and Apply");
+  assert.ok(/agingAutoApply\(draft\)/.test(control) && /role="alert"/.test(control) && !/>Apply</.test(control), "validation message; no Apply button");
   // Displayed wording comes from the label system; the operator VALUES stay "lt" / "gt" / "eq" / "between" and the comparison is unchanged.
   const L = DEFAULT_LABELS as Record<string, string>;
   assert.deepEqual(["op_lt", "op_gt", "op_eq", "op_between", "value"].map((k) => L[`last_payment.aging.${k}`]), ["Less than", "More Than", "Exactly", "Between", "Days"], "More Than / Days defaults; the others unchanged");

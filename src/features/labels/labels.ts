@@ -1192,6 +1192,9 @@ export const DEFAULT_LABELS = {
   "last_payment.aging.op_eq": "Exactly",
   "last_payment.aging.op_between": "Between",
   "last_payment.aging.value": "Days",
+  // ---- Last Payment Report → automatic filtering ----
+  "last_payment.filter.loading": "Updating results…",
+  "last_payment.filter.error": "The results could not be updated. The last results loaded are still shown; your selections are kept.",
   // ---- Billing Exception form + Info popup (Last Payment Report) ----
   "billing_exception.action.create": "Create a Billing Exception",
   "billing_exception.form.title": "Create a Billing Exception",

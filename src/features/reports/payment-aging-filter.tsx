@@ -1,12 +1,12 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useLabel } from "@/features/labels/label-ui";
 import {
-  buildPaymentAging, paymentAgingLabel,
+  AGING_APPLY_DELAY_MS, agingAutoApply, paymentAgingLabel,
   type PaymentAgingDraft, type PaymentAgingFilter, type PaymentAgingOperator,
 } from "@/lib/last-payment-report";
 
@@ -18,8 +18,9 @@ const draftOf = (filter: PaymentAgingFilter | null): PaymentAgingDraft =>
 
 /**
  * The Payment Aging filter for the Days column — a dropdown beside the (separate) Days sort button, in the same
- * dropdown style as the other column filters. Apply validates the numbers; "All" clears the filter. The caller owns
- * the applied filter; the draft text lives here until Apply.
+ * dropdown style as the other column filters. A valid number / range is applied automatically after a short typing delay
+ * (incomplete input is left alone, wrong input shows a message and is never applied); Clear removes the filter. The caller owns
+ * the applied filter; the draft text lives here.
  */
 export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentAgingFilter | null; onChange: (next: PaymentAgingFilter | null) => void }) {
   // Display wording comes from the label system (Edit Labels); the operator VALUES ("lt" / "gt" / "eq" / "between") and the comparison logic never change.
@@ -32,20 +33,28 @@ export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentA
   const valueLabel = useLabel("last_payment.aging.value");
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<PaymentAgingDraft>(draftOf(value));
-  const [error, setError] = useState<string | null>(null);
   const active = value !== null;
 
-  const apply = () => {
-    const built = buildPaymentAging(draft);
-    if ("error" in built) { setError(built.error); return; }
-    setError(null);
-    onChange(built.filter);
-    setOpen(false);
-  };
-  const set = (patch: Partial<PaymentAgingDraft>) => { setDraft((d) => ({ ...d, ...patch })); setError(null); };
+  const status = agingAutoApply(draft);
+  const error = status.kind === "invalid" ? status.error : null;
+  const readyKey = status.kind === "ready" ? paymentAgingLabel(status.filter) : null;
+  const currentKey = value ? paymentAgingLabel(value) : null;
+  // Auto-apply: only while the menu is open (the user is editing), only for a valid value, only when it differs from what is applied.
+  useEffect(() => {
+    if (!open || status.kind !== "ready" || readyKey === currentKey) return;
+    const timer = setTimeout(() => onChange(status.filter), AGING_APPLY_DELAY_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, readyKey, currentKey]);
+  const set = (patch: Partial<PaymentAgingDraft>) => setDraft((d) => ({ ...d, ...patch }));
 
   return (
-    <DropdownMenu open={open} onOpenChange={(next) => { setOpen(next); if (next) { setDraft(draftOf(value)); setError(null); } }}>
+    <DropdownMenu open={open} onOpenChange={(next) => {
+      // Closing the menu inside the typing delay must not lose a valid value: apply it right away.
+      if (!next && status.kind === "ready" && readyKey !== currentKey) onChange(status.filter);
+      setOpen(next);
+      if (next) setDraft(draftOf(value));
+    }}>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
@@ -82,9 +91,8 @@ export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentA
             <Input inputMode="numeric" aria-label="Payment Aging value" value={draft.value} onChange={(e) => set({ value: e.target.value })} /></label>
         )}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        <div className="flex justify-between gap-2">
-          <Button type="button" variant="outline" size="sm" disabled={!active} onClick={() => { setError(null); onChange(null); setOpen(false); }}>Clear</Button>
-          <Button type="button" size="sm" onClick={apply}>Apply</Button>
+        <div className="flex justify-start gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={!active} onClick={() => { setDraft(draftOf(null)); onChange(null); setOpen(false); }}>Clear</Button>
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

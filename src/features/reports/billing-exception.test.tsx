@@ -321,7 +321,7 @@ function page() {
   for (const [label, v] of [["Current", { 0: "billing-exception" }], ["History", { 0: "billing-exception", 1: "history" }]] as const) {
     const out = draw(v, [EX("x1")]);
     assert.ok(out.includes('data-testid="exception-summary"') && !out.includes('data-testid="day-summary"'), `${label}: the exception summary, not the day summary`);
-    assert.ok(out.indexOf("Apply Filters") < out.indexOf('data-testid="exception-summary"') && out.indexOf('data-testid="exception-summary"') < out.indexOf("<table"), `${label}: between the toolbar and the table`);
+    assert.ok(out.indexOf('data-testid="filter-loading"') < out.indexOf('data-testid="exception-summary"') && out.indexOf('data-testid="exception-summary"') < out.indexOf("<table"), `${label}: between the toolbar and the table`);
     const panelHtml = out.slice(out.indexOf('data-testid="exception-summary"'), out.indexOf("<table"));
     assert.ok(["Total Ex. Bills", "Dealers", "Top Dealers", "Top SO"].every((l) => panelHtml.includes(l)), `${label}: four items`);
     assert.equal((panelHtml.match(/<button/g) ?? []).length, 2, `${label}: only Top Dealers and Top SO are clickable`);

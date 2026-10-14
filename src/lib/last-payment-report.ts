@@ -289,15 +289,30 @@ export function cascadedFilterOptions(rows: readonly ReportFilterable[], filters
   return out;
 }
 
+/** Typing delays before a search / Days value is applied automatically (column-filter ticks apply immediately). */
+export const SEARCH_APPLY_DELAY_MS = 350;
+export const AGING_APPLY_DELAY_MS = 400;
+
 /**
- * "Apply Filters" step (pure; the page calls it). Choosing filters only changes `pending`; the table/export/URL use `applied`, which
- * moves ONLY here: when pending differs from applied and no apply is already running. A real change resets to page 1; with no pending
- * change (or while applying) nothing changes — so no needless refetch and no duplicate request.
+ * A column-filter tick / untick applies immediately: the COMPLETE latest selection becomes the filter, and a real change always returns
+ * to page 1. When nothing really changed (same selections, in any order) the state is returned untouched — no needless request.
  */
-export function applyFilterStep(state: { pending: ReportFilters; applied: ReportFilters; page: number; applying: boolean }):
-  { applied: ReportFilters; page: number; applying: boolean; changed: boolean } {
-  if (state.applying || sameReportFilters(state.pending, state.applied)) return { applied: state.applied, page: state.page, applying: state.applying, changed: false };
-  return { applied: state.pending, page: 1, applying: true, changed: true };
+export function changeFilterStep(state: { filters: ReportFilters; page: number }, next: ReportFilters): { filters: ReportFilters; page: number; changed: boolean } {
+  if (sameReportFilters(state.filters, next)) return { filters: state.filters, page: state.page, changed: false };
+  return { filters: next, page: 1, changed: true };
+}
+
+/**
+ * What the Days (Payment Aging) editor should do with its current text: nothing while it is still empty/incomplete, show the message
+ * while it is filled in but wrong (e.g. "abc", "-3", From > To), and apply once it is a valid number or range.
+ */
+export function agingAutoApply(draft: PaymentAgingDraft): { kind: "incomplete" } | { kind: "invalid"; error: string } | { kind: "ready"; filter: PaymentAgingFilter } {
+  const fields = draft.operator === "between" ? [draft.from, draft.to] : [draft.value];
+  const blank = fields.filter((field) => field.trim() === "").length;
+  // Nothing typed yet, or only one end of a range typed so far (and that end is a number): still incomplete — no message, no request.
+  if (blank === fields.length || (blank > 0 && fields.every((field) => field.trim() === "" || parseAgingDays(field) !== null))) return { kind: "incomplete" };
+  const built = buildPaymentAging(draft);
+  return "error" in built ? { kind: "invalid", error: built.error } : { kind: "ready", filter: built.filter };
 }
 
 /** Same selections? (order-insensitive per column; an empty column equals a missing one) */

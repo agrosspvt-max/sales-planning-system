@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Download, Loader2 } from "lucide-react";
@@ -23,7 +23,7 @@ import { BillingExceptionActionDialog, BillingExceptionInfoDialog, BillingStatus
 import { EMPTY_EXCEPTION_SUMMARY, type BillingExceptionRow, type ExceptionRankEntry, type ExceptionRanking, type ExceptionSummary, type ExceptionView } from "@/lib/billing-exception";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
-  AUTH_FILTER_OPTIONS, BILLING_FILTER_OPTIONS, DAY_BUCKETS, DEFAULT_DAYS_SORT, bucketOfAging, dayBucketAsAging, NO_EXPORT_DATA_MESSAGE, applyFilterStep, formatLastUpdate, parseLastPaymentReportParams, paymentAgingToParams, sameReportFilters, REPORT_DEFAULT_PAGE_SIZE, REPORT_FILTER_KEYS,
+  AUTH_FILTER_OPTIONS, BILLING_FILTER_OPTIONS, DAY_BUCKETS, DEFAULT_DAYS_SORT, bucketOfAging, dayBucketAsAging, NO_EXPORT_DATA_MESSAGE, SEARCH_APPLY_DELAY_MS, changeFilterStep, formatLastUpdate, parseLastPaymentReportParams, paymentAgingToParams, sameReportFilters, REPORT_DEFAULT_PAGE_SIZE, REPORT_FILTER_KEYS,
   type DayBucketKey, type DaySummary, type DaysSort, type LastPaymentReportRow, type PaymentAgingFilter, type ReportFilterKey, type ReportFilterOptions, type ReportFilters,
 } from "@/lib/last-payment-report";
 
@@ -156,29 +156,30 @@ function ReportView({ view }: { view: ReportViewKey }) {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<DaysSort>(DEFAULT_DAYS_SORT);
   const [page, setPage] = useState(1);
-  // Column filters (Party / Status / State / Territory / Sales Officer) are applied EXPLICITLY:
-  //   pending  = what the user has selected in the dropdowns (drives the cascading OPTIONS and the header counts only)
-  //   applied  = what the table, the export and the URL use — it changes only when "Apply Filters" is clicked.
-  // Both start from the filters in the URL (if any). Search, the Days sort and Payment Aging (which has its own Apply) are unchanged.
+  // Column filters (Party / Status / State / Territory / Sales Officer / Billing Status / Authorized By) apply AUTOMATICALLY: every tick / untick
+  // makes the complete latest selection the filter, so the table, totals, summaries, rankings, options, URL and export always agree.
+  // They start from the filters in the URL (if any). Search applies after a short typing delay; the Days filter once its value is valid.
   const urlFilters = parseLastPaymentReportParams(new URLSearchParams(useSearchParams()?.toString() ?? "")).filters;
-  const [pending, setPending] = useState<ReportFilters>(urlFilters);
+  const [filters, setFilters] = useState<ReportFilters>(urlFilters);
   // Payment Aging (Days) filter: separate from the Days sort — setting it never touches the sort, and vice versa.
   const [aging, setAging] = useState<PaymentAgingFilter | null>(null);
-  const [applied, setApplied] = useState<ReportFilters>(urlFilters);
-  const [applying, setApplying] = useState(false);
+  // What the search box has been applied as (the box itself updates on every keystroke).
+  const [appliedSearch, setAppliedSearch] = useState("");
   // Summary panel quick filter (one selected day range, or none). It is a separate layer ON TOP of the manual Days filter: counts are taken before it, the table after it.
   const [bucket, setBucket] = useState<DayBucketKey | null>(null);
   // Billing Exception: the dealer whose status was clicked (action popup → form) and the exception whose Info is open.
   const [target, setTarget] = useState<{ dealerId: string; party: string } | null>(null);
   const [infoId, setInfoId] = useState<string | null>(null);
+  const loadingLabel = useLabel("last_payment.filter.loading");
+  const failedLabel = useLabel("last_payment.filter.error");
   const daysLabels = { frozen: useLabel("billing_exception.days.frozen"), running: useLabel("billing_exception.days.running") };
   const canCreate = useCanCreateBillingException(); // Super Admin / a Custom Admin granted create — never SO / RM
 
   // The report's query string. The table (paged) and the Excel export (all rows) are built from the SAME function, so the export
   // always carries exactly the filters / search / Payment Aging / Days sort that are in effect at the moment it is requested.
   const reportQuery = (extra: Record<string, string> = {}) => {
-    const query = new URLSearchParams({ search, sort, ...extra });
-    for (const key of REPORT_FILTER_KEYS) for (const value of applied[key] ?? []) query.append(key, value); // APPLIED, never pending
+    const query = new URLSearchParams({ search: appliedSearch, sort, ...extra });
+    for (const key of REPORT_FILTER_KEYS) for (const value of filters[key] ?? []) query.append(key, value);
     paymentAgingToParams(aging, query);
     if (bucket && !exceptionView) query.set("bucket", bucket);
     return query;
@@ -189,7 +190,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
   const exportReport = async () => {
     if (exporting) return; // no duplicate requests
     setExportMessage(null);
-    if (data && data.total === 0) { setExportMessage(NO_EXPORT_DATA_MESSAGE); return; }
+    if (shown && shown.total === 0) { setExportMessage(NO_EXPORT_DATA_MESSAGE); return; }
     setExporting(true);
     try {
       const response = await fetch(exceptionView ? `/api/reports/last-payment/billing-exceptions/export?${reportQuery({ view })}` : `/api/reports/last-payment/export?${reportQuery()}`);
@@ -210,51 +211,66 @@ function ReportView({ view }: { view: ReportViewKey }) {
     }
   };
 
-  const { data, isLoading, isFetching, error, isPlaceholderData } = useQuery<ReportPage>({
-    queryKey: exceptionView ? ["billing-exceptions", view, search, sort, page, applied, aging] : ["last-payment-report", search, sort, page, applied, aging, bucket],
+  const { data: fetched, isLoading, isFetching, error, isPlaceholderData } = useQuery<ReportPage>({
+    // The key carries the COMPLETE latest state: a change starts a new request, and a slower earlier one can never replace newer results
+    // (the query observer only follows the newest key; the older response is just cached under its own key).
+    queryKey: exceptionView ? ["billing-exceptions", view, appliedSearch, sort, page, filters, aging] : ["last-payment-report", appliedSearch, sort, page, filters, aging, bucket],
     queryFn: () => exceptionView
       ? api.get(`/api/reports/last-payment/billing-exceptions?${reportQuery({ view, page: String(page), pageSize: String(REPORT_DEFAULT_PAGE_SIZE) })}`)
       : api.get(`/api/reports/last-payment?${reportQuery({ page: String(page), pageSize: String(REPORT_DEFAULT_PAGE_SIZE) })}`),
-    placeholderData: keepPreviousData, // keeps the filter options (and table) steady while a new filter loads
+    placeholderData: keepPreviousData, // the previous results stay on screen while the new ones load
   });
-  // Cascading dropdown options follow the PENDING selections (a lightweight options-only request: no table rows, no receipt lookup),
-  // so choosing State = MP immediately narrows Territory / Sales Officer / Party / Status while the table keeps showing the
-  // applied result. The server also returns the cleaned selection: children that no longer fit are cleared from `pending`.
+  // The last SUCCESSFUL result: a failed update keeps showing it (table, totals, summaries and rankings all come from this one object).
+  const lastGood = useRef<ReportPage | undefined>(undefined);
+  if (fetched && !isPlaceholderData) lastGood.current = fetched;
+  const shown = fetched ?? lastGood.current;
+  const data = shown;
+  // Cascading dropdown options follow the same selections (a lightweight options-only request: no table rows, no receipt lookup),
+  // so choosing State = MP immediately narrows Territory / Sales Officer / Party / Status. The server also returns the cleaned
+  // selection: children that no longer fit are dropped from `filters`.
   const optionsQuery = useQuery<{ options: ReportFilterOptions; appliedFilters: ReportFilters }>({
-    queryKey: exceptionView ? ["billing-exceptions-options", view, pending] : ["last-payment-report-options", pending],
+    queryKey: exceptionView ? ["billing-exceptions-options", view, filters] : ["last-payment-report-options", filters],
     queryFn: () => {
       const query = new URLSearchParams({ optionsOnly: "1" });
-      for (const key of REPORT_FILTER_KEYS) for (const value of pending[key] ?? []) query.append(key, value);
+      for (const key of REPORT_FILTER_KEYS) for (const value of filters[key] ?? []) query.append(key, value);
       if (exceptionView) { query.set("view", view); return api.get(`/api/reports/last-payment/billing-exceptions?${query}`); }
       return api.get(`/api/reports/last-payment?${query}`);
     },
     placeholderData: keepPreviousData,
   });
-  const options = optionsQuery.data?.options ?? data?.options ?? NO_OPTIONS;
+  const options = optionsQuery.data?.options ?? shown?.options ?? NO_OPTIONS;
   useEffect(() => {
     const cleaned = optionsQuery.data?.appliedFilters;
-    if (cleaned && !optionsQuery.isPlaceholderData && !sameReportFilters(cleaned, pending)) setPending(cleaned);
-  }, [optionsQuery.data, optionsQuery.isPlaceholderData, pending]);
-  // The applied selection was already cleaned (it came from `pending`); adopt the server's cleaned copy defensively.
+    if (cleaned && !optionsQuery.isPlaceholderData && !sameReportFilters(cleaned, filters)) setFilters(cleaned);
+  }, [optionsQuery.data, optionsQuery.isPlaceholderData, filters]);
+  // The server's cleaned copy of the selection (it never widens it) is adopted defensively.
   useEffect(() => {
-    if (data && !isPlaceholderData && data.appliedFilters && !sameReportFilters(data.appliedFilters, applied)) setApplied(data.appliedFilters);
-  }, [data, isPlaceholderData, applied]);
-  // "Apply Filters": nothing is fetched until it is clicked; with no pending change it does nothing (no needless refetch).
-  const dirty = !sameReportFilters(pending, applied);
-  const applyFilters = () => {
-    const next = applyFilterStep({ pending, applied, page, applying }); // no duplicate clicks; no refetch when nothing changed
-    if (!next.changed) return;
-    setApplying(next.applying);
-    setApplied(next.applied);
-    setPage(next.page); // a changed filter always starts at page 1
-    if (typeof window !== "undefined") { // the APPLIED filters (only) are mirrored to the URL, without adding history entries
-      const url = new URLSearchParams(window.location.search);
-      for (const key of REPORT_FILTER_KEYS) url.delete(key);
-      for (const key of REPORT_FILTER_KEYS) for (const value of pending[key] ?? []) url.append(key, value);
-      window.history.replaceState(null, "", url.toString() ? `?${url}` : window.location.pathname);
-    }
+    if (fetched && !isPlaceholderData && fetched.appliedFilters && !sameReportFilters(fetched.appliedFilters, filters)) setFilters(fetched.appliedFilters);
+  }, [fetched, isPlaceholderData, filters]);
+  // A tick / untick: the complete latest selection applies immediately and the table returns to page 1.
+  const changeFilters = (patch: Partial<ReportFilters>) => {
+    const step = changeFilterStep({ filters, page }, { ...filters, ...patch });
+    if (!step.changed) return;
+    setFilters(step.filters);
+    setPage(step.page);
   };
-  useEffect(() => { if (applying && !isFetching) setApplying(false); }, [applying, isFetching]);
+  // The URL mirrors the applied filters (without adding history entries).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URLSearchParams(window.location.search);
+    for (const key of REPORT_FILTER_KEYS) url.delete(key);
+    for (const key of REPORT_FILTER_KEYS) for (const value of filters[key] ?? []) url.append(key, value);
+    window.history.replaceState(null, "", url.toString() ? `?${url}` : window.location.pathname);
+  }, [filters]);
+  // Search applies after a short typing delay (and returns to page 1 once it does).
+  useEffect(() => {
+    if (search === appliedSearch) return;
+    const timer = setTimeout(() => { setAppliedSearch(search); setPage(1); }, SEARCH_APPLY_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [search, appliedSearch]);
+  // Busy until the NEWEST state has finished (a pending search delay counts); a failure ends it too, and keeps the last good results.
+  const failed = Boolean(error) || Boolean(optionsQuery.error);
+  const busy = isFetching || optionsQuery.isFetching || search !== appliedSearch;
 
   return (
     <div className="space-y-5">
@@ -265,15 +281,16 @@ function ReportView({ view }: { view: ReportViewKey }) {
             className="w-72 max-w-sm"
             placeholder="Search parties…"
             value={search}
-            onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+            onChange={(event) => setSearch(event.target.value)}
           />
-          <Button size="sm" variant={dirty ? "default" : "outline"} disabled={applying} onClick={applyFilters} aria-busy={applying}>
-            {applying && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />} {applying ? "Applying…" : "Apply Filters"}
-          </Button>
+          {/* Fixed-size slot where "Apply Filters" used to be: the spinner appears here while results update, and the layout never shifts. */}
+          <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center" role="status" aria-live="polite" data-testid="filter-loading">
+            {busy && <><Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden /><span className="sr-only">{loadingLabel}</span></>}
+          </span>
         </div>
         <div className="flex items-center gap-3">
           {canExport && (
-            <Button variant="outline" size="sm" disabled={exporting || isLoading} onClick={() => void exportReport()}>
+            <Button variant="outline" size="sm" disabled={exporting || isLoading || busy || failed} onClick={() => void exportReport()}>
               {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} {exporting ? "Exporting…" : "Export"}
             </Button>
           )}
@@ -281,7 +298,11 @@ function ReportView({ view }: { view: ReportViewKey }) {
         </div>
       </div>
       {exportMessage && <p className="text-sm text-destructive" role="alert">{exportMessage}</p>}
-      {error && <p className="text-sm text-destructive">{(error as Error).message}</p>}
+      {failed && (
+        <p className="text-sm text-destructive" role="alert" data-testid="filter-error">
+          {failedLabel}{((error ?? optionsQuery.error) as Error | null)?.message ? ` (${((error ?? optionsQuery.error) as Error).message})` : ""}
+        </p>
+      )}
       {exceptionView && <ExceptionSummaryPanel summary={data?.summary as ExceptionSummary | undefined} />}
       {!exceptionView && (
         <DaySummaryPanel
@@ -290,12 +311,12 @@ function ReportView({ view }: { view: ReportViewKey }) {
           onSelect={(key) => { setBucket(key); setPage(1); }}
           onAll={() => {
             // "All Dealers": back to everything the user may see — search, every column filter (Billing Status included), the Days constraint and the quick filter.
-            setSearch(""); setPending({}); setApplied({}); setAging(null); setBucket(null); setPage(1);
+            setSearch(""); setAppliedSearch(""); setFilters({}); setAging(null); setBucket(null); setPage(1);
             if (typeof window !== "undefined") window.history.replaceState(null, "", window.location.pathname);
           }}
         />
       )}
-      <div className="overflow-auto rounded-lg border bg-background">
+      <div className="overflow-auto rounded-lg border bg-background" aria-busy={busy}>
         <Table className={exceptionView ? "min-w-[1360px] table-fixed" : "min-w-[1130px] table-fixed"}>
           <TableHeader>
             <TableRow>
@@ -306,8 +327,8 @@ function ReportView({ view }: { view: ReportViewKey }) {
                   label={label}
                   ariaLabel={`Filter by ${label}`}
                   options={options[key]}
-                  selected={pending[key] ?? []}
-                  onChange={(next) => setPending((current) => ({ ...current, [key]: next }))}
+                  selected={filters[key] ?? []}
+                  onChange={(next) => changeFilters({ [key]: next })}
                 />
               ))}
               <TableHead className="w-40 text-right">Last Payment Date</TableHead>
@@ -337,12 +358,12 @@ function ReportView({ view }: { view: ReportViewKey }) {
               {exceptionView ? (
                 <>
                   <TableHead className="w-32 text-right">Billing Date</TableHead>
-                  <ColumnFilterHeader className="w-36" label="Authorized By" ariaLabel="Filter by Authorized By" options={AUTH_FILTER_OPTIONS} selected={pending.authBy ?? []} onChange={(next) => setPending((current) => ({ ...current, authBy: next }))} />
+                  <ColumnFilterHeader className="w-36" label="Authorized By" ariaLabel="Filter by Authorized By" options={AUTH_FILTER_OPTIONS} selected={filters.authBy ?? []} onChange={(next) => changeFilters({ authBy: next })} />
                   <TableHead className="w-20 text-center">Info</TableHead>
                 </>
               ) : (
-                // Same component / dropdown / selection / Apply Filters behaviour as the Sales Officer header filter.
-                <ColumnFilterHeader className="w-40" label="Billing Status" ariaLabel="Filter by Billing Status" options={BILLING_FILTER_OPTIONS} selected={pending.billing ?? []} onChange={(next) => setPending((current) => ({ ...current, billing: next }))} />
+                // Same component / dropdown / automatic-apply behaviour as the Sales Officer header filter.
+                <ColumnFilterHeader className="w-40" label="Billing Status" ariaLabel="Filter by Billing Status" options={BILLING_FILTER_OPTIONS} selected={filters.billing ?? []} onChange={(next) => changeFilters({ billing: next })} />
               )}
             </TableRow>
           </TableHeader>

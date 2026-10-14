@@ -331,6 +331,17 @@ export function combineConversionRows(rows: ConversionRow[], labels?: Pick<Daily
 export type TaskType = "AUTO" | "CALENDAR" | "MANUAL";
 
 /**
+ * RECOVERY TYPE source — WHERE an automatically generated Recovery task comes from. It is a separate fact from Task Type (how the task was
+ * created) and from the stored `entryType` (REGULAR | SCHEME), which stays the financial classification and is never changed by it.
+ * Derived from the authoritative contribution links (BillingExceptionTask / CnPaymentEvent / CnRequest), never from names, amounts or text.
+ */
+export type RecoverySource = "BILLING_EXCEPTION" | "CN_REQUEST";
+/** Billing Exception wins over CN when a row carries both; a row with neither is a manual row (no source). */
+export function recoverySourceOf(billingLinked: boolean, cnLinked: boolean): RecoverySource | null {
+  return billingLinked ? "BILLING_EXCEPTION" : cnLinked ? "CN_REQUEST" : null;
+}
+
+/**
  * A Daily Plan row's Task Type. A row is an Auto Task iff it carries at least one materialized Auto Task
  * contribution (the existing CN → DailyWorkEntry link). A row created from a Calendar Daily Task (the
  * CalendarEntry → DailyWorkEntry link) is CALENDAR. A row with only manual data is Manual. Precedence for a mixed row:

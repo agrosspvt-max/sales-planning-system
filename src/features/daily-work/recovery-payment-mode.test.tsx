@@ -28,6 +28,7 @@ let rows = [
     status: "DRAFT",
   },
 ];
+let queryOverride: Record<string, unknown> = {};
 const requests: unknown[] = [];
 let submitMutations = 0; // how many times the "Submit Daily Work" mutation (the submit API call) was triggered
 const planReads: Record<string, { dealers: { dealerId: string; dealerName: string; todaysPlan: number | null }[] }> = {
@@ -74,6 +75,7 @@ const overrides: Record<string, unknown> = {
         canSubmit: true,
         isFinalized: false,
         sections: [],
+        ...queryOverride,
       },
     }),
     useQueryClient: () => ({ invalidateQueries: () => {} }),
@@ -304,6 +306,42 @@ async function main() {
       "Payment Mode",
     ),
   );
+
+  // ---- Task Type vs Recovery Type (a Billing Exception task is Auto; its source is the locked Recovery Type) ----
+  {
+    const billingRow = { ...rows[0], entryId: "entry-b", dealerId: "dealer-b", dealerName: "test_dealer5", todaysPlan: "12000", status: "DRAFT", recoverySource: "BILLING_EXCEPTION", autoAmount: 12000, amountLocked: true };
+    const manualRow = { ...rows[0], entryId: "entry-m", dealerId: "dealer-m", dealerName: "Manual Dealer", todaysPlan: "300", status: "DRAFT", recoverySource: null, autoAmount: 0, amountLocked: false };
+    const saved = rows;
+    rows = [billingRow, manualRow] as typeof rows;
+    queryOverride = { dealers: rows, billingEntryIds: ["entry-b"], billingTasks: [{ taskId: "t1", dealerId: "dealer-b", dealerName: "test_dealer5", amount: 12000, taskDate: "2026-10-14", promisedDate: "2026-10-14" }] };
+    selects.length = 0;
+    const html = render("RECOVERY", "PLAN", false);
+    const rowOf = (id: string) => (html.match(new RegExp(`<tr[^>]*data-dealer-id="${id}"[^>]*>.*?</tr>`)) ?? [""])[0];
+    const b = rowOf("dealer-b"), m = rowOf("dealer-m");
+    assert.ok(/data-task-type="true">Auto<\/td>/.test(b) && !b.includes("Billing Exception</td>"), "Billing Exception task → Task Type Auto");
+    assert.ok(/<select[^>]*disabled=""[^>]*data-recovery-source="BILLING_EXCEPTION"[^>]*>|<select[^>]*data-recovery-source="BILLING_EXCEPTION"[^>]*disabled=""[^>]*>/.test(b) && b.includes('<option value="BILLING_EXCEPTION" selected="">Billing Exception</option>') && !b.includes('value="REGULAR"'), "Recovery Type: Billing Exception, preselected, disabled, no other choice");
+    assert.ok(b.includes('value="12000"'), "Today's Plan amount unchanged (₹12,000)");
+    assert.ok(/<input[^>]*readOnly=""|<input[^>]*readonly=""/i.test(b) && b.includes("data-auto-locked"), "an Auto amount is read-only");
+    assert.ok(!b.includes("lucide-trash2") && b.includes("lucide-calendar-clock"), "no delete icon on an Auto row; a calendar icon in its place");
+    assert.ok(m.includes("lucide-trash2") && !/<input[^>]*readonly/i.test(m) && !m.includes("lucide-calendar-clock"), "a manual row keeps its delete icon and editable amount");
+    assert.ok(!html.includes("Billing Exception tasks") && !html.includes("billing-task-panel") && !html.includes(">Confirm<"), "no separate automatic-task section, no Confirm");
+    assert.ok(/data-task-type="true">Manual<\/td>/.test(m) && !m.includes("data-recovery-source") && m.includes('<option value="REGULAR" selected="">Regular</option>') && !/<select[^>]*disabled/.test(m), "a manual task: Manual, Recovery Type editable as before");
+    // Wording comes from Edit Labels; the stored identifiers are not the labels.
+    assert.equal((DEFAULT_LABELS as Record<string, string>)["daily_work.task_type.auto"], "Auto");
+    assert.equal((DEFAULT_LABELS as Record<string, string>)["daily_work.task_type.manual"], "Manual");
+    assert.equal((DEFAULT_LABELS as Record<string, string>)["daily_work.recovery_source.billing_exception"], "Billing Exception");
+    assert.equal((DEFAULT_LABELS as Record<string, string>)["daily_work.col.recovery_type"], "Recovery Type");
+    // Review view: Auto + the source, for a Billing Exception and a CN row; manual keeps Regular / Scheme.
+    const rev = cellsOf(renderToStaticMarkup(<review.DealerSection title="Recovery" recovery autoEntryIds={["b1", "c1"]} rows={[
+      { entryId: "b1", dealerId: "d1", dealerName: "test_dealer5", todaysPlan: 12000, todaysActual: 0, paymentMode: null, entryType: "REGULAR", recoverySource: "BILLING_EXCEPTION" },
+      { entryId: "c1", dealerId: "d2", dealerName: "CN Dealer", todaysPlan: 1000, todaysActual: 0, paymentMode: null, entryType: "REGULAR", recoverySource: "CN_REQUEST" },
+      { entryId: "m1", dealerId: "d3", dealerName: "Manual One", todaysPlan: 500, todaysActual: 0, paymentMode: null, entryType: "SCHEME" },
+    ]} />));
+    assert.deepEqual(rev[1], ["test_dealer5", "Auto", "₹12,000", "₹0", "—", "Billing Exception"]);
+    assert.deepEqual(rev[2], ["CN Dealer", "Auto", "₹1,000", "₹0", "—", "CN Request"]);
+    assert.deepEqual(rev[3], ["Manual One", "Manual", "₹500", "₹0", "—", "Scheme"]);
+    rows = saved; queryOverride = {};
+  }
   // ---- Performance → View review modal: Planned and Actual are always separate columns ----
   {
     const sales = [
@@ -326,7 +364,7 @@ async function main() {
     const r = cellsOf(renderToStaticMarkup(<DealerSection title="Recovery" rows={recovery} recovery autoEntryIds={["r2"]} />));
     assert.deepEqual(r[0], ["Dealer", "Task Type", "Planned", "Actual", "Payment Mode", "Recovery Type"]);
     assert.deepEqual(r[1], ["GAURI AGRO", "Manual", "₹25,000", "₹20,000", "UPI", "Regular"], "Payment Mode sits with the ACTUAL recovery");
-    assert.deepEqual(r[2], ["KISAN MITRA", "Auto Task", "₹5,000", "₹0", "—", "Scheme"], "Auto Task + no mode against zero recovery");
+    assert.deepEqual(r[2], ["KISAN MITRA", "Auto", "₹5,000", "₹0", "—", "Scheme"], "Auto + no mode against zero recovery");
 
     const a = cellsOf(renderToStaticMarkup(<AppointmentSection title="Dealer Appointment" rows={[
       { rowId: "a1", dealerName: "New Client", marketName: "Bhopal", status: "APPOINTED" },

@@ -5,9 +5,9 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
-import { getCurrentOwnerByDealer } from "@/lib/scope";
+import { getCurrentOwnerByDealer, getOfficerScope } from "@/lib/scope";
+import { getResolvedLabels } from "@/features/labels/service.server";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
-import { PAYMENT_DATE_PAST_MESSAGE } from "@/lib/billing-exception";
 import { effectiveBillingTaskOwners, canViewBillingTask } from "./billing-task-visibility.server";
 import { lockDailyWorkDay, type DailyWorkDayState } from "./day-lock.server";
 import { reverseMaterializedDailyWorkContribution } from "./auto-task-materialization.server";
@@ -143,26 +143,13 @@ export async function billingLinkedEntryIds(entryIds: string[]): Promise<string[
   return rows.map((r) => r.id);
 }
 
-/** Materialized Billing Exception tasks of the editable batch the owner has not explicitly confirmed (the submit gate; submitting never confirms). */
-export async function countUnconfirmedBillingTasks(tx: Prisma.TransactionClient, officerId: string, workDate: string, batchId: string): Promise<number> {
-  const rows = await tx.$queryRaw<Array<{ n: number }>>(Prisma.sql`
-    SELECT COUNT(*)::int AS n FROM "BillingExceptionTask" t JOIN "DailyWorkEntry" d ON d."id" = t."dailyWorkEntryId"
-    WHERE d."officerId" = ${officerId} AND d."workDate" = ${workDate}::date AND d."batchId" = ${batchId}
-      AND d."section" = 'RECOVERY' AND d."status" = 'DRAFT' AND t."dailyWorkConfirmed" = false`);
-  return rows[0]?.n ?? 0;
-}
-
 /** Per dealer: the sum of Billing Exception contributions inside the editable Recovery rows (Today's Plan may never be saved below the sum of all active contributions). */
 export const BILLING_CONTRIBUTION_UNION = Prisma.sql`
   UNION ALL
   SELECT "dailyWorkEntryId" AS "entryId", "dailyWorkContribution" AS "contribution"
   FROM "BillingExceptionTask" WHERE "dailyWorkEntryId" IS NOT NULL`;
 
-/* ------------------------------------------------ owner actions ------------------------------------------------ */
-
-function assertOwnerRole(ctx: AuthContext): void {
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only the responsible officer can act on this task.");
-}
+/* ------------------------------------------------ owner / RM actions ------------------------------------------------ */
 
 async function loadLocked(tx: Prisma.TransactionClient, id: string) {
   const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "BillingExceptionTask" WHERE "id" = ${id} FOR UPDATE`);
@@ -170,49 +157,58 @@ async function loadLocked(tx: Prisma.TransactionClient, id: string) {
   return tx.billingExceptionTask.findUniqueOrThrow({ where: { id } });
 }
 
-/** Explicitly confirm a task that is inside today's editable Recovery row. Idempotent; never completes anything, never moves the contribution. */
-export async function confirmBillingTask(ctx: AuthContext, id: string): Promise<{ taskId: string; confirmed: true }> {
-  assertOwnerRole(ctx);
-  const workDate = currentBusinessDate();
-  return prisma.$transaction(async (tx) => {
-    const day = await lockDailyWorkDay(tx, ctx.userId, workDate);
-    if (day.status === "FINALIZED") throw new ApiError(409, "Today's Daily Work is finalized; its tasks can no longer be confirmed.");
-    const task = await loadLocked(tx, id);
-    if (task.officerId !== ctx.userId) throw new ApiError(403, "Only the responsible officer can act on this task.");
-    const inEditable = task.dailyWorkEntryId ? await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      SELECT "id" FROM "DailyWorkEntry" WHERE "id" = ${task.dailyWorkEntryId} AND "officerId" = ${ctx.userId} AND "workDate" = ${workDate}::date
-        AND "batchId" = ${day.currentBatchId} AND "section" = 'RECOVERY' AND "status" = 'DRAFT'`) : [];
-    if (inEditable.length === 0) throw new ApiError(409, "This task is not in today's editable Recovery plan.");
-    await tx.$executeRaw(Prisma.sql`UPDATE "BillingExceptionTask" SET "dailyWorkConfirmed" = true, "updatedAt" = NOW() WHERE "id" = ${id} AND "dailyWorkEntryId" IS NOT NULL`);
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "billingExceptionTask", entityId: id, summary: "Billing Exception task confirmed for today's Daily Work" }, tx);
-    return { taskId: id, confirmed: true as const };
-  }, { timeout: 15_000 });
-}
-
 /**
- * Move a task to another day (today or later). If it is already inside today's editable Recovery row, ONLY its own contribution is removed from Today's Plan
- * (manual / CN / Calendar contributions stay) and it re-enters on its new day. Submitted / finalized work is never touched (409). The original promised date is kept.
+ * Move a task to a LATER day (strictly after the current business date). Allowed for the task's responsible Sales Officer and for a Regional Manager whose team contains them.
+ * It is the SAME task row that moves — never deleted and recreated: id, amount, exception link, owner and the original promised date stay; only `taskDate` (the task's own
+ * schedule, kept apart from the exception's promised date) changes. If the task is already inside today's editable Recovery row, ONLY its own contribution is removed from Today's
+ * Plan (manual / CN / Calendar contributions stay; a row left with nothing is dropped) and the task re-enters on its new day. Submitted / finalized work is never touched (409).
+ * Retrying the same request is a no-op, and a stale draft can never bring the amount back (saveDailyWork refuses a draft that still carries the old Auto amount).
  */
 export async function rescheduleBillingTask(ctx: AuthContext, id: string, rawDate: unknown): Promise<{ taskId: string; taskDate: string }> {
-  assertOwnerRole(ctx);
+  const L = await getResolvedLabels();
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, L["daily_work.billing_tasks.error.forbidden"]);
   const taskDate = typeof rawDate === "string" ? rawDate.trim() : "";
   const workDate = currentBusinessDate();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(taskDate) || Number.isNaN(Date.parse(`${taskDate}T00:00:00Z`))) throw new ApiError(422, "Enter a valid date.");
-  if (taskDate < workDate) throw new ApiError(422, PAYMENT_DATE_PAST_MESSAGE);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(taskDate) || Number.isNaN(Date.parse(`${taskDate}T00:00:00Z`)) || new Date(`${taskDate}T00:00:00Z`).toISOString().slice(0, 10) !== taskDate) throw new ApiError(422, L["daily_work.billing_tasks.error.invalid_date"]);
+  if (taskDate <= workDate) throw new ApiError(422, L["daily_work.billing_tasks.error.after_today"]);
+
+  const peek = await prisma.billingExceptionTask.findUnique({ where: { id }, select: { id: true, officerId: true, dealerId: true, dailyWorkEntryId: true } });
+  if (!peek) throw new ApiError(404, "Task not found");
+  const [owner] = await effectiveBillingTaskOwners([peek]);
+  let allowed = owner === ctx.userId;
+  if (!allowed && ctx.role === Role.REGIONAL_MANAGER) { const scope = await getOfficerScope(ctx); allowed = scope.all || scope.ids.includes(owner!); }
+  if (!allowed) throw new ApiError(403, L["daily_work.billing_tasks.error.forbidden"]);
+
   return prisma.$transaction(async (tx) => {
-    const day = await lockDailyWorkDay(tx, ctx.userId, workDate);
+    // Lock order (as everywhere): the OWNER's DailyWorkDay first, then the task row.
+    const day = peek.dailyWorkEntryId ? await lockDailyWorkDay(tx, peek.officerId, workDate) : null;
     const task = await loadLocked(tx, id);
-    if (task.officerId !== ctx.userId) throw new ApiError(403, "Only the responsible officer can act on this task.");
-    if (task.dailyWorkEntryId) {
-      // Throws 409 unless the entry is today's current editable Recovery row (submitted / finalized / older days are immutable).
-      await reverseMaterializedDailyWorkContribution(tx, { entryId: task.dailyWorkEntryId, contribution: Number(task.dailyWorkContribution), officerId: ctx.userId, workDate, day });
+    if ((task.dailyWorkEntryId ?? null) !== (peek.dailyWorkEntryId ?? null)) throw new ApiError(409, L["daily_work.billing_tasks.error.changed"]);
+    const previous = iso(task.taskDate);
+    if (!task.dailyWorkEntryId && previous === taskDate) return { taskId: id, taskDate }; // a retry of a request that already succeeded
+    if (task.dailyWorkEntryId && day) {
+      // Throws 409 unless the entry is the owner's current editable Recovery row (submitted / finalized / older days are immutable).
+      try {
+        await reverseMaterializedDailyWorkContribution(tx, { entryId: task.dailyWorkEntryId, contribution: Number(task.dailyWorkContribution), officerId: task.officerId, workDate, day });
+      } catch (e) { if (e instanceof ApiError && e.status === 409) throw new ApiError(409, L["daily_work.billing_tasks.error.locked_day"]); throw e; }
     }
+    const entryId = task.dailyWorkEntryId;
     const updated = await tx.billingExceptionTask.updateMany({
-      where: { id, dailyWorkEntryId: task.dailyWorkEntryId },
-      data: { taskDate: new Date(`${taskDate}T00:00:00Z`), rescheduled: iso(task.taskDate) !== taskDate ? true : task.rescheduled, dailyWorkEntryId: null, dailyWorkContribution: null, dailyWorkConfirmed: false, materializedAt: null },
+      where: { id, dailyWorkEntryId: entryId },
+      data: { taskDate: new Date(`${taskDate}T00:00:00Z`), rescheduled: true, dailyWorkEntryId: null, dailyWorkContribution: null, dailyWorkConfirmed: false, materializedAt: null },
     });
-    if (updated.count === 0) throw new ApiError(409, "The task changed; refresh Daily Work and try again.");
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "billingExceptionTask", entityId: id, summary: `Billing Exception task rescheduled to ${taskDate} (promised ${iso(task.promisedDate)})` }, tx);
+    if (updated.count === 0) throw new ApiError(409, L["daily_work.billing_tasks.error.changed"]);
+    if (entryId) {
+      // The row now carries nothing (no plan, no other automatic / calendar source): drop it so today's plan no longer lists the dealer.
+      await tx.$executeRaw(Prisma.sql`
+        DELETE FROM "DailyWorkEntry" e
+        WHERE e."id" = ${entryId} AND e."status" = 'DRAFT' AND COALESCE(e."todaysPlan", 0) = 0
+          AND NOT EXISTS (SELECT 1 FROM "BillingExceptionTask" x WHERE x."dailyWorkEntryId" = e."id")
+          AND NOT EXISTS (SELECT 1 FROM "CnPaymentEvent" x WHERE x."dailyWorkEntryId" = e."id")
+          AND NOT EXISTS (SELECT 1 FROM "CnRequest" x WHERE x."legacyDailyWorkEntryId" = e."id")
+          AND NOT EXISTS (SELECT 1 FROM "CalendarEntry" x WHERE x."dailyWorkEntryId" = e."id")`);
+    }
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "billingExceptionTask", entityId: id, summary: `Billing Exception task rescheduled by ${ctx.username ?? ctx.userId}: ${previous} → ${taskDate} (promised ${iso(task.promisedDate)} unchanged)` }, tx);
     return { taskId: id, taskDate };
   }, { timeout: 15_000 });
 }

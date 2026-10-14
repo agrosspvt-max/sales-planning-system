@@ -109,6 +109,8 @@ function makeFake(opts: FakeOpts) {
       for (const r of store) if (r.id === entryId && r.officerId === officerId && r.section === section && r.workDate === workDate && r.batchId !== currentBatchId && r.status === "PLAN_SUBMITTED") { r.todaysActual = String(actual); if (mode !== undefined) r.paymentMode = mode; n++; }
       return n;
     }
+    // Automatic (CN / Billing Exception) contribution lookups: this fake has none.
+    if (text.startsWith('SELECT t."entryId", SUM(t."contribution")') || text.startsWith('SELECT e."dealerId", SUM(t."contribution")::text AS "contribution" FROM (')) return [];
     throw new Error("Unhandled raw SQL: " + text);
   }
 

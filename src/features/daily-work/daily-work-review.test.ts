@@ -102,6 +102,7 @@ function makeFake(init: Partial<Store> = {}) {
       store.reviews.set(officerId, { rating, reviewerId });
       return 1;
     }
+    if (text.startsWith('SELECT t."entryId", SUM(t."contribution")')) return []; // automatic (CN / Billing Exception) contribution lookup: none in this fake
     throw new Error("Unhandled SQL: " + text);
   }
 

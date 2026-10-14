@@ -24,12 +24,12 @@ import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
-import { billingTasksForEntries, billingLinkedEntryIds, countUnconfirmedBillingTasks, BILLING_CONTRIBUTION_UNION, type BillingTaskDto } from "./billing-task.server";
+import { billingTasksForEntries, billingLinkedEntryIds, BILLING_CONTRIBUTION_UNION, type BillingTaskDto } from "./billing-task.server";
 import {
   currentBusinessDate, monthNameForDate, performanceSectionTotals, performanceRowValue, isPerformanceMetric, PERFORMANCE_METRIC_INFO, type PerformanceMetric, type PerformanceUnit, type PerformanceEntryRow, type PerformanceSectionTotals, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
   computeSectionStatuses, sectionStatusCounts, canSubmitDailyWork, parseNoPlanSet, serializeNoPlanSet,
   MANDATORY_SECTIONS, SectionStatus, SCHEME_CONVERSION_ENABLED, isDailyWorkSectionEnabled, RECOVERY_PAYMENT_MODES,
-  type RecoveryPaymentMode,
+  type RecoveryPaymentMode, recoverySourceOf, type RecoverySource,
   dailyWorkClock, invalidPlanRows, planRequiredMessage, dailyReportDeadline, isReportDeadlinePassed, isReportMissed, previousBusinessDate, previousReportBlocksPlan, previousReportState, type PreviousReportState,
   type DailyWorkSection, type DailyWorkType, type DailyWorkDealerRow,
   type SectionDataPresence, type MandatorySection, type SectionStatusCounts,
@@ -74,6 +74,8 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     todaysPlan: money.optional(),
     entryType: z.enum(["REGULAR", "SCHEME"], invalidOption).optional().default("REGULAR"),
     schemeId: z.string().min(1, L["daily_work.placeholder.select_scheme"]).optional().nullable(),
+    /** Recovery: the automatic amount the editor was showing for this row — a stale draft (a task was rescheduled meanwhile) is refused. */
+    autoAmount: z.coerce.number().min(0).max(1e12).optional(),
   });
   const appointmentRowSchema = z.object({
     rowId: z.string().min(1, L["daily_work.validation.invalid_option"]),
@@ -158,6 +160,11 @@ export interface DailyWorkDealerDto {
   todaysPlan: number | null; // officer-entered
   todaysActual: number | null; // manual actual (post-submit)
   entryType: DailyWorkType;
+  /** Recovery only: the system source of an automatically generated row (its Recovery Type is shown and locked as this). null → a manual row. */
+  recoverySource?: RecoverySource | null;
+  /** Recovery: Σ of the automatic contributions (Billing Exception + CN) inside this row, and whether the whole amount is automatic (then read-only). */
+  autoContribution?: number;
+  amountLocked?: boolean;
   paymentMode?: RecoveryPaymentMode | null; // Recovery Daily REPORT only (the ACTUAL receipt mode); never part of the Daily Plan
   schemeId: string | null;
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
@@ -474,6 +481,19 @@ async function autoTaskEntryIdsForReport(officerId: string, entryIds: string[]):
   return rows.map((row) => row.entryId);
 }
 
+/** Σ of every automatic contribution (CN payment events, legacy CN, Billing Exception tasks) per Daily Work row. */
+async function autoContributionByEntry(entryIds: string[]): Promise<Map<string, number>> {
+  if (entryIds.length === 0) return new Map();
+  const rows = await prisma.$queryRaw<Array<{ entryId: string; contribution: string }>>(Prisma.sql`
+    SELECT t."entryId", SUM(t."contribution")::text AS "contribution" FROM (
+      SELECT "dailyWorkEntryId" AS "entryId", "dailyWorkContribution" AS "contribution" FROM "CnPaymentEvent" WHERE "dailyWorkEntryId" IS NOT NULL
+      UNION ALL
+      SELECT "legacyDailyWorkEntryId" AS "entryId", "legacyDailyWorkContribution" AS "contribution" FROM "CnRequest" WHERE "legacyDailyWorkEntryId" IS NOT NULL
+      ${BILLING_CONTRIBUTION_UNION}
+    ) t WHERE t."entryId" IN (${Prisma.join(entryIds)}) GROUP BY t."entryId"`);
+  return new Map((rows ?? []).map((r) => [r.entryId, Number(r.contribution)]));
+}
+
 /* --------------------------------- Read --------------------------------- */
 
 export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate?: string, targetOfficerId?: string, rawMode?: string): Promise<DailyWorkPayload> {
@@ -550,12 +570,23 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     ? await materializedCnTasksForEntries(officerId, dailyRows.map((row) => row.id))
     : [];
   const calendarEntryIds = await calendarLinkedEntryIds(dailyRows.map((row) => row.id));
-  const autoTaskEntryIds = section === "RECOVERY" && mode === "REPORT"
-    ? await autoTaskEntryIdsForReport(officerId, dailyRows.map((row) => row.id))
-    : [];
+  const cnLinkedIds = section === "RECOVERY" ? await autoTaskEntryIdsForReport(officerId, dailyRows.map((row) => row.id)) : [];
   const [billingTasks, billingEntryIds] = section === "RECOVERY"
     ? await Promise.all([mode === "PLAN" ? billingTasksForEntries(officerId, dailyRows.map((row) => row.id), workDate) : Promise.resolve([] as BillingTaskDto[]), billingLinkedEntryIds(dailyRows.map((row) => row.id))])
     : [[] as BillingTaskDto[], [] as string[]];
+  // Task Type "Auto" (Daily Report / review views) = any system-generated contribution: a CN follow-up OR a Billing Exception task.
+  const autoTaskEntryIds = section === "RECOVERY" && mode === "REPORT" ? [...new Set([...cnLinkedIds, ...billingEntryIds])] : [];
+  if (section === "RECOVERY") {
+    const billingSet = new Set(billingEntryIds), cnSet = new Set(cnLinkedIds);
+    const contributions = await autoContributionByEntry(dealers.map((d) => d.entryId));
+    for (const d of dealers) {
+      d.recoverySource = recoverySourceOf(billingSet.has(d.entryId), cnSet.has(d.entryId));
+      const auto = contributions.get(d.entryId) ?? 0;
+      d.autoContribution = auto;
+      // Whole amount automatic (nothing manual on top) → the amount is read-only; a manual amount added to the same dealer row stays editable.
+      d.amountLocked = auto > 0 && (d.todaysPlan ?? 0) <= auto + 0.005;
+    }
+  }
 
   return {
     section,
@@ -608,12 +639,13 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
   }
 
   const keepIds = rows.map((r) => r.dealerId);
+  const locked = new Map<string, { entryType: DailyWorkType; schemeId: string | null }>();
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     if (section === "RECOVERY") {
-      const linked = await tx.$queryRaw<Array<{ dealerId: string; contribution: string }>>(Prisma.sql`
-        SELECT e."dealerId", SUM(t."contribution")::text AS "contribution"
+      const linked = await tx.$queryRaw<Array<{ dealerId: string; contribution: string; entryType: string; schemeId: string | null; stored: string | null }>>(Prisma.sql`
+        SELECT e."dealerId", SUM(t."contribution")::text AS "contribution", MAX(e."entryType") AS "entryType", MAX(e."schemeId") AS "schemeId", MAX(e."todaysPlan")::text AS "stored"
         FROM (
           SELECT "dailyWorkEntryId" AS "entryId", "dailyWorkContribution" AS "contribution"
           FROM "CnPaymentEvent" WHERE "dailyWorkEntryId" IS NOT NULL
@@ -631,6 +663,27 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
         if (!row || Number(row.todaysPlan ?? 0) < Number(item.contribution)) {
           throw new ApiError(409, L["daily_work.validation.auto_task_amount"]);
         }
+        // The automatic part of the amount is fixed: when the stored amount IS the automatic amount (nothing manual on top), the request may not change it.
+        if (Number(item.stored ?? 0) <= Number(item.contribution) + 0.005 && Math.abs(Number(row.todaysPlan ?? 0) - Number(item.stored ?? 0)) > 0.005) {
+          throw new ApiError(409, L["daily_work.validation.auto_task_locked"]);
+        }
+        // An automatically generated row's Recovery Type is fixed by its source: whatever the request says, the stored classification stays.
+        locked.set(item.dealerId, { entryType: item.entryType as DailyWorkType, schemeId: item.schemeId });
+      }
+    }
+    // Stale draft: the editor still shows an automatic amount that is no longer in this row (e.g. the task was rescheduled) → refuse; never re-create it as a manual amount.
+    if (section === "RECOVERY") {
+      const current = new Map(((await tx.$queryRaw<Array<{ dealerId: string; contribution: string }>>(Prisma.sql`
+        SELECT e."dealerId", SUM(t."contribution")::text AS "contribution" FROM (
+          SELECT "dailyWorkEntryId" AS "entryId", "dailyWorkContribution" AS "contribution" FROM "CnPaymentEvent" WHERE "dailyWorkEntryId" IS NOT NULL
+          UNION ALL
+          SELECT "legacyDailyWorkEntryId" AS "entryId", "legacyDailyWorkContribution" AS "contribution" FROM "CnRequest" WHERE "legacyDailyWorkEntryId" IS NOT NULL
+          ${BILLING_CONTRIBUTION_UNION}
+        ) t JOIN "DailyWorkEntry" e ON e."id" = t."entryId"
+        WHERE e."officerId" = ${officerId} AND e."workDate" = ${workDate}::date AND e."batchId" = ${day.currentBatchId} AND e."section" = 'RECOVERY'
+        GROUP BY e."dealerId"`)) ?? []).map((r) => [r.dealerId, Number(r.contribution)] as const));
+      for (const row of rows) {
+        if (row.autoAmount !== undefined && Math.abs(row.autoAmount - (current.get(row.dealerId) ?? 0)) > 0.005) throw new ApiError(409, L["daily_work.validation.auto_task_stale"]);
       }
     }
     // Replace-set: delete this officer/section/date rows no longer present (never touch SUBMITTED actuals of
@@ -642,12 +695,14 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
 
     for (const r of rows) {
       const todaysPlan = r.todaysPlan == null ? Prisma.sql`NULL` : Prisma.sql`${r.todaysPlan}`;
-      const schemeId = r.entryType === "SCHEME" ? r.schemeId! : null;
+      const lock = locked.get(r.dealerId);
+      const entryType = lock ? lock.entryType : r.entryType;
+      const schemeId = lock ? lock.schemeId : r.entryType === "SCHEME" ? r.schemeId! : null;
       // Upsert on the unique (officer, workDate, section, rowKey). For SALES/RECOVERY rowKey == dealerId, so
       // duplicate protection is unchanged. Keep existing todaysActual + SUBMITTED status on conflict.
       await tx.$executeRaw(Prisma.sql`
         INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId","status","createdAt","updatedAt")
-        VALUES (${randomUUID()}, ${officerId}, ${r.dealerId}, ${r.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, ${todaysPlan}, ${r.entryType}, ${schemeId}, 'DRAFT', NOW(), NOW())
+        VALUES (${randomUUID()}, ${officerId}, ${r.dealerId}, ${r.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, ${todaysPlan}, ${entryType}, ${schemeId}, 'DRAFT', NOW(), NOW())
         ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
         DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId", "updatedAt" = NOW()`);
     }
@@ -1315,8 +1370,8 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
       // Submitting Daily Work must NOT implicitly confirm an Auto Task. Every materialized Auto Task in the current
       // editable batch must have been explicitly confirmed first (this never completes the payment task).
       const unconfirmed = await countUnconfirmedMaterializedTasks(tx, officerId, workDate, day.currentBatchId);
-      const unconfirmedBilling = await countUnconfirmedBillingTasks(tx, officerId, workDate, day.currentBatchId);
-      if (unconfirmed + unconfirmedBilling > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
+      // Billing Exception tasks need no confirmation: a due task is in the plan once, and submitting it is the officer's confirmation.
+      if (unconfirmed > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
     }
     const [data, noPlanSet] = await Promise.all([
       sectionDataPresence(officerId, workDate, day.currentBatchId, tx),

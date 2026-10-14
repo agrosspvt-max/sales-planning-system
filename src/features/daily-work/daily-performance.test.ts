@@ -95,6 +95,7 @@ function makeFake(init: Partial<Store> = {}) {
     if (text.includes('FROM "DailyWorkAttendance"')) {
       return rowsFrom(store.attendance, ids, from, to, (oid, date, status) => ({ officerId: oid, workDate: D(date), status }));
     }
+    if (text.startsWith('SELECT t."entryId", SUM(t."contribution")')) return []; // automatic (CN / Billing Exception) contribution lookup: none in this fake
     throw new Error("Unhandled SQL: " + text);
   }
 

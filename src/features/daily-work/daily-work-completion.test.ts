@@ -180,6 +180,7 @@ function makeFake() {
       for (const row of entries) if (row.officerId === officerId && row.workDate === workDate && row.status === "PLAN_SUBMITTED") { row.status = "FINALIZED"; count++; }
       return count;
     }
+    if (text.startsWith('SELECT t."entryId", SUM(t."contribution")')) return []; // automatic (CN / Billing Exception) contribution lookup: none in this fake
     throw new Error(`Unhandled SQL: ${text}`);
   }
 

@@ -10,42 +10,36 @@ const load = testLoader({
   "@tanstack/react-query": { useMutation: () => ({ isPending: false, mutate() {} }), useQuery: () => ({ data: undefined, isLoading: true, error: null }), useQueryClient: () => ({ invalidateQueries() {} }) },
   "@/lib/api-client": { api: { post: async () => ({}), get: async () => ({}) } },
   "@/features/labels/label-ui": { useLabel: (key: string) => (DEFAULT_LABELS as Record<string, string>)[key] ?? key },
+  "@/components/ui/dialog": { Dialog: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DialogContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DialogHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DialogTitle: ({ children }: { children: React.ReactNode }) => <h2>{children}</h2>, DialogFooter: ({ children }: { children: React.ReactNode }) => <div>{children}</div> },
+  "@/components/ui/date-input-dmy": { DateInputDMY: ({ min, "aria-label": al }: { min?: string; "aria-label"?: string }) => <input type="text" placeholder="DD/MM/YYYY" min={min} aria-label={al} /> },
 });
-const { BillingTaskPanel } = load<typeof import("./billing-task-ui")>("src/features/daily-work/billing-task-ui.tsx");
-const T = (over: Record<string, unknown> = {}) => ({ taskId: "t1", billingExceptionId: "e1", dealerId: "d1", dealerName: "Beta Stores", taskType: "BILLING_EXCEPTION", planType: "RECOVERY", amount: 20000, promisedDate: "2026-10-09", taskDate: "2026-10-09", rescheduled: false, confirmed: false, overdue: false, billNo: "B-1", authPerson: "Varun sir", ...over });
-const html = (tasks: unknown[], locked = false) => renderToStaticMarkup(<BillingTaskPanel tasks={tasks as never} locked={locked} onChanged={() => {}} />);
-const text = (h: string) => h.replace(/<[^>]*>/g, "|").replace(/\|+/g, "|");
+const { BillingTaskRescheduleDialog, dayAfter } = load<typeof import("./billing-task-ui")>("src/features/daily-work/billing-task-ui.tsx");
+const T = { taskId: "t1", billingExceptionId: "e1", dealerId: "d1", dealerName: "Beta Stores", taskType: "BILLING_EXCEPTION", planType: "RECOVERY", amount: 20000, promisedDate: "2026-10-09", taskDate: "2026-10-12", rescheduled: false, confirmed: false, overdue: false, billNo: "B-1", authPerson: "Varun sir" };
+const out = renderToStaticMarkup(<BillingTaskRescheduleDialog task={T as never} today="2026-10-14" onClose={() => {}} onDone={() => {}} />);
 
-// display: dealer, amount, Task Type, Plan Type, scheduled payment date, actions
-let out = html([T()]);
-for (const needle of ["Beta Stores", "₹20,000", "Billing Exception", "Recovery", "09/10/2026", ">Confirm<", ">Details<", ">Reschedule<", "Billing Exception tasks"]) assert.ok(out.includes(needle), needle);
-assert.ok(!out.includes("Overdue") && !out.includes("Confirmed"), "an on-time unconfirmed task");
-// overdue keeps the ORIGINAL promised date and says so; a rescheduled task shows both dates; confirmed replaces the Confirm button
-out = html([T({ overdue: true, taskDate: "2026-10-09", promisedDate: "2026-10-07" })]);
-assert.ok(out.includes("Overdue") && out.includes("07/10/2026"), "overdue is labelled; the promised date is shown");
-out = html([T({ rescheduled: true, taskDate: "2026-10-12" })]);
-assert.ok(out.includes("Rescheduled: 12/10/2026") && out.includes("09/10/2026"));
-out = html([T({ confirmed: true })]);
-assert.ok(out.includes("Confirmed") && !out.includes(">Confirm<"), "confirmed tasks no longer offer Confirm");
-out = html([T()], true);
-assert.ok(/<button[^>]*disabled[^>]*>Confirm<\/button>/.test(out) && /<button[^>]*disabled[^>]*>Reschedule<\/button>/.test(out), "a locked (submitted) day disables the actions");
-out = html([T({ taskId: "t1" }), T({ taskId: "t2", amount: 2500, dealerName: "Beta Stores" })]);
-assert.equal((out.match(/data-billing-task-id/g) ?? []).length, 2, "several tasks for one dealer stay independent rows");
+// the reschedule popup: dealer, read-only planned amount, current date (DD/MM/YYYY), a date picker, Save / Cancel
+for (const needle of ["Beta Stores", "₹20,000", "12/10/2026", "Planned amount", "Current scheduled date", "New date", ">Reschedule<", ">Cancel<", "DD/MM/YYYY"]) assert.ok(out.includes(needle), needle);
+assert.ok(!/<input[^>]*value="20000"/.test(out) && out.includes('data-testid="reschedule-amount"'), "the amount is plain text, never an input");
+assert.equal(dayAfter("2026-10-14"), "2026-10-15"); assert.equal(dayAfter("2026-12-31"), "2027-01-01"); assert.equal(dayAfter("2028-02-28"), "2028-02-29");
+assert.ok(/min="2026-10-15"/.test(out), "the picker starts the day AFTER today");
 
 /* ---- wiring ---- */
 const read = (p: string) => readFileSync(p, "utf8");
 const ui = read("src/features/daily-work/billing-task-ui.tsx"), server = read("src/features/daily-work/billing-task.server.ts");
-assert.ok(!/cn-requests|CnPaymentEvent|CnRequest/.test(ui + server.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")), "no CN endpoint, table or id is used by the Billing Exception source");
-assert.ok(ui.includes("/api/billing-exception-tasks/${id}/confirm") && ui.includes("/api/billing-exception-tasks/${task.taskId}/reschedule") && ui.includes("/api/billing-exception-tasks/${id}"), "its own endpoints");
+assert.ok(!/cn-requests|CnPaymentEvent|CnRequest/.test(ui + server.replace(/NOT EXISTS \(SELECT 1 FROM "Cn\w+" x WHERE [^)]*\)/g, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")), "no CN endpoint, table or id is used by the Billing Exception source");
+assert.ok(ui.includes("/api/billing-exception-tasks/${task.taskId}/reschedule") && ui.includes("/api/billing-exception-tasks/${id}") && !ui.includes("/confirm"), "its own endpoints; no confirmation endpoint");
 const page = read("src/features/daily-work/daily-work-page.tsx");
-const panelUse = page.slice(page.indexOf("<BillingTaskPanel") - 220, page.indexOf("<BillingTaskPanel") + 120);
-assert.ok(panelUse.includes("billingTasks") && !panelUse.includes("autoTasksEnabled"), "the panel does not depend on the Auto Tasks container's visibility setting");
-assert.ok(page.includes("taskTypeBilling") && page.includes("billingDealerIds"), "Task Type label");
+assert.ok(!page.includes("BillingTaskPanel") && !ui.includes("BillingTaskPanel") && !page.includes("billing-task-panel"), "the separate Billing Exception tasks section is gone");
+assert.ok(page.includes("<BillingTaskRescheduleDialog") && page.includes('data-testid="billing-reschedule-icon"') && page.includes("!(r.autoAmount > 0) &&"), "the calendar icon is on the task row; Auto rows have no delete icon");
+assert.ok(page.includes("readOnly={r.amountLocked}") && page.includes("data-auto-locked"), "an Auto amount is read-only");
+assert.ok(!/confirmBillingTask|countUnconfirmedBillingTasks|billing-exception-tasks\/\[id\]\/confirm/.test(read("src/features/daily-work/billing-task.server.ts") + read("src/features/daily-work/service.server.ts")), "no confirmation requirement is left for Billing Exception tasks");
+assert.ok(page.includes("billingDealerIds") && page.includes('billingDealerIds.has(dealerId) ? "AUTO"'), "Task Type: a Billing Exception task is Auto");
+assert.ok(!page.includes("taskTypeBilling") && page.includes("data-recovery-source") && page.includes("sourceBilling"), "its source is the (locked) Recovery Type, not the Task Type");
 const service = read("src/features/daily-work/service.server.ts");
-assert.ok(service.includes("${BILLING_CONTRIBUTION_UNION}") && service.includes("countUnconfirmedBillingTasks(tx, officerId, workDate, day.currentBatchId)") && service.includes("billingTasks,") && service.includes("billingEntryIds,"), "Today's Plan floor, submit gate and payload include the source");
+assert.ok(service.includes("${BILLING_CONTRIBUTION_UNION}") && service.includes("billingTasks,") && service.includes("billingEntryIds,"), "Today's Plan floor, submit gate and payload include the source");
 const auto = read("src/features/daily-work/auto-task-materialization.server.ts");
 assert.ok(auto.includes("materializeDueBillingTasksInTransaction(tx, officerId, workDate, day)") && auto.includes("cn.materializedTasks + billing.materialized"), "one materialization entry point for every read path and submit gate, counts combined (a newly added task blocks finalization like a CN task)");
-assert.ok(/SELECT "id" FROM "BillingExceptionTask" WHERE "id" = \$\{id\} FOR UPDATE/.test(server) && server.indexOf("lockDailyWorkDay(tx, ctx.userId, workDate)") < server.indexOf("loadLocked(tx, id)"), "lock order: Daily Work day, then the task row");
+assert.ok(/SELECT "id" FROM "BillingExceptionTask" WHERE "id" = \$\{id\} FOR UPDATE/.test(server) && server.indexOf("lockDailyWorkDay(tx, peek.officerId, workDate)") < server.indexOf("const task = await loadLocked(tx, id)"), "lock order: Daily Work day, then the task row");
 assert.ok(/UPDATE "BillingExceptionTask"[\s\S]{0,400}WHERE "id" = \$\{task\.id\} AND "dailyWorkEntryId" IS NULL/.test(server), "claim-first idempotent link");
 assert.ok(!/DealerPaymentReceipt|LastPaymentReceipt|todaysActual|paymentMode/i.test(server.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")), "a task never writes receipts, actuals or payment mode");
 const perms = read("src/features/accounts/route-permissions.ts");

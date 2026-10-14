@@ -27,7 +27,7 @@ interface ReviewDto { rating: number; reviewerId: string; reviewerName: string; 
 // All of these are the EXISTING Daily Work report values (the review endpoint returns the standard section payloads).
 interface DealerRow {
   entryId?: string; dealerId: string; dealerName: string; todaysPlan: number | null; todaysActual: number | null;
-  entryType?: DailyWorkType; paymentMode?: RecoveryPaymentMode | null;
+  entryType?: DailyWorkType; paymentMode?: RecoveryPaymentMode | null; recoverySource?: "BILLING_EXCEPTION" | "CN_REQUEST" | null;
 }
 interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds?: string[]; calendarEntryIds?: string[] }
 interface ApptRow { rowId: string; entryId?: string; dealerName: string; marketName: string; status: string | null }
@@ -168,6 +168,8 @@ function useReviewColumns() {
     auto: useLabel("daily_work.task_type.auto"),
     manual: useLabel("daily_work.task_type.manual"),
     calendar: useLabel("daily_work.task_type.calendar"),
+    sourceBilling: useLabel("daily_work.recovery_source.billing_exception"),
+    sourceCn: useLabel("daily_work.recovery_source.cn_request"),
     appointed: useLabel("daily_work.status.appointed"),
     notAppointed: useLabel("daily_work.status.not_appointed"),
     yes: useLabel("daily_work.achievability.yes"),
@@ -189,7 +191,8 @@ export function DealerSection({ title, rows, recovery = false, autoEntryIds = []
     const type = rowTaskType(!!row.entryId && auto.has(row.entryId), !!row.entryId && calendar.has(row.entryId));
     return type === "AUTO" ? C.auto : type === "CALENDAR" ? C.calendar : C.manual;
   };
-  const typeText = (row: DealerRow) => (row.entryType === "SCHEME" ? C.schemeType : C.regular);
+  // An automatically generated task shows its SOURCE as the Recovery Type; a manual one shows its own Regular / Scheme choice.
+  const typeText = (row: DealerRow) => (row.recoverySource === "BILLING_EXCEPTION" ? C.sourceBilling : row.recoverySource === "CN_REQUEST" ? C.sourceCn : row.entryType === "SCHEME" ? C.schemeType : C.regular);
   return (
     <ReadSection title={title} section={recovery ? "recovery" : "sales"} empty={rows.length === 0} noPlan={noPlan}>
       <Table>

@@ -120,6 +120,8 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
     delete: useLabel("calendar.delete"),
     inDailyWork: useLabel("calendar.in_daily_work"),
     billingTask: useLabel("daily_work.task_type.billing_exception"),
+    colTaskType: useLabel("daily_work.col.task_type"), taskTypeAuto: useLabel("daily_work.task_type.auto"),
+    colRecoveryType: useLabel("daily_work.col.recovery_type"), sourceBilling: useLabel("daily_work.recovery_source.billing_exception"),
     btScheduled: useLabel("calendar.billing_task.scheduled"),
     btOverdue: useLabel("calendar.billing_task.overdue"),
     btInDailyWork: useLabel("calendar.billing_task.in_daily_work"),
@@ -415,6 +417,7 @@ function BillingTaskCard({ t, labels: L }: { t: CalendarBillingTaskDto; labels: 
       <div className="space-y-0.5 text-sm">
         <div className="font-medium"><DealerName id={t.dealerId} name={t.dealerName} /> — {formatCurrency(t.amount)}</div>
         <div className="text-muted-foreground">{L.salesOfficer}: {t.ownerName} · {L.btScheduledDate}: {dmy(t.dateKey)}</div>
+        <div className="text-muted-foreground" data-testid="calendar-billing-types">{L.colTaskType}: {L.taskTypeAuto} · {L.colRecoveryType}: {L.sourceBilling}</div>
       </div>
       <div className="mt-1 flex justify-end"><Button variant="ghost" size="sm" onClick={() => setOpen(true)}>{L.btDetails}</Button></div>
       {open && <BillingTaskDetailDialog id={t.id} onClose={() => setOpen(false)} />}

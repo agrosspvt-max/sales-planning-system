@@ -1,6 +1,7 @@
 "use client";
 
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { formatDateTimeDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeDateInput } from "./scheme-form-inputs";
 
@@ -34,7 +35,7 @@ interface Timeline {
 }
 
 const ordinal = (n: number) => { const s = ["th", "st", "nd", "rd"]; const v = n % 100; return n + (s[(v - 20) % 10] ?? s[v] ?? s[0]); };
-const dateTime = (s: string) => new Date(s).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+const dateTime = (s: string) => formatDateTimeDMY(s);
 
 function AllocStatusBadge({ status, pct }: { status: string; pct: number }) {
   if (status === "RECEIVED") return <Badge variant="success">Settled</Badge>;

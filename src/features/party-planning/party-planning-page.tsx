@@ -1,5 +1,6 @@
 "use client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 
 
 import { useEffect, useMemo, useState } from "react";
@@ -163,6 +164,7 @@ export function PartyCreatePlanPage() {
   // Hooks must be called unconditionally — resolve label text once, up front.
   const title = useLabel("party_planning.title");
   const saveLabel = useLabel("party_planning.action.save_draft");
+  const appointmentDateLabel = useLabel("party_planning.col.appointment_date");
   const submitLabel = useLabel("party_planning.action.submit");
   const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.legacy.subtitle_create", rejectedBanner: "party_planning.legacy.rejected_banner",
     phParty: "party_planning.legacy.placeholder_party", phMarket: "party_planning.legacy.placeholder_market", rejectedRemark: "party_planning.legacy.rejected_remark", removeRow: "party_planning.legacy.remove_row", saving: "party_planning.common.saving", submitting: "party_planning.common.submitting" });
@@ -204,7 +206,7 @@ export function PartyCreatePlanPage() {
                     {r.status === "REJECTED" && r.remarks && <p className="mt-1 text-xs text-destructive">{fill(T.rejectedRemark, { remarks: r.remarks })}</p>}
                   </TableCell>
                   <TableCell><Input value={r.marketName} onChange={(e) => update(i, { marketName: e.target.value })} placeholder={T.phMarket} /></TableCell>
-                  <TableCell><Input type="date" value={r.appointmentDate} onChange={(e) => update(i, { appointmentDate: e.target.value })} /></TableCell>
+                  <TableCell><DateInputDMY aria-label={appointmentDateLabel} value={r.appointmentDate} onChange={(v) => update(i, { appointmentDate: v })} /></TableCell>
                   <TableCell className="text-right">
                     <Button size="sm" variant="ghost" className="text-destructive" onClick={() => removeRow(i)} disabled={busy} title={T.removeRow}>
                       <Trash2 className="h-4 w-4" />

@@ -148,12 +148,12 @@ export async function getBillingExceptionDetail(ctx: AuthContext, id: string): P
 }
 
 export type ExceptionPage = Paginated<BillingExceptionRow> & { options: ReportFilterOptions; appliedFilters: ReportFilters; lastUpdate: string | null; summary: ExceptionSummary };
-interface ExceptionRecordLite { id: string; dealerId: string; billingDate: Date; billNo: string; authPerson: string; status: string; createdAt: Date; billingAmount: Prisma.Decimal | null; paymentCondition: boolean | null; paymentDate: Date | null; paymentAmount: Prisma.Decimal | null }
+interface ExceptionRecordLite { id: string; dealerId: string; billingDate: Date; billNo: string; authPerson: string; status: string; createdAt: Date; billingAmount: Prisma.Decimal | null; paymentCondition: boolean | null; paymentDate: Date | null; paymentAmount: Prisma.Decimal | null; snapDays: number | null }
 const rowOf = (e: ExceptionRecordLite, v: { party: string; status: string; state: string | null; territory: string | null; salesOfficer: string | null; lastPaymentDate: string | null; amount: number | null; days: number | null }): BillingExceptionRow => ({
   exceptionId: e.id, dealerId: e.dealerId, ...v, billingDate: isoDay(e.billingDate), billNo: e.billNo, authPerson: e.authPerson, exceptionStatus: e.status as ExceptionStatus, createdAt: e.createdAt.toISOString(),
-  billingAmount: money(e.billingAmount), paymentCondition: conditionOf(e.paymentCondition), paymentDate: e.paymentDate ? isoDay(e.paymentDate) : null, paymentAmount: money(e.paymentAmount),
+  billingAmount: money(e.billingAmount), paymentCondition: conditionOf(e.paymentCondition), paymentDate: e.paymentDate ? isoDay(e.paymentDate) : null, paymentAmount: money(e.paymentAmount), frozenDays: e.snapDays,
 });
-const LITE = { id: true, dealerId: true, billingDate: true, billNo: true, authPerson: true, status: true, createdAt: true, billingAmount: true, paymentCondition: true, paymentDate: true, paymentAmount: true } as const;
+const LITE = { id: true, dealerId: true, billingDate: true, billNo: true, authPerson: true, status: true, createdAt: true, billingAmount: true, paymentCondition: true, paymentDate: true, paymentAmount: true, snapDays: true } as const;
 const newestFirst = (a: ExceptionRecordLite, b: ExceptionRecordLite) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id);
 
 /** Every row of the view (filtered + sorted, NOT paginated). Current = live report values; History = the stored snapshots. */

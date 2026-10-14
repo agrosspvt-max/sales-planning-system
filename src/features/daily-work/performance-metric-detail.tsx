@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatDMY } from "@/lib/date-format";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +19,7 @@ export interface MetricRequest { metric: string; title: string; from: string; to
 export const rupees = (v: number) => `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v)}`; // Sales / Recovery are money
 export const countText = (v: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v); // Scheme units, appointments and visits are counts
 const formatValue = (unit: string, v: number) => (unit === "currency" ? rupees(v) : countText(v));
-const dateText = (d: string) => new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" });
+const dateText = (d: string) => formatDMY(d);
 const fill = (t: string, vars: Record<string, string | number>) => t.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m));
 
 /**

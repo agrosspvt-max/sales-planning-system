@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { localizeDatesInText } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { cn, formatDate } from "@/lib/utils";
@@ -72,7 +73,7 @@ export function NotificationsPage() {
                   {!n.isRead && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary" />}
                   <div>
                     <p className="text-sm font-medium">{n.title}</p>
-                    <p className="text-sm text-muted-foreground">{n.message}</p>
+                    <p className="text-sm text-muted-foreground">{localizeDatesInText(n.message)}</p>
                     <p className="text-xs text-muted-foreground">{formatDate(n.createdAt)}</p>
                   </div>
                 </div>

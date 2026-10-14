@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { formatDMY } from "@/lib/date-format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { PlanStage } from "@/lib/monthly-plan";
@@ -9,7 +10,7 @@ import { useLabels } from "./party-labels";
 
 /** Shared pieces of the Party Planning Seasonal / Monthly LIST pages (the same list → create → Open pattern as Sales Planning). */
 
-export const dateTimeText = (iso: string) => new Date(iso).toLocaleDateString("en-IN", { dateStyle: "medium" });
+export const dateTimeText = (iso: string) => formatDMY(iso);
 
 const STATUS_VARIANT: Record<string, "muted" | "secondary" | "success" | "destructive" | "warning"> = {
   Draft: "muted", "Pending Approval": "secondary", Approved: "success", "Needs Changes": "destructive", "In Progress": "secondary", Completed: "success",

@@ -1,6 +1,7 @@
 "use client";
 
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
+import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -54,7 +55,7 @@ interface ReviewDetail {
 }
 
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
-const dateText = (d: string) => new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" });
+const dateText = (d: string) => formatDMY(d);
 const dash = <span className="text-muted-foreground">—</span>;
 
 /* ==================================== Page ==================================== */
@@ -454,7 +455,7 @@ function RmReviewPanel({ officerId, workDate, review, onReviewed, readOnly = fal
         </div>
         <div className="text-lg font-semibold tabular-nums">{ratingText(review.rating)}</div>
         <div className="text-muted-foreground">{L.reviewer}: {review.reviewerName}</div>
-        <div className="text-muted-foreground">{L.reviewedAt}: {new Date(review.reviewedAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</div>
+        <div className="text-muted-foreground">{L.reviewedAt}: {formatDateTimeDMY(review.reviewedAt)}</div>
       </div>
     );
   }

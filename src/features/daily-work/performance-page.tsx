@@ -1,5 +1,6 @@
 "use client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 
 
 import { useState } from "react";
@@ -40,8 +41,8 @@ interface Payload {
 }
 
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
-const timeText = (iso: string | null) => iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—";
-const dateText = (d: string) => new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" });
+const timeText = (iso: string | null) => iso ? formatDateTimeDMY(iso) : "—";
+const dateText = (d: string) => formatDMY(d);
 const dash = <span className="text-muted-foreground">—</span>;
 
 export function PerformancePage({ role }: { role: Role }) {

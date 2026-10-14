@@ -5,6 +5,8 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { displayToIso, isoToDisplay, isRealDate, maskDisplayInput } from "@/lib/date-input";
 import { testLoader } from "@/features/dealer-tags/test-loader";
+import { DEFAULT_LABELS } from "@/features/labels/labels";
+const labelMock = { "@/features/labels/label-ui": { useLabel: (key: string) => (DEFAULT_LABELS as Record<string, string>)[key] ?? key } };
 
 // Pure conversion: ISO ⇄ DD/MM/YYYY.
 assert.equal(isoToDisplay("2026-10-09"), "09/10/2026");
@@ -23,7 +25,7 @@ assert.equal(isRealDate(2026, 4, 31), false); assert.equal(isRealDate(2026, 4, 3
 assert.deepEqual(["0", "09", "091", "0910", "09102", "09102026", "091020261", "09/10/2026", "9a1b0", "  "].map(maskDisplayInput), ["0", "09", "09/1", "09/10", "09/10/2", "09/10/2026", "09/10/2026", "09/10/2026", "91/0", ""]);
 
 // Rendering: whatever the browser locale, the visible text is DD/MM/YYYY; the committed value stays ISO (no Date object → no time-zone shift).
-const { DateInputDMY } = testLoader({ "lucide-react": { CalendarDays: () => <svg /> } })("src/components/ui/date-input-dmy.tsx") as { DateInputDMY: React.ComponentType<{ value: string; onChange: (v: string) => void; "aria-label"?: string }> };
+const { DateInputDMY } = testLoader({ "lucide-react": { CalendarDays: () => <svg /> }, ...labelMock })("src/components/ui/date-input-dmy.tsx") as { DateInputDMY: React.ComponentType<{ value: string; onChange: (v: string) => void; "aria-label"?: string }> };
 const html = renderToStaticMarkup(<DateInputDMY value="2026-10-09" onChange={() => undefined} aria-label="Date From" />);
 assert.ok(html.includes('value="09/10/2026"') && html.includes('placeholder="DD/MM/YYYY"') && html.includes('aria-label="Date From"'), "shows 09/10/2026");
 assert.ok(html.includes('type="date"') && html.includes('value="2026-10-09"') && html.includes('aria-hidden="true"'), "the picker's own value is the ISO key");
@@ -37,7 +39,7 @@ assert.ok(!/new Date|Date\.|toLocale|Intl\./.test(src), "string handling only �
 {
   const hooks: unknown[] = []; let cursor = 0;
   const { DateInputDMY: Raw } = testLoader({
-    "lucide-react": { CalendarDays: () => null },
+    "lucide-react": { CalendarDays: () => null }, ...labelMock,
     react: { ...React, useState: (init: unknown) => { const i = cursor++; if (!(i in hooks)) hooks[i] = init; return [hooks[i], (u: unknown) => { hooks[i] = u; }]; } },
   })("src/components/ui/date-input-dmy.tsx") as { DateInputDMY: (p: { value: string; onChange: (v: string) => void }) => React.ReactElement<{ children: React.ReactElement<Record<string, unknown>>[] }> };
   const emitted: string[] = [];
@@ -61,6 +63,33 @@ for (const f of ["src/features/daily-work/performance-page.tsx", "src/features/d
   assert.ok(!/type="date"/.test(page), `${f}: no native date input left`);
   assert.ok(/useState\(currentBusinessDate\)/.test(page) && /new URLSearchParams\(\{ from, to \}\)|query = new URLSearchParams\(\{ from, to \}\)/.test(page), `${f}: default range and the from/to API parameters are unchanged (ISO)`);
 }
-// Other date inputs in the app are untouched.
-for (const f of ["src/features/audit/audit-page.tsx", "src/features/sales-upload/wizard.tsx", "src/features/party-planning/monthly-planning-page.tsx"]) assert.ok(readFileSync(f, "utf8").includes('type="date"'), `${f} unchanged`);
+// Every date field in the application is the shared DD/MM/YYYY control: no native <input type="date"> is left as a VISIBLE field (the one inside the shared control is the hidden calendar picker).
+import { readdirSync, statSync } from "node:fs";
+const walk = (dir: string): string[] => readdirSync(dir).flatMap((n) => { const f = `${dir}/${n}`; return statSync(f).isDirectory() ? walk(f) : /\.tsx$/.test(f) && !/\.test\./.test(f) ? [f] : []; });
+const native = walk("src").filter((f) => readFileSync(f, "utf8").split("\n").some((l) => /type=["']date["']/.test(l) && !/^\s*(\/\/|\/?\*)/.test(l) && !/^\s*\/\*\*/.test(l)));
+assert.deepEqual(native.sort(), ["src/components/ui/date-input-dmy.tsx", "src/features/schemes/scheme-form-inputs.tsx"], "only the shared control's hidden picker and the Scheme bill-date control (itself DD/MM/YYYY text with a hidden picker) use a native date input");
+for (const f of ["src/features/audit/audit-page.tsx", "src/features/sales-upload/wizard.tsx", "src/features/party-planning/monthly-planning-page.tsx", "src/features/cn-requests/cn-payment-dialog.tsx", "src/features/assignments/assignment-page.tsx", "src/features/daily-work/daily-work-page.tsx"]) assert.ok(readFileSync(f, "utf8").includes("<DateInputDMY"), `${f} uses the shared control`);
+
+// Rules: placeholder, real calendar dates only, messages, min / max — through the real component.
+{
+  const hooks: unknown[] = []; let cursor = 0;
+  const { DateInputDMY: Raw } = testLoader({
+    "lucide-react": { CalendarDays: () => null }, ...labelMock,
+    react: { ...React, useState: (init: unknown) => { const i = cursor++; if (!(i in hooks)) hooks[i] = init; return [hooks[i], (u: unknown) => { hooks[i] = u; }]; } },
+  })("src/components/ui/date-input-dmy.tsx") as { DateInputDMY: (p: { value: string; onChange: (v: string) => void; min?: string; max?: string; id?: string }) => React.ReactElement<{ children: (React.ReactElement<Record<string, any>> | false | null)[] }> }; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const emitted: string[] = [];
+  const view = (extra: { min?: string; max?: string } = {}) => { cursor = 0; const tree = Raw({ value: "2026-10-09", onChange: (v) => emitted.push(v), id: "d", ...extra }); const [text, , picker, error] = tree.props.children as React.ReactElement<Record<string, any>>[]; return { text: text!.props, picker: picker!.props, error: error ? (error.props.children as string) : null }; }; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const type = (t: string, extra = {}) => view(extra).text.onChange({ target: { value: t } });
+  assert.equal(view().text.placeholder, "DD/MM/YYYY", "placeholder from the label system");
+  type("29022027"); assert.deepEqual(emitted, []); assert.match(view().error ?? "", /real calendar date/, "29/02/2027 (not a leap year) is rejected with a message");
+  view().text.onFocus(); assert.equal(view().error, null, "the message clears when the user returns to the field");
+  type("29022028"); assert.deepEqual(emitted, ["2028-02-29"], "29/02/2028 (leap year) is accepted");
+  type("31042026"); assert.match(view().error ?? "", /real calendar date/, "31/04 does not exist");
+  type("0402"); view().text.onBlur(); assert.match(view().error ?? "", /full date/, "a partial date is called out on leaving the field");
+  const n = emitted.length;
+  type("01102026", { min: "2026-10-05" }); assert.equal(emitted.length, n, "before the minimum → not applied"); assert.match(view({ min: "2026-10-05" }).error ?? "", /cannot be before 05\/10\/2026/);
+  type("20102026", { max: "2026-10-15" }); assert.equal(emitted.length, n, "after the maximum → not applied"); assert.match(view({ max: "2026-10-15" }).error ?? "", /cannot be after 15\/10\/2026/);
+  type("10102026", { min: "2026-10-05", max: "2026-10-15" }); assert.equal(emitted.at(-1), "2026-10-10", "inside the limits → applied");
+  assert.equal(view({ min: "2026-10-05", max: "2026-10-15" }).picker.min, "2026-10-05", "the calendar picker carries the same limits");
+}
 console.log("date-input-dmy.test.tsx — all assertions passed");

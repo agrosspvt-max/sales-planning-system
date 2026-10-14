@@ -1,6 +1,8 @@
 "use client";
 
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
+import { formatDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { Fragment, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -119,8 +121,8 @@ export function SchemeUploadWizard() {
               Only enrolled dealers and each scheme&apos;s required products contribute.
             </p>
             <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5"><Label>{tStart} *</Label><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></div>
-              <div className="space-y-1.5"><Label>{tEnd} *</Label><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></div>
+              <div className="space-y-1.5"><Label htmlFor="su-start">{tStart} *</Label><DateInputDMY id="su-start" value={startDate} onChange={setStartDate} /></div>
+              <div className="space-y-1.5"><Label htmlFor="su-end">{tEnd} *</Label><DateInputDMY id="su-end" value={endDate} onChange={setEndDate} /></div>
             </div>
             <div className="space-y-1.5">
               <Label>{tSelect} *</Label>
@@ -133,7 +135,7 @@ export function SchemeUploadWizard() {
                     <span className="font-medium">{s.schemeName}</span>
                     <Badge variant="secondary">{s.requirementType === "VALUE_BASED" ? `Value · ${s.valueMode === "COMBINED" ? "Combined" : "Individual"}` : "Product"}</Badge>
                     {s.status === "CLOSED" && <Badge variant="muted">Closed</Badge>}
-                    <span className="ml-auto text-xs text-muted-foreground">{s.isPerpetual ? "Perpetual" : `${s.startDate ? new Date(s.startDate).toLocaleDateString("en-IN") : "—"} – ${s.endDate ? new Date(s.endDate).toLocaleDateString("en-IN") : "—"}`}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">{s.isPerpetual ? "Perpetual" : `${s.startDate ? formatDMY(s.startDate) : "—"} – ${s.endDate ? formatDMY(s.endDate) : "—"}`}</span>
                   </label>
                 ))}
               </div>
@@ -154,7 +156,7 @@ export function SchemeUploadWizard() {
         {step === "review" && analysis && (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-              <p className="text-muted-foreground">{analysis.fileName} · {new Date(analysis.startDate).toLocaleDateString("en-IN")} – {new Date(analysis.endDate).toLocaleDateString("en-IN")} · {analysis.parsedDealers} dealer(s) in file</p>
+              <p className="text-muted-foreground">{analysis.fileName} · {formatDMY(analysis.startDate)} – {formatDMY(analysis.endDate)} · {analysis.parsedDealers} dealer(s) in file</p>
               <p className="font-medium">{analysis.totalContributions} contribution(s) to import</p>
             </div>
 

@@ -17,16 +17,16 @@ export async function GET(req: NextRequest) {
     const params = parseLastPaymentReportParams(req.nextUrl.searchParams);
     const { rows, lastUpdate } = await listBillingExceptionsExport(ctx, view, params);
     if (rows.length === 0) return NextResponse.json({ error: NO_EXPORT_DATA_MESSAGE }, { status: 422 });
-    const day = (iso: string | null) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso ?? ""); return m ? `${m[3]}/${m[2]}/${m[1]}` : ""; };
     const title = view === "history" ? "Billing Exception History" : "Billing Exception Current";
     const buffer = await buildReportXlsx({
       type: "dealer", kind: "summary", title,
-      columns: EXCEPTION_EXPORT_COLUMNS.map((c) => ({ ...c })),
+      // Current: the running Days and, separately labelled, the Days frozen on each exception. History: only its frozen Days.
+      columns: EXCEPTION_EXPORT_COLUMNS.filter((c) => view === "current" || c.key !== "frozenDays").map((c) => ({ ...c, label: view === "current" && c.key === "days" ? "Current Days" : c.label })),
       rows: rows.map((r) => ({
         id: r.exceptionId, party: r.party, status: dealerStatusLabel(r.status), state: r.state ?? "", territory: r.territory ?? "", salesOfficer: r.salesOfficer ?? "",
-        lastPaymentDate: day(r.lastPaymentDate), amount: r.amount ?? "", days: r.days ?? "", billingDate: day(r.billingDate), billNo: r.billNo, authPerson: r.authPerson,
+        lastPaymentDate: r.lastPaymentDate ?? "", amount: r.amount ?? "", days: r.days ?? "", frozenDays: r.frozenDays ?? "", billingDate: r.billingDate, billNo: r.billNo, authPerson: r.authPerson,
         exceptionStatus: r.exceptionStatus === "CURRENT" ? "Current" : "Resolved",
-        billingAmount: r.billingAmount ?? "", paymentCondition: r.paymentCondition === "YES" ? "Yes" : r.paymentCondition === "NO" ? "No" : "", paymentDate: day(r.paymentDate),
+        billingAmount: r.billingAmount ?? "", paymentCondition: r.paymentCondition === "YES" ? "Yes" : r.paymentCondition === "NO" ? "No" : "", paymentDate: r.paymentDate ?? "",
       })),
       totals: null, drillChild: null, meta: { seasonName: "", filters: [] }, sort: { key: "days", dir: params.sort === "days_asc" ? "asc" : "desc" },
     }, { metaLines: [`Last Update: ${formatLastUpdate(lastUpdate) ?? "—"}`] });

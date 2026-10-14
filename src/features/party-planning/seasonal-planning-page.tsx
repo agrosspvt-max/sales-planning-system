@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatDMY } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { Check, Pencil, Plus, Send, Trash2, X } from "lucide-react";
@@ -38,7 +39,7 @@ interface Plan {
 
 const APPROVAL_VARIANT: Record<ApprovalStatus, "muted" | "secondary" | "success" | "destructive"> = { DRAFT: "muted", PENDING_RM: "secondary", PENDING_ADMIN: "secondary", APPROVED: "success", REJECTED: "destructive" };
 const dash = <span className="text-muted-foreground">—</span>;
-const dateText = (iso: string | null) => (iso ? new Date(iso.length === 10 ? `${iso}T00:00:00` : iso).toLocaleDateString("en-IN", { dateStyle: "medium" }) : null);
+const dateText = (iso: string | null) => (iso ? formatDMY(iso) : null);
 
 /** Market picker: type to search the Phase-1 Market list; the chosen Market is resolved to its id (only an existing Market is accepted). */
 function MarketInput({ markets, value, onChange, listId, className }: { markets: Market[]; value: string; onChange: (text: string, market: Market | null) => void; listId: string; className?: string }) {

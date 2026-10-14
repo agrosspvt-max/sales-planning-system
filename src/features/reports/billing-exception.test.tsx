@@ -286,10 +286,10 @@ function page() {
   // Last Payment Date + Amount are ONE cell: the date, with the amount underneath as smaller muted text (display only; both stay separate API / export fields).
   const stack = (view: Row, items: unknown[]) => { const out = draw(view, items); return [...out.matchAll(/<tr[^>]*data-dealer-id="([^"]+)"[^>]*>(.*?)<\/tr>/g)].map((m) => [m[1], [...m[2].matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((c) => c[1])] as const); };
   const payCell = (cells: readonly string[]) => cells[5];
-  const stacked = '<div class="flex flex-col items-end gap-0.5"><span>7 Apr 2026</span><span class="text-xs text-muted-foreground" data-testid="payment-amount">₹2,20,706</span></div>';
+  const stacked = '<div class="flex flex-col items-end gap-0.5"><span>07/04/2026</span><span class="text-xs text-muted-foreground" data-testid="payment-amount">₹2,20,706</span></div>';
   const lpRows = stack({}, [LP({ dealerId: "p1", lastPaymentDate: "2026-04-07", amount: 220706 }), LP({ dealerId: "p2", lastPaymentDate: "2026-04-07", amount: 0 }), LP({ dealerId: "p3", lastPaymentDate: null, amount: null, days: null, billingStatus: "UNAVAILABLE" })]);
   assert.ok(payCell(lpRows[0]![1]).includes(stacked), "Last Payment: date on top, amount underneath (smaller, muted)");
-  assert.ok(payCell(lpRows[1]![1]).includes("₹0") && payCell(lpRows[1]![1]).includes("7 Apr 2026"), "a genuine zero amount is shown as currency, not as missing");
+  assert.ok(payCell(lpRows[1]![1]).includes("₹0") && payCell(lpRows[1]![1]).includes("07/04/2026"), "a genuine zero amount is shown as currency, not as missing");
   assert.equal(payCell(lpRows[2]![1]).replace(/<[^>]*>/g, ""), "—", "nothing available → a single dash");
   assert.ok(!payCell(lpRows[2]![1]).includes("₹"));
   for (const [label, v] of [["Current", { 0: "billing-exception" }], ["History", { 0: "billing-exception", 1: "history" }]] as const) {
@@ -305,8 +305,8 @@ function page() {
     assert.deepEqual(hs.slice(hs.indexOf("Days"), hs.indexOf("Days") + 4).map((h) => h.replace(/\s+/g, " ")), ["Days", "Billing Date", "Authorized By", "Info"].map((h) => (h === "Days" ? hs[hs.indexOf("Days")]! : h)), `${label}: Days → Billing Date → Authorized By → Info`);
     const two = stack(v, [EX("e1", { billingDate: "2026-10-13", billingAmount: 12000, authPerson: "Varun sir" }), EX("e2", { billingDate: "2026-09-02", billingAmount: 2500, authPerson: "Tej Sir" }), EX("e3", { billingDate: null, billingAmount: null, authPerson: null })]);
     const cell = (i: number, c: number) => two[i]![1][c]!;
-    assert.ok(cell(0, 7).includes("<span>13 Oct 2026</span>") && cell(0, 7).includes('class="text-xs text-muted-foreground" data-testid="billing-amount">₹12,000</span>') && cell(0, 8) === "Varun sir", `${label}: first exception shows ITS date, amount and authorization option`);
-    assert.ok(cell(1, 7).includes("2 Sept 2026") && cell(1, 7).includes("₹2,500") && cell(1, 8) === "Tej Sir", `${label}: the same dealer's second exception shows its own, different, values`);
+    assert.ok(cell(0, 7).includes("<span>13/10/2026</span>") && cell(0, 7).includes('class="text-xs text-muted-foreground" data-testid="billing-amount">₹12,000</span>') && cell(0, 8) === "Varun sir", `${label}: first exception shows ITS date, amount and authorization option`);
+    assert.ok(cell(1, 7).includes("02/09/2026") && cell(1, 7).includes("₹2,500") && cell(1, 8) === "Tej Sir", `${label}: the same dealer's second exception shows its own, different, values`);
     assert.equal(cell(2, 7).replace(/<[^>]*>/g, ""), "—", `${label}: missing legacy billing date/amount → a single dash`);
     assert.equal(cell(2, 8).replace(/<[^>]*>/g, ""), "—", `${label}: missing Auth Person → dash`);
     assert.ok(!cell(0, 7).includes("₹2,20,706") && !cell(0, 7).includes("220706"), `${label}: never the dealer's last-payment amount`);
@@ -328,6 +328,18 @@ function page() {
     assert.ok(/data-testid="summary-total-bills">—</.test(panelHtml) === true, `${label}: counts show a dash until the data arrives`);
   }
   assert.ok(!draw({}, [LP()]).includes("exception-summary"), "Last Payment tab: no exception summary");
+  // Days cell: Current = the exception's FROZEN Days on top, the running Days underneath (smaller, muted, tooltips from the label system); History = frozen only.
+  {
+    const cur = stack({ 0: "billing-exception" }, [EX("x1", { days: 105, frozenDays: 104 }), EX("x2", { days: 105, frozenDays: 100 }), EX("x3", { days: 105, frozenDays: null })]);
+    const daysCell = (i: number) => cur[i]![1][6]!;
+    assert.ok(/data-testid="frozen-days"[^>]*>104<\/span><span class="text-xs text-muted-foreground"[^>]*data-testid="running-days"[^>]*>105<\/span>/.test(daysCell(0)), "Current: 104 above 105");
+    assert.ok(daysCell(0).includes('title="Days at exception creation"') && daysCell(0).includes('title="Current Days"'), "tooltips distinguish the two values");
+    assert.ok(/frozen-days"[^>]*>100</.test(daysCell(1)) && /running-days"[^>]*>105</.test(daysCell(1)), "another exception of the same dealer: its own frozen value, the shared running value");
+    assert.ok(/frozen-days"[^>]*><span class="text-muted-foreground">—<\/span>/.test(daysCell(2)) && /running-days"[^>]*>105</.test(daysCell(2)), "missing frozen value → a dash, nothing invented");
+    const hist = stack({ 0: "billing-exception", 1: "history" }, [EX("h1", { days: 104, frozenDays: 104 })]);
+    assert.equal(hist[0]![1][6]!.replace(/<[^>]*>/g, ""), "104", "History: only the frozen Days");
+    assert.ok(!hist[0]![1][6]!.includes("running-days"));
+  }
   const panel = draw({}, [LP()]);
   assert.ok(panel.includes('data-testid="day-summary"') && ["All Dealers", "30 Days or Less", "31–44 Days", "45–60 Days", "61–90 Days", "90+ Days"].every((l) => panel.includes(l)) && panel.indexOf('data-testid="day-summary"') < panel.indexOf("<table") && panel.indexOf("Apply Filters") < panel.indexOf('data-testid="day-summary"'), "Last Payment tab: six summary items between the toolbar and the table");
   assert.ok(!draw({ 0: "billing-exception" }, [EX("x1")]).includes("day-summary") && !draw({ 0: "billing-exception", 1: "history" }, [EX("x1")]).includes("day-summary"), "no summary panel inside Billing Exception");

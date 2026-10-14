@@ -160,7 +160,10 @@ export interface BillingExceptionRow {
   salesOfficer: string | null;
   lastPaymentDate: string | null;
   amount: number | null;
+  /** Current: the dealer's RUNNING Days (drives sorting, filters, status and resolution). History: the frozen snapshot. */
   days: number | null;
+  /** The Days frozen on THIS exception when it was created (its own snapshot; null only if unavailable). Display only — never decides Current / Resolved. */
+  frozenDays: number | null;
   billingDate: string;
   billNo: string;
   authPerson: string;
@@ -193,11 +196,11 @@ export interface BillingExceptionDetail {
 }
 
 /** Export columns of the two exception views (the report's eight + the exception's own fields). */
-export const EXCEPTION_EXPORT_COLUMNS: readonly { key: string; label: string; format: "text" | "number" | "currency" }[] = [
+export const EXCEPTION_EXPORT_COLUMNS: readonly { key: string; label: string; format: "text" | "number" | "currency" | "date" }[] = [
   { key: "party", label: "Party", format: "text" }, { key: "status", label: "Status", format: "text" }, { key: "state", label: "State", format: "text" },
   { key: "territory", label: "Territory", format: "text" }, { key: "salesOfficer", label: "Sales Officer", format: "text" },
-  { key: "lastPaymentDate", label: "Last Payment Date", format: "text" }, { key: "amount", label: "Amount", format: "currency" }, { key: "days", label: "Days", format: "number" },
-  { key: "billingDate", label: "Billing Date", format: "text" }, { key: "billNo", label: "Bill No", format: "text" }, { key: "authPerson", label: "Authorized By", format: "text" },
+  { key: "lastPaymentDate", label: "Last Payment Date", format: "date" }, { key: "amount", label: "Amount", format: "currency" }, { key: "days", label: "Days", format: "number" }, { key: "frozenDays", label: "Days at Exception Creation", format: "number" },
+  { key: "billingDate", label: "Billing Date", format: "date" }, { key: "billNo", label: "Bill No", format: "text" }, { key: "authPerson", label: "Authorized By", format: "text" },
   { key: "exceptionStatus", label: "Exception", format: "text" },
-  { key: "billingAmount", label: "Billing Amount", format: "currency" }, { key: "paymentCondition", label: "Payment Condition", format: "text" }, { key: "paymentDate", label: "Promised Date of Payment", format: "text" }, { key: "paymentAmount", label: "Promised Payment Amount", format: "currency" },
+  { key: "billingAmount", label: "Billing Amount", format: "currency" }, { key: "paymentCondition", label: "Payment Condition", format: "text" }, { key: "paymentDate", label: "Promised Date of Payment", format: "date" }, { key: "paymentAmount", label: "Promised Payment Amount", format: "currency" },
 ];

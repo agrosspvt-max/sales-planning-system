@@ -4,17 +4,12 @@ import { ChevronDown } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useLabel } from "@/features/labels/label-ui";
 import {
   buildPaymentAging, paymentAgingLabel,
   type PaymentAgingDraft, type PaymentAgingFilter, type PaymentAgingOperator,
 } from "@/lib/last-payment-report";
 
-const OPERATORS: { value: PaymentAgingOperator; label: string }[] = [
-  { value: "lt", label: "Less than" },
-  { value: "gt", label: "Greater than" },
-  { value: "eq", label: "Exactly" },
-  { value: "between", label: "Between" },
-];
 
 const draftOf = (filter: PaymentAgingFilter | null): PaymentAgingDraft =>
   !filter ? { operator: "gt", value: "", from: "", to: "" }
@@ -27,6 +22,14 @@ const draftOf = (filter: PaymentAgingFilter | null): PaymentAgingDraft =>
  * the applied filter; the draft text lives here until Apply.
  */
 export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentAgingFilter | null; onChange: (next: PaymentAgingFilter | null) => void }) {
+  // Display wording comes from the label system (Edit Labels); the operator VALUES ("lt" / "gt" / "eq" / "between") and the comparison logic never change.
+  const OPERATORS: { value: PaymentAgingOperator; label: string }[] = [
+    { value: "lt", label: useLabel("last_payment.aging.op_lt") },
+    { value: "gt", label: useLabel("last_payment.aging.op_gt") },
+    { value: "eq", label: useLabel("last_payment.aging.op_eq") },
+    { value: "between", label: useLabel("last_payment.aging.op_between") },
+  ];
+  const valueLabel = useLabel("last_payment.aging.value");
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<PaymentAgingDraft>(draftOf(value));
   const [error, setError] = useState<string | null>(null);
@@ -75,7 +78,7 @@ export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentA
               <Input inputMode="numeric" aria-label="Payment Aging to" value={draft.to} onChange={(e) => set({ to: e.target.value })} /></label>
           </div>
         ) : (
-          <label className="flex items-center gap-2 text-sm"><span className="w-10">Value</span>
+          <label className="flex items-center gap-2 text-sm"><span className="w-10">{valueLabel}</span>
             <Input inputMode="numeric" aria-label="Payment Aging value" value={draft.value} onChange={(e) => set({ value: e.target.value })} /></label>
         )}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}

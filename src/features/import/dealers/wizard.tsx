@@ -1,5 +1,6 @@
 "use client";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo, useState } from "react";
@@ -440,7 +441,7 @@ export function DealerImportWizard() {
                 </Button>
                 <div className="space-y-1.5">
                   <Label htmlFor="eff">Effective from</Label>
-                  <Input id="eff" type="date" className="w-40" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} />
+                  <DateInputDMY id="eff" className="w-40" value={effectiveFrom} onChange={setEffectiveFrom} />
                 </div>
               </div>
 

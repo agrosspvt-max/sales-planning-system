@@ -7,6 +7,7 @@ import { Role } from "@prisma/client";
 import * as realDailyWork from "@/lib/daily-work";
 import type { AuthContext } from "@/lib/http";
 import { TestApiError, testLoader } from "@/features/dealer-tags/test-loader";
+import { DEFAULT_LABELS } from "@/features/labels/labels";
 import { navForRole } from "@/features/navigation/nav";
 import { resolveNavState } from "@/features/navigation/nav-state";
 import {
@@ -724,7 +725,9 @@ async function exportTests() {
   const pageHtml = await draw(admin);
   assert.deepEqual([...pageHtml.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).slice(0, 9), all.headers.filter((h) => h !== "Amount"), "export headers == UI headers (the UI shows the amount under the date; the Excel keeps both columns)");
   const a = all.rows.find((r) => r["Party"] === "Alpha Traders")!;
-  assert.deepEqual([a["Status"], a["State"], a["Territory"], a["Sales Officer"], a["Last Payment Date"], a["Amount"], a["Days"]], ["Active", "MP", "BHOPAL", "Arjun Yadav", "02/10/2026", 50000, 3], "display labels, DD/MM/YYYY, numeric amount/days — the page's calculated values");
+  const paidOn = a["Last Payment Date"] as unknown;
+  assert.ok(paidOn instanceof Date && paidOn.toISOString() === "2026-10-02T00:00:00.000Z", "the payment date is a real Excel DATE cell at UTC midnight (no time-zone shift)");
+  assert.deepEqual([a["Status"], a["State"], a["Territory"], a["Sales Officer"], a["Amount"], a["Days"]], ["Active", "MP", "BHOPAL", "Arjun Yadav", 50000, 3], "display labels, numeric amount/days — the page's calculated values");
   const e = all.rows.find((r) => r["Party"] === "Epsilon RM Dealer")!;
   assert.deepEqual([e["Status"], e["Last Payment Date"], e["Amount"], e["Days"]], ["Pending", null, null, null], "no payment → blank cells, not zeros");
   assert.ok(!all.rows.some((r) => Object.values(r).some((v) => /Page \d|Generated/i.test(String(v)))) && !all.meta.some((m) => /Generated|Page /i.test(m)), "no pagination / generation timestamp");
@@ -893,7 +896,7 @@ async function page() {
   const row = (id: string) => (html.match(new RegExp(`<tr[^>]*data-dealer-id="${id}"[^>]*>(.*?)</tr>`)) ?? [])[1] ?? "";
   const cells = (id: string) => [...row(id).matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim());
   // 3, 6 — formatting conventions: date, ₹ currency, Days.
-  assert.deepEqual(cells("d-a"), ["Alpha Traders", "Active", "MP", "BHOPAL", "Arjun Yadav", "2 Oct 2026₹50,000", "3", "Open"]);
+  assert.deepEqual(cells("d-a"), ["Alpha Traders", "Active", "MP", "BHOPAL", "Arjun Yadav", "02/10/2026₹50,000", "3", "Open"]);
   // 8 — empty representation.
   assert.deepEqual(cells("d-e"), ["Epsilon RM Dealer", "Pending", "MP", "HQ", "RM One", "—", "—", "Unavailable"]);
   assert.deepEqual(cells("d-f"), ["Zeta Unassigned", "Active", "—", "—", "—", "—", "—", "Unavailable"], "a dealer with no owner shows empty values");
@@ -959,7 +962,16 @@ async function page() {
   assert.ok(/setSort\(/.test(sortBtn) && !/setAging|setPending|setApplied|setSearch/.test(sortBtn), "sorting never clears aging");
   assert.ok(!/setSort|setSearch|setPending|setApplied/.test(pageSource.slice(pageSource.indexOf("<PaymentAgingFilterControl"), pageSource.indexOf("</TableHead>", pageSource.indexOf("<PaymentAgingFilterControl")))), "applying aging never resets sort / search / filters");
   const control = readFileSync("src/features/reports/payment-aging-filter.tsx", "utf8");
-  assert.ok(/buildPaymentAging\(draft\)/.test(control) && /role="alert"/.test(control) && /Less than/.test(control) && /Greater than/.test(control) && /Exactly/.test(control) && /Between/.test(control) && /Apply/.test(control), "operators, validation message and Apply");
+  assert.ok(/buildPaymentAging\(draft\)/.test(control) && /role="alert"/.test(control) && /Apply/.test(control), "validation message and Apply");
+  // Displayed wording comes from the label system; the operator VALUES stay "lt" / "gt" / "eq" / "between" and the comparison is unchanged.
+  const L = DEFAULT_LABELS as Record<string, string>;
+  assert.deepEqual(["op_lt", "op_gt", "op_eq", "op_between", "value"].map((k) => L[`last_payment.aging.${k}`]), ["Less than", "More Than", "Exactly", "Between", "Days"], "More Than / Days defaults; the others unchanged");
+  for (const [value, key] of [["lt", "op_lt"], ["gt", "op_gt"], ["eq", "op_eq"], ["between", "op_between"]]) assert.ok(control.includes(`{ value: "${value}", label: useLabel("last_payment.aging.${key}") }`), `operator ${value} keeps its value and reads its label`);
+  assert.ok(control.includes('{valueLabel}') && !/Greater than|>Value</.test(control), "no hard-coded old wording");
+  // "More Than" is still the existing strictly-greater-than comparison on Days
+  const mt = applyPaymentAging([{ days: 44 }, { days: 45 }, { days: 46 }, { days: null }], { operator: "gt", value: 45 });
+  assert.deepEqual(mt.map((r) => r.days), [46], "More Than 45 → only Days 46 (45 itself and missing Days excluded)");
+  assert.equal(paymentAgingLabel({ operator: "gt", value: 45 }), "> 45", "the header indicator is unchanged");
 
   // Read-only: no editing controls anywhere on the page.
   assert.ok(!/<input[^>]*type="(checkbox|number)"|<textarea|<select/.test(await draw(admin)) && !(await draw(admin)).includes("Save"));

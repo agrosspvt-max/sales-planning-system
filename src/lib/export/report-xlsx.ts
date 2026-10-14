@@ -1,4 +1,5 @@
 import "server-only";
+import { formatDateTimeDMY } from "@/lib/date-format";
 import ExcelJS from "exceljs";
 import type { CellFormat, ReportPayload } from "@/features/reports/types";
 
@@ -7,7 +8,10 @@ const NUM_FMT: Record<CellFormat, string | undefined> = {
   number: "#,##0",
   currency: '"₹"#,##0.00',
   percent: "0.0%",
+  date: "dd/mm/yyyy",
 };
+/** A calendar date cell: "YYYY-MM-DD" → a real Excel date at UTC midnight (no time zone can move the day); anything else stays as given (blank stays blank). */
+const dateCellValue = (v: unknown): unknown => { const m = typeof v === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(v) : null; return m ? new Date(Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!)) : v; };
 
 /**
  * Build an .xlsx workbook from a ReportPayload. The export is format-specific but
@@ -33,7 +37,7 @@ export async function buildReportXlsx(payload: ReportPayload, options: { metaLin
   // (e.g. the Last Payment Report shows only "Last Update: DD/MM/YYYY" — no generation timestamp).
   const metaLines = options.metaLines ?? [
     `Season: ${payload.meta.seasonName || "—"}`,
-    `Generated: ${new Date().toLocaleString("en-IN")}`,
+    `Generated: ${formatDateTimeDMY(new Date())}`,
     payload.meta.filters.length > 0 ? `Filters: ${payload.meta.filters.join("; ")}` : "Filters: none",
   ];
   metaLines.forEach((line, i) => { merge(2 + i); ws.getCell(2 + i, 1).value = line; });
@@ -53,9 +57,9 @@ export async function buildReportXlsx(payload: ReportPayload, options: { metaLin
   payload.rows.forEach((row, r) => {
     payload.columns.forEach((c, i) => {
       const cell = ws.getCell(headerRow + 1 + r, i + 1);
-      cell.value = row[c.key] as string | number;
+      cell.value = (c.format === "date" ? dateCellValue(row[c.key]) : row[c.key]) as string | number;
       if (NUM_FMT[c.format]) cell.numFmt = NUM_FMT[c.format]!;
-      cell.alignment = { horizontal: c.format === "text" ? "left" : "right" };
+      cell.alignment = { horizontal: c.format === "text" || c.format === "date" ? "left" : "right" };
     });
   });
 

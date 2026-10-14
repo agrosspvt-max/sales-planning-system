@@ -1,3 +1,5 @@
+import { localizeDatesInText } from "./date-format";
+
 export interface ApiErrorBody {
   error?: string;
   issues?: Record<string, string[]>;
@@ -12,7 +14,7 @@ export class ApiRequestError extends Error {
   status: number;
   issues?: Record<string, string[]>;
   constructor(status: number, message: string, issues?: Record<string, string[]>) {
-    super(message);
+    super(localizeDatesInText(message)); // an ISO date inside a server message is shown as DD/MM/YYYY
     this.name = "ApiRequestError";
     this.status = status;
     this.issues = issues;

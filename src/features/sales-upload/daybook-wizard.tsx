@@ -1,5 +1,6 @@
 "use client";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 
 import { useState } from "react";
@@ -97,11 +98,11 @@ export function DaybookUploadWizard() {
               </div>
               <div className="space-y-1.5">
                 <Label>Start Date</Label>
-                <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+                <DateInputDMY aria-label="Start Date" value={fromDate} onChange={setFromDate} />
               </div>
               <div className="space-y-1.5">
                 <Label>End Date</Label>
-                <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
+                <DateInputDMY aria-label="End Date" value={toDate} onChange={setToDate} />
               </div>
             </div>
             <div className="space-y-1.5">

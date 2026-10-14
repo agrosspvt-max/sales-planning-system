@@ -1,6 +1,7 @@
 "use client";
 
 import { useTaggedDealersFirst } from "@/features/dealers/dealer-table-ui";
+import { formatDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import Link from "next/link";
@@ -46,7 +47,7 @@ const MONTHS = ["January", "February", "March", "April", "May", "June", "July", 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const pad = (n: number) => String(n).padStart(2, "0");
 const keyFor = (y: number, m: number, d: number) => `${y}-${pad(m)}-${pad(d)}`;
-const longDate = (dk: string) => { const [y, m, d] = dk.split("-").map(Number); return `${d} ${MONTHS[m - 1]} ${y}`; };
+const longDate = (dk: string) => formatDMY(dk);
 
 function StatusBadge({ status, label }: { status: ConversionStatus; label: string }) {
   return <Badge variant={STATUS_META[status].variant}>{label}</Badge>;
@@ -400,7 +401,7 @@ function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entr
 function BillingTaskCard({ t, labels: L }: { t: CalendarBillingTaskDto; labels: Labels }) {
   const [open, setOpen] = useState(false);
   const statusLabel = t.status === "IN_DAILY_WORK" ? L.btInDailyWork : t.status === "OVERDUE" ? L.btOverdue : L.btScheduled;
-  const dmy = (dk: string) => dk.split("-").reverse().join("/");
+  const dmy = (dk: string) => formatDMY(dk);
   return (
     <div className="rounded-md border bg-card p-3" data-testid="calendar-billing-task">
       <div className="mb-1 flex items-center justify-between gap-2">
@@ -578,7 +579,7 @@ function ConversionCard({ e, labels: L }: { e: ConversionEvent; labels: Labels }
       {e.dateChanged && (
         <div className="mt-1 flex items-center gap-1 text-xs text-warning">
           <RefreshCw className="h-3 w-3" /> {L.dateChanged}
-          {e.originalDateKey && <span className="text-muted-foreground"> · {L.previousDate}: {e.originalDateKey.split("-").reverse().join("/")} → {L.newDate}: {e.dateKey.split("-").reverse().join("/")}</span>}
+          {e.originalDateKey && <span className="text-muted-foreground"> · {L.previousDate}: {formatDMY(e.originalDateKey)} → {L.newDate}: {formatDMY(e.dateKey)}</span>}
         </div>
       )}
     </div>

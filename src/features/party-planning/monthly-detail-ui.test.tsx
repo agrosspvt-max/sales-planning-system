@@ -33,6 +33,7 @@ const overrides = {
   },
   "@/lib/api-client": { api: { get: async () => ({}), put: async () => ({}), post: async (url: string, body: unknown) => { posts.push({ url, body }); return {}; } } },
   "@/components/ui/button": { Button: (p: { children?: React.ReactNode; onClick?: () => void; disabled?: boolean }) => { buttons.push(p); return <button>{p.children}</button>; } },
+  "@/components/ui/date-input-dmy": { DateInputDMY: (p: { value: string; onChange: (v: string) => void }) => { inputs.push({ ...p, type: "date", onChange: (e: { target: { value: string } }) => p.onChange(e.target.value) } as (typeof inputs)[number]); return <input type="text" defaultValue={p.value} />; } }, // the shared DD/MM/YYYY field (ISO inside)
   "@/components/ui/input": { Input: (p: (typeof inputs)[number]) => { inputs.push(p); return <input placeholder={p.placeholder} defaultValue={p.value} type={p.type} />; } },
   "@/features/sales-upload/create-dealer-dialog": { DealerDialog: (p: Record<string, unknown>) => { dealerProps = p; return <div data-dealer-dialog />; } },
   "@/components/ui/searchable-select": { SearchableSelect: (p: (typeof combos)[number]) => { combos.push(p); return <input role="combobox" aria-expanded={false} aria-controls="x" aria-label={p.ariaLabel} placeholder={p.placeholder} />; } },

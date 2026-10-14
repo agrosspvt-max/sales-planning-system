@@ -1,5 +1,6 @@
 "use client";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { formatDateTimeDMY } from "@/lib/date-format";
 
 import { useQuery } from "@tanstack/react-query";
 import { Download, Eye } from "lucide-react";
@@ -30,7 +31,7 @@ const STATUS_VARIANT: Record<string, "secondary" | "default" | "success" | "dest
   SUBMITTED: "secondary", ACCEPTED_NOT_POSTED: "default", POSTED_IN_LEDGER: "success", RETURNED_FROM_LEDGER: "destructive", REJECTED: "destructive",
 };
 const money = (value: number | null) => value == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(value))}`;
-const dateTime = (value: string) => new Date(value).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+const dateTime = (value: string) => formatDateTimeDMY(value);
 
 /** Shared CN Request details dialog used by both CN Requests and Daily Work. */
 export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {

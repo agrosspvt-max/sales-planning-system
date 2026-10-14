@@ -41,8 +41,8 @@ test("Daily Work page has no day picker and derives its date automatically", () 
   assert.match(page, /useState\(currentBusinessDate\)/);
   // The only date inputs allowed are CN follow-up "Task Date" pickers (the SO schedules a CN task). Every
   // date input must be a labelled CN task-date input, never a Daily Work day picker.
-  const dateInputs = (page.match(/type=["']date["']/g) ?? []).length;
-  const cnTaskDateInputs = (page.match(/aria-label=\{`\$\{L\.taskDate\}/g) ?? []).length;
+  const dateInputs = (page.match(/<DateInputDMY/g) ?? []).length + (page.match(/type=["']date["']/g) ?? []).length;
+  const cnTaskDateInputs = (page.match(/aria-label=\{`\$\{L\.taskDate\}/g) ?? []).length; // (the shared DD/MM/YYYY field; no native date input remains)
   assert.equal(dateInputs, cnTaskDateInputs, "the only date inputs are CN Task Date pickers");
 });
 test("public Daily Work routes make the current business date authoritative", () => {

@@ -1,5 +1,6 @@
 "use client";
 import { useRef, useState } from "react";
+import { formatDateTimeDMY, formatDMY } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { formatCurrency } from "@/lib/utils";
@@ -25,7 +26,7 @@ const dash = <span className="text-muted-foreground">—</span>;
 const TASK_STATUS = { SCHEDULED: "Scheduled", IN_DAILY_WORK: "In Daily Work", OVERDUE: "Overdue — pending" } as const;
 /** The Daily Work business date (India) — only a hint for the client check; the server decides. */
 const businessToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-const dateLabel = (iso: string) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso); return m ? `${m[3]}/${m[2]}/${m[1]}` : iso; };
+const dateLabel = (iso: string) => formatDMY(iso);
 
 const STATUS_STYLE: Record<BillingStatus, { variant: "success" | "warning" | "muted"; className?: string }> = {
   OPEN: { variant: "success" },                                            // green
@@ -182,10 +183,10 @@ export function BillingExceptionInfoDialog({ exceptionId, onClose }: { exception
             {/* The promised recovery amount — a separate value from the Billing Amount above (exceptions saved before it existed show "Not recorded"). */}
             {data.paymentCondition === "YES" && field(L.promisedAmount, data.paymentAmount !== null ? formatCurrency(data.paymentAmount) : <span className="text-muted-foreground">{L.notRecorded}</span>)}
             {data.task && field(L.task, `${data.task.officerName} · ${TASK_STATUS[data.task.status]}${data.task.taskDate !== data.task.promisedDate ? ` (now ${dateLabel(data.task.taskDate)})` : ""}`)}
-            {field("Created", new Date(data.createdAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }))}
+            {field("Created", formatDateTimeDMY(data.createdAt))}
             {field("Created by", data.createdByName)}
             {field("Exception", <Badge variant={data.exceptionStatus === "CURRENT" ? "warning" : "muted"}>{data.exceptionStatus === "CURRENT" ? "Current" : "Resolved"}</Badge>)}
-            {data.exceptionStatus === "RESOLVED" && field("Resolved", data.resolvedAt ? new Date(data.resolvedAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : dash)}
+            {data.exceptionStatus === "RESOLVED" && field("Resolved", data.resolvedAt ? formatDateTimeDMY(data.resolvedAt) : dash)}
             {data.exceptionStatus === "RESOLVED" && field("Resolution", data.resolutionReason ? RESOLUTION_LABEL[data.resolutionReason] ?? data.resolutionReason : dash)}
             {data.exceptionStatus === "RESOLVED" && data.resolvedDays !== null && field("Days at resolution", data.resolvedDays)}
             <div className="mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">At creation</div>

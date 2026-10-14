@@ -1,5 +1,6 @@
 "use client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { formatDMY } from "@/lib/date-format";
 
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
@@ -124,23 +125,12 @@ function NoPlanInfo({ reason, detail }: { reason: string | null; detail: string 
   );
 }
 
-/** Compact dd/mm for dynamic column headers (aging cutoff / month opening). */
-const ddmm = (d: Date | string) => {
-  const x = new Date(d);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(x.getDate())}/${p(x.getMonth() + 1)}`;
-};
-/** dd/mm/yyyy for the Last Payment date. Formats the "YYYY-MM-DD" string directly (no Date parsing → no
- *  timezone shift), so the shown day always matches the stored Receipt date. */
-const ddmmyyyy = (isoDate: string) => {
-  const [y, m, d] = isoDate.slice(0, 10).split("-");
-  return y && m && d ? `${d}/${m}/${y}` : isoDate;
-};
+/** Dynamic column-header dates (aging cutoff / month opening): full DD/MM/YYYY like every other date. */
+const ddmm = (d: Date | string) => formatDMY(d);
+/** DD/MM/YYYY for the Last Payment date (the "YYYY-MM-DD" string is re-ordered as text — no timezone shift). */
+const ddmmyyyy = (isoDate: string) => formatDMY(isoDate.slice(0, 10));
 /** First calendar day of the aging cutoff's month — the "Outstanding Till" opening date. */
-const monthFirstDdMm = (cutoff: Date | string) => {
-  const x = new Date(cutoff);
-  return ddmm(new Date(x.getFullYear(), x.getMonth(), 1));
-};
+const monthFirstDdMm = (cutoff: Date | string) => `01/${formatDMY(cutoff).slice(3)}`;
 /** Second header line showing a dynamic date under a (still label-editable) column title. */
 function DateSuffix({ date }: { date: string }) {
   return <span className="block text-[10px] font-normal normal-case text-muted-foreground">{date}</span>;

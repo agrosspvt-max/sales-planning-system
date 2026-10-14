@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import Link from "next/link";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Loader2, Check, ArrowLeft, ArrowRight, AlertTriangle } from "lucide-react";
@@ -185,11 +186,11 @@ export function SalesUploadWizard() {
               </div>
               <div className="space-y-1.5">
                 <Label>From Date</Label>
-                <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+                <DateInputDMY aria-label="From Date" value={fromDate} onChange={setFromDate} />
               </div>
               <div className="space-y-1.5">
                 <Label>To Date</Label>
-                <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
+                <DateInputDMY aria-label="To Date" value={toDate} onChange={setToDate} />
               </div>
             </div>
             <div className="space-y-1.5">

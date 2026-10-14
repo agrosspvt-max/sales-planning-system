@@ -9,7 +9,8 @@ export type ReportType =
   | "season"
   | "monthly";
 
-export type CellFormat = "text" | "number" | "currency" | "percent";
+/** "date" cells carry a real calendar date (ISO "YYYY-MM-DD" in the payload) and display as DD/MM/YYYY in Excel. */
+export type CellFormat = "text" | "number" | "currency" | "percent" | "date";
 
 export interface ReportColumn {
   key: string;

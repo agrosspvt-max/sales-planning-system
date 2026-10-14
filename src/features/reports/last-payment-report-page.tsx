@@ -18,6 +18,7 @@ import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
 import { PillNav, UnderlineTabs } from "@/features/planning/plan-list-ui";
 import { PaymentAgingFilterControl } from "./payment-aging-filter";
+import { useLabel } from "@/features/labels/label-ui";
 import { BillingExceptionActionDialog, BillingExceptionInfoDialog, BillingStatusCell } from "./billing-exception-ui";
 import { EMPTY_EXCEPTION_SUMMARY, type BillingExceptionRow, type ExceptionRankEntry, type ExceptionRanking, type ExceptionSummary, type ExceptionView } from "@/lib/billing-exception";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -170,6 +171,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
   // Billing Exception: the dealer whose status was clicked (action popup → form) and the exception whose Info is open.
   const [target, setTarget] = useState<{ dealerId: string; party: string } | null>(null);
   const [infoId, setInfoId] = useState<string | null>(null);
+  const daysLabels = { frozen: useLabel("billing_exception.days.frozen"), running: useLabel("billing_exception.days.running") };
   const canCreate = useCanCreateBillingException(); // Super Admin / a Custom Admin granted create — never SO / RM
 
   // The report's query string. The table (paged) and the Excel export (all rows) are built from the SAME function, so the export
@@ -367,7 +369,17 @@ function ReportView({ view }: { view: ReportViewKey }) {
                       </div>
                     ) : dash}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">{row.days != null ? row.days : dash}</TableCell>
+                  {view === "current" && "exceptionId" in row ? (
+                    // Current: the Days FROZEN on this exception (its own snapshot) on top, the dealer's running Days underneath. Sorting / filtering / status stay on the running value.
+                    <TableCell className="text-right tabular-nums">
+                      <div className="flex flex-col items-end gap-0.5">
+                        <span title={daysLabels.frozen} aria-label={`${daysLabels.frozen}: ${row.frozenDays ?? "—"}`} data-testid="frozen-days">{row.frozenDays != null ? row.frozenDays : dash}</span>
+                        <span className="text-xs text-muted-foreground" title={daysLabels.running} aria-label={`${daysLabels.running}: ${row.days ?? "—"}`} data-testid="running-days">{row.days != null ? row.days : dash}</span>
+                      </div>
+                    </TableCell>
+                  ) : (
+                    <TableCell className="text-right tabular-nums">{row.days != null ? row.days : dash}</TableCell>
+                  )}
                   {"exceptionId" in row ? (
                     <>
                       {/* This exception's OWN Date of Billing with ITS Billing Amount underneath (not the dealer's last payment) — same stacked layout as Last Payment Date. */}

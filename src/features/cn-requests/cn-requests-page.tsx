@@ -1,5 +1,6 @@
 "use client";
 import { useAdminPermission } from "@/features/accounts/permission-ui";
+import { formatDMY } from "@/lib/date-format";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 
@@ -62,7 +63,7 @@ const STATUS_VARIANT: Record<string, "secondary" | "default" | "success" | "dest
   SUBMITTED: "secondary", ACCEPTED_NOT_POSTED: "default", POSTED_IN_LEDGER: "success", RETURNED_FROM_LEDGER: "destructive", REJECTED: "destructive",
 };
 const money = (n: number | null) => (n == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n))}`);
-const businessDate = (s: string) => new Date(`${s}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" });
+const businessDate = (s: string) => formatDMY(s);
 
 /**
  * CN Requests — one role-aware screen. Sales Officer creates + views own; Regional Manager rejects

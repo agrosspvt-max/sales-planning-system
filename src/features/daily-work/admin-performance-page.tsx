@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { useQuery } from "@tanstack/react-query";
 import { Eye } from "lucide-react";
 import { api } from "@/lib/api-client";
@@ -79,7 +80,7 @@ export function AdminPerformancePage() {
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5">
           <Label>{L.date}</Label>
-          <Input type="date" value={workDate} onChange={(e) => setWorkDate(e.target.value || currentBusinessDate())} className="w-48" />
+          <DateInputDMY aria-label="Date" value={workDate} onChange={(v) => setWorkDate(v || currentBusinessDate())} className="w-48" />
         </div>
         <div className="space-y-1.5">
           <Label>{L.fRm}</Label>

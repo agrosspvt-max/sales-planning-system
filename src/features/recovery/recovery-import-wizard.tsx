@@ -1,5 +1,6 @@
 "use client";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo, useState } from "react";
@@ -211,7 +212,7 @@ export function RecoveryImportWizard({ fixedScope, officerOptions, title = "Reco
               </div>
               <div className="space-y-1.5">
                 <Label className={staticMode ? "text-muted-foreground" : undefined}>Cutoff Date{staticMode ? " · not required in static mode" : ""}</Label>
-                <Input type="date" value={staticMode ? "" : cutoff} onChange={(e) => setCutoff(e.target.value)} disabled={staticMode} />
+                <DateInputDMY aria-label="Cut-off date" value={staticMode ? "" : cutoff} onChange={setCutoff} disabled={staticMode} />
               </div>
             </div>
 

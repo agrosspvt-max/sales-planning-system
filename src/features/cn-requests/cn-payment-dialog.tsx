@@ -1,5 +1,7 @@
 "use client";
 import { useAdminPermission } from "@/features/accounts/permission-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
+import { formatDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 
 import { useRef, useState } from "react";
@@ -29,7 +31,7 @@ interface PaymentDetail {
 }
 
 const money = (value: number | null) => value == null ? "—" : formatSchemeCurrency(value);
-const displayDate = (value: string | null, notScheduled: string) => value ? new Date(`${value}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" }) : notScheduled;
+const displayDate = (value: string | null, notScheduled: string) => value ? formatDMY(value) : notScheduled;
 
 // Who recorded an event, and whether it is authoritative. Admin verification is GREEN (authoritative);
 // SO reports are GRAY (provisional); the acceptance/system baseline is neutral.
@@ -170,9 +172,9 @@ function SalesOfficerReportForm({ data, requestId, labels, onSaved }: { data: Pa
         value={status}
         onChange={(e) => { setStatus(e.target.value as CnPaymentStatusValue | ""); setFormError(null); }}
       />
-      {(status === "PAID" || status === "PARTIAL_PAID") && <div className="space-y-1"><Label>{labels.paymentDate} *</Label><Input type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} required /></div>}
+      {(status === "PAID" || status === "PARTIAL_PAID") && <div className="space-y-1"><Label htmlFor="cn-payment-date">{labels.paymentDate} *</Label><DateInputDMY id="cn-payment-date" value={paymentDate} onChange={setPaymentDate} required /></div>}
       {status === "PARTIAL_PAID" && <div className="space-y-1"><Label>{labels.amountPaid} *</Label><Input type="number" min="0.01" step="0.01" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} required /></div>}
-      {(status === "NOT_PAID" || status === "PARTIAL_PAID") && <div className="space-y-1"><Label>{labels.followUpDate} *</Label><Input type="date" min={data.events[0]?.eventDate} max={data.expiryDate ?? undefined} value={followUpDate} onChange={(e) => setFollowUpDate(e.target.value)} required /></div>}
+      {(status === "NOT_PAID" || status === "PARTIAL_PAID") && <div className="space-y-1"><Label htmlFor="cn-follow-up-date">{labels.followUpDate} *</Label><DateInputDMY id="cn-follow-up-date" min={data.events[0]?.eventDate} max={data.expiryDate ?? undefined} value={followUpDate} onChange={setFollowUpDate} required /></div>}
       {formError && <p className="text-sm text-destructive">{formError}</p>}
       <Button disabled={!status || report.isPending} onClick={() => report.mutate()}>{report.isPending ? labels.saving : labels.saveStatus}</Button>
     </div>

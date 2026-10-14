@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { localizeDatesInText } from "@/lib/date-format";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell } from "lucide-react";
@@ -108,7 +109,7 @@ export function NotificationBell() {
                         {!n.isRead && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary" />}
                         <div className="min-w-0">
                           <p className="text-sm font-medium">{n.title}</p>
-                          <p className="truncate text-xs text-muted-foreground">{n.message}</p>
+                          <p className="truncate text-xs text-muted-foreground">{localizeDatesInText(n.message)}</p>
                           <p className="text-[10px] text-muted-foreground">{formatDate(n.createdAt)}</p>
                         </div>
                       </div>

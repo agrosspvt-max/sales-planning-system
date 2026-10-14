@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatDMY } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { dealerStatusLabel } from "@/lib/dealer-status";
@@ -18,7 +19,7 @@ import { fill, useLabels } from "./party-labels";
 import type { DealerStatusRequestDto } from "./territory.server";
 
 const STATUS_VARIANT: Record<string, "success" | "muted" | "secondary" | "destructive"> = { ACTIVE: "success", INACTIVE: "muted", PENDING: "secondary", DEFAULTER: "destructive" };
-const dateText = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-IN", { dateStyle: "medium" }) : "—");
+const dateText = (iso: string | null) => (iso ? formatDMY(iso) : "—");
 
 /** The reason labels, resolved through the label system (editable under Edit Labels). */
 function useReasonLabels(): Record<DealerStatusReason, string> {

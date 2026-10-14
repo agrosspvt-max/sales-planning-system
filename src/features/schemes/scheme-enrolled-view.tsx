@@ -1,6 +1,7 @@
 "use client";
 
 import { DealerTableBody as TableBody, DealerRowGroup } from "@/features/dealers/dealer-table-ui";
+import { formatDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { SchemeDateInput, FormattedNumberInput } from "./scheme-form-inputs";
 import type { EnrolledInstanceRow, EnrolledBillRow } from "./scheme-enrolled.server";
@@ -232,7 +233,7 @@ function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: strin
             <DialogHeader><DialogTitle>Confirm billing date</DialogTitle></DialogHeader>
             <div className="space-y-3 py-2 text-center">
               <p className="text-sm text-muted-foreground">Are you sure that the billing date is</p>
-              <p className="text-3xl font-semibold tabular-nums">{billingConfirm.date.split("-").reverse().join("/")}</p>
+              <p className="text-3xl font-semibold tabular-nums">{formatDMY(billingConfirm.date)}</p>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => { setBillingConfirm(null); setResetKey((k) => k + 1); }}>Cancel</Button>

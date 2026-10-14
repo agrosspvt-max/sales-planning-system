@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { localizeDatesInText } from "@/lib/date-format";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
@@ -96,10 +98,10 @@ export function AuditPage() {
           />
         </Field>
         <Field label="From">
-          <Input type="date" className="w-40" value={filters.from} onChange={(e) => set("from", e.target.value)} />
+          <DateInputDMY aria-label="From" className="w-40" value={filters.from} onChange={(v) => set("from", v)} />
         </Field>
         <Field label="To">
-          <Input type="date" className="w-40" value={filters.to} onChange={(e) => set("to", e.target.value)} />
+          <DateInputDMY aria-label="To" className="w-40" value={filters.to} onChange={(v) => set("to", v)} />
         </Field>
       </div>
 
@@ -136,7 +138,7 @@ export function AuditPage() {
                   <TableCell>{r.userName}</TableCell>
                   <TableCell>{r.action}</TableCell>
                   <TableCell>{r.entity}</TableCell>
-                  <TableCell className="text-muted-foreground">{r.summary ?? r.entityId ?? "—"}</TableCell>
+                  <TableCell className="text-muted-foreground">{r.summary ? localizeDatesInText(r.summary) : r.entityId ?? "—"}</TableCell>
                 </TableRow>
               ))
             )}

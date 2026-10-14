@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { monthEndIso } from "@/lib/date-format";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
+import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { Check, Plus, Send, X } from "lucide-react";
@@ -45,8 +48,8 @@ const STATUS_VARIANT: Record<string, "muted" | "secondary" | "success" | "destru
   Draft: "muted", Submitted: "secondary", Approved: "secondary", "Doc Send By SO": "secondary", "Doc Received": "secondary", "SD Bounce": "warning", Appointed: "success", Rejected: "destructive",
 };
 const dash = <span className="text-muted-foreground">—</span>;
-const dateText = (v: string | null) => (v ? new Date(v.length === 10 ? `${v}T00:00:00` : v).toLocaleDateString("en-IN", { dateStyle: "medium" }) : null);
-const dateTimeText = (iso: string) => new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+const dateText = (v: string | null) => (v ? formatDMY(v) : null);
+const dateTimeText = (iso: string) => formatDateTimeDMY(iso);
 const docText = (d: DocInfo | null, T: { document: string; check: string; otherValue: string }) => (d ? [d.documents && T.document, d.checks && T.check, d.other && fill(T.otherValue, { text: d.other })].filter(Boolean).join(" · ") || "—" : "—");
 
 /** The status texts (display only). The server sends the stable English status text; the shown text is its editable label. */
@@ -191,8 +194,8 @@ function AddMarketDialog({ sheetId, detail, labels, onClose, onAdded }: { sheetI
               placeholder={detail.seasonalPlans.length ? T.search : T.none} emptyText={T.notFound} disabled={detail.seasonalPlans.length === 0}
               onChange={(id) => { setForm({ ...form, seasonalPlanId: id }); setError(null); }} />
           </div>
-          <div className="space-y-1.5"><Label>{labels.planDate}</Label>
-            <Input type="date" className="w-44" min={`${detail.month.key}-01`} max={`${detail.month.key}-31`} value={form.planDate} onChange={(e) => setForm({ ...form, planDate: e.target.value })} />
+          <div className="space-y-1.5"><Label htmlFor="mp-plan-date">{labels.planDate}</Label>
+            <DateInputDMY id="mp-plan-date" className="w-44" min={`${detail.month.key}-01`} max={monthEndIso(detail.month.key)} value={form.planDate} onChange={(v) => setForm({ ...form, planDate: v })} />
           </div>
           <div className="space-y-1.5"><Label>{T.opt1} *</Label><Input maxLength={200} value={form.option1Party} onChange={(e) => setForm({ ...form, option1Party: e.target.value })} /></div>
           <div className="space-y-1.5"><Label>{T.opt2}</Label><Input maxLength={200} value={form.option2Party} onChange={(e) => setForm({ ...form, option2Party: e.target.value })} /></div>
@@ -245,7 +248,7 @@ function ConversionDateCell({ plan, onChanged, onHistory }: { plan: Plan; onChan
     return (
       <div className="space-y-1">
         <div className="flex items-center gap-1">
-          <Input type="date" className="h-8 w-40" aria-label={T.planDate} min={monthStart} max={plan.monthKey ? `${plan.monthKey}-31` : undefined} value={value} onChange={(e) => setValue(e.target.value)} />
+          <DateInputDMY className="w-40" aria-label={T.planDate} min={monthStart} max={plan.monthKey ? monthEndIso(plan.monthKey) : undefined} value={value} onChange={setValue} />
           <Button size="sm" className="shrink-0" disabled={save.isPending || value === (plan.planDate ?? "")} onClick={() => save.mutate()}>{T.save}</Button>
           <Button size="sm" variant="ghost" className="shrink-0" onClick={() => { setEditing(false); setError(null); }}>{T.cancel}</Button>
         </div>

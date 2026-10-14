@@ -1180,6 +1180,18 @@ export const DEFAULT_LABELS = {
   "daily_work.task_type.manual": "Manual",
   "daily_work.task_type.calendar": "Calendar",
   "daily_work.task_type.billing_exception": "Billing Exception",
+  // ---- Dates (every date field in the application: DD/MM/YYYY) ----
+  "date.placeholder": "DD/MM/YYYY",
+  "date.error.invalid": "Enter a real calendar date as DD/MM/YYYY (for example 04/02/2026).",
+  "date.error.incomplete": "Enter the full date as DD/MM/YYYY — two-digit day, two-digit month and four-digit year.",
+  "date.error.before": "The date cannot be before {date}.",
+  "date.error.after": "The date cannot be after {date}.",
+  // ---- Last Payment Report → Days (Payment Aging) filter ----
+  "last_payment.aging.op_lt": "Less than",
+  "last_payment.aging.op_gt": "More Than",
+  "last_payment.aging.op_eq": "Exactly",
+  "last_payment.aging.op_between": "Between",
+  "last_payment.aging.value": "Days",
   // ---- Billing Exception form + Info popup (Last Payment Report) ----
   "billing_exception.action.create": "Create a Billing Exception",
   "billing_exception.form.title": "Create a Billing Exception",
@@ -1201,6 +1213,8 @@ export const DEFAULT_LABELS = {
   "billing_exception.form.cancel": "Cancel",
   "billing_exception.form.save": "Save",
   "billing_exception.form.saving": "Saving…",
+  "billing_exception.days.frozen": "Days at exception creation",
+  "billing_exception.days.running": "Current Days",
   "billing_exception.info.title": "Billing Exception",
   "billing_exception.info.dealer": "Dealer",
   "billing_exception.info.billing_date": "Date of Billing",

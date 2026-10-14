@@ -329,13 +329,13 @@ export function formatLastUpdate(isoDate: string | null | undefined): string | n
 
 export const NO_EXPORT_DATA_MESSAGE = "No data available to export for the selected filters.";
 
-export const EXPORT_COLUMNS: readonly { key: string; label: string; format: "text" | "number" | "currency" }[] = [
+export const EXPORT_COLUMNS: readonly { key: string; label: string; format: "text" | "number" | "currency" | "date" }[] = [
   { key: "party", label: "Party", format: "text" },
   { key: "status", label: "Status", format: "text" },
   { key: "state", label: "State", format: "text" },
   { key: "territory", label: "Territory", format: "text" },
   { key: "salesOfficer", label: "Sales Officer", format: "text" },
-  { key: "lastPaymentDate", label: "Last Payment Date", format: "text" },
+  { key: "lastPaymentDate", label: "Last Payment Date", format: "date" },
   { key: "amount", label: "Amount", format: "currency" },
   { key: "days", label: "Days", format: "number" },
   { key: "billingStatus", label: "Billing Status", format: "text" },
@@ -350,7 +350,7 @@ export function toExportRows(rows: readonly LastPaymentReportRow[]): ({ id: stri
     state: r.state ?? "",
     territory: r.territory ?? "",
     salesOfficer: r.salesOfficer ?? "",
-    lastPaymentDate: formatLastUpdate(r.lastPaymentDate) ?? "", // DD/MM/YYYY, like the page
+    lastPaymentDate: r.lastPaymentDate ?? "", // an Excel DATE cell (ISO in the payload; the column format shows DD/MM/YYYY)
     amount: r.amount ?? "",
     days: r.days ?? "",
     billingStatus: BILLING_STATUS_LABEL[r.billingStatus],

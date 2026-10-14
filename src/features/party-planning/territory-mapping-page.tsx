@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { Check, Upload, X } from "lucide-react";
@@ -45,7 +46,7 @@ interface ImportPreview { sheetNames: string[]; sheet: string | null; needsSheet
 interface ImportResult { applied: number; noChange: number; skippedUnmatched: number; skippedAmbiguous: number; rejectedInvalid: number; duplicates: number; marketsCreated: number; skippedUnknownDistrict: number }
 
 const REQUEST_VARIANT: Record<MarketRequest["status"], "secondary" | "success" | "destructive"> = { PENDING_RM: "secondary", PENDING_ADMIN: "secondary", APPROVED: "success", REJECTED: "destructive" };
-const dateText = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-IN", { dateStyle: "medium" }) : "—");
+const dateText = (iso: string | null) => (iso ? formatDMY(iso) : "—");
 const dash = <span className="text-muted-foreground">—</span>;
 
 /* ===================================================== Page ===================================================== */
@@ -365,7 +366,7 @@ export function DistrictCell({ row, options }: { row: DealerRow; options: Distri
   );
 }
 
-const dateTimeFull = (iso: string) => new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+const dateTimeFull = (iso: string) => formatDateTimeDMY(iso);
 
 /**
  * TEMPORARY: the Market of an Existing Dealer is a free-text value the user can correct. The table cell shows only the saved name; clicking it opens ONE

@@ -1,5 +1,6 @@
 "use client";
 import { BillingTaskPanel } from "./billing-task-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import type { BillingTaskDto } from "./billing-task.server";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -943,13 +944,12 @@ function MaterializedTaskRescheduleDialog({ tasks, onChanged, onClose }: { tasks
               <TableRow data-dealer-id={task.dealerId} key={taskKey(task)}>
                 <TableCell><DealerName id={task.dealerId} name={task.partyName} /></TableCell>
                 <TableCell className="text-right tabular-nums">{task.recoveryAmount == null ? "—" : money(task.recoveryAmount)}</TableCell>
-                <TableCell><Input
+                <TableCell><DateInputDMY
                   aria-label={`${L.taskDate} — ${task.partyName}`}
-                  type="date" className="h-8 w-40" min={task.acceptanceDate ?? undefined} max={task.expiryDate ?? undefined}
+                  className="w-40" min={task.acceptanceDate ?? undefined} max={task.expiryDate ?? undefined}
                   value={pendingDates[taskKey(task)] ?? ""} disabled={scheduleMut.isPending || (task.expiryDate != null && today > task.expiryDate)}
-                  onChange={(event) => {
+                  onChange={(next) => {
                     // Update the pending date only — NO server mutation here.
-                    const next = event.target.value;
                     setPendingDates((prev) => ({ ...prev, [taskKey(task)]: next }));
                   }}
                 /></TableCell>
@@ -1621,20 +1621,17 @@ function CnTasksPanel({ onChanged }: { onChanged: () => void }) {
                 <TableCell>{task.taskType === "CN_REQUEST" ? L.cnRequest : task.taskType}</TableCell>
                 <TableCell>{task.planType === "RECOVERY" ? L.recovery : task.planType}</TableCell>
                 <TableCell>
-                  <Input
+                  <DateInputDMY
                     aria-label={`${L.taskDate} — ${task.partyName}`}
-                    type="date"
-                    className="h-8 w-40"
+                    className="w-40"
                     min={task.acceptanceDate ?? undefined}
                     max={task.expiryDate ?? undefined}
                     value={task.taskDate ?? ""}
                     disabled={busy || isExpired(task)}
-                    onChange={(event) => {
-                      const taskDate = event.target.value;
+                    onChange={(taskDate) => {
                       if (!taskDate) return;
                       if (isCnSundayDateKey(taskDate)) {
-                        event.currentTarget.value = task.taskDate ?? "";
-                        alert(L.sundayInvalid);
+                        alert(L.sundayInvalid); // the field keeps showing the saved date (its value is controlled)
                         return;
                       }
                       if (taskDate !== task.taskDate) scheduleMut.mutate({ id: task.cnRequestId, taskId: task.taskId, taskDate });

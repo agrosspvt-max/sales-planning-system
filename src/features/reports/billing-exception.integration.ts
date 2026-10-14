@@ -325,6 +325,36 @@ async function main() {
   // the summary / rankings keep using the BILLING amount
   const ps = ((await be.listBillingExceptions(admin, "current", params({ search: "payment dealer" }), asOf)).summary);
   eq(ps.topDealers.byBills[0]!.amount, 50000 + 777 + 20000, "exception amount rankings use Amount, never Payment");
+
+  /* ---- 15. Current shows the frozen Days of EACH exception beside the dealer's running Days (display only) ---- */
+  const base0 = asOf;
+  const plus = (n: number) => new Date(Date.parse(`${base0}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+  const shift = Math.round((Date.parse(`${base0}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
+  await dealer("dF", "Frozen Days Dealer", "so1", null); await receipt("dF", -shift); // paid on base0 (the business date this section starts from)
+  const frozenIn = (n: number) => input("dF", { billingDate: plus(n) });
+  asOf = plus(50);                                   // Days 50 now
+  const f1 = await be.createBillingException(admin, frozenIn(0), asOf);
+  asOf = plus(55);                                   // five days later: Days 55
+  const f2 = await be.createBillingException(admin, frozenIn(1), asOf);
+  const cur55 = (await current(admin, { search: "frozen days" })).items;
+  eq(cur55.map((r) => [r.exceptionId, r.frozenDays, r.days]).sort(), [[f1.id, 50, 55], [f2.id, 55, 55]].sort(), "each exception keeps ITS frozen Days; both share the running Days");
+  asOf = plus(60);                                   // only the running value moves
+  const cur60 = (await current(admin, { search: "frozen days" })).items;
+  eq(cur60.map((r) => [r.exceptionId, r.frozenDays, r.days]).sort(), [[f1.id, 50, 60], [f2.id, 55, 60]].sort(), "advancing the business date changes only the running Days");
+  eq((await history(admin, { search: "frozen days" })).items.map((r) => [r.exceptionId, r.days, r.frozenDays]).sort(), [[f1.id, 50, 50], [f2.id, 55, 55]].sort(), "History: only the frozen Days (unchanged)");
+  // sorting / Payment Aging / summary stay on the RUNNING Days
+  eq((await current(admin, { search: "frozen days", paymentAging: { operator: "gt", value: 58 } })).total, 2, "Payment Aging filters on running Days (60), not frozen 50 / 55");
+  eq((await current(admin, { search: "frozen days", paymentAging: { operator: "gt", value: 61 } })).total, 0);
+  // the stored snapshots are never rewritten by any of it
+  eq((await prisma.billingException.findMany({ where: { dealerId: "dF" }, orderBy: { createdAt: "asc" }, select: { snapDays: true } })).map((r) => r.snapDays), [50, 55], "snapshots untouched");
+  // export: Current carries both values under separate labels; History only the frozen one
+  const exp = (await be.listBillingExceptionsExport(admin, "current", params({ search: "frozen days" }), asOf)).rows as unknown as { frozenDays: number; days: number }[];
+  assert.ok(exp.length === 2 && exp.every((r) => r.days === 60) && exp.map((r) => r.frozenDays).sort().join() === "50,55");
+  // a newer payment (Days ≤ 45) resolves them (decided on the RUNNING Days only) and History keeps the frozen values
+  await receipt("dF", -(shift + 40));                  // a NEWER payment on day 40 → Days 20 at the current business date
+  const rec = await be.reconcileBillingExceptions({ today: asOf, actor: { userId: "admin" } });
+  assert.ok(rec.resolved >= 1);
+  eq([(await current(admin, { search: "frozen days" })).total, (await history(admin, { search: "frozen days" })).items.map((r) => r.days).sort()], [0, [50, 55]], "Days ≤ 45 → gone from Current; both stay in History with their frozen Days");
   console.log("billing-exception.integration.ts — all assertions passed");
 }
 main().then(() => prisma.$disconnect(), async (e) => { console.error(e); await prisma.$disconnect(); process.exit(1); });

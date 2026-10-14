@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, History } from "lucide-react";
 import { api } from "@/lib/api-client";
@@ -207,13 +208,7 @@ export function AssignmentPage({ config }: { config: AssignmentConfig }) {
             ))}
             <div className="space-y-1.5">
               <Label htmlFor="effectiveFrom">Effective From</Label>
-              <Input
-                id="effectiveFrom"
-                type="date"
-                value={effectiveFrom}
-                onChange={(e) => setEffectiveFrom(e.target.value)}
-                required
-              />
+              <DateInputDMY id="effectiveFrom" value={effectiveFrom} onChange={setEffectiveFrom} required />
             </div>
             {error && <p className="text-sm text-destructive">{error}</p>}
             <DialogFooter>

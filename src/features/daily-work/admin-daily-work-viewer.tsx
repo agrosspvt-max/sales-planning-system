@@ -1,6 +1,8 @@
 "use client";
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
+import { formatDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -100,7 +102,7 @@ export function AdminDailyWorkViewer() {
 
       <DailyWorkFieldset legend={L.planReport}>
         <div className="flex flex-wrap items-end gap-3">
-          <div className="space-y-1.5"><Label>{L.date}</Label><Input type="date" value={workDate} onChange={(event) => setWorkDate(event.target.value || currentBusinessDate())} className="w-44" /></div>
+          <div className="space-y-1.5"><Label htmlFor="adv-date">{L.date}</Label><DateInputDMY id="adv-date" value={workDate} onChange={(v) => setWorkDate(v || currentBusinessDate())} className="w-44" /></div>
           <div className="space-y-1.5"><Label>{L.state}</Label><NativeSelect className="w-48" value={groupId} onChange={(event) => changeGroup(event.target.value)} options={[{ value: "", label: L.selectState }, ...(groups.data ?? []).map((group) => ({ value: group.id, label: group.name }))]} /></div>
           <div className="space-y-1.5"><Label>{L.officer}</Label><NativeSelect className="w-56" value={officerId} disabled={!groupId || officers.isLoading} onChange={(event) => setOfficerId(event.target.value)} options={[{ value: "", label: L.selectOfficer }, ...(officers.data ?? []).map((officer) => ({ value: officer.id, label: officer.name }))]} /></div>
         </div>
@@ -126,7 +128,7 @@ export function AdminDailyWorkViewer() {
           : report.data ? (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 px-4 py-3 text-sm">
-                <span className="font-medium">{report.data.officerName} · {new Date(`${report.data.workDate}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" })}</span>
+                <span className="font-medium">{report.data.officerName} · {formatDMY(report.data.workDate)}</span>
                 <span className="flex gap-5 text-muted-foreground"><span>{L.selfRating}: <b className="text-foreground">{rating(report.data.selfRating)}</b></span><span>{L.rmRating}: <b className="text-foreground">{rating(report.data.review?.rating ?? null)}</b></span></span>
               </div>
               <AdminReportSection section={section} report={report.data} noSection={L.noSection} noPlan={L.noPlan} />

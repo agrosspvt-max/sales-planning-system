@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { formatDMY } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2 } from "lucide-react";
 import { api } from "@/lib/api-client";
@@ -22,7 +23,7 @@ import type { HistoricalAnalysis, HistoricalResult, HistoricalRow, ReceiptReview
 
 const money = (value: number | string) =>
   new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(Number(value));
-const date = (value: string) => value.split("-").reverse().join("/");
+const date = (value: string) => formatDMY(value);
 const payment = (value: { date: string; amount: number } | null) =>
   value ? `${date(value.date)} · ₹${money(value.amount)}` : "—";
 const PAGE = 100;

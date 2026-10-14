@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { formatDMY } from "./date-format";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -30,26 +31,14 @@ export function formatPercent(fraction: number | string): string {
   return `${Math.round(n * 100)}%`;
 }
 
+/** Every user-facing date is DD/MM/YYYY — see lib/date-format.ts (business time zone for timestamps; calendar dates never shift). */
 export function formatDate(value: Date | string | null | undefined): string {
-  if (!value) return "—";
-  return new Date(value).toLocaleDateString("en-IN", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  return formatDMY(value);
 }
 
-/**
- * Compact, date-only "DD Mon YY" (e.g. 02 Sep 26). Time is never shown. Shared formatter used across the
- * Scheme Planning tables so every date reads the same. Display-only — never mutates the stored value.
- */
+/** Kept for its many callers: the same DD/MM/YYYY (the compact "DD Mon YY" form is retired). Time is never shown. */
 export function formatDateShort(value: Date | string | null | undefined): string {
-  if (!value) return "—";
-  return new Date(value).toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "2-digit",
-  });
+  return formatDMY(value);
 }
 
 export function formatSchemeDate(value: Date | string | null | undefined) {

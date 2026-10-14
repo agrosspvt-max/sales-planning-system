@@ -1,6 +1,7 @@
 "use client";
 
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { formatDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import Link from "next/link";
 import { PartyLink } from "@/features/calendar/party-link";
@@ -12,8 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useLabel } from "@/features/labels/label-ui";
 import type { UpcomingItem } from "@/features/calendar/calendar.server";
 
-const MON3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const shortDate = (dk: string) => { const [, m, d] = dk.split("-").map(Number); return `${d} ${MON3[m - 1]}`; };
+const shortDate = (dk: string) => formatDMY(dk);
 
 /**
  * Dashboard "Upcoming — Next 5 Days" card. Reuses /api/calendar/upcoming (scoped server-side), showing only
@@ -48,7 +48,7 @@ export function UpcomingCard({ partyPlanningEnabled = false }: { partyPlanningEn
           <ul className="space-y-2"><DealerOrder>
             {data!.map((it, i) => (
               <li data-dealer-id={it.event?.dealerId ?? it.billingTask?.dealerId} key={i} className="flex items-start gap-3 border-b pb-2 text-sm last:border-0 last:pb-0">
-                <span className="w-12 shrink-0 pt-0.5 text-xs font-medium text-muted-foreground tabular-nums">{shortDate(it.dateKey)}</span>
+                <span className="w-20 shrink-0 pt-0.5 text-xs font-medium text-muted-foreground tabular-nums">{shortDate(it.dateKey)}</span>
                 {it.kind === "CONVERSION" && it.event ? (
                   <Link href="/planning/scheme/plans" className="min-w-0 flex-1 hover:underline">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.conversion}</div>

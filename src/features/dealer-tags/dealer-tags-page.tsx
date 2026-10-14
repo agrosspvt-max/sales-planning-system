@@ -8,10 +8,13 @@ import { Role } from "@prisma/client";
 import { api } from "@/lib/api-client";
 import { PageHeader } from "@/components/layout/page-header";
 import { NativeSelect } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { useLabel } from "@/features/labels/label-ui";
+import { taggedDealersFirst } from "@/lib/dealer-tags";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerName, useDealerMarkers } from "@/features/dealers/dealer-name-ui";
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
 import { Table, TableHeader, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import { DealerTagRequests } from "./dealer-tag-requests";
@@ -19,6 +22,12 @@ import { SalesOfficerFilterHeader, type SalesOfficerOption } from "./sales-offic
 import type { TagDefinition, TagDealer } from "./types";
 export function DealerTagsPage({ role }: { role: Role }) {
   const qc = useQueryClient();
+  const L = {
+    dealerPlaceholder: useLabel("dealer_tags.dealer.placeholder"),
+    dealerSearch: useLabel("dealer_tags.dealer.search"),
+    dealerEmpty: useLabel("dealer_tags.dealer.empty"),
+  };
+  const markers = useDealerMarkers();
   const [dealerId, setDealerId] = useState(""),
     [tagId, setTagId] = useState(""),
     [operation, setOperation] = useState<"ADD" | "REVOKE">("ADD"),
@@ -75,15 +84,17 @@ export function DealerTagsPage({ role }: { role: Role }) {
       <div className="grid gap-3 rounded-lg border p-4 md:grid-cols-4">
         <div className="space-y-1">
           <Label>Dealer *</Label>
-          <NativeSelect
-            dealerOptions
-            placeholder="Select a dealer…"
+          {/* Searchable over the FULL authorized dealer list (never just the table page). The submitted value stays the dealer's id. */}
+          <SearchableSelect
+            ariaLabel={L.dealerSearch}
+            placeholder={L.dealerPlaceholder}
+            emptyText={L.dealerEmpty}
             value={dealerId}
-            onChange={(e) => {
-              setDealerId(e.target.value);
+            onChange={(value) => {
+              setDealerId(value);
               setTagId("");
             }}
-            options={(dealers.data ?? []).map((d) => ({ value: d.id, label: d.name }))}
+            options={taggedDealersFirst((dealers.data ?? []).map((d) => ({ value: d.id, label: d.name })), (o) => o.value, markers)}
           />
         </div>
         <div className="space-y-1">

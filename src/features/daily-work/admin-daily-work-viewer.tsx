@@ -9,7 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, ApiRequestError } from "@/lib/api-client";
 import { cn, formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import {
-  combineAppointmentRows, combineConversionRows, combineDailyWorkRows, currentBusinessDate, rowTaskType,
+  combineAppointmentRows, combineConversionRows, combineDailyWorkRows, currentBusinessDate, rowTaskType, sectionSavedAsNoPlan,
   type AppointmentRow, type ConversionRow, type DailyWorkDealerRow, type DailyWorkType, type RecoveryPaymentMode,
 } from "@/lib/daily-work";
 import { useLabel } from "@/features/labels/label-ui";
@@ -139,8 +139,8 @@ export function AdminDailyWorkViewer() {
   );
 }
 
-function EmptyState({ text }: { text: string }) {
-  return <div className="rounded-lg border bg-muted/30 px-4 py-8 text-center text-sm text-muted-foreground">{text}</div>;
+function EmptyState({ text, strong = false }: { text: string; strong?: boolean }) {
+  return <div className="rounded-lg border bg-muted/30 px-4 py-8 text-center text-sm text-muted-foreground">{strong ? <strong className="font-bold text-foreground">{text}</strong> : text}</div>;
 }
 
 function ErrorState({ error }: { error: Error }) {
@@ -148,25 +148,26 @@ function ErrorState({ error }: { error: Error }) {
 }
 
 function AdminReportSection({ section, report, noSection, noPlan }: { section: Section; report: ReportPayload; noSection: string; noPlan: string }) {
-  const isNoPlan = (value: Section) => report.summary.batches.length > 0 && report.summary.batches.every((batch) => new Set((batch.noPlanSections ?? "").split(",").filter(Boolean)).has(value));
+  // Only the explicit saved No Plan decision (every submitted batch) shows "No Plan"; an empty section keeps its own message.
+  const empty = (value: Section) => (sectionSavedAsNoPlan(report.summary.batches, value) ? <EmptyState text={noPlan} strong /> : <EmptyState text={noSection} />);
   if (section === "SALES" || section === "RECOVERY") {
-    if (report[section === "SALES" ? "sales" : "recovery"].dealers.length === 0) return <EmptyState text={isNoPlan(section) ? noPlan : noSection} />;
+    if (report[section === "SALES" ? "sales" : "recovery"].dealers.length === 0) return empty(section);
     return <AdminDealerReport section={section} data={report[section === "SALES" ? "sales" : "recovery"]} />;
   }
   if (section === "APPOINTMENT") {
-    if (report.appointment.rows.length === 0) return <EmptyState text={isNoPlan(section) ? noPlan : noSection} />;
+    if (report.appointment.rows.length === 0) return empty(section);
     return <AdminAppointmentReport data={report.appointment} />;
   }
   if (section === "SCHEME_CONVERSION") {
-    if (report.conversion.rows.length === 0) return <EmptyState text={isNoPlan(section) ? noPlan : noSection} />;
+    if (report.conversion.rows.length === 0) return empty(section);
     return <AdminConversionReport data={report.conversion} />;
   }
   if (section === "VISITS") {
     const batches = report.summary.batches.filter((batch) => !new Set((batch.noPlanSections ?? "").split(",").filter(Boolean)).has("VISITS"));
-    if (batches.length === 0) return <EmptyState text={isNoPlan(section) ? noPlan : noSection} />;
+    if (batches.length === 0) return empty(section);
     return <AdminVisitsReport batches={batches} />;
   }
-  return report.summary.others.trim() ? <div className="whitespace-pre-wrap rounded-lg border bg-background p-4 text-sm">{report.summary.others}</div> : <EmptyState text={isNoPlan(section) ? noPlan : noSection} />;
+  return report.summary.others.trim() ? <div className="whitespace-pre-wrap rounded-lg border bg-background p-4 text-sm">{report.summary.others}</div> : empty(section);
 }
 
 function AdminDealerReport({ section, data }: { section: "SALES" | "RECOVERY"; data: DealerPayload }) {

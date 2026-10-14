@@ -57,10 +57,7 @@ export const NAV_ITEMS: NavItem[] = [
   // Daily Work Template — a Sales Officer's daily Sales + Recovery execution page. Scope is applied
   // server-side (SO works only with their own assigned dealers).
   { label: "Daily Work", href: "/daily-work", icon: CheckSquare, roles: ALL_ROLES, group: "Planning" },
-  // Team Performance — RM-only review of their team's submitted Daily Work + immutable per-SO rating.
-  // Team membership + all authorization is enforced server-side (group-based hierarchy).
-  { label: "Team Performance", href: "/team-performance", icon: BarChart3, roles: [Role.REGIONAL_MANAGER], group: "Planning" },
-  // Performance — role-aware, date-range Daily Work performance (Phase 4). SO sees own; RM sees team; Admin sees
+  // Performance — role-aware, date-range Daily Work performance (Phase 4). SO sees own; RM sees own + team; Admin sees
   // company-wide. Scope/columns/filters/attendance-edit are all enforced server-side by role.
   { label: "Performance", href: "/performance", icon: BarChart3, roles: ALL_ROLES, group: "Insights" },
   // Operational calendar over Scheme Planning conversion dates (+ personal notes). All roles; scope is

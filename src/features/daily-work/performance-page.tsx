@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { RmBadge } from "@/components/ui/rm-badge";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
@@ -25,7 +26,7 @@ import { PerformanceMetricDetail, countText, rupees, type MetricRequest } from "
 type Attendance = "PRESENT" | "ABSENT" | "LEAVE" | "HOLIDAY";
 interface Option { id: string; name: string }
 interface PerfRow {
-  officerId: string; officerName: string; groupId: string | null; stateName: string | null; date: string;
+  officerId: string; officerName: string; officerRole: Role; groupId: string | null; stateName: string | null; date: string;
   attendance: Attendance; planSubmittedAt: string | null; reportSubmittedAt: string | null;
   selfRating: number | null; rmRating: number | null; submitted: boolean; reportMissed: boolean;
 }
@@ -87,6 +88,9 @@ export function PerformancePage({ role }: { role: Role }) {
     sMyAttendance: useLabel("daily_work.performance.summary.my_attendance"),
     sAttendance: useLabel("daily_work.performance.summary.attendance"),
     sOfficers: useLabel("daily_work.team.summary.sales_officers"),
+    sNotSubmitted: useLabel("daily_work.team.summary.not_submitted"),
+    rmBadge: useLabel("daily_work.performance.rm_badge"),
+    rmNoRating: useLabel("daily_work.performance.rm_no_rating"),
     sPlans: useLabel("daily_work.performance.summary.submitted_plans"),
     sReports: useLabel("daily_work.performance.summary.submitted_reports"),
     sAvgSelf: useLabel("daily_work.team.summary.avg_self_rating"),
@@ -160,6 +164,7 @@ export function PerformancePage({ role }: { role: Role }) {
         )}
         <Stat label={L.sPlans} value={data ? String(data.summary.submittedPlans) : "—"} />
         <Stat label={L.sReports} value={data ? String(data.summary.submittedReports) : "—"} />
+        {isRM && <Stat label={L.sNotSubmitted} value={data ? String(data.summary.totalDays - data.summary.submittedReports) : "—"} />}
         <Stat label={L.sAvgSelf} value={data ? ratingText(data.summary.averageSelfRating) : "—"} />
         <Stat label={L.sAvgRm} value={data ? ratingText(data.summary.averageRmRating) : "—"} />
         {/* Planned vs Actual per section, over the same filtered officers and dates as the table (Others has no totals). */}
@@ -228,7 +233,8 @@ export function PerformancePage({ role }: { role: Role }) {
                     {r.reportSubmittedAt ? timeText(r.reportSubmittedAt) : r.reportMissed ? <Badge variant="destructive">{L.reportMissed}</Badge> : timeText(null)}
                   </TableCell>
                   <TableCell className="tabular-nums">{r.selfRating == null ? dash : ratingText(r.selfRating)}</TableCell>
-                  <TableCell className="tabular-nums">{r.rmRating == null ? dash : ratingText(r.rmRating)}</TableCell>
+                  {/* Decided by the role of the person this ROW represents (never by the viewer): an RM has no RM rating, so the RM capsule shows. */}
+                  <TableCell className="tabular-nums">{r.officerRole === Role.REGIONAL_MANAGER ? <RmBadge label={L.rmBadge} title={L.rmNoRating} /> : r.rmRating == null ? dash : ratingText(r.rmRating)}</TableCell>
                   <TableCell className="text-right">
                     {r.submitted ? (
                       <Button size="sm" variant="outline" onClick={() => setDetail({ officerId: r.officerId, date: r.date })}><Eye className="h-4 w-4" /> {L.view}</Button>
@@ -250,7 +256,8 @@ export function PerformancePage({ role }: { role: Role }) {
         <DailyWorkReviewDialog
           officerId={detail.officerId}
           workDate={detail.date}
-          readOnly={role !== Role.REGIONAL_MANAGER}
+          // Only an RM viewer, and only on a Sales Officer's day, can rate: an RM's own day (or any RM's) is view-only.
+          readOnly={role !== Role.REGIONAL_MANAGER || data?.rows.find((r) => r.officerId === detail.officerId)?.officerRole === Role.REGIONAL_MANAGER}
           onClose={() => setDetail(null)}
         />
       )}

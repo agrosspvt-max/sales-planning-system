@@ -36,6 +36,7 @@ import {
   currentBusinessDate, dailyWorkShowsResults, visibleDailyWorkRows, DEFAULT_DAILY_WORK_VIEW, DailyWorkView,
   type RecoveryPaymentMode, paymentModeApplies, paymentModeForActual, type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
   MANDATORY_SECTIONS, resolveDailyWorkSection, isValidTodaysPlan, invalidPlanRows, planRequiredMessage, type PlanRowToCheck,
+  sectionSavedAsNoPlan,
 } from "@/lib/daily-work";
 
 /* --------------------------------- Types (mirror the service DTO) --------------------------------- */
@@ -132,6 +133,20 @@ interface StatusPayload {
 }
 /** Shared status query — every section save/No-Plan invalidates this key so the bar updates immediately. */
 const STATUS_KEY = (workDate: string) => ["daily-work-status", workDate] as const;
+/**
+ * The shared "No Plan" wording (Edit Labels → daily_work.action.no_plan) plus which sections the day's SUBMITTED report batches saved as No Plan.
+ * Only the explicit saved decision counts; an empty section never becomes No Plan by itself.
+ */
+function useReportNoPlan(workDate: string, view: DailyWorkViewType) {
+  const label = useLabel("daily_work.action.no_plan");
+  const { data } = useQuery<SummaryPayload>({
+    queryKey: ["daily-work", "SUMMARY", workDate, view],
+    queryFn: () => api.get<SummaryPayload>(`/api/daily-work?section=SUMMARY&view=${view}&date=${workDate}`),
+    enabled: view === DailyWorkView.REPORT,
+  });
+  return { label, is: (section: string) => view === DailyWorkView.REPORT && sectionSavedAsNoPlan(data?.batches, section) };
+}
+
 function useDailyStatus(workDate: string) {
   return useQuery<StatusPayload>({ queryKey: STATUS_KEY(workDate), queryFn: () => api.get<StatusPayload>(`/api/daily-work/status?date=${workDate}`) });
 }
@@ -328,10 +343,11 @@ function OwnerDailyWorkPage() {
  * Fixed height so tab labels stay aligned whether or not an icon is present.
  */
 function SectionStatusIcon({ status }: { status?: SectionStatusValue }) {
+  const noPlanLabel = useLabel("daily_work.action.no_plan");
   return (
     <span className="flex h-3.5 items-center justify-center">
       {status === "FILLED" ? <Check className="h-3.5 w-3.5 text-success" aria-label="Filled" />
-        : status === "NO_PLAN" ? <Ban className="h-3.5 w-3.5 text-noplan" aria-label="No Plan" />
+        : status === "NO_PLAN" ? <Ban className="h-3.5 w-3.5 text-noplan" aria-label={noPlanLabel} />
           : null}
     </span>
   );
@@ -619,6 +635,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   };
 
   const showResults = dailyWorkShowsResults(view);
+  const reportNoPlan = useReportNoPlan(workDate, view);
   const visibleRows = useMemo(
     () => visibleDailyWorkRows(rows, view, (row) => row.status !== "DRAFT" && row.status !== "NEW"),
     [rows, view],
@@ -764,7 +781,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
             </TableRow>
 
             {visibleRows.length === 0 ? (
-              <TableRow><TableCell colSpan={columnCount} className="py-8 text-center text-muted-foreground">{showResults ? L.noSubmittedSection : L.empty}</TableCell></TableRow>
+              <TableRow><TableCell colSpan={columnCount} className="py-8 text-center text-muted-foreground">{showResults ? (reportNoPlan.is(section) ? <strong>{reportNoPlan.label}</strong> : L.noSubmittedSection) : L.empty}</TableCell></TableRow>
             ) : (
               visibleRows.map((r, i) => {
                 const submitted = r.status !== "DRAFT" && r.status !== "NEW";
@@ -1050,6 +1067,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   };
 
   const showResults = dailyWorkShowsResults(view);
+  const reportNoPlan = useReportNoPlan(workDate, view);
   const showTaskType = view === DailyWorkView.PLAN;
   const visibleRows = useMemo(
     () => visibleDailyWorkRows(rows, view, (row) => row.rowStatus !== "DRAFT" && row.rowStatus !== "NEW"),
@@ -1121,7 +1139,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
             </TableRow>
 
             {visibleRows.length === 0 ? (
-              <TableRow><TableCell colSpan={5 + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0)} className="py-8 text-center text-muted-foreground">{showResults ? L.noSubmittedSection : L.none}</TableCell></TableRow>
+              <TableRow><TableCell colSpan={5 + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0)} className="py-8 text-center text-muted-foreground">{showResults ? (reportNoPlan.is("APPOINTMENT") ? <strong>{reportNoPlan.label}</strong> : L.noSubmittedSection) : L.none}</TableCell></TableRow>
             ) : visibleRows.map((r, i) => {
               const submitted = r.rowStatus !== "DRAFT" && r.rowStatus !== "NEW";
               return (
@@ -1221,6 +1239,7 @@ function ConversionSection({ workDate, view, locked }: { workDate: string; view:
   };
 
   const showResults = dailyWorkShowsResults(view);
+  const reportNoPlan = useReportNoPlan(workDate, view);
   const showTaskType = view === DailyWorkView.PLAN;
   const visibleRows = useMemo(
     () => visibleDailyWorkRows(rows, view, (row) => row.rowStatus !== "DRAFT" && row.rowStatus !== "NEW"),
@@ -1321,7 +1340,7 @@ function ConversionSection({ workDate, view, locked }: { workDate: string; view:
             </TableRow>
 
             {visibleRows.length === 0 ? (
-              <TableRow><TableCell colSpan={5 + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0)} className="py-8 text-center text-muted-foreground">{showResults ? L.noSubmittedSection : L.empty}</TableCell></TableRow>
+              <TableRow><TableCell colSpan={5 + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0)} className="py-8 text-center text-muted-foreground">{showResults ? (reportNoPlan.is("SCHEME_CONVERSION") ? <strong>{reportNoPlan.label}</strong> : L.noSubmittedSection) : L.empty}</TableCell></TableRow>
             ) : visibleRows.map((r, i) => {
               const submitted = r.rowStatus !== "DRAFT" && r.rowStatus !== "NEW";
               return (
@@ -1458,6 +1477,7 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
     noSubmittedSection: useLabel("daily_work.report.no_submitted_section"),
     enterVisits: useLabel("daily_work.validation.enter_visit_actuals"),
   };
+  const noPlanLabel = useLabel("daily_work.action.no_plan");
 
   // Save only the focused tab's fields: VISITS writes the visit columns (so an explicit 0 becomes real data),
   // OTHERS writes only the note — so an Others-only save never marks the Visits section "filled".
@@ -1532,7 +1552,7 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
             </TableRow></TableHeader>
             <TableBody>
               {reportVisitBatches.length === 0 ? (
-                <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">{L.noSubmittedSection}</TableCell></TableRow>
+                <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">{sectionSavedAsNoPlan(data?.batches, "VISITS") ? <strong>{noPlanLabel}</strong> : L.noSubmittedSection}</TableCell></TableRow>
               ) : reportVisitBatches.map((batch, index) => (
                 <TableRow key={batch.entryId}>
                   <TableCell className="font-medium">{index + 1}</TableCell>

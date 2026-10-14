@@ -1192,6 +1192,10 @@ export const DEFAULT_LABELS = {
   "last_payment.aging.op_eq": "Exactly",
   "last_payment.aging.op_between": "Between",
   "last_payment.aging.value": "Days",
+  // ---- Dealer Tags → dealer selector ----
+  "dealer_tags.dealer.placeholder": "Select a dealer…",
+  "dealer_tags.dealer.search": "Search dealers",
+  "dealer_tags.dealer.empty": "No dealers found",
   // ---- Last Payment Report → automatic filtering ----
   "last_payment.filter.loading": "Updating results…",
   "last_payment.filter.error": "The results could not be updated. The last results loaded are still shown; your selections are kept.",
@@ -1347,7 +1351,6 @@ export const DEFAULT_LABELS = {
   "daily_work.others.placeholder": "Anything else you want to record about your day…",
   // Section completion / progress bar / No Plan
   "daily_work.status.filled": "Filled",
-  "daily_work.status.no_plan": "No Plan",
   "daily_work.status.remaining": "Remaining",
   "daily_work.progress.sections": "Sections",
   // Select/input placeholders and empty states
@@ -1480,8 +1483,10 @@ export const DEFAULT_LABELS = {
   "daily_work.performance.invalid_officer": "That Sales Officer is not valid.",
   "daily_work.performance.attendance_admin_only": "Only an administrator can change attendance.",
   "daily_work.performance.my_title": "My Performance",
-  "daily_work.performance.team_title": "Team Performance",
+  "daily_work.performance.team_title": "Performance",
   "daily_work.performance.company_title": "Company Performance",
+  "daily_work.performance.rm_badge": "RM",
+  "daily_work.performance.rm_no_rating": "Regional Managers are not rated",
   "daily_work.performance.date_from": "Date From",
   "daily_work.performance.date_to": "Date To",
   "daily_work.performance.col.date": "Date",

@@ -355,11 +355,10 @@ async function main() {
   {
     const read = (p: string) => readFileSync(p, "utf8");
     const team = read("src/features/daily-work/team-performance-page.tsx");
-    assert.ok(team.includes("{r.submitted ? (") && !team.includes("{r.reportSubmittedAt ? ("), "RM Team Performance offers View from Plan Submission");
     assert.ok(/data\.reportSubmitted/.test(team) && team.includes("<RmReviewPanel") && team.includes("L.reportPending"), "plan-only dialog shows the notice and no rating panel");
     assert.ok(read("src/app/api/daily-work/review/route.ts").includes("{ allowPlanOnly: true }"), "only the review route opts in");
     const perf = read("src/features/daily-work/performance-page.tsx");
-    assert.ok(perf.includes("{r.submitted ? (") && perf.includes("timeText(r.planSubmittedAt)") && perf.includes("timeText(r.reportSubmittedAt)"), "Performance: separate Plan/Report columns, View on plan submission");
+    assert.ok(perf.includes("{r.submitted ? (") && !perf.includes("{r.reportSubmittedAt ? (") && perf.includes("timeText(r.planSubmittedAt)") && perf.includes("timeText(r.reportSubmittedAt)"), "Performance: separate Plan/Report columns, View on plan submission");
   }
 
   // ===================== Phase 3 — Admin company-wide performance =====================

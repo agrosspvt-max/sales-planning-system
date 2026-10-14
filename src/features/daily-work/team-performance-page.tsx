@@ -1,38 +1,27 @@
 "use client";
 
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
-import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
+import { formatDateTimeDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useState } from "react";
+import { Role } from "@prisma/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, Send, Lock } from "lucide-react";
+import { Send, Lock } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { RecoveryPaymentModeField } from "./recovery-payment-mode";
-import { type DailyWorkType, type RecoveryPaymentMode, currentBusinessDate, rowTaskType } from "@/lib/daily-work";
+import { type DailyWorkType, type RecoveryPaymentMode, rowTaskType, sectionSavedAsNoPlan } from "@/lib/daily-work";
 import { formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { RmBadge } from "@/components/ui/rm-badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
 
 /* --------------------------------- DTOs (mirror the service) --------------------------------- */
-
-interface TeamRow {
-  officerId: string; officerName: string; date: string;
-  submitted: boolean; // the Daily Plan was submitted → there is something to view
-  reportSubmittedAt: string | null; selfRating: number | null; rmRating: number | null;
-}
-interface TeamSummary {
-  salesOfficers: number; totalDays: number; submittedReports: number;
-  averageSelfRating: number | null; averageRmRating: number | null;
-}
-interface TeamPayload { from: string; to: string; summary: TeamSummary; rows: TeamRow[] }
 
 interface ReviewDto { rating: number; reviewerId: string; reviewerName: string; reviewedAt: string }
 // All of these are the EXISTING Daily Work report values (the review endpoint returns the standard section payloads).
@@ -44,132 +33,25 @@ interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds?: string[]; cal
 interface ApptRow { rowId: string; entryId?: string; dealerName: string; marketName: string; status: string | null }
 interface ConvRow { dealerId: string; schemeId: string; dealerName: string; schemeName: string; todaysPlan: number | null; achievability: string | null }
 interface SummaryDto {
+  /** Each submitted batch's saved No Plan sections (explicit decision) — the only source of the "No Plan" display. */
+  batches?: { noPlanSections: string | null }[];
   dealerVisits: number; newPartyVisits: number; others: string; visitsEntered: boolean;
   actualDealerVisits?: number | null; actualNewPartyVisits?: number | null;
 }
 interface ReviewDetail {
-  officerId: string; officerName: string; workDate: string;
+  officerId: string; officerName: string; officerRole: Role; workDate: string;
   sales: DealerPayload; recovery: DealerPayload;
   appointment: { rows: ApptRow[] }; conversion: { rows: ConvRow[] };
   summary: SummaryDto; selfRating: number | null; review: ReviewDto | null; reportSubmitted: boolean;
 }
 
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
-const dateText = (d: string) => formatDMY(d);
 const dash = <span className="text-muted-foreground">—</span>;
-
-/* ==================================== Page ==================================== */
-
-export function TeamPerformancePage() {
-  const [from, setFrom] = useState(currentBusinessDate);
-  const [to, setTo] = useState(currentBusinessDate);
-  const [openOfficer, setOpenOfficer] = useState<{ officerId: string; date: string } | null>(null);
-  const L = {
-    title: useLabel("daily_work.team.title"),
-    breadcrumb: useLabel("daily_work.team.breadcrumb"),
-    planning: useLabel("daily_work.page.breadcrumb_planning"),
-    subtitle: useLabel("daily_work.team.subtitle"),
-    dateFrom: useLabel("daily_work.performance.date_from"),
-    dateTo: useLabel("daily_work.performance.date_to"),
-    colDate: useLabel("daily_work.performance.col.date"),
-    colOfficer: useLabel("daily_work.team.col.sales_officer"),
-    colSubmission: useLabel("daily_work.team.col.submission"),
-    colSelf: useLabel("daily_work.team.col.self_rating"),
-    colRm: useLabel("daily_work.team.col.rm_rating"),
-    colAction: useLabel("daily_work.team.col.action"),
-    view: useLabel("daily_work.team.action.view"),
-    submitted: useLabel("daily_work.team.submitted"),
-    notSubmitted: useLabel("daily_work.team.not_submitted"),
-    empty: useLabel("daily_work.team.empty"),
-    sSalesOfficers: useLabel("daily_work.team.summary.sales_officers"),
-    sSubmitted: useLabel("daily_work.team.summary.submitted"),
-    sNotSubmitted: useLabel("daily_work.team.summary.not_submitted"),
-    sAvgSelf: useLabel("daily_work.team.summary.avg_self_rating"),
-    sAvgRm: useLabel("daily_work.team.summary.avg_rm_rating"),
-  };
-  const query = new URLSearchParams({ from, to });
-  const { data, isLoading } = useQuery<TeamPayload>({
-    queryKey: ["team-performance", from, to],
-    queryFn: () => api.get<TeamPayload>(`/api/daily-work/performance?${query.toString()}`),
-  });
-
-  return (
-    <div className="space-y-5">
-      <PageHeader crumbs={[{ label: L.planning }, { label: L.breadcrumb }]} title={L.title} subtitle={L.subtitle} />
-
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1.5"><Label>{L.dateFrom}</Label><DateInputDMY value={from} onChange={(v) => setFrom(v || currentBusinessDate())} className="w-44" aria-label={L.dateFrom} /></div>
-        <div className="space-y-1.5"><Label>{L.dateTo}</Label><DateInputDMY value={to} onChange={(v) => setTo(v || currentBusinessDate())} className="w-44" aria-label={L.dateTo} /></div>
-      </div>
-
-      {/* Team summary for the selected range. Counts are officer-days; averages exclude missing ratings. */}
-      <div className="grid gap-3 rounded-lg border bg-background p-4 sm:grid-cols-3 lg:grid-cols-5">
-        <SummaryStat label={L.sSalesOfficers} value={data ? String(data.summary.salesOfficers) : "—"} />
-        <SummaryStat label={L.sSubmitted} value={data ? String(data.summary.submittedReports) : "—"} />
-        <SummaryStat label={L.sNotSubmitted} value={data ? String(data.summary.totalDays - data.summary.submittedReports) : "—"} />
-        <SummaryStat label={L.sAvgSelf} value={data ? ratingText(data.summary.averageSelfRating) : "—"} />
-        <SummaryStat label={L.sAvgRm} value={data ? ratingText(data.summary.averageRmRating) : "—"} />
-      </div>
-
-      <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{L.colOfficer}</TableHead>
-              <TableHead>{L.colDate}</TableHead>
-              <TableHead>{L.colSubmission}</TableHead>
-              <TableHead>{L.colSelf}</TableHead>
-              <TableHead>{L.colRm}</TableHead>
-              <TableHead className="text-right">{L.colAction}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoading ? (
-              <TableRow><TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-            ) : (data?.rows.length ?? 0) === 0 ? (
-              <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">{L.empty}</TableCell></TableRow>
-            ) : (
-              data!.rows.map((r) => (
-                <TableRow key={`${r.officerId}-${r.date}`}>
-                  <TableCell className="font-medium">{r.officerName}</TableCell>
-                  <TableCell className="whitespace-nowrap">{dateText(r.date)}</TableCell>
-                  <TableCell>
-                    {r.reportSubmittedAt
-                      ? <Badge variant="success">{L.submitted}</Badge>
-                      : <Badge variant="muted">{L.notSubmitted}</Badge>}
-                  </TableCell>
-                  <TableCell className="tabular-nums">{r.selfRating == null ? dash : ratingText(r.selfRating)}</TableCell>
-                  <TableCell className="tabular-nums">{r.rmRating == null ? dash : ratingText(r.rmRating)}</TableCell>
-                  <TableCell className="text-right">
-                    {r.submitted ? (
-                      <Button size="sm" variant="outline" onClick={() => setOpenOfficer({ officerId: r.officerId, date: r.date })}><Eye className="h-4 w-4" /> {L.view}</Button>
-                    ) : dash}
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </div>
-
-      {openOfficer && <DailyWorkReviewDialog officerId={openOfficer.officerId} workDate={openOfficer.date} onClose={() => setOpenOfficer(null)} />}
-    </div>
-  );
-}
-
-function SummaryStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-lg font-semibold tabular-nums">{value}</div>
-    </div>
-  );
-}
 
 /* ==================================== Review dialog (read-only detail + RM rating) ==================================== */
 
 /**
- * Shared read-only Daily Work detail dialog. Used by RM Team Performance (readOnly=false → the RM can submit a
+ * Shared read-only Daily Work detail dialog. Used by the RM Performance page (readOnly=false → the RM can submit a
  * rating when none exists) and by the Admin Performance dashboard (readOnly=true → observe only, no rating control).
  */
 export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly = false }: { officerId: string; workDate: string; onClose: () => void; readOnly?: boolean }) {
@@ -186,7 +68,11 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
     reportPending: useLabel("daily_work.review.report_not_submitted"),
     close: useLabel("daily_work.action.cancel"),
     unavailable: useLabel("daily_work.review.unavailable"),
+    rmReview: useLabel("daily_work.review.rm_review"),
+    rmBadge: useLabel("daily_work.performance.rm_badge"),
+    rmNoRating: useLabel("daily_work.performance.rm_no_rating"),
   };
+  const savedNoPlan = (section: string) => sectionSavedAsNoPlan(data?.summary.batches, section);
   const { data, isLoading, error } = useQuery<ReviewDetail>({
     queryKey: ["team-review", officerId, workDate],
     queryFn: () => api.get<ReviewDetail>(`/api/daily-work/review?officerId=${officerId}&date=${workDate}`),
@@ -204,12 +90,12 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
           <div className="space-y-5">
             <p className="text-sm text-muted-foreground">{data.officerName} · {workDate}</p>
 
-            <DealerSection title={L.sales} rows={data.sales.dealers} autoEntryIds={data.sales.autoTaskEntryIds} calendarEntryIds={data.sales.calendarEntryIds} />
-            <DealerSection title={L.recovery} rows={data.recovery.dealers} autoEntryIds={data.recovery.autoTaskEntryIds} calendarEntryIds={data.recovery.calendarEntryIds} recovery />
-            <AppointmentSection title={L.appointment} rows={data.appointment.rows} />
-            <ConversionSection title={L.conversion} rows={data.conversion.rows} />
-            <VisitsSection title={L.visits} summary={data.summary} />
-            <OthersSection title={L.others} text={data.summary.others} />
+            <DealerSection title={L.sales} noPlan={savedNoPlan("SALES")} rows={data.sales.dealers} autoEntryIds={data.sales.autoTaskEntryIds} calendarEntryIds={data.sales.calendarEntryIds} />
+            <DealerSection title={L.recovery} noPlan={savedNoPlan("RECOVERY")} rows={data.recovery.dealers} autoEntryIds={data.recovery.autoTaskEntryIds} calendarEntryIds={data.recovery.calendarEntryIds} recovery />
+            <AppointmentSection title={L.appointment} noPlan={savedNoPlan("APPOINTMENT")} rows={data.appointment.rows} />
+            <ConversionSection title={L.conversion} noPlan={savedNoPlan("SCHEME_CONVERSION")} rows={data.conversion.rows} />
+            <VisitsSection title={L.visits} noPlan={savedNoPlan("VISITS")} summary={data.summary} />
+            <OthersSection title={L.others} noPlan={savedNoPlan("OTHERS")} text={data.summary.others} />
 
             <div className="flex items-center justify-between rounded-lg border bg-background px-4 py-2.5 text-sm">
               <span className="text-muted-foreground">{L.selfRating}</span>
@@ -219,6 +105,12 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
             {/* Plan-only day: the report (actuals, self-rating) does not exist yet, so there is nothing to rate. */}
             {!data.reportSubmitted ? (
               <p className="rounded-lg border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">{L.reportPending}</p>
+            ) : data.officerRole === Role.REGIONAL_MANAGER ? (
+              // An RM rating does not apply to a Regional Manager: the same RM capsule as the Performance table, never a rating control.
+              <div className="flex items-center justify-between rounded-lg border bg-background px-4 py-2.5 text-sm">
+                <span className="text-muted-foreground">{L.rmReview}</span>
+                <RmBadge label={L.rmBadge} title={L.rmNoRating} />
+              </div>
             ) : <RmReviewPanel
               officerId={officerId}
               workDate={workDate}
@@ -239,17 +131,19 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
 
 /** A titled block holding either a compact Planned | Actual table or a one-line empty state (never a big blank box). */
 type SectionKey = "sales" | "recovery" | "appointment" | "scheme_conversion" | "visits" | "others";
-function ReadSection({ title, section, empty, children }: { title: string; section: SectionKey; empty?: boolean; children?: React.ReactNode }) {
+function ReadSection({ title, section, empty, noPlan = false, children }: { title: string; section: SectionKey; empty?: boolean; noPlan?: boolean; children?: React.ReactNode }) {
   // One editable empty-state label per section (Edit Labels → Daily Work Review).
   const noDataLabels = {
     sales: useLabel("daily_work.review.no_data_sales"), recovery: useLabel("daily_work.review.no_data_recovery"), appointment: useLabel("daily_work.review.no_data_appointment"),
     scheme_conversion: useLabel("daily_work.review.no_data_scheme_conversion"), visits: useLabel("daily_work.review.no_data_visits"), others: useLabel("daily_work.review.no_data_others"),
   };
   const noData = noDataLabels[section];
+  const noPlanLabel = useLabel("daily_work.action.no_plan"); // the ONE shared "No Plan" wording (Edit Labels)
   return (
     <section data-review-section={title}>
       <h3 className="mb-1.5 text-sm font-semibold">{title}</h3>
-      {empty ? <p className="rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground">{noData}</p>
+      {empty && noPlan ? <p className="px-1 py-1 text-sm font-bold" data-no-plan={section}>{noPlanLabel}</p>
+        : empty ? <p className="rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground">{noData}</p>
         : <div className="overflow-auto rounded-md border [&_td]:px-3 [&_td]:py-1.5 [&_th]:h-9 [&_th]:px-3">{children}</div>}
     </section>
   );
@@ -286,8 +180,8 @@ function useReviewColumns() {
 const money = (v: number | null | undefined) => (v == null ? dash : formatCurrency(v));
 
 /** Sales / Recovery: Planned = Today's Plan (Daily Plan); Actual = Today's Sales/Recovery (Daily Report) — separate columns. */
-export function DealerSection({ title, rows, recovery = false, autoEntryIds = [], calendarEntryIds = [] }: {
-  title: string; rows: DealerRow[]; recovery?: boolean; autoEntryIds?: string[]; calendarEntryIds?: string[];
+export function DealerSection({ title, rows, recovery = false, autoEntryIds = [], calendarEntryIds = [], noPlan = false }: {
+  title: string; noPlan?: boolean; rows: DealerRow[]; recovery?: boolean; autoEntryIds?: string[]; calendarEntryIds?: string[];
 }) {
   const C = useReviewColumns();
   const auto = new Set(autoEntryIds), calendar = new Set(calendarEntryIds);
@@ -297,7 +191,7 @@ export function DealerSection({ title, rows, recovery = false, autoEntryIds = []
   };
   const typeText = (row: DealerRow) => (row.entryType === "SCHEME" ? C.schemeType : C.regular);
   return (
-    <ReadSection title={title} section={recovery ? "recovery" : "sales"} empty={rows.length === 0}>
+    <ReadSection title={title} section={recovery ? "recovery" : "sales"} empty={rows.length === 0} noPlan={noPlan}>
       <Table>
         <TableHeader><TableRow>
           <TableHead>{C.dealer}</TableHead><TableHead>{C.task}</TableHead>
@@ -324,11 +218,11 @@ export function DealerSection({ title, rows, recovery = false, autoEntryIds = []
 }
 
 /** Dealer Appointment: Planned = the planned dealer/client visit (market); Actual = the reported result. */
-export function AppointmentSection({ title, rows }: { title: string; rows: ApptRow[] }) {
+export function AppointmentSection({ title, rows, noPlan = false }: { title: string; rows: ApptRow[]; noPlan?: boolean }) {
   const C = useReviewColumns();
   const result = (status: string | null) => status === "APPOINTED" ? C.appointed : status === "NOT_APPOINTED" ? C.notAppointed : dash;
   return (
-    <ReadSection title={title} section="appointment" empty={rows.length === 0}>
+    <ReadSection title={title} section="appointment" empty={rows.length === 0} noPlan={noPlan}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.dealerClient}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
@@ -346,11 +240,11 @@ export function AppointmentSection({ title, rows }: { title: string; rows: ApptR
 }
 
 /** Scheme Conversion: Planned = planned units for today; Actual = the reported achievability. */
-export function ConversionSection({ title, rows }: { title: string; rows: ConvRow[] }) {
+export function ConversionSection({ title, rows, noPlan = false }: { title: string; rows: ConvRow[]; noPlan?: boolean }) {
   const C = useReviewColumns();
   const result = (v: string | null) => v === "YES" ? C.yes : v === "NO" ? C.no : dash;
   return (
-    <ReadSection title={title} section="scheme_conversion" empty={rows.length === 0}>
+    <ReadSection title={title} section="scheme_conversion" empty={rows.length === 0} noPlan={noPlan}>
       <Table>
         <TableHeader><TableRow>
           <TableHead>{C.dealer}</TableHead><TableHead>{C.scheme}</TableHead>
@@ -372,7 +266,7 @@ export function ConversionSection({ title, rows }: { title: string; rows: ConvRo
 }
 
 /** Visits: Planned (Daily Plan counts) vs Actual (Daily Report counts), one metric per row. */
-export function VisitsSection({ title, summary }: { title: string; summary: SummaryDto }) {
+export function VisitsSection({ title, summary, noPlan = false }: { title: string; summary: SummaryDto; noPlan?: boolean }) {
   const C = useReviewColumns();
   const count = (v: number | null | undefined) => (v == null ? dash : v);
   const metrics = [
@@ -380,7 +274,7 @@ export function VisitsSection({ title, summary }: { title: string; summary: Summ
     { label: C.newPartyVisits, planned: summary.newPartyVisits, actual: summary.actualNewPartyVisits },
   ];
   return (
-    <ReadSection title={title} section="visits" empty={!summary.visitsEntered}>
+    <ReadSection title={title} section="visits" empty={!summary.visitsEntered} noPlan={noPlan}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.metric}</TableHead><TableHead className="text-right">{C.planned}</TableHead><TableHead className="text-right">{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
@@ -398,10 +292,10 @@ export function VisitsSection({ title, summary }: { title: string; summary: Summ
 }
 
 /** Others: the planned note. Daily Work records no separate actual for Others, so Actual stays "—" (nothing is invented). */
-export function OthersSection({ title, text }: { title: string; text: string }) {
+export function OthersSection({ title, text, noPlan = false }: { title: string; text: string; noPlan?: boolean }) {
   const C = useReviewColumns();
   return (
-    <ReadSection title={title} section="others" empty={text.trim() === ""}>
+    <ReadSection title={title} section="others" empty={text.trim() === ""} noPlan={noPlan}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.item}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>

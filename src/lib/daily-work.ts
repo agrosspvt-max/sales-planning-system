@@ -461,6 +461,19 @@ export function parseNoPlanSet(csv: string | null | undefined): Set<MandatorySec
   }
   return set;
 }
+/**
+ * Was this section explicitly SAVED as No Plan for the day's report? Only an explicit saved decision counts — an empty section, an
+ * unsubmitted plan/report or missing results never does. The decision lives on each submitted batch:
+ *  - an ACTIVE section must be Filled or No Plan before a batch can be submitted, so a section with no data had No Plan on EVERY batch;
+ *  - a section that is switched off (Scheme Conversion, see SCHEME_CONVERSION_ENABLED) is not required, so batches submitted after it was
+ *    switched off carry no decision at all. There, one batch's saved No Plan stands for the section (callers show it only when the
+ *    section has no data, so populated results are never replaced).
+ */
+export function sectionSavedAsNoPlan(batches: readonly { noPlanSections: string | null }[] | null | undefined, section: string): boolean {
+  if (!batches || batches.length === 0) return false;
+  const saved = (batch: { noPlanSections: string | null }) => (parseNoPlanSet(batch.noPlanSections) as ReadonlySet<string>).has(section);
+  return isDailyWorkSectionEnabled(section) ? batches.every(saved) : batches.some(saved);
+}
 export function serializeNoPlanSet(set: ReadonlySet<string>): string {
   return ALL_DAILY_WORK_SECTIONS.filter((s) => set.has(s)).join(",");
 }

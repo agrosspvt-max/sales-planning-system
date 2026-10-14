@@ -57,7 +57,7 @@ assert.ok(!/new Date|Date\.|toLocale|Intl\./.test(src), "string handling only â€
 }
 
 // Wiring: Date From / Date To use it on every Performance view (My / Team / Company share performance-page; the RM team page has its own filters); state and API stay ISO.
-for (const f of ["src/features/daily-work/performance-page.tsx", "src/features/daily-work/team-performance-page.tsx"]) {
+for (const f of ["src/features/daily-work/performance-page.tsx"]) {
   const page = readFileSync(f, "utf8");
   assert.ok(page.includes("<DateInputDMY value={from} onChange={(v) => setFrom(v || currentBusinessDate())}") && page.includes("<DateInputDMY value={to} onChange={(v) => setTo(v || currentBusinessDate())}"), `${f}: Date From / Date To`);
   assert.ok(!/type="date"/.test(page), `${f}: no native date input left`);

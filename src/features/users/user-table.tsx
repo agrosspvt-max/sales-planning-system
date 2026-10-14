@@ -3,12 +3,13 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Trash2, UserX, UserCheck, UserMinus, ShieldCheck, ArrowUpCircle, ArrowDownCircle, Pencil, Check, X } from "lucide-react";
+import { KeyRound, Trash2, UserX, UserCheck, UserMinus, ArrowUpCircle, ArrowDownCircle, Pencil, Check, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { RmBadge } from "@/components/ui/rm-badge";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -132,7 +133,7 @@ export function UserTable({
                     />
                   )}
                   {showRoleActions && o.isManager && (
-                    <Badge variant="default" className="ml-2 gap-1"><ShieldCheck className="h-3 w-3" /> RM</Badge>
+                    <RmBadge className="ml-2" />
                   )}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{o.username}</TableCell>

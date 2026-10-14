@@ -172,21 +172,25 @@ async function main() {
     const svc = loadService(makeFake().prisma);
     const p = await svc.getDailyPerformance(RM1);
     assert.equal(p.from, p.to, "default From and To are both the current business date");
-    assert.equal(p.rows.length, 2, "one default-date row for each officer in the RM's team");
+    assert.equal(p.rows.length, 3, "one default-date row for the RM themself and one for each officer in the RM's team");
+    assert.deepEqual([p.rows[0].officerId, p.rows[0].officerRole], ["rm1", Role.REGIONAL_MANAGER], "own row first; the role is the ROW person's");
+    assert.deepEqual(flat0(p.rows.slice(1).map((r) => [r.officerId, r.officerRole]).sort()), [["so1", Role.SALES_OFFICER], ["so2", Role.SALES_OFFICER]], "then the team");
+    assert.equal(new Set(p.rows.map(cell)).size, p.rows.length, "every person/date record appears exactly once");
+    assert.equal(p.summary.salesOfficers, 2, "'Sales Officers' counts Sales Officers only — the RM is not one");
+    assert.deepEqual(flat0(p.officers.map((o) => o.id).sort()), ["rm1", "so1", "so2"], "the Sales Officer filter lists the RM's own row and their team");
     await expectStatus(() => svc.getDailyPerformance(RM1, { from: "2026-09-29", to: "2026-09-28" }), 422, "From after To is rejected");
     await expectStatus(() => svc.getDailyPerformance(RM1, { from: "2026-01-01", to: "2026-04-03" }), 422, "range over 92 days is rejected");
   }
 
-  // The RM-only page uses the shared from/to API and keeps each officer-date visible and reviewable.
+  // The RM's page IS Performance: the shared from/to API, one row per person per date, and View on each submitted day.
   {
-    const page = readFileSync(resolve("src/features/daily-work/team-performance-page.tsx"), "utf8");
+    const page = readFileSync(resolve("src/features/daily-work/performance-page.tsx"), "utf8");
     assert.match(page, /const \[from, setFrom\] = useState\(currentBusinessDate\)/);
     assert.match(page, /const \[to, setTo\] = useState\(currentBusinessDate\)/);
     assert.match(page, /new URLSearchParams\(\{ from, to \}\)/);
     assert.match(page, /\/api\/daily-work\/performance\?\$\{query\.toString\(\)\}/);
-    assert.doesNotMatch(page, /\/api\/daily-work\/team\?date=/, "the RM page no longer uses the single-date API");
-    assert.match(page, /key=\{`\$\{r\.officerId\}-\$\{r\.date\}`\}/, "the table renders one row per officer per date");
-    assert.match(page, /workDate=\{openOfficer\.date\}/, "the action opens the selected row's business date");
+    assert.match(page, /key=\{`\$\{r\.officerId\}-\$\{r\.date\}`\}/, "the table renders one row per person per date");
+    assert.match(page, /date: r\.date/, "the action opens the selected row's business date");
     assert.match(page, /data\.summary\.submittedReports/, "range summary uses finalized report submissions");
   }
 
@@ -200,12 +204,52 @@ async function main() {
     assert.equal(p.canEditAttendance, false);
   }
 
-  // 2) RM sees only their team (g1: so1, so2), never another team's SO.
+  // 2) RM sees themself and only their team (g1: so1, so2), never another team's SO (or another RM).
   {
     const svc = loadService(makeFake().prisma);
     const p = await svc.getDailyPerformance(RM1, RANGE);
-    assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["so1", "so2"]);
-    assert.equal(p.rows.length, 6, "2 officers × 3 days");
+    assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["rm1", "so1", "so2"]);
+    assert.equal(p.rows.length, 9, "own row + 2 officers, × 3 days — each person/date once");
+  }
+  // 2b) RM consolidation: own + team in ONE report; no duplicates; RM rows never carry (or average in) an RM rating; counts stay accurate.
+  {
+    const f = makeFake({
+      days: new Map([
+        ["rm1|2026-09-27", { finalizedAt: TS("2026-09-27T18:00:00Z"), selfRating: 9 }],
+        ["so1|2026-09-27", { finalizedAt: TS("2026-09-27T18:00:00Z"), selfRating: 8 }],
+      ]),
+      plans: new Map([["rm1|2026-09-27", TS("2026-09-27T05:00:00Z")], ["so1|2026-09-27", TS("2026-09-27T05:00:00Z")]]),
+      // A stray review row for the RM (impossible through the API) and one real review for so1.
+      reviews: new Map([["rm1|2026-09-27", 3], ["so1|2026-09-27", 7]]),
+    });
+    const svc = loadService(f.prisma);
+    const p = await svc.getDailyPerformance(RM1, RANGE);
+    assert.equal(new Set(p.rows.map(cell)).size, p.rows.length, "no duplicate person/date rows");
+    assert.equal(p.rows.filter((r) => r.officerId === "rm1").length, 3, "the RM's own row appears once per date");
+    const own = p.rows.find((r) => cell(r) === "rm1|2026-09-27")!;
+    assert.equal(own.officerRole, Role.REGIONAL_MANAGER);
+    assert.equal(own.rmRating, null, "an RM row never carries an RM rating");
+    assert.equal(own.selfRating, 9, "the RM's own self rating / submissions are shown");
+    assert.equal(p.rows.find((r) => cell(r) === "so1|2026-09-27")!.rmRating, 7, "Sales Officer ratings unchanged");
+    assert.equal(p.summary.averageRmRating, 7, "the RM-rating average comes from Sales Officers only");
+    assert.equal(p.summary.averageSelfRating, 8.5, "self-rating average keeps the existing rule (each person/date once)");
+    assert.equal(p.summary.salesOfficers, 2, "Sales Officers count excludes the RM");
+    assert.equal(p.summary.totalDays, 9); assert.equal(p.summary.submittedPlans, 2); assert.equal(p.summary.submittedReports, 2);
+    // The RM-scoped officer filter can narrow to the RM's own rows or to one officer; an unrelated person is still refused.
+    const mine = await svc.getDailyPerformance(RM1, { ...RANGE, officerId: "rm1" });
+    assert.deepEqual(flat0([...new Set(mine.rows.map((r) => r.officerId))]), ["rm1"]);
+    assert.equal(mine.summary.salesOfficers, 0); assert.equal(mine.rows.length, 3);
+    await expectStatus(() => svc.getDailyPerformance(RM1, { ...RANGE, officerId: "rm2" }), 403, "another RM stays out of scope");
+    // Admin sees the same RM rows, flagged by the ROW's role, and averages exclude them as well.
+    const adm = await svc.getDailyPerformance(ADMIN, RANGE);
+    assert.deepEqual(flat0([...new Set(adm.rows.filter((r) => r.officerRole === Role.REGIONAL_MANAGER).map((r) => r.officerId))].sort()), ["rm1", "rm2"]);
+    assert.equal(adm.summary.salesOfficers, 5, "company: 5 Sales Officers (the 2 RMs are not counted as Sales Officers)");
+    assert.equal(adm.summary.averageRmRating, 7);
+    assert.equal(new Set(adm.rows.map(cell)).size, adm.rows.length);
+    // A Sales Officer still sees only their own row.
+    const so = await svc.getDailyPerformance(SO1, RANGE);
+    assert.deepEqual(flat0([...new Set(so.rows.map((r) => r.officerId))]), ["so1"]);
+    assert.equal(so.rows.every((r) => r.officerRole === Role.SALES_OFFICER), true);
   }
   // RM cannot request an unrelated SO.
   {
@@ -341,7 +385,7 @@ async function main() {
 
     const byState = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g2" });
     assert.deepEqual([...new Set(byState.rows.map((r) => r.officerId))].sort(), ["rm2", "so3"], "State filter → g2 only");
-    assert.equal(byState.summary.salesOfficers, 2);
+    assert.equal(byState.summary.salesOfficers, 1, "two performers (RM + SO) but only ONE Sales Officer");
     assert.deepEqual(byState.officers.map((o) => o.id).sort(), ["rm2", "so3"], "UP dropdown contains UP performers only");
 
     const wb = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g3" });
@@ -396,7 +440,7 @@ async function main() {
     assert.ok(!all.rows.some((r) => r.officerId === "rm2" && r.date === "2026-10-09"), "RM record outside the date range is excluded");
     const keys = all.rows.map((r) => `${r.officerId}|${r.date}`);
     assert.equal(new Set(keys).size, keys.length, "no performer-day is counted twice");
-    assert.equal(all.summary.salesOfficers, 7);
+    assert.equal(all.summary.salesOfficers, 5, "7 performers, of which 5 are Sales Officers (the 2 RMs are not counted)");
     assert.equal(all.summary.submittedPlans, 2, "rm2 + so3 on the 28th (the out-of-range plan is not counted)");
     assert.equal(all.summary.submittedReports, 1);
     assert.equal(all.summary.averageSelfRating, 9);
@@ -406,14 +450,14 @@ async function main() {
     assert.deepEqual([...new Set(up.rows.map((r) => r.officerId))].sort(), ["rm2", "so3"]);
     const justRm = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g2", officerId: "rm2" });
     assert.deepEqual([...new Set(justRm.rows.map((r) => r.officerId))], ["rm2"]);
-    assert.equal(justRm.summary.salesOfficers, 1);
+    assert.equal(justRm.summary.salesOfficers, 0, "a lone RM is not a Sales Officer");
     assert.equal(justRm.summary.submittedReports, 1, "summary follows the selected person");
     await expectStatus(() => svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g1", officerId: "rm2" }), 403, "an RM from another State is not selectable");
 
-    // Authorization: an RM caller still sees only the Sales Officers of their own team (never RMs / other teams); an SO only self.
+    // Authorization: an RM caller sees themself and the Sales Officers of their own team (never another RM / other teams); an SO only self.
     const asRm = await svc.getDailyPerformance(RM2, RANGE);
-    assert.deepEqual([...new Set(asRm.rows.map((r) => r.officerId))], ["so3"], "RM sees their team only — unchanged");
-    assert.deepEqual(asRm.officers.map((o) => o.id), ["so3"]);
+    assert.deepEqual(flat0([...new Set(asRm.rows.map((r) => r.officerId))].sort()), ["rm2", "so3"], "RM sees their own row and their team only");
+    assert.deepEqual(flat0(asRm.officers.map((o) => o.id).sort()), ["rm2", "so3"]);
     await expectStatus(() => svc.getDailyPerformance(RM2, { ...RANGE, officerId: "rm1" }), 403, "another RM is not exposed through the filter");
     assert.deepEqual([...new Set((await svc.getDailyPerformance(SO1, RANGE)).rows.map((r) => r.officerId))], ["so1"]);
 
@@ -538,7 +582,7 @@ async function main() {
     assert.equal(all.f.store.rawCount, 5, "one totals query regardless of officers/days");
 
     // Existing summary metrics are unchanged by the new section totals.
-    assert.equal(all.p.summary.salesOfficers, 7); assert.equal(all.p.summary.totalDays, 21);
+    assert.equal(all.p.summary.salesOfficers, 5, "Sales Officers only (the 2 RMs are performers, not Sales Officers)"); assert.equal(all.p.summary.totalDays, 21);
   }
 
   // 12) The page: ten new cards (no Others), money vs count formats, existing cards kept.

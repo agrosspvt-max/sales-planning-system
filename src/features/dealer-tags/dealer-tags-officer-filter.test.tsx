@@ -136,7 +136,7 @@ const render = (role: Role, p: typeof preset = {}) => { preset = p; stateCall = 
 const heads = (html: string) => [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim());
 const rowNames = (html: string) => [...html.matchAll(/<tr[^>]*data-dealer-id="([^"]+)"/g)].map((m) => m[1]);
 
-function page() {
+async function page() {
   for (const role of [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER]) {
     // Test 1 — the Sales Officers column sits immediately after Dealer (Admin and RM share the page).
     const html = render(role);
@@ -170,11 +170,29 @@ function page() {
   assert.equal(salesOfficersHeaderLabel(0), "Sales Officers");
   assert.equal(salesOfficersHeaderLabel(2), "Sales Officers (2)");
 
+  // Searchable dealer picker: a combobox over the FULL authorized list (not the filtered table page), case-insensitive partial match, ids as values, labels editable.
+  {
+    const html = render(Role.SUPER_ADMIN, { officerIds: ["so-a"] });
+    assert.ok(/role="combobox"[^>]*aria-label="Search dealers"/.test(html) && html.includes('placeholder="Select a dealer…"'), "searchable combobox with its placeholder and search label");
+    const { filterSearchableOptions } = await import("@/components/ui/searchable-select");
+    const dealerOptions = everyone.map((d) => ({ value: d.id, label: d.name }));
+    assert.deepEqual(filterSearchableOptions(dealerOptions, "  ALP ").map((o) => o.value), ["alpha"], "case-insensitive partial name match");
+    assert.deepEqual(filterSearchableOptions(dealerOptions, "eta").map((o) => o.value), ["beta"]);
+    assert.deepEqual(filterSearchableOptions(dealerOptions, "zzz"), [], "nothing matches → the empty state");
+    assert.equal(filterSearchableOptions(dealerOptions, "").length, everyone.length, "an empty search lists everyone");
+    const { DEFAULT_LABELS } = await import("@/features/labels/labels");
+    assert.deepEqual(["placeholder", "search", "empty"].map((k) => (DEFAULT_LABELS as Record<string, string>)[`dealer_tags.dealer.${k}`]), ["Select a dealer…", "Search dealers", "No dealers found"]);
+    const src = readFileSync("src/features/dealer-tags/dealer-tags-page.tsx", "utf8");
+    assert.ok(src.includes('useLabel("dealer_tags.dealer.placeholder")') && src.includes('useLabel("dealer_tags.dealer.empty")') && src.includes('useLabel("dealer_tags.dealer.search")'), "wording comes from Edit Labels");
+    assert.ok(src.includes("setDealerId(value);") && src.includes("{ dealerId, tagId, operation }"), "the stable dealer id is what is submitted");
+    assert.ok(src.includes('placeholder="Search dealers…"'), "the separate table search is unchanged");
+  }
+
   // Test 11 — assignment / revocation workflow untouched: same endpoints, and the dealer picker still uses the
   // unfiltered list rather than the filtered one.
   const source = readFileSync("src/features/dealer-tags/dealer-tags-page.tsx", "utf8");
   assert.ok(source.includes('"/api/dealer-tags/direct" : "/api/dealer-tags/requests"'));
-  assert.ok(source.includes("options={(dealers.data ?? []).map((d) => ({ value: d.id, label: d.name }))}"));
+  assert.ok(source.includes("(dealers.data ?? []).map((d) => ({ value: d.id, label: d.name }))") && source.includes("<SearchableSelect") && !source.includes("dealerOptions"), "the dealer picker is searchable and still uses the unfiltered, authorized list with ids as values");
   assert.ok(source.includes("const selected = dealers.data?.find((d) => d.id === dealerId);"));
   const route = readFileSync("src/app/api/dealer-tags/dealers/route.ts", "utf8");
   assert.ok(route.includes("requireAuth()") && route.includes("officerIds"), "the filter is read by an authenticated route and applied server-side");
@@ -182,4 +200,4 @@ function page() {
   assert.ok(permissions.includes('p === "dealer-tags/sales-officers"'), "the options endpoint is guarded like the dealers endpoint");
 }
 
-service().then(() => { page(); console.log("dealer-tags-officer-filter.test.tsx — all assertions passed"); }).catch((error) => { console.error(error); process.exitCode = 1; });
+service().then(() => page()).then(() => { console.log("dealer-tags-officer-filter.test.tsx — all assertions passed"); }).catch((error) => { console.error(error); process.exitCode = 1; });

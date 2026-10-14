@@ -1552,6 +1552,8 @@ async function isDailyWorkPlanSubmitted(officerId: string, workDate: string): Pr
 export interface DailyWorkReviewDetailPayload {
   officerId: string;
   officerName: string;
+  /** The reviewed person's role (decides whether an RM rating applies: it never does for a Regional Manager). */
+  officerRole: Role;
   workDate: string;
   sales: DailyWorkPayload;
   recovery: DailyWorkPayload;
@@ -1586,7 +1588,7 @@ export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: s
   if (!reportSubmitted && !(opts.allowPlanOnly && await isDailyWorkPlanSubmitted(officerId, workDate))) throw new ApiError(409, L["daily_work.review.not_submitted"]);
 
   const [officer, sales, recovery, appointment, conversion, summary, status, review] = await Promise.all([
-    prisma.user.findUnique({ where: { id: officerId }, select: { name: true } }),
+    prisma.user.findUnique({ where: { id: officerId }, select: { name: true, role: true } }),
     getDailyWork(ctx, "SALES", workDate, officerId, "REPORT"),
     getDailyWork(ctx, "RECOVERY", workDate, officerId, "REPORT"),
     getDailyAppointment(ctx, workDate, officerId, "REPORT"),
@@ -1598,6 +1600,7 @@ export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: s
   return {
     officerId,
     officerName: officer?.name ?? "—",
+    officerRole: officer?.role ?? Role.SALES_OFFICER,
     workDate,
     sales,
     // Payment Mode is a Daily REPORT value: a plan-only day must never present a (legacy) planned mode as an actual receipt.
@@ -1821,6 +1824,8 @@ const MAX_PERFORMANCE_RANGE_DAYS = 92; // guardrail: a bounded report keeps the 
 export interface PerformanceRow {
   officerId: string;
   officerName: string;
+  /** The role of the person this row represents (not of the viewer): an RM row never carries an RM rating. */
+  officerRole: Role;
   groupId: string | null;
   stateName: string | null; // the officer's UserGroup (region) — shown as "State" for Admin
   date: string; // YYYY-MM-DD business date
@@ -1834,13 +1839,13 @@ export interface PerformanceRow {
   reportMissed: boolean;
 }
 export interface PerformanceSummary {
-  salesOfficers: number;
+  salesOfficers: number; // Sales Officers only — a Regional Manager's own row is never counted here
   presentDays: number;
   totalDays: number; // denominator = officers × dates in range
   submittedPlans: number;
   submittedReports: number;
   averageSelfRating: number | null; // excludes missing (never 0)
-  averageRmRating: number | null; // excludes missing (never 0)
+  averageRmRating: number | null; // excludes missing (never 0) and Regional Manager rows (an RM rating does not apply to them)
   /** Σ Planned / Actual per section over the SAME filtered population and dates as the rows (see performanceSectionTotals for units). */
   sections: PerformanceSectionTotals;
 }
@@ -1884,11 +1889,14 @@ async function performancePopulation(ctx: AuthContext): Promise<PerformancePerso
     return self ? [{ id: self.id, name: self.name, role: self.role, groupId: self.groupId, groupName: self.group?.name ?? null }] : [];
   }
   if (ctx.role === Role.REGIONAL_MANAGER) {
+    // The RM's own row first, then their authorized Sales Officers. Each user is one row source (unique id), so the RM is never counted twice.
     const scope = await getOfficerScope(ctx);
     const ids = scope.ids.filter((id) => id !== ctx.userId);
-    if (ids.length === 0) return [];
-    const officers = await prisma.user.findMany({ where: { role: Role.SALES_OFFICER, isActive: true, deletedAt: null, id: { in: ids } }, select, orderBy: { name: "asc" } });
-    return officers.map((o) => ({ id: o.id, name: o.name, role: o.role, groupId: o.groupId, groupName: o.group?.name ?? null }));
+    const [self, officers] = await Promise.all([
+      prisma.user.findUnique({ where: { id: ctx.userId }, select }),
+      ids.length === 0 ? [] : prisma.user.findMany({ where: { role: Role.SALES_OFFICER, isActive: true, deletedAt: null, id: { in: ids } }, select, orderBy: { name: "asc" } }),
+    ]);
+    return [...(self ? [self] : []), ...officers].map((o) => ({ id: o.id, name: o.name, role: o.role, groupId: o.groupId, groupName: o.group?.name ?? null }));
   }
   // Super Admin — company-wide. Daily Work owners are Sales Officers AND Regional Managers (an RM submits Daily Work too),
   // so both appear. Each user is one row source (unique id), so nobody is double-counted. The RM caller's own scope above is unchanged.
@@ -2003,6 +2011,7 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
       rows.push({
         officerId: officer.id,
         officerName: officer.name,
+        officerRole: officer.role,
         groupId: officer.groupId,
         stateName: officer.groupName,
         date,
@@ -2011,7 +2020,8 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
         reportSubmittedAt: finalized ? finalized.toISOString() : null,
         // A self-rating is committed only at report finalization; surface it only then (never as 0).
         selfRating: finalized && day?.selfRating != null ? day.selfRating : null,
-        rmRating: rmMap.get(key) ?? null,
+        // An RM rating does not apply to a Regional Manager: that row never carries one.
+        rmRating: officer.role === Role.REGIONAL_MANAGER ? null : rmMap.get(key) ?? null,
         submitted: plan != null,
         reportMissed: isReportMissed(date, plan != null, day?.status === "FINALIZED" || finalized != null, now),
       });
@@ -2019,13 +2029,13 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   }
 
   const summary: PerformanceSummary = {
-    salesOfficers: population.length,
+    salesOfficers: population.filter((p) => p.role === Role.SALES_OFFICER).length,
     presentDays: rows.filter((r) => r.attendance === "PRESENT").length,
     totalDays: rows.length,
     submittedPlans: rows.filter((r) => r.planSubmittedAt != null).length,
     submittedReports: rows.filter((r) => r.reportSubmittedAt != null).length,
     averageSelfRating: average(rows.map((r) => r.selfRating).filter((v): v is number => v != null)),
-    averageRmRating: average(rows.map((r) => r.rmRating).filter((v): v is number => v != null)),
+    averageRmRating: average(rows.filter((r) => r.officerRole === Role.SALES_OFFICER).map((r) => r.rmRating).filter((v): v is number => v != null)),
     sections: performanceSectionTotals(entryRows),
   };
 

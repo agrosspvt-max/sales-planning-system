@@ -47,4 +47,52 @@ for (const [f, src] of files) {
   for (const mt of code.matchAll(/\?\?\s*\"([^\"]+)\"/g)) assert.fail(`${f}: hardcoded fallback text "${mt[1]}"`);
   for (const key of code.matchAll(/useLabel\("([^"]+)"\)/g)) assert.ok(key[1]! in DEFAULT_LABELS, `${f}: unregistered label ${key[1]}`);
 }
+
+// 3. No Plan: ONE shared label (Edit Labels), bold under each section heading, only from the explicit saved state.
+import { sectionSavedAsNoPlan } from "@/lib/daily-work";
+const NP = "daily_work.action.no_plan";
+assert.equal((DEFAULT_LABELS as Record<string, string>)[NP], "No Plan", "default text");
+assert.ok(!("daily_work.status.no_plan" in DEFAULT_LABELS), "no second, unused No Plan key");
+const row = { dealerId: "d1", dealerName: "Alpha", todaysPlan: 100, todaysActual: 90 };
+const noPlanCases: [string, (np: boolean) => React.ReactElement, string][] = [
+  ["Sales", (np) => <m.DealerSection title="Sales" rows={[]} noPlan={np} />, "No Sales data"],
+  ["Recovery", (np) => <m.DealerSection title="Recovery" rows={[]} recovery noPlan={np} />, "No Recovery data"],
+  ["Appt", (np) => <m.AppointmentSection title="Dealer Appointment" rows={[]} noPlan={np} />, "No Dealer Appointment data"],
+  ["Conv", (np) => <m.ConversionSection title="Scheme Conversion" rows={[]} noPlan={np} />, "No Scheme Conversion data"],
+  ["Vis", (np) => <m.VisitsSection title="Visits" summary={visits} noPlan={np} />, "No Visits data"],
+  ["Oth", (np) => <m.OthersSection title="Others" text=" " noPlan={np} />, "No Others data"],
+];
+for (const [name, render, oldMessage] of noPlanCases) {
+  let out = renderToStaticMarkup(render(true));
+  assert.ok(/<p[^>]*font-bold[^>]*data-no-plan="[^"]+"[^>]*>No Plan<\/p>/.test(out) && !out.includes(oldMessage), `${name}: bold No Plan replaces "${oldMessage}"`);
+  assert.ok(out.indexOf("<h3") < out.indexOf("No Plan"), `${name}: No Plan sits beneath the heading`);
+  out = renderToStaticMarkup(render(false));
+  assert.ok(out.includes(oldMessage) && !out.includes("No Plan"), `${name}: an empty section that was NOT saved as No Plan keeps its own message`);
+  edited[NP] = "Not Planned";
+  out = renderToStaticMarkup(render(true));
+  assert.ok(/font-bold[^>]*>Not Planned</.test(out) && !out.includes(">No Plan<"), `${name}: editing the label updates the display and keeps it bold`);
+  delete edited[NP];
+}
+// Populated sections ignore the flag (data always wins) and keep their values.
+assert.ok(renderToStaticMarkup(<m.DealerSection title="Sales" rows={[row]} noPlan />).includes("Alpha") && !renderToStaticMarkup(<m.DealerSection title="Sales" rows={[row]} noPlan />).includes("No Plan"), "populated section unchanged");
+// The saved-state rule: every submitted batch must carry it; none / empty / other sections never count.
+const b = (csv: string | null) => ({ noPlanSections: csv });
+assert.equal(sectionSavedAsNoPlan([b("SALES,RECOVERY")], "SALES"), true);
+assert.equal(sectionSavedAsNoPlan([b("SALES,RECOVERY")], "APPOINTMENT"), false, "mixed record: only the saved sections");
+assert.equal(sectionSavedAsNoPlan([b("SALES"), b(null)], "SALES"), false, "one batch with plan data/none saved → not No Plan");
+assert.equal(sectionSavedAsNoPlan([], "SALES"), false, "no submitted batch (unsubmitted plan/report) is never No Plan");
+assert.equal(sectionSavedAsNoPlan(undefined, "SALES"), false);
+assert.equal(sectionSavedAsNoPlan([b("")], "SALES"), false, "an empty section is not No Plan");
+// Scheme Conversion (switched off in Daily Work): batches submitted since carry no decision, so one explicit saved No Plan counts — and only an explicit one.
+assert.equal(sectionSavedAsNoPlan([b("SALES,SCHEME_CONVERSION")], "SCHEME_CONVERSION"), true, "explicit Scheme Conversion No Plan");
+assert.equal(sectionSavedAsNoPlan([b("SCHEME_CONVERSION"), b("SALES")], "SCHEME_CONVERSION"), true, "…even when a later batch (submitted while the section was off) has no decision");
+assert.equal(sectionSavedAsNoPlan([b("SALES,RECOVERY"), b(null)], "SCHEME_CONVERSION"), false, "no explicit selection → the normal empty message");
+assert.equal(sectionSavedAsNoPlan([], "SCHEME_CONVERSION"), false);
+// Wiring: every place uses the one key.
+for (const f of ["team-performance-page", "daily-work-page", "admin-daily-work-viewer"]) {
+  const src = readFileSync(`src/features/daily-work/${f}.tsx`, "utf8");
+  assert.ok(src.includes(`"${NP}"`), `${f} reads the shared No Plan label`);
+  assert.ok(!/>\s*No Plan\s*</.test(src) && !/aria-label="No Plan"/.test(src), `${f}: no hard-coded No Plan text`);
+}
+assert.ok(readFileSync("src/features/daily-work/admin-daily-work-viewer.tsx", "utf8").includes("strong"), "admin report: bold");
 console.log("performance-labels.test.tsx — all assertions passed");

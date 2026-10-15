@@ -18,6 +18,8 @@ export interface NotificationItem {
   relatedEntityId: string | null;
   isRead: boolean;
   createdAt: string;
+  /** Resolved on the server for this recipient (calendar day / exception details); null when the alert has no destination. */
+  href?: string | null;
 }
 
 interface Feed {
@@ -26,6 +28,7 @@ interface Feed {
 }
 
 function hrefFor(n: NotificationItem): string | null {
+  if (n.href) return n.href;
   if (n.relatedEntityType === "DealerTagRequest") return "/planning/approvals";
   if (n.relatedEntityType === "SeasonPlan" && n.relatedEntityId) return `/planning/${n.relatedEntityId}`;
   if (n.relatedEntityType === "Announcement") return `/announcements`;

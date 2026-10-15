@@ -411,6 +411,8 @@ function makeStore() {
 
 const localRequire = createRequire(import.meta.url);
 
+/** Every new-task alert the CN service asked for (source, owner, date, amount, event id). */
+const cnTaskAlerts: Array<Record<string, unknown>> = [];
 function loadService(
   prisma: object,
   audits: Array<{ summary?: string | null }> = [],
@@ -435,6 +437,7 @@ function loadService(
       reverseMaterializedDailyWorkContribution: async (_tx: unknown, input: { entryId: string; contribution: number }) => { reversals.push(input); },
     },
     "@/features/labels/service.server": { getResolvedLabels: async () => ({ ...DEFAULT_LABELS, ...labelOverrides }) },
+    "@/features/notifications/task-alerts.server": { notifyAutoTaskCreated: async (_tx: unknown, _labels: unknown, alert: Record<string, unknown>) => { cnTaskAlerts.push(alert); } }, // own suite: notifications/task-alerts.test.ts
     "@/lib/cn-request": {
       CN_PAYMENT_STATUSES,
       CN_ACCEPTANCE_DETAILS_REQUIRED_MESSAGE,
@@ -999,6 +1002,13 @@ async function main() {
     { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 3, outstandingAmount: 12000 },
     PDF_UPLOAD,
   )).status, "ACCEPTED_NOT_POSTED");
+  // The accepted Payment-Pending CN opens ONE Recovery task: exactly one alert request, for the planned (outstanding) amount, linked to the task event.
+  const acceptanceAlerts = cnTaskAlerts.filter((x) => x.entityType === "CnPaymentEvent");
+  assert.equal(acceptanceAlerts.length >= 1, true, "a new CN task asks for an alert");
+  const lastAlert = acceptanceAlerts.at(-1)!;
+  assert.deepEqual([lastAlert.source, lastAlert.section, lastAlert.amount], ["CN", "RECOVERY", 12000]);
+  assert.equal(typeof lastAlert.date, "string"); assert.match(String(lastAlert.date), /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(store.paymentEvents.some((e) => e.id === lastAlert.entityId), true, "the alert points at the saved task event");
   const accepted = store.rows.find((row) => row.id === "cn-1")!;
   assert.equal(accepted.acceptanceReason, "PAYMENT_PENDING");
   assert.equal(accepted.acceptanceReasonDetails, null);

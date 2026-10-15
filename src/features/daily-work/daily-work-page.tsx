@@ -19,6 +19,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { NativeSelect } from "@/components/ui/select";
+import { SearchableDropdown } from "@/components/ui/searchable-dropdown";
+import { StatusDialog } from "@/features/party-planning/monthly-planning-page";
+import type { MonthlyPlanDto } from "@/features/party-planning/monthly.server";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -1048,12 +1051,70 @@ function AddDealerDialog({ available, labels, onAdd, onClose }: {
 
 /* ==================================== SECTION 3 — Dealer Appointment ==================================== */
 
-interface ApptRowDto { entryId: string; batchId: string; rowId: string; dealerName: string; marketName: string; monthlyPlan: null; pending: null; status: "APPOINTED" | "NOT_APPOINTED" | null; rowStatus: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" }
-interface ApptPayload { section: "APPOINTMENT"; workDate: string; canEnterStatus: boolean; rows: ApptRowDto[]; calendarEntryIds?: string[] }
-interface ApptEditRow { entryId: string; batchId: string; rowId: string; dealerName: string; marketName: string; status: "APPOINTED" | "NOT_APPOINTED" | ""; rowStatus: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW" }
+interface ApptRowDto {
+  entryId: string; batchId: string; rowId: string; monthlyPlanId: string | null; marketId: string | null; marketName: string; dealerName: string; legacy: boolean;
+  monthlyStatus: string | null; resultEventId: string | null; reportedDealerName: string; status: "APPOINTED" | "NOT_APPOINTED" | null; rowStatus: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED";
+}
+interface EligibleMarketDto { monthlyPlanId: string; marketId: string; marketName: string; monthlyStatus: string }
+interface ApptPayload {
+  section: "APPOINTMENT"; workDate: string; partyPlanningEnabled: boolean; canEnterStatus: boolean; eligibleMarkets: EligibleMarketDto[]; monthlyDealerPlan: number; pending: number; rows: ApptRowDto[]; calendarEntryIds?: string[];
+}
+interface ApptEditRow {
+  entryId: string; batchId: string; rowId: string; monthlyPlanId: string; marketName: string; dealerName: string; legacy: boolean; monthlyStatus: string | null; resultEventId: string | null;
+  /** Daily Report: the reported dealer name. Temporary report input until a result is saved; always blank for Not Appointed. */
+  reportedDealerName: string;
+  status: "APPOINTED" | "NOT_APPOINTED" | ""; rowStatus: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
+}
 
 let apptSeq = 0;
-const newApptRow = (): ApptEditRow => { const rowId = `new-${Date.now()}-${apptSeq++}`; return { entryId: rowId, batchId: "", rowId, dealerName: "", marketName: "", status: "", rowStatus: "NEW" }; };
+const newApptRow = (connected = true): ApptEditRow => { const rowId = `new-${Date.now()}-${apptSeq++}`; return { entryId: rowId, batchId: "", rowId, monthlyPlanId: "", marketName: "", dealerName: "", legacy: !connected, monthlyStatus: null, resultEventId: null, reportedDealerName: "", status: "", rowStatus: "NEW" }; };
+
+/**
+ * Daily Report → "Appointed": opens the Monthly Planning status dialog (the very same StatusDialog) inside Daily Work. Its final save goes to ONE endpoint that runs the owner's
+ * "Doc Send By SO" transition and stores the Daily Work result together; opening / ticking / Continue never save anything. An entry that already progressed has no owner step left:
+ * it shows its current status and records the result without a second transition.
+ */
+function AppointedPopup({ row, workDate, onClose, onDone }: { row: ApptEditRow; workDate: string; onClose: () => void; onDone: () => void }) { // the entered dealer name travels WITH the final save only
+  const L = {
+    unavailable: useLabel("daily_work.appointment.popup_unavailable"), title: useLabel("daily_work.appointment.progressed_title"), message: useLabel("daily_work.appointment.progressed_message"),
+    confirm: useLabel("daily_work.appointment.progressed_confirm"), cancel: useLabel("daily_work.action.cancel"),
+  };
+  const { data: plan, error, isLoading } = useQuery<MonthlyPlanDto>({
+    queryKey: ["daily-work", "appointment-plan", row.monthlyPlanId],
+    queryFn: () => api.get<MonthlyPlanDto>(`/api/daily-work/appointment-plan?id=${encodeURIComponent(row.monthlyPlanId)}`),
+    staleTime: 0, gcTime: 0, retry: false,
+  });
+  const save = (sent?: unknown) => api.post("/api/daily-work/appointed", { workDate, entryId: row.entryId, dealerName: row.reportedDealerName, ...(sent ? { sent } : {}) });
+  const [failure, setFailure] = useState<string | null>(null);
+  const progressed = useMutation({ mutationFn: () => save(), onSuccess: onDone, onError: (e) => setFailure((e as Error).message) });
+  if (isLoading) return null;
+  if (error || !plan) {
+    return (
+      <Dialog open onOpenChange={(open) => !open && onClose()}>
+        <DialogContent className="max-w-sm"><DialogHeader><DialogTitle>{row.marketName}</DialogTitle></DialogHeader>
+          <p role="alert" className="text-sm text-destructive">{(error as Error | null)?.message ?? L.unavailable}</p>
+          <DialogFooter><Button variant="outline" onClick={onClose}>{L.cancel}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+  if (plan.allowedStatuses.length === 0) {
+    return (
+      <Dialog open onOpenChange={(open) => !open && !progressed.isPending && onClose()}>
+        <DialogContent className="max-w-md" data-testid="appointed-progressed">
+          <DialogHeader><DialogTitle>{L.title.replace("{market}", plan.marketName)}</DialogTitle></DialogHeader>
+          <p className="text-sm">{L.message.replace("{status}", plan.statusLabel)}</p>
+          {failure && <p role="alert" className="text-sm text-destructive">{failure}</p>}
+          <DialogFooter>
+            <Button variant="outline" disabled={progressed.isPending} onClick={onClose}>{L.cancel}</Button>
+            <Button disabled={progressed.isPending || plan.opStatus === "REJECTED"} onClick={() => { setFailure(null); progressed.mutate(); }}>{L.confirm}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+  return <StatusDialog plan={plan} onClose={onClose} onChanged={onDone} submit={(body) => save((body as { sent?: unknown }).sent)} />;
+}
 
 function AppointmentSection({ workDate, view, locked }: { workDate: string; view: DailyWorkViewType; locked: boolean }) {
   const qc = useQueryClient();
@@ -1062,15 +1123,17 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
     queryFn: () => api.get<ApptPayload>(`/api/daily-work?section=APPOINTMENT&view=${view}&date=${workDate}`),
   });
 
+  const partyPlanningEnabled = data?.partyPlanningEnabled ?? false;
   const [rows, setRows] = useState<ApptEditRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [appointedFor, setAppointedFor] = useState<ApptEditRow | null>(null);
   const hydratedRef = useRef(false);
   const seedHydrationPendingRef = useRef(false);
   useEffect(() => {
     if (!data) return;
     setRows(data.rows.length > 0
-      ? data.rows.map((r) => ({ entryId: r.entryId, batchId: r.batchId, rowId: r.rowId, dealerName: r.dealerName, marketName: r.marketName, status: r.status ?? "", rowStatus: r.rowStatus }))
-      : [newApptRow()]);
+      ? data.rows.map((r) => ({ entryId: r.entryId, batchId: r.batchId, rowId: r.rowId, monthlyPlanId: r.monthlyPlanId ?? "", marketName: r.marketName, dealerName: r.dealerName, legacy: r.legacy, monthlyStatus: r.monthlyStatus, resultEventId: r.resultEventId, reportedDealerName: r.reportedDealerName ?? "", status: r.status ?? "", rowStatus: r.rowStatus }))
+      : [newApptRow(!!data.partyPlanningEnabled)]);
     hydratedRef.current = false;
     seedHydrationPendingRef.current = true;
   }, [data]);
@@ -1078,16 +1141,17 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   const canEnterStatus = data?.canEnterStatus ?? false;
   const L = {
     dealer: useLabel("col.dealer"), dealers: useLabel("daily_work.count.dealers"),
-    market: useLabel("daily_work.col.market"), markets: useLabel("daily_work.count.markets"),
-    plan: useLabel("daily_work.col.monthly_dealer_plan"), pending: useLabel("col.pending"),
-    work: useLabel("daily_work.col.todays_appointment"), status: useLabel("daily_work.col.appointment_status"),
-    appointed: useLabel("daily_work.status.appointed"), notAppointed: useLabel("daily_work.status.not_appointed"),
-    addRow: useLabel("daily_work.action.add_row"), saveDraft: useLabel("daily_work.action.save_draft"),
-    saveActuals: useLabel("daily_work.action.save_actuals"),
-    multiple: useLabel("daily_work.combined.multiple"), none: useLabel("daily_work.combined.none"),
-    removeRow: useLabel("daily_work.action.remove_row"), saving: useLabel("daily_work.state.saving"),
-    dealerName: useLabel("daily_work.placeholder.dealer_name"),
-    marketPlaceholder: useLabel("daily_work.placeholder.market"), selectStatus: useLabel("daily_work.placeholder.select_status"),
+    manualDealerPlaceholder: useLabel("daily_work.placeholder.dealer_name"), manualMarketPlaceholder: useLabel("daily_work.placeholder.market"),
+    addDealer: useLabel("daily_work.action.add_row"), work: useLabel("daily_work.col.todays_appointment"),
+    market: useLabel("daily_work.appointment.market"), markets: useLabel("daily_work.count.markets"),
+    plan: useLabel("daily_work.appointment.monthly_dealer_plan"), pending: useLabel("daily_work.appointment.pending"),
+    status: useLabel("daily_work.appointment.result"), selectResult: useLabel("daily_work.appointment.select_result"),
+    appointed: useLabel("daily_work.appointment.result_appointed"), notAppointed: useLabel("daily_work.appointment.result_not_appointed"),
+    addMarket: useLabel("daily_work.appointment.add_market"), selectMarket: useLabel("daily_work.appointment.select_market"), searchMarket: useLabel("daily_work.appointment.search_market"), searchMarketPlaceholder: useLabel("daily_work.appointment.search_market_placeholder"),
+    noMarketsFound: useLabel("daily_work.appointment.no_markets_found"), noApproved: useLabel("daily_work.appointment.no_approved_markets"),
+    dealerName: useLabel("daily_work.appointment.dealer_name"), dealerNamePlaceholder: useLabel("daily_work.appointment.dealer_name_placeholder"),
+    legacyDealer: useLabel("daily_work.appointment.legacy_dealer"), monthlyStatus: useLabel("daily_work.appointment.monthly_status"),
+    none: useLabel("daily_work.combined.none"), removeRow: useLabel("daily_work.action.remove_row"),
     noSubmittedSection: useLabel("daily_work.report.no_submitted_section"),
     taskType: useLabel("daily_work.col.task_type"),
     taskTypeAuto: useLabel("daily_work.task_type.auto"), taskTypeManual: useLabel("daily_work.task_type.manual"), taskTypeCalendar: useLabel("daily_work.task_type.calendar"),
@@ -1100,24 +1164,30 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
     () => visibleDailyWorkRows(rows, view, (row) => row.rowStatus !== "DRAFT" && row.rowStatus !== "NEW"),
     [rows, view],
   );
+  const eligible = data?.eligibleMarkets ?? [];
 
   const combined = useMemo(() => {
     const src: AppointmentRow[] = visibleRows.map((r) => ({ marketName: r.marketName, status: r.status === "" ? null : r.status }));
     return combineAppointmentRows(src, { dealer: L.dealer, dealers: L.dealers, market: L.market, markets: L.markets });
   }, [visibleRows, L.dealer, L.dealers, L.market, L.markets]);
 
-  // Dealer Appointment has no Auto Task source, so every row is Manual (derived, not fabricated).
+  // Dealer Appointment has no Auto Task source: a row is Calendar (from a Calendar Daily Task) or Manual.
   const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.none, calendar: L.taskTypeCalendar };
 
-  const payloadRows = () => rows.filter((r) => r.dealerName.trim() !== "").map((r) => ({ rowId: r.rowId, dealerName: r.dealerName, marketName: r.marketName }));
+  // Plan: linked markets by plan id, plus untouched legacy rows echoed back as stored (nothing new can be typed).
+  const payloadRows = () => rows.filter((r) => r.monthlyPlanId !== "" || (r.legacy && r.dealerName.trim() !== ""))
+    .map((r) => (r.legacy ? { rowId: r.rowId, dealerName: r.dealerName, marketName: r.marketName } : { rowId: r.rowId, monthlyPlanId: r.monthlyPlanId }));
 
   const isReport = view === DailyWorkView.REPORT;
-  const statusEntries = () => visibleRows.filter((r) => r.status !== "").map((r) => ({ entryId: r.entryId, status: r.status }));
-  const autosaveEnabled = isReport ? canEnterStatus && !locked : view === DailyWorkView.PLAN && !locked;
-  const draftKey = isReport ? `R|${JSON.stringify(statusEntries())}` : JSON.stringify(payloadRows());
+  // The result autosave carries ONLY verified choices: Not Appointed (any row), and an Appointed that was already recorded (an echo). A new Appointed on a linked row never travels here.
+  // The reported dealer name rides along ONLY with Appointed (a recorded one, or a legacy row); Not Appointed carries none — the server clears it anyway.
+  const statusEntries = () => visibleRows.filter((r) => r.status !== "" && (r.legacy || r.status === "NOT_APPOINTED" || r.resultEventId !== null || r.status === "APPOINTED"))
+    .map((r) => (r.status === "APPOINTED" ? { entryId: r.entryId, status: r.status, dealerName: r.reportedDealerName } : { entryId: r.entryId, status: r.status }));
+  const autosaveEnabled = !!data && (isReport ? canEnterStatus && !locked : view === DailyWorkView.PLAN && !locked);
+  const draftKey = `${partyPlanningEnabled}|${isReport ? `R|${JSON.stringify(statusEntries())}` : JSON.stringify(payloadRows())}`;
   const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
     if (isReport) { const entries = statusEntries(); if (entries.length > 0) await api.post("/api/daily-work/actual", { section: "APPOINTMENT", workDate, entries }); }
-    else await api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, rows: payloadRows() });
+    else await api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, partyPlanningEnabled, rows: payloadRows() });
     setError(null);
     qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
   }, { onConflict: () => { qc.invalidateQueries({ queryKey: ["daily-work", "APPOINTMENT", workDate] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); } });
@@ -1130,68 +1200,113 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   useRegisterSaveDraft(autosaveEnabled, { flush: autosave.flush, saving: autosave.saving, failed: autosave.failed, savedAt: autosave.savedAt });
   const busy = false; // autosave never disables the inputs mid-edit
 
-  const update = (i: number, patch: Partial<ApptEditRow>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const pickMarket = (i: number, monthlyPlanId: string) => {
+    const m = eligible.find((x) => x.monthlyPlanId === monthlyPlanId);
+    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, monthlyPlanId, marketName: m?.marketName ?? "", monthlyStatus: m?.monthlyStatus ?? null } : r)));
+  };
   const updateRow = (entryId: string, patch: Partial<ApptEditRow>) => setRows((rs) => rs.map((r) => (r.entryId === entryId ? { ...r, ...patch } : r)));
-  const addRow = () => setRows((rs) => [...rs, newApptRow()]);
-  const removeRow = (i: number) => setRows((rs) => (rs.length <= 1 ? [newApptRow()] : rs.filter((_, j) => j !== i)));
+  const taken = new Set(rows.map((r) => r.monthlyPlanId).filter((id) => id !== ""));
+  const addRow = () => setRows((rs) => [...rs, newApptRow(partyPlanningEnabled)]);
+  const removeRow = (i: number) => setRows((rs) => (rs.length <= 1 ? [newApptRow(partyPlanningEnabled)] : rs.filter((_, j) => j !== i)));
+  const chooseResult = (r: ApptEditRow, value: string) => {
+    if (value === "APPOINTED" && !r.legacy && partyPlanningEnabled) { setAppointedFor(r); return; } // verified only by the popup's final save
+    // Not Appointed clears the name (and the input is disabled for that result); a legacy row's Appointed keeps whatever was typed.
+    updateRow(r.entryId, { status: value as ApptEditRow["status"], ...(value === "NOT_APPOINTED" ? { reportedDealerName: "" } : {}) });
+  };
   if (isLoading) return <Skeleton className="h-64 w-full" />;
+
+  const hasRows = visibleRows.some((r) => r.monthlyPlanId !== "" || r.legacy);
+  const noApprovedMarkets = partyPlanningEnabled && view === DailyWorkView.PLAN && eligible.length === 0 && !hasRows;
+  const colCount = (partyPlanningEnabled ? 3 : 5) + (showResults ? (partyPlanningEnabled ? 2 : 1) : 0) + (showTaskType ? 1 : 0); // Market, [Task Type], [Dealer Name], Monthly Dealer Plan, Pending, [Result]
 
   return (
     <div className="space-y-4">
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table className={cn("table-fixed", showResults ? "min-w-[1024px]" : "min-w-[912px]")}>
+        <Table className={cn("table-fixed", showResults ? "min-w-[1000px]" : "min-w-[760px]")}>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-52">{L.dealer}</TableHead>
-              {showTaskType && <TableHead className="w-32">{L.taskType}</TableHead>}
-              <TableHead className="w-44">{L.market}</TableHead>
-              <TableHead className="w-44 text-right">{L.plan}</TableHead>
-              <TableHead className="w-32 text-right">{L.pending}</TableHead>
-              <TableHead className="w-40">{L.work}</TableHead>
-              {showResults && <TableHead className="w-44">{L.status}</TableHead>}
+              <TableHead className="w-72">{partyPlanningEnabled ? L.market : L.dealer}</TableHead>
+              {showTaskType && <TableHead className="w-28">{L.taskType}</TableHead>}
+              {!partyPlanningEnabled && <TableHead className="w-52">{L.market}</TableHead>}
+              {showResults && partyPlanningEnabled && <TableHead className="w-56">{L.dealerName}</TableHead>}
+              <TableHead className="w-40 text-right">{L.plan}</TableHead>
+              <TableHead className="w-28 text-right">{L.pending}</TableHead>
+              {!partyPlanningEnabled && <TableHead className="w-48">{L.work}</TableHead>}
+              {showResults && <TableHead className="w-48">{L.status}</TableHead>}
               {view === DailyWorkView.PLAN && <TableHead className="w-16" />}
             </TableRow>
           </TableHeader>
           <TableBody>
-            {/* Combined summary — dealer count plus numeric aggregates; dealer-level values stay neutral. */}
-            <TableRow className="border-b-2 bg-muted/40 font-semibold">
-              <TableCell>{combined.dealerLabel}</TableCell>
+            {/* Summary row: the MONTHLY totals (unique approved markets / markets whose monthly workflow is unfinished). Rows below never repeat them. */}
+            <TableRow className="border-b-2 bg-muted/40 font-semibold" data-testid="appointment-summary">
+              <TableCell>{partyPlanningEnabled ? combined.marketLabel : combined.dealerLabel}</TableCell>
               {showTaskType && <TableCell>{L.none}</TableCell>}
-              <TableCell>{L.none}</TableCell>
-              <TableCell className="text-right text-muted-foreground">{L.none}</TableCell>
-              <TableCell className="text-right text-muted-foreground">{L.none}</TableCell>
-              <TableCell>{L.none}</TableCell>
+              {!partyPlanningEnabled && <TableCell>{L.none}</TableCell>}
+              {showResults && partyPlanningEnabled && <TableCell>{L.none}</TableCell>}
+              <TableCell className="text-right tabular-nums" data-testid="monthly-dealer-plan">{partyPlanningEnabled && data ? data.monthlyDealerPlan : L.none}</TableCell>
+              <TableCell className="text-right tabular-nums" data-testid="monthly-pending">{partyPlanningEnabled && data ? data.pending : L.none}</TableCell>
+              {!partyPlanningEnabled && <TableCell>{L.none}</TableCell>}
               {showResults && <TableCell>{L.none}</TableCell>}
               {view === DailyWorkView.PLAN && <TableCell />}
             </TableRow>
 
-            {visibleRows.length === 0 ? (
-              <TableRow><TableCell colSpan={5 + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0)} className="py-8 text-center text-muted-foreground">{showResults ? (reportNoPlan.is("APPOINTMENT") ? <strong>{reportNoPlan.label}</strong> : L.noSubmittedSection) : L.none}</TableCell></TableRow>
-            ) : visibleRows.map((r, i) => {
+            {noApprovedMarkets ? (
+              <TableRow><TableCell colSpan={colCount + (view === DailyWorkView.PLAN ? 1 : 0)} className="py-8 text-center text-muted-foreground" data-testid="no-approved-markets">{L.noApproved}</TableCell></TableRow>
+            ) : visibleRows.length === 0 ? (
+              <TableRow><TableCell colSpan={colCount + (view === DailyWorkView.PLAN ? 1 : 0)} className="py-8 text-center text-muted-foreground">{showResults ? (reportNoPlan.is("APPOINTMENT") ? <strong>{reportNoPlan.label}</strong> : L.noSubmittedSection) : L.none}</TableCell></TableRow>
+            ) : visibleRows.map((r) => {
+              const i = rows.findIndex((x) => x.entryId === r.entryId);
               const submitted = r.rowStatus !== "DRAFT" && r.rowStatus !== "NEW";
+              const options = eligible.filter((m) => m.monthlyPlanId === r.monthlyPlanId || !taken.has(m.monthlyPlanId)).map((m) => ({ value: m.monthlyPlanId, label: m.marketName }));
+              const resultLocked = !r.legacy && r.status === "APPOINTED"; // Appointed moved the monthly status: it is not reversible from here
               return (
-                <TableRow key={r.entryId}>
-                  <TableCell className="p-1"><Input className="h-8 w-full" placeholder={L.dealerName} value={r.dealerName} disabled={busy || submitted} onChange={(e) => update(i, { dealerName: e.target.value })} /></TableCell>
+                <TableRow key={r.entryId} data-market-plan-id={r.monthlyPlanId || undefined}>
+                  <TableCell className="p-1 align-top">
+                    {!partyPlanningEnabled ? (
+                      <Input className="h-8 w-full" aria-label={L.dealer} placeholder={L.manualDealerPlaceholder} value={r.dealerName || (!r.legacy ? r.reportedDealerName : "")} disabled={busy || locked || submitted || !r.legacy} onChange={(e) => updateRow(r.entryId, { dealerName: e.target.value })} />
+                    ) : submitted || r.legacy ? (
+                      // Submitted / legacy rows show the stored market (a display snapshot linked by plan id) read-only; a legacy typed dealer keeps its name beneath.
+                      <div className="px-2 py-1.5 text-sm font-medium">
+                        {r.marketName || L.none}
+                        {r.legacy && r.dealerName && <span className="block text-xs font-normal text-muted-foreground">{L.legacyDealer}: {r.dealerName}</span>}
+                      </div>
+                    ) : (
+                      <SearchableDropdown ariaLabel={L.market} searchLabel={L.searchMarket} searchPlaceholder={L.searchMarketPlaceholder} placeholder={L.selectMarket} emptyText={L.noApproved} noMatchText={L.noMarketsFound} options={options} value={r.monthlyPlanId} disabled={busy || locked} onChange={(v) => pickMarket(i, v)} />
+                    )}
+                  </TableCell>
                   {/* Task Type — Dealer Appointment has no Auto Task source: a row is Calendar (from a Calendar Daily Task) or Manual. */}
-                  {showTaskType && <TableCell>{taskTypeText(rowTaskType(false, (data?.calendarEntryIds ?? []).includes(r.entryId)), taskTypeL)}</TableCell>}
-                  <TableCell className="p-1"><Input className="h-8 w-full" placeholder={L.marketPlaceholder} value={r.marketName} disabled={busy || submitted} onChange={(e) => update(i, { marketName: e.target.value })} /></TableCell>
-                  {/* Monthly Dealer Plan + Pending — placeholders (Dealer Planning not built yet). */}
+                  {showTaskType && <TableCell className="align-middle">{taskTypeText(rowTaskType(false, (data?.calendarEntryIds ?? []).includes(r.entryId)), taskTypeL)}</TableCell>}
+                  {!partyPlanningEnabled && <TableCell className="p-1"><Input className="h-8 w-full" aria-label={L.market} placeholder={L.manualMarketPlaceholder} value={r.marketName} disabled={busy || locked || submitted || !r.legacy} onChange={(e) => updateRow(r.entryId, { marketName: e.target.value })} /></TableCell>}
+                  {/* Dealer Name (Daily Report only): report information entered before / after the result. Blank and disabled for Not Appointed; read-only once the day is final. */}
+                  {showResults && partyPlanningEnabled && <TableCell className="p-1 align-middle">
+                    {locked ? (
+                      <div className="px-2 py-1.5 text-sm" data-testid="reported-dealer-name">{r.reportedDealerName || L.none}</div>
+                    ) : (
+                      <Input
+                        className="h-8 w-full" aria-label={L.dealerName} placeholder={L.dealerNamePlaceholder} maxLength={200}
+                        value={r.status === "NOT_APPOINTED" ? "" : r.reportedDealerName}
+                        disabled={busy || r.status === "NOT_APPOINTED"}
+                        onChange={(e) => updateRow(r.entryId, { reportedDealerName: e.target.value })}
+                      />
+                    )}
+                  </TableCell>}
                   <TableCell className="text-right text-muted-foreground">{L.none}</TableCell>
                   <TableCell className="text-right text-muted-foreground">{L.none}</TableCell>
-                  <TableCell className="text-muted-foreground">{L.none}</TableCell>
-                  {/* Appointment result belongs to Daily Report and remains post-submit only. */}
-                  {showResults && <TableCell className="p-1">
+                  {!partyPlanningEnabled && <TableCell className="text-muted-foreground">{L.none}</TableCell>}
+                  {/* The result belongs to Daily Report and remains post-submit only. No default: a new report row starts empty. */}
+                  {showResults && <TableCell className="p-1 align-middle">
                     <NativeSelect
                       className="h-8 w-full"
-                      disabled={busy || locked}
-                      placeholder={L.selectStatus}
+                      aria-label={L.status}
+                      disabled={busy || locked || resultLocked}
+                      placeholder={L.selectResult}
                       value={r.status}
                       options={[{ value: "APPOINTED", label: L.appointed }, { value: "NOT_APPOINTED", label: L.notAppointed }]}
-                      onChange={(e) => updateRow(r.entryId, { status: e.target.value as ApptEditRow["status"] })}
+                      onChange={(e) => chooseResult(r, e.target.value)}
                     />
                   </TableCell>}
                   {view === DailyWorkView.PLAN && <TableCell className="text-right">
-                    {!submitted && <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => removeRow(i)} title={L.removeRow} aria-label={L.removeRow}><Trash2 className="h-4 w-4" /></Button>}
+                    {!submitted && <Button size="sm" variant="ghost" className="text-destructive" disabled={busy || locked} onClick={() => removeRow(i)} title={L.removeRow} aria-label={L.removeRow}><Trash2 className="h-4 w-4" /></Button>}
                   </TableCell>}
                 </TableRow>
               );
@@ -1202,11 +1317,25 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {/* Save Draft + save status live in the Plan Type toolbar (Plan and Report); Add Row stays here for PLAN. */}
+      {/* Save Draft + save status live in the Plan Type toolbar (Plan and Report); Add Market stays here for PLAN. */}
       {view === DailyWorkView.PLAN && (
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" onClick={addRow} disabled={busy || locked}><Plus className="h-4 w-4" /> {L.addRow}</Button>
+          <Button variant="outline" onClick={addRow} disabled={busy || locked || (partyPlanningEnabled && (eligible.length === 0 || eligible.every((m) => taken.has(m.monthlyPlanId))))}><Plus className="h-4 w-4" /> {partyPlanningEnabled ? L.addMarket : L.addDealer}</Button>
         </div>
+      )}
+      {appointedFor && partyPlanningEnabled && (
+        <AppointedPopup
+          row={appointedFor}
+          workDate={workDate}
+          onClose={() => setAppointedFor(null)}
+          onDone={() => {
+            setAppointedFor(null);
+            // Refresh everything the recorded transition touches: this report, the section / report completion, and the Monthly Planning views and counts.
+            qc.invalidateQueries({ queryKey: ["daily-work", "APPOINTMENT", workDate] });
+            qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
+            for (const key of ["party-monthly", "party-monthly-plans", "party-monthly-sheet", "calendar", "calendar-upcoming"]) void qc.invalidateQueries({ queryKey: [key] });
+          }}
+        />
       )}
     </div>
   );

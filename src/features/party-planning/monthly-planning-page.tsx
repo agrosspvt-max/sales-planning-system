@@ -8,7 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { Check, Plus, Send, X } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { ROW_STATUS_LABEL, type PlanStage, type RowStatus } from "@/lib/monthly-plan";
+import { ROW_STATUS_LABEL, EMPTY_SENT_FORM, chooseSentAnswer, isLegacySentInfo, sentFormAnswered, sentFormBody, setSentNotSent, type SentForm, type Completeness, type PlanStage, type RowStatus, type StoredSentInfo } from "@/lib/monthly-plan";
 import { fill, fillNodes, useLabels } from "./party-labels";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,26 +35,42 @@ interface MonthlySheetDetail {
   plans: Plan[];
 }
 interface DocInfo { documents: boolean; checks: boolean; other: string | null }
-interface StatusEvent { id: string; dealerId: string | null; previousStatus: string; newStatus: string; previousLabel: string; newLabel: string; actorName: string; actorRole: string; remarks: string | null; sentInfo: DocInfo | null; receivedInfo: DocInfo | null; createdAt: string }
+interface StatusEvent { id: string; dealerId: string | null; previousStatus: string; newStatus: string; previousLabel: string; newLabel: string; actorName: string; actorRole: string; remarks: string | null; sentInfo: StoredSentInfo | null; receivedInfo: DocInfo | null; createdAt: string }
 interface Option { id: string; optionNo: 1 | 2; partyName: string | null }
 interface DateChange { id: string; previousDate: string | null; newDate: string | null; byAdmin: boolean; automatic: boolean; actorName: string; actorRole: string; createdAt: string }
 interface Plan {
   id: string; monthLabel: string; monthKey: string; ownerId: string; ownerGroupId: string | null; appointedDealerId: string | null; appointedDealerName: string | null; ownerName: string; marketName: string; marketPotential: string | null; planDate: string | null; canManage: boolean; options: Option[];
-  opStatus: RowStatus; statusLabel: string; statusChangedAt: string | null; approvalStatus: string; canEditEntry: boolean; canReview: boolean; allowedStatuses: { to: RowStatus; label: string }[]; sentInfo: DocInfo | null; receivedInfo: DocInfo | null; statusEvents: StatusEvent[];
+  opStatus: RowStatus; statusLabel: string; statusChangedAt: string | null; approvalStatus: string; canEditEntry: boolean; canReview: boolean; allowedStatuses: { to: RowStatus; label: string }[]; sentInfo: StoredSentInfo | null; receivedInfo: DocInfo | null; statusEvents: StatusEvent[];
   canEditDate: boolean; dateChangeCount: number; seasonalAddedOn: string; days: number; daysFinal: boolean; dateHistory: DateChange[];
 }
 
 const STATUS_VARIANT: Record<string, "muted" | "secondary" | "success" | "destructive" | "warning"> = {
-  Draft: "muted", Submitted: "secondary", Approved: "secondary", "Doc Send By SO": "secondary", "Doc Received": "secondary", "SD Bounce": "warning", Appointed: "success", Rejected: "destructive",
+  Draft: "muted", Submitted: "secondary", Approved: "secondary", Pending: "secondary", "Document Not Sent": "warning", "Doc Send By SO": "secondary", "Doc Received": "secondary", "SD Bounce": "warning", Appointed: "success", Rejected: "destructive",
 };
 const dash = <span className="text-muted-foreground">—</span>;
 const dateText = (v: string | null) => (v ? formatDMY(v) : null);
 const dateTimeText = (iso: string) => formatDateTimeDMY(iso);
 const docText = (d: DocInfo | null, T: { document: string; check: string; otherValue: string }) => (d ? [d.documents && T.document, d.checks && T.check, d.other && fill(T.otherValue, { text: d.other })].filter(Boolean).join(" · ") || "—" : "—");
 
+/** One-line text of what the owner answered (drawer): the new Complete / Incomplete answers, "Document Not Sent", or a legacy "sent" record shown as it was recorded. */
+function sentText(d: StoredSentInfo | null, T: { item_document: string; item_cheque: string; complete: string; incomplete: string; notSentShort: string; legacyDoc: string; legacyCheque: string; legacySent: string; legacyNotSent: string; otherValue: string; legacyNote: string }): string {
+  if (!d) return "—";
+  const other = d.other ? fill(T.otherValue, { text: d.other }) : null;
+  if (d.documentNotSent) return [T.notSentShort, other].filter(Boolean).join(" · ");
+  if (isLegacySentInfo(d)) return [fill(T.legacyDoc, { value: d.documents ? T.legacySent : T.legacyNotSent }), fill(T.legacyCheque, { value: d.checks ? T.legacySent : T.legacyNotSent }), other, T.legacyNote].filter(Boolean).join(" · ");
+  const c = (v: Completeness | null | undefined) => (v === "COMPLETE" ? T.complete : v === "INCOMPLETE" ? T.incomplete : "—");
+  return [`${T.item_document}: ${c(d.documentStatus)}`, `${T.item_cheque}: ${c(d.chequeStatus)}`, other].filter(Boolean).join(" · ");
+}
+
+const SENT_TEXT_KEYS = {
+  item_document: "party_planning.monthly.doc.item_document", item_cheque: "party_planning.monthly.doc.item_cheque", complete: "party_planning.monthly.doc.complete", incomplete: "party_planning.monthly.doc.incomplete",
+  notSentShort: "party_planning.monthly.doc.not_sent_summary_short", legacyDoc: "party_planning.monthly.doc.legacy_doc", legacyCheque: "party_planning.monthly.doc.legacy_cheque", legacySent: "party_planning.monthly.doc.legacy_sent",
+  legacyNotSent: "party_planning.monthly.doc.legacy_not_sent", otherValue: "party_planning.monthly.doc.other_value", legacyNote: "party_planning.monthly.doc.legacy_note",
+} as const;
+
 /** The status texts (display only). The server sends the stable English status text; the shown text is its editable label. */
 const STATUS_KEYS = {
-  "Draft": "party_planning.status.draft", "Submitted": "party_planning.status.submitted", "Approved": "party_planning.status.approved", "Doc Send By SO": "party_planning.status.doc_sent",
+  "Draft": "party_planning.status.draft", "Submitted": "party_planning.status.submitted", "Approved": "party_planning.status.approved", "Pending": "party_planning.status.appointment_pending", "Document Not Sent": "party_planning.status.doc_not_sent", "Doc Send By SO": "party_planning.status.doc_sent",
   "Doc Received": "party_planning.status.doc_received", "SD Bounce": "party_planning.status.sd_bounce", "Appointed": "party_planning.status.appointed", "Rejected": "party_planning.status.rejected",
 } as const;
 function useStatusText(): (text: string) => string {
@@ -297,6 +313,7 @@ function PartyOptionsDrawer({ plan, onClose, onShowTimeline }: { plan: Plan; onC
     partyName: "party_planning.monthly.field.party_name", status: "party_planning.monthly.col.status", since: "party_planning.monthly.msg.since", sent: "party_planning.monthly.msg.sent_by_so", received: "party_planning.monthly.msg.received_by_admin",
     dealerCreated: "party_planning.monthly.msg.dealer_created", viewHistory: "party_planning.monthly.action.view_status_history", document: "party_planning.monthly.doc.document", check: "party_planning.monthly.doc.check", otherValue: "party_planning.monthly.doc.other_value" });
   const st = useStatusText();
+  const SL = useLabels(SENT_TEXT_KEYS);
   return (
     <div className="fixed inset-0 z-40 flex justify-end" role="dialog" aria-modal="true" aria-label={T.title} onKeyDown={(e) => e.key === "Escape" && onClose()}>
       <button type="button" className="absolute inset-0 bg-black/30" aria-label={T.close} onClick={onClose} />
@@ -312,7 +329,7 @@ function PartyOptionsDrawer({ plan, onClose, onShowTimeline }: { plan: Plan; onC
           <section className="space-y-1.5 rounded-md border p-3">
             <h3 className="font-semibold">{T.status}</h3>
             <div className="flex items-center gap-2"><Badge variant={STATUS_VARIANT[plan.statusLabel] ?? "muted"}>{st(plan.statusLabel)}</Badge>{plan.statusChangedAt && <span className="text-xs text-muted-foreground">{fill(T.since, { date: dateTimeText(plan.statusChangedAt) })}</span>}</div>
-            <div>{fill(T.sent, { value: docText(plan.sentInfo, T) })}</div>
+            <div>{fill(T.sent, { value: sentText(plan.sentInfo, SL) })}</div>
             <div>{fill(T.received, { value: docText(plan.receivedInfo, T) })}</div>
             {plan.appointedDealerName && <div>{T.dealerCreated}: <b>{plan.appointedDealerName}</b></div>}
             {plan.statusEvents.length > 0 && <Button size="sm" variant="outline" onClick={onShowTimeline}>{T.viewHistory}</Button>}
@@ -338,32 +355,64 @@ function InfoBlock({ title, info, at, by }: { title: string; info: DocInfo | nul
   );
 }
 
+/** What the owner answered on the "Doc Send By SO" form, as a block: Document / Cheque Complete or Incomplete, or "Appointed, Document Not Sent"; an old record keeps its original "sent" meaning with completeness unrecorded. */
+function SentBlock({ title, info, at, by }: { title: string; info: StoredSentInfo | null; at?: string | null; by?: string | null }) {
+  const T = useLabels({ item_document: "party_planning.monthly.doc.item_document", item_cheque: "party_planning.monthly.doc.item_cheque", complete: "party_planning.monthly.doc.complete", incomplete: "party_planning.monthly.doc.incomplete",
+    notAnswered: "party_planning.monthly.doc.not_answered", notSent: "party_planning.monthly.doc.not_sent_summary", legacyNote: "party_planning.monthly.doc.legacy_note", other: "party_planning.monthly.doc.other" });
+  if (info && isLegacySentInfo(info)) return <div className="space-y-1"><InfoBlock title={title} info={{ documents: !!info.documents, checks: !!info.checks, other: info.other ?? null }} at={at} by={by} /><p className="text-xs text-muted-foreground">{T.legacyNote}</p></div>;
+  const c = (v: Completeness | null | undefined) => (v === "COMPLETE" ? T.complete : v === "INCOMPLETE" ? T.incomplete : T.notAnswered);
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 text-sm" data-testid="sent-block">
+      <div className="font-semibold">{title}</div>
+      {info?.documentNotSent ? <div data-testid="sent-not-sent">{T.notSent}</div> : <>
+        <div>{T.item_document}: <b data-testid="sent-document">{c(info?.documentStatus)}</b></div>
+        <div>{T.item_cheque}: <b data-testid="sent-cheque">{c(info?.chequeStatus)}</b></div>
+      </>}
+      <div>{T.other}: <b>{info?.other ?? "—"}</b></div>
+      {(by || at) && <div className="text-xs text-muted-foreground">{by}{at && `, ${dateTimeText(at)}`}</div>}
+    </div>
+  );
+}
+
 /**
  * Change the row's ONE operational status. The SO's "Doc Send By SO" (≥ one of Document / Check, optional Other text) and Admin's "Doc Received"
  * (what was ACTUALLY received, shown beside — never merged with — what the SO said was sent) and the other Admin statuses (SD Bounce / Appointed /
  * Rejected, optional remarks) all go through a confirmation step; the server re-validates everything.
  */
-export function StatusDialog({ plan, onClose, onChanged }: { plan: Plan; onClose: () => void; onChanged: () => void }) {
+/**
+ * `submit` lets a host (Daily Work → Dealer Appointment) run the SAME dialog but hand the validated transition body to its own coordinated endpoint, so the monthly
+ * transition and the host's own record are saved together; without it the dialog posts to the Monthly Planning status endpoint exactly as before.
+ */
+export function StatusDialog({ plan, onClose, onChanged, submit }: { plan: Plan; onClose: () => void; onChanged: () => void; submit?: (body: Record<string, unknown>) => Promise<unknown> }) {
   const [to, setTo] = useState<RowStatus | null>(plan.allowedStatuses.length === 1 ? plan.allowedStatuses[0]!.to : null);
-  const [doc, setDoc] = useState({ documents: false, checks: false, other: "" });
+  const [doc, setDoc] = useState({ documents: false, checks: false, other: "" }); // Admin's "actually received" (unchanged)
   const [remarks, setRemarks] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dealerOpen, setDealerOpen] = useState(to === "APPOINTED");
-  const isDoc = to === "DOC_SENT" || to === "DOC_RECEIVED";
+  // The owner's "Doc Send By SO" answers. Nothing is preselected: Document and Cheque each start unanswered (null).
+  const [sent, setSent] = useState<SentForm>(EMPTY_SENT_FORM);
+  const isSend = to === "DOC_SENT";
+  const isDoc = isSend || to === "DOC_RECEIVED";
+  const sentBody = sentFormBody(sent);
   const appointing = to === "APPOINTED";
   const save = useMutation({
-    mutationFn: () => api.post(`/api/party-monthly-plans/${plan.id}/status`, to === "DOC_SENT" ? { to, sent: doc } : to === "DOC_RECEIVED" ? { to, received: doc } : { to, remarks }),
+    mutationFn: () => {
+      const body = to === "DOC_SENT" ? { to, sent: sentBody } : to === "DOC_RECEIVED" ? { to, received: doc } : { to, remarks };
+      return submit ? submit(body) : api.post(`/api/party-monthly-plans/${plan.id}/status`, body);
+    },
     onSuccess: onChanged, onError: (e) => { setConfirming(false); setError((e as Error).message); },
   });
-  const valid = to != null && (!isDoc || doc.documents || doc.checks);
-  const label = to ? ROW_STATUS_LABEL[to] : "";
+  const answered = sentFormAnswered(sent);
+  const valid = to != null && (isSend ? answered : !isDoc || doc.documents || doc.checks);
+  const label = to ? (isSend && sent.notSent ? ROW_STATUS_LABEL.DOC_NOT_SENT : ROW_STATUS_LABEL[to]) : "";
   const received = to === "DOC_RECEIVED";
   const T = useLabels({ dealerTitle: "party_planning.monthly.dialog.create_dealer_title", title: "party_planning.monthly.dialog.status_title", current: "party_planning.monthly.msg.current", bySo: "party_planning.monthly.doc.submitted_by_so",
     actuallyReceived: "party_planning.monthly.doc.actually_received", whatSending: "party_planning.monthly.doc.what_sending", docReceived: "party_planning.monthly.doc.document_received", docSent: "party_planning.monthly.doc.document_sent",
     checkReceived: "party_planning.monthly.doc.check_received", checkSend: "party_planning.monthly.doc.check_send", otherReceived: "party_planning.monthly.doc.other_received", otherOptional: "party_planning.monthly.doc.other_optional",
     selectSent: "party_planning.monthly.validation.select_one_sent", selectReceived: "party_planning.monthly.validation.select_one_received", remarksOptional: "party_planning.monthly.field.remarks_optional", confirmChange: "party_planning.monthly.msg.confirm_change",
     receivedShort: "party_planning.monthly.doc.actually_received_short", youSending: "party_planning.monthly.doc.you_are_sending", remarks: "party_planning.monthly.msg.remarks", today: "party_planning.monthly.msg.date_set_today",
+    notSentSpecial: "party_planning.monthly.doc.not_sent_special", item: "party_planning.monthly.doc.item", itemDocument: "party_planning.monthly.doc.item_document", itemCheque: "party_planning.monthly.doc.item_cheque", complete: "party_planning.monthly.doc.complete", incomplete: "party_planning.monthly.doc.incomplete", otherDetails: "party_planning.monthly.doc.other_details_optional", selectCompleteIncomplete: "party_planning.monthly.validation.select_complete_incomplete",
     back: "party_planning.common.back", confirmStatus: "party_planning.monthly.action.confirm_status", saving: "party_planning.common.saving", cancel: "party_planning.common.cancel", continue: "party_planning.common.continue" });
   const st = useStatusText();
   return (
@@ -382,14 +431,41 @@ export function StatusDialog({ plan, onClose, onChanged }: { plan: Plan; onClose
           {!confirming && (
             <>
               <div className="flex flex-wrap gap-2">{plan.allowedStatuses.map((a) => <Button key={a.to} size="sm" variant={to === a.to ? "default" : "outline"} onClick={() => { setTo(a.to); setError(null); if (a.to === "APPOINTED") setDealerOpen(true); /* straight to the Create Dealer form */ }}>{st(a.label)}</Button>)}</div>
-              {received && <InfoBlock title={T.bySo} info={plan.sentInfo} />}
-              {isDoc && (
+              {received && <SentBlock title={T.bySo} info={plan.sentInfo} />}
+              {received && (
                 <div className="space-y-2 rounded-md border p-3">
-                  <div className="font-semibold">{received ? T.actuallyReceived : T.whatSending}</div>
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={doc.documents} onChange={(e) => setDoc({ ...doc, documents: e.target.checked })} /> {received ? T.docReceived : T.docSent}</label>
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={doc.checks} onChange={(e) => setDoc({ ...doc, checks: e.target.checked })} /> {received ? T.checkReceived : T.checkSend}</label>
-                  <div className="space-y-1"><Label>{received ? T.otherReceived : T.otherOptional}</Label><Textarea rows={2} maxLength={500} value={doc.other} onChange={(e) => setDoc({ ...doc, other: e.target.value })} /></div>
-                  {!doc.documents && !doc.checks && <p className="text-xs text-muted-foreground">{received ? T.selectReceived : T.selectSent}</p>}
+                  <div className="font-semibold">{T.actuallyReceived}</div>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={doc.documents} onChange={(e) => setDoc({ ...doc, documents: e.target.checked })} /> {T.docReceived}</label>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={doc.checks} onChange={(e) => setDoc({ ...doc, checks: e.target.checked })} /> {T.checkReceived}</label>
+                  <div className="space-y-1"><Label>{T.otherReceived}</Label><Textarea rows={2} maxLength={500} value={doc.other} onChange={(e) => setDoc({ ...doc, other: e.target.value })} /></div>
+                  {!doc.documents && !doc.checks && <p className="text-xs text-muted-foreground">{T.selectReceived}</p>}
+                </div>
+              )}
+              {isSend && (
+                <div className="space-y-3 rounded-md border p-3" data-testid="sent-form">
+                  <div className="font-semibold">{T.whatSending}</div>
+                  {/* Checking this alone saves nothing: it clears + disables the four answers; the normal Continue / confirm / save flow still applies. */}
+                  <label className="flex items-center gap-2 text-base font-medium">
+                    <input type="checkbox" className="h-5 w-5" data-testid="not-sent-special" checked={sent.notSent} onChange={(e) => { setError(null); setSent(setSentNotSent(sent, e.target.checked)); }} /> {T.notSentSpecial}
+                  </label>
+                  <table className="w-full text-sm">
+                    <thead><tr className="text-left text-muted-foreground"><th className="py-1 font-medium">{T.item}</th><th className="py-1 text-center font-medium">{T.complete}</th><th className="py-1 text-center font-medium">{T.incomplete}</th></tr></thead>
+                    <tbody>
+                      {([["documentStatus", T.itemDocument, "document"], ["chequeStatus", T.itemCheque, "cheque"]] as const).map(([field, name, id]) => (
+                        <tr key={field}>
+                          <td className="py-1">{name}</td>
+                          {(["COMPLETE", "INCOMPLETE"] as const).map((value) => (
+                            <td key={value} className="py-1 text-center">
+                              <input type="checkbox" className="h-4 w-4" data-testid={`${id}-${value.toLowerCase()}`} aria-label={`${name}: ${value === "COMPLETE" ? T.complete : T.incomplete}`} disabled={sent.notSent}
+                                checked={sent[field] === value} onChange={(e) => setSent(chooseSentAnswer(sent, field, value, e.target.checked))} />
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="space-y-1"><Label>{T.otherDetails}</Label><Textarea rows={2} maxLength={500} value={sent.other} onChange={(e) => setSent({ ...sent, other: e.target.value })} /></div>
+                  {!answered && <p className="text-xs text-muted-foreground" data-testid="sent-hint">{T.selectCompleteIncomplete}</p>}
                 </div>
               )}
               {to != null && !isDoc && !appointing && <div className="space-y-1"><Label>{T.remarksOptional}</Label><Textarea rows={2} maxLength={500} value={remarks} onChange={(e) => setRemarks(e.target.value)} /></div>}
@@ -398,7 +474,8 @@ export function StatusDialog({ plan, onClose, onChanged }: { plan: Plan; onClose
           {confirming && (
             <div className="space-y-2">
               <p>{fillNodes(T.confirmChange, { market: <b>{plan.marketName}</b>, from: <b>{st(plan.statusLabel)}</b>, to: <b>{st(label)}</b> })}</p>
-              {isDoc && <InfoBlock title={received ? T.receivedShort : T.youSending} info={{ documents: doc.documents, checks: doc.checks, other: doc.other.trim() || null }} />}
+              {received && <InfoBlock title={T.receivedShort} info={{ documents: doc.documents, checks: doc.checks, other: doc.other.trim() || null }} />}
+              {isSend && <SentBlock title={T.youSending} info={{ documentStatus: sentBody.documentStatus, chequeStatus: sentBody.chequeStatus, documentNotSent: sent.notSent, other: sent.other.replace(/\s+/g, " ").trim() || null }} />}
               {!isDoc && remarks.trim() && <p>{fill(T.remarks, { text: remarks.trim() })}</p>}
               <p className="text-xs text-muted-foreground">{T.today}</p>
             </div>
@@ -429,7 +506,7 @@ export function StatusTimelineDialog({ plan, onClose }: { plan: Plan; onClose: (
             <li key={e.id} className="space-y-1 rounded-md border p-3">
               <div className="font-medium">{i + 1}. {st(e.previousLabel)} → {st(e.newLabel)}</div>
               <div className="text-xs text-muted-foreground">{dateTimeText(e.createdAt)} · {e.actorName} ({e.actorRole.replace(/_/g, " ").toLowerCase()})</div>
-              {e.sentInfo && <InfoBlock title={T.bySo} info={e.sentInfo} />}
+              {e.sentInfo && <SentBlock title={T.bySo} info={e.sentInfo} />}
               {e.receivedInfo && <InfoBlock title={T.received} info={e.receivedInfo} />}
               {e.remarks && <div>{fill(T.remarks, { text: e.remarks })}</div>}
               {e.dealerId && <div>{plan.appointedDealerName ? fill(T.dealerCreatedName, { name: plan.appointedDealerName }) : T.dealerCreated}</div>}

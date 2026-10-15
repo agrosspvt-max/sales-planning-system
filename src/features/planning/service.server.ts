@@ -19,7 +19,7 @@ import { loadEffectiveProduct } from "@/features/products/merge.server";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { saveLinesSchema, remarksSchema, revisionRequestSchema } from "@/lib/validations/planning";
 import { NotificationType } from "@prisma/client";
-import { findOrCreateSeason } from "@/features/seasons/service.server";
+import { findOrCreateSeason, listSeasons } from "@/features/seasons/service.server";
 import { writeAudit } from "@/lib/audit";
 import {
   createNotification,
@@ -160,6 +160,9 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
     throw new ApiError(403, "You are not allowed to create a plan");
   }
 
+  // A Sales Officer / Regional Manager can neither create nor reopen a plan in a season that is not OPEN.
+  if (ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER) await assertSeasonOpen(input.seasonId);
+
   const officer = await prisma.user.findUnique({ where: { id: officerId } });
   // The owner must be an active Sales Officer, OR the Regional Manager creating their own plan.
   const ownerOk = officer && officer.isActive &&
@@ -257,30 +260,33 @@ export async function setDealerNoPlan(
 }
 
 export interface CreateSeasonalPlansInput {
-  season: { name: string; year: number; startMonth: number; endMonth: number };
+  /** Stable id of an existing season (the Seasons master). Required for Sales Officers / Regional Managers. */
+  seasonId?: string;
+  /** Legacy descriptor — honoured for administrators only; never for SO/RM. */
+  season?: { name: string; year: number; startMonth: number; endMonth: number };
   officerScope?: "single" | "multiple" | "all";
   officerIds?: string[];
 }
 
+/** OPEN seasons from the Seasons master, with the exact configured period and ordered months — what a planner may pick. */
+export async function listOpenSeasonOptions() {
+  const seasons = await listSeasons("", true);
+  return seasons.map((s) => {
+    const stored = s.startMonth && s.startYear && s.endMonth && s.endYear
+      ? { startMonth: s.startMonth, startYear: s.startYear, endMonth: s.endMonth, endYear: s.endYear } : null;
+    return { id: s.id, name: s.name, year: s.year, period: s.effectivePeriod ?? stored, months: s.months };
+  });
+}
+
 /**
- * Simplified Seasonal create (Phase 3). Resolves the Season from name+year+period via the
- * single authoritative findOrCreateSeason, then creates (or reopens) ONE Seasonal draft per
- * targeted officer through the existing createSalesPlan — which already dedupes/reopens, so
- * the "one plan per season+year" rule needs no new logic. Admin may target one, several, or
- * all active Sales Officers; an officer plans only for themselves.
+ * Seasonal create / reopen. The season comes from the Seasons master by id and MUST be OPEN (checked before an
+ * existing draft is reopened too). A Sales Officer / Regional Manager can never create or modify a Season: their
+ * only input is the id, and a descriptor from them is refused. Administrators keep the legacy descriptor path.
  */
 export async function createSeasonalPlans(
   ctx: AuthContext,
   input: CreateSeasonalPlansInput,
 ): Promise<{ ids: string[] }> {
-  const { id: seasonId } = await findOrCreateSeason({
-    name: input.season.name,
-    startMonth: input.season.startMonth,
-    startYear: input.season.year,
-    endMonth: input.season.endMonth,
-    endYear: input.season.year,
-  });
-
   let officerIds: string[];
   if (ctx.role === Role.SALES_OFFICER || ctx.role === Role.REGIONAL_MANAGER) {
     // Sales Officer and Regional Manager both create only their OWN plan (My Plans).
@@ -298,6 +304,24 @@ export async function createSeasonalPlans(
     if (officerIds.length === 0) throw new ApiError(422, "Select at least one Sales Officer");
   } else {
     throw new ApiError(403, "Only a Sales Officer or Super Admin can create a plan");
+  }
+
+  let seasonId: string;
+  if (input.seasonId) {
+    await assertSeasonOpen(input.seasonId); // existing + OPEN, whether a new draft is created or an existing one reopened
+    seasonId = input.seasonId;
+  } else if (!isAdministrativeRole(ctx.role)) {
+    throw new ApiError(403, "Select an open season. Seasons are created only by an administrator.");
+  } else if (input.season) {
+    ({ id: seasonId } = await findOrCreateSeason({
+      name: input.season.name,
+      startMonth: input.season.startMonth,
+      startYear: input.season.year,
+      endMonth: input.season.endMonth,
+      endYear: input.season.year,
+    }));
+  } else {
+    throw new ApiError(422, "Select a season");
   }
 
   const ids: string[] = [];

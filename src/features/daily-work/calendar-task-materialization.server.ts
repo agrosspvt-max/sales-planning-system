@@ -152,6 +152,10 @@ export async function materializeDueCalendarTasksInTransaction(
 export async function materializeDueCalendarTasks(ctx: AuthContext): Promise<CalendarMaterializationResult> {
   if (!autoTasksApplyToRole(ctx.role)) return { materialized: 0 }; // same owner roles as CN Auto Tasks: SO and RM
   const workDate = currentBusinessDate();
+  // A read takes the day lock only when a Calendar task is actually due (a cheap, non-locking look first), so routine reads never queue on it.
+  const due = await prisma.$queryRaw<Array<{ due: boolean }>>(Prisma.sql`
+    SELECT EXISTS (SELECT 1 FROM "CalendarEntry" WHERE "ownerId" = ${ctx.userId} AND "kind" = 'TASK' AND "date" = ${workDate}::date AND "materializedAt" IS NULL) AS "due"`);
+  if (!(due[0]?.due ?? true)) return { materialized: 0 };
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, ctx.userId, workDate);
     return materializeDueCalendarTasksInTransaction(tx, ctx.userId, workDate, day);

@@ -3,12 +3,13 @@
 import { useTaggedDealersFirst } from "@/features/dealers/dealer-table-ui";
 import { formatDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PartyLink } from "@/features/calendar/party-link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { ChevronLeft, ChevronRight, Plus, Pencil, Trash2, RefreshCw, StickyNote } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Plus, Pencil, Trash2, RefreshCw, StickyNote } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -17,11 +18,10 @@ import { NativeSelect } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
-import { dateKey, groupEventsByOfficer, type ConversionEvent, type ConversionStatus, type PartyAppointmentEvent } from "@/lib/calendar";
+import { dateKey, groupDayByEmployee, type ConversionEvent, type ConversionStatus, type PartyAppointmentEvent } from "@/lib/calendar";
 import { BillingTaskDetailDialog } from "@/features/daily-work/billing-task-ui";
 import type { CalendarBillingTaskDto } from "@/features/daily-work/billing-task-visibility.server";
 import type { CalendarPayload, CalendarNoteDto, CalendarEntryDto, CalendarEntryKind } from "@/features/calendar/calendar.server";
@@ -59,16 +59,28 @@ const ENTRY_DOT: Record<CalendarEntryKind, string> = { TASK: "bg-primary", MEETI
 const KIND_LABEL_PROP: Record<CalendarEntryKind, string> = { TASK: "kindTask", MEETING: "kindMeeting", REMINDER: "kindReminder", OTHER: "kindOther" };
 
 export function CalendarView({ role, partyPlanningEnabled = false }: { role: Role; userId: string; partyPlanningEnabled?: boolean }) {
+  const searchParams = useSearchParams();
   const taggedFirst = useTaggedDealersFirst();
   const qc = useQueryClient();
   const today = new Date();
   const todayKey = dateKey(today)!;
-  const [cursor, setCursor] = useState({ year: today.getUTCFullYear(), month: today.getUTCMonth() + 1 });
+  // A notification link opens the Calendar on a given day: /planning/calendar?date=YYYY-MM-DD (a real calendar date only; anything else is ignored).
+  const linkedDate = useMemo(() => {
+    const raw = searchParams?.get("date") ?? "";
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if (!m) return null;
+    const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+    return d.toISOString().slice(0, 10) === raw ? raw : null;
+  }, [searchParams]);
+  const [cursor, setCursor] = useState(linkedDate ? { year: Number(linkedDate.slice(0, 4)), month: Number(linkedDate.slice(5, 7)) } : { year: today.getUTCFullYear(), month: today.getUTCMonth() + 1 });
   const [officerId, setOfficerId] = useState("");
   const [groupId, setGroupId] = useState("");
   // Regional Manager: My Calendar (own) is the default; Team Calendar widens to the RM's existing team scope (server-enforced).
   const [view, setView] = useState<"mine" | "team">("mine");
-  const [openDate, setOpenDate] = useState<string | null>(null);
+  // ONE selected date drives both layouts (desktop right-hand panel, smartphone agenda): the same query, the same grouped data, nothing loaded twice.
+  const [selected, setSelected] = useState<string | null>(linkedDate);
+  // Smartphone: like a phone calendar, today is selected from the start. Desktop: the details panel stays blank until a day is clicked.
+  useEffect(() => { if (!linkedDate && typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches) setSelected(todayKey); }, [todayKey, linkedDate]);
 
   // Labels
   const L = {
@@ -89,6 +101,9 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
     previousDate: useLabel("calendar.previous_date"),
     newDate: useLabel("calendar.new_date"),
     noEvents: useLabel("calendar.no_events"),
+    selectedDay: useLabel("calendar.selected_day"),
+    entryOne: useLabel("calendar.entry_count_one"), entryMany: useLabel("calendar.entry_count_many"),
+    expandSection: useLabel("calendar.expand_employee"), collapseSection: useLabel("calendar.collapse_employee"),
     scheme: useLabel("calendar.scheme"),
     schemes: useLabel("calendar.schemes"),
     partyAppointment: useLabel("calendar.party_appointment"),
@@ -189,8 +204,16 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
   }, [cursor]);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["calendar"] });
-  const step = (delta: number) => setCursor((c) => { const m = c.month + delta; return { year: c.year + Math.floor((m - 1) / 12), month: ((m - 1 + 12) % 12) + 1 }; });
-  const goToday = () => setCursor({ year: today.getUTCFullYear(), month: today.getUTCMonth() + 1 });
+  const isPhone = () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
+  const step = (delta: number) => {
+    const m = cursor.month + delta;
+    const next = { year: cursor.year + Math.floor((m - 1) / 12), month: ((m - 1 + 12) % 12) + 1 };
+    setCursor(next);
+    // Details must never be stale after navigation: the selected day only stays when it is inside the month now shown.
+    // Phone: today (if that month) or the 1st, so the agenda always has a date; desktop: back to the blank panel.
+    setSelected(isPhone() ? (next.year === today.getUTCFullYear() && next.month === today.getUTCMonth() + 1 ? todayKey : keyFor(next.year, next.month, 1)) : null);
+  };
+  const goToday = () => { setCursor({ year: today.getUTCFullYear(), month: today.getUTCMonth() + 1 }); setSelected(todayKey); };
 
   const officers = (data?.officers ?? []).filter((o) => !groupId || o.groupId === groupId); // State narrows the Sales Officer list
   const states = data?.states ?? [];
@@ -244,43 +267,59 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
         </div>
       </div>
 
-      {/* Month grid */}
-      <div className="overflow-hidden rounded-lg border bg-background">
+      <div className="lg:grid lg:grid-cols-[minmax(0,58fr)_minmax(0,42fr)] lg:items-start lg:gap-5">
+      {/* Month grid — compact on the left (desktop); the same grid sits above the agenda on a phone, with dots instead of event strips. */}
+      <div className="min-w-0 overflow-hidden rounded-lg border bg-background" data-testid="calendar-grid">
         <div className="grid grid-cols-7 border-b bg-muted/30 text-xs font-medium text-muted-foreground">
-          {WEEKDAYS.map((w) => <div key={w} className="px-2 py-2 text-center">{w}</div>)}
+          {WEEKDAYS.map((w) => <div key={w} className="px-1 py-2 text-center">{w}</div>)}
         </div>
         {isLoading ? (
-          <Skeleton className="h-[28rem] w-full" />
+          <Skeleton className="h-[22rem] w-full" />
         ) : (
           <div className="grid grid-cols-7">
             {cells.map((dk, i) => {
-              if (!dk) return <div key={i} className="min-h-[5.5rem] border-b border-r bg-muted/10 last:border-r-0" />;
+              if (!dk) return <div key={i} className="min-h-[3.25rem] border-b border-r bg-muted/10 lg:min-h-[4.5rem] [&:nth-child(7n)]:border-r-0" />;
               const evs = taggedFirst(eventsByDate.get(dk) ?? [], (e) => e.dealerId);
               const partyEvs = partyEventsByDate.get(dk) ?? [];
               const notes = notesByDate.get(dk) ?? [];
               const dayEntries = entriesByDate.get(dk) ?? [];
               const dayBilling = billingByDate.get(dk) ?? [];
               const totalEvs = evs.length + partyEvs.length + dayEntries.length + dayBilling.length;
-              const shownParty = partyEvs.slice(0, Math.max(0, 2 - evs.length));
-              const shownBilling = dayBilling.slice(0, Math.max(0, 2 - evs.length - shownParty.length));
-              const shownEntries = dayEntries.slice(0, Math.max(0, 2 - evs.length - shownParty.length - shownBilling.length));
+              const total = totalEvs + notes.length;
+              const shownParty = partyEvs.slice(0, Math.max(0, 1 - evs.length));
+              const shownBilling = dayBilling.slice(0, Math.max(0, 1 - evs.length - shownParty.length));
+              const shownEntries = dayEntries.slice(0, Math.max(0, 1 - evs.length - shownParty.length - shownBilling.length));
               const isToday = dk === todayKey;
+              const isSelected = dk === selected;
+              // One small coloured dot per entry on the phone (the same entry-type colours as the desktop chips).
+              const dots = [
+                ...evs.map((e) => DOT_CLASS[e.status]), ...partyEvs.map(() => "bg-warning"), ...dayBilling.map((t) => (t.status === "OVERDUE" ? "bg-destructive" : "bg-purple-500")),
+                ...dayEntries.map((e) => ENTRY_DOT[e.kind]), ...notes.map(() => "bg-warning"),
+              ];
               return (
                 <button
                   key={i}
                   type="button"
-                  onClick={() => setOpenDate(dk)}
+                  onClick={() => setSelected(dk)}
+                  aria-pressed={isSelected}
+                  aria-label={`${longDate(dk)}${total > 0 ? ` — ${(total === 1 ? L.entryOne : L.entryMany).replace("{n}", String(total))}` : ""}`}
+                  data-date={dk}
                   className={cn(
-                    "min-h-[5.5rem] border-b border-r p-1.5 text-left align-top transition-colors hover:bg-accent/40 [&:nth-child(7n)]:border-r-0",
+                    "min-h-[3.25rem] min-w-0 border-b border-r p-1 text-left align-top transition-colors hover:bg-accent/40 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:min-h-[4.5rem] lg:p-1.5 [&:nth-child(7n)]:border-r-0",
                     isToday && "bg-primary/5",
+                    isSelected && "bg-accent ring-2 ring-inset ring-primary", // the SELECTED day: a ring, separate from today's filled number
                   )}
                 >
                   <div className="flex items-center justify-between">
                     <span className={cn("inline-flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums", isToday && "bg-primary font-semibold text-primary-foreground")}>{Number(dk.slice(-2))}</span>
-                    {notes.length > 0 && <StickyNote className="h-3.5 w-3.5 text-warning" />}
+                    {notes.length > 0 && <StickyNote className="hidden h-3.5 w-3.5 text-warning lg:block" />}
                   </div>
-                  <div className="mt-1 space-y-0.5">
-                    {evs.slice(0, 2).map((e) => (
+                  <div className="mt-0.5 flex flex-wrap items-center gap-0.5 px-0.5 lg:hidden" data-testid="calendar-dots">
+                    {dots.slice(0, 4).map((c, j) => <span key={j} className={cn("h-1.5 w-1.5 rounded-full", c)} />)}
+                    {dots.length > 4 && <span className="text-[9px] leading-none text-muted-foreground">+{dots.length - 4}</span>}
+                  </div>
+                  <div className="mt-1 hidden space-y-0.5 lg:block">
+                    {evs.slice(0, 1).map((e) => (
                       <div key={e.planId} className="flex items-center gap-1 truncate rounded bg-primary/10 px-1 py-0.5 text-[11px] leading-tight">
                         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", DOT_CLASS[e.status])} />
                         <span className="truncate">{groupByOfficer ? e.salesOfficerName : <DealerName id={e.dealerId} name={e.dealerName} />}</span>
@@ -304,7 +343,7 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
                         <span className="truncate">{groupByOfficer ? `${e.ownerName} · ${(L as Record<string, string>)[KIND_LABEL_PROP[e.kind]]}` : (L as Record<string, string>)[KIND_LABEL_PROP[e.kind]]}</span>
                       </div>
                     ))}
-                    {totalEvs > 2 && <div className="px-1 text-[11px] text-muted-foreground">+{totalEvs - 2} more</div>}
+                    {totalEvs > 1 && <div className="px-1 text-[11px] text-muted-foreground">+{totalEvs - 1} more</div>}
                   </div>
                 </button>
               );
@@ -313,89 +352,106 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
         )}
       </div>
 
-      {openDate && (
-        <DateDetailDialog
-          dateKey={openDate}
-          title={longDate(openDate)}
-          events={taggedFirst(eventsByDate.get(openDate) ?? [], (e) => e.dealerId)}
-          partyEvents={partyEventsByDate.get(openDate) ?? []}
-          notes={notesByDate.get(openDate) ?? []}
-          entries={entriesByDate.get(openDate) ?? []}
-          billingTasks={billingByDate.get(openDate) ?? []}
-          payload={data}
-          role={role}
-          groupByOfficer={groupByOfficer}
-          partyPlanningEnabled={partyPlanningEnabled}
-          labels={L}
-          onClose={() => setOpenDate(null)}
-          onChanged={invalidate}
-        />
-      )}
+      {/* Selected-day details: right of the grid on desktop (blank until a day is picked), the agenda below it on a phone. */}
+      <div className="mt-4 min-w-0 lg:mt-0" data-testid="calendar-day-panel">
+        {selected && (
+          <DayDetails
+            key={selected}
+            dateKey={selected}
+            title={longDate(selected)}
+            events={taggedFirst(eventsByDate.get(selected) ?? [], (e) => e.dealerId)}
+            partyEvents={partyEventsByDate.get(selected) ?? []}
+            notes={notesByDate.get(selected) ?? []}
+            entries={entriesByDate.get(selected) ?? []}
+            billingTasks={billingByDate.get(selected) ?? []}
+            payload={data}
+            loading={isLoading}
+            role={role}
+            groupByOfficer={groupByOfficer}
+            partyPlanningEnabled={partyPlanningEnabled}
+            labels={L}
+            onChanged={invalidate}
+          />
+        )}
+      </div>
+      </div>
     </div>
   );
 }
 
 type Labels = Record<string, string>;
 
-function DateDetailDialog({ dateKey: dk, title, events, partyEvents, notes, entries, billingTasks, payload, role, groupByOfficer, partyPlanningEnabled, labels: L, onClose, onChanged }: {
-  partyPlanningEnabled: boolean;
+/**
+ * The selected day's details (the old date dialog's content, now inline). With several employees visible (Admin / RM team view) the day's entries are grouped by EMPLOYEE in
+ * collapsible sections — name + entry count, collapsed to start, several may stay open; a Sales Officer (or anyone viewing a single employee) sees the entries directly.
+ * Expanding / collapsing and picking a date only change the view; every card keeps its own permitted actions.
+ */
+function DayDetails({ dateKey: dk, title, events, partyEvents, notes, entries, billingTasks, payload, loading, role, groupByOfficer, partyPlanningEnabled, labels: L, onChanged }: {
+  partyPlanningEnabled: boolean; loading: boolean;
   dateKey: string; title: string; events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; notes: CalendarNoteDto[]; entries: CalendarEntryDto[]; billingTasks: CalendarBillingTaskDto[];
-  payload: CalendarPayload | undefined; role: Role; groupByOfficer: boolean; labels: Labels; onClose: () => void; onChanged: () => void;
+  payload: CalendarPayload | undefined; role: Role; groupByOfficer: boolean; labels: Labels; onChanged: () => void;
 }) {
-  const groups = groupByOfficer ? groupEventsByOfficer(events) : null;
-  const partyGroups = groupByOfficer ? groupEventsByOfficer(partyEvents) : null;
   const [adding, setAdding] = useState<CalendarEntryKind | null>(null);
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set()); // expanded employees (several allowed); starts collapsed for every new date
   const canTask = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
   const isPast = dk < dateKey(new Date())!;
   const actions: { kind: CalendarEntryKind; label: string; disabled?: boolean; hint?: string }[] = [
     ...(canTask ? [{ kind: "TASK" as const, label: L.addTask, disabled: isPast, hint: isPast ? L.taskPastDate : undefined }] : []),
     { kind: "REMINDER", label: L.addReminder },
   ];
+  const total = events.length + partyEvents.length + notes.length + entries.length + billingTasks.length;
+  const groups = useMemo(() => groupDayByEmployee({ events, partyEvents, billingTasks, entries, notes }), [events, partyEvents, billingTasks, entries, notes]);
+  const countText = (n: number) => (n === 1 ? L.entryOne : L.entryMany).replace("{n}", String(n));
+  const toggle = (id: string) => setOpen((cur) => { const next = new Set(cur); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const body = (g: { events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; billingTasks: CalendarBillingTaskDto[]; entries: CalendarEntryDto[]; notes: CalendarNoteDto[] }) => (
+    <div className="space-y-2">
+      {g.events.map((e) => <ConversionCard key={e.planId} e={e} labels={L} />)}
+      {g.partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} linked={partyPlanningEnabled} />)}
+      {g.billingTasks.map((t) => <BillingTaskCard key={t.id} t={t} labels={L} />)}
+      {g.entries.map((e) => <EntryCard key={e.id} e={e} labels={L} onChanged={onChanged} />)}
+      {/* Existing notes keep working (view / edit / delete); new entries are added through the actions above. */}
+      <NotesSection dateKey={dk} notes={g.notes} labels={L} onChanged={onChanged} />
+    </div>
+  );
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
-        <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
-        <div className="space-y-4">
-          {/* Two clear actions (Add Daily Task for SO/RM, Add Reminder for all); each opens its own small form below (no immediate text box). */}
-          <div className="grid grid-cols-2 gap-2">
-            {actions.map((a) => (
-              <Button key={a.kind} variant={adding === a.kind ? "default" : "outline"} size="sm" disabled={a.disabled} title={a.hint} onClick={() => setAdding(adding === a.kind ? null : a.kind)}>
-                <Plus className="h-4 w-4" /> {a.label}
-              </Button>
-            ))}
-          </div>
-          {adding && <AddEntryForm kind={adding} dateKey={dk} payload={payload} labels={L} onCancel={() => setAdding(null)} onSaved={() => { setAdding(null); onChanged(); }} />}
+    <section className="space-y-4 rounded-lg border bg-background p-4 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto" aria-label={`${L.selectedDay} ${title}`} data-testid="calendar-day-details">
+      <h2 className="text-base font-semibold" data-testid="selected-date">{title}</h2>
+      {/* Two clear actions (Add Daily Task for SO/RM, Add Reminder for all); each opens its own small form below. */}
+      <div className="grid grid-cols-2 gap-2">
+        {actions.map((a) => (
+          <Button key={a.kind} variant={adding === a.kind ? "default" : "outline"} size="sm" className="min-h-9" disabled={a.disabled} title={a.hint} onClick={() => setAdding(adding === a.kind ? null : a.kind)}>
+            <Plus className="h-4 w-4" /> {a.label}
+          </Button>
+        ))}
+      </div>
+      {adding && <AddEntryForm kind={adding} dateKey={dk} payload={payload} labels={L} onCancel={() => setAdding(null)} onSaved={() => { setAdding(null); onChanged(); }} />}
 
-          {events.length === 0 && partyEvents.length === 0 && notes.length === 0 && entries.length === 0 && billingTasks.length === 0 && <p className="text-sm text-muted-foreground">{L.noEvents}</p>}
-
-          {groups
-            ? groups.map((g) => (
-                <div key={g.salesOfficerId} className="space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.salesOfficerName}</div>
-                  {g.events.map((e) => <ConversionCard key={e.planId} e={e} labels={L} />)}
-                </div>
-              ))
-            : events.map((e) => <ConversionCard key={e.planId} e={e} labels={L} />)}
-
-          {/* Party Appointment events — grouped by officer for the Admin/RM global view, flat otherwise. */}
-          {partyGroups
-            ? partyGroups.map((g) => (
-                <div key={`party-${g.salesOfficerId}`} className="space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.salesOfficerName}</div>
-                  {g.events.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} linked={partyPlanningEnabled} />)}
-                </div>
-              ))
-            : partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} linked={partyPlanningEnabled} />)}
-
-          {billingTasks.map((t) => <BillingTaskCard key={t.id} t={t} labels={L} />)}
-          {entries.map((e) => <EntryCard key={e.id} e={e} labels={L} onChanged={onChanged} />)}
-
-          {/* Existing notes keep working (view / edit / delete); new entries are added through the four actions above. */}
-          <NotesSection dateKey={dk} notes={notes} labels={L} onChanged={onChanged} />
+      {loading ? <Skeleton className="h-24 w-full" /> : total === 0 ? (
+        <p className="text-sm text-muted-foreground" data-testid="day-empty">{L.noEvents}</p>
+      ) : groupByOfficer ? (
+        <div className="space-y-2" data-testid="employee-groups">
+          {groups.map((g) => {
+            const expanded = open.has(g.employeeId);
+            const panelId = `emp-${dk}-${g.employeeId}`;
+            return (
+              <div key={g.employeeId} className="rounded-md border" data-employee-id={g.employeeId}>
+                <button
+                  type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => toggle(g.employeeId)}
+                  aria-label={`${expanded ? L.collapseSection : L.expandSection} ${g.employeeName}`}
+                  className="flex min-h-11 w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <span className="min-w-0 truncate text-sm font-semibold">{g.employeeName}</span>
+                  <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">{countText(g.count)}<ChevronDown className={cn("h-4 w-4 transition-transform", expanded && "rotate-180")} aria-hidden /></span>
+                </button>
+                {expanded && <div id={panelId} className="border-t p-3">{body(g)}</div>}
+              </div>
+            );
+          })}
         </div>
-        <DialogFooter><Button variant="outline" onClick={onClose}>{L.cancel}</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
+      ) : (
+        body({ events, partyEvents, billingTasks, entries, notes })
+      )}
+    </section>
   );
 }
 

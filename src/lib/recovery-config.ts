@@ -3,12 +3,14 @@ import { prisma } from "@/lib/prisma";
 
 /**
  * Recovery Configuration — persisted in the existing SystemSetting table (no dedicated table), so a change
- * applies GLOBALLY and immediately with no deployment. Missing keys default ON, so existing installations
- * keep their current Recovery and Calendar behaviour until an administrator explicitly disables a feature.
+ * applies GLOBALLY and immediately with no deployment. Recovery validation and Calendar default ON; Auto Tasks visibility and the Dealer Appointment
+ * connection default OFF.
  */
 export const RECOVERY_DUE_VALIDATION_KEY = "recovery.dueValidation";
 export const CALENDAR_ENABLED_KEY = "calendar.enabled";
 export const AUTO_TASKS_ENABLED_KEY = "recovery.autoTasksEnabled";
+
+export const APPOINTMENT_PARTY_PLANNING_KEY = "dailyWork.appointmentPartyPlanningEnabled";
 
 export interface RecoveryConfig {
   dueValidation: boolean; // ON (default): enforce Due ≥ Overdue + Due before Running is editable
@@ -17,6 +19,7 @@ export interface RecoveryConfig {
   // disables, deletes, stops or alters any Auto Task internal behaviour — scheduling, materialization,
   // rescheduling, payment and the Daily Report all run server-side regardless of this flag.
   autoTasksEnabled: boolean;
+  appointmentPartyPlanningEnabled: boolean; // OFF: manual dealer/market; ON: approved Monthly Party Planning markets
 }
 
 // DashboardLayout reads this flag on every authenticated navigation. A short process-local cache removes that
@@ -33,10 +36,10 @@ function rememberCalendarEnabled(value: boolean): boolean {
   return value;
 }
 
-/** Read the recovery config (safe default ON). Cheap; call per request as needed. */
+/** Read the persisted recovery config with each flag's documented default. */
 export async function getRecoveryConfig(): Promise<RecoveryConfig> {
   const rows = (await prisma.systemSetting.findMany({
-    where: { key: { in: [RECOVERY_DUE_VALIDATION_KEY, CALENDAR_ENABLED_KEY, AUTO_TASKS_ENABLED_KEY] } },
+    where: { key: { in: [RECOVERY_DUE_VALIDATION_KEY, CALENDAR_ENABLED_KEY, AUTO_TASKS_ENABLED_KEY, APPOINTMENT_PARTY_PLANNING_KEY] } },
     select: { key: true, value: true },
   })) as { key: string; value: string }[];
   const values = new Map(rows.map((row) => [row.key, row.value]));
@@ -46,6 +49,7 @@ export async function getRecoveryConfig(): Promise<RecoveryConfig> {
     calendarEnabled: values.get(CALENDAR_ENABLED_KEY) !== "false",
     // Auto Tasks block defaults OFF: only an explicit "true" shows it (missing/anything else stays hidden).
     autoTasksEnabled: values.get(AUTO_TASKS_ENABLED_KEY) === "true",
+    appointmentPartyPlanningEnabled: values.get(APPOINTMENT_PARTY_PLANNING_KEY) === "true",
   };
   rememberCalendarEnabled(config.calendarEnabled);
   return config;
@@ -84,6 +88,12 @@ export async function getAutoTasksEnabled(): Promise<boolean> {
   return row?.value === "true";
 }
 
+/** Read on the server for every appointment operation; never trust a browser-only switch. */
+export async function getAppointmentPartyPlanningEnabled(db: Pick<typeof prisma, "systemSetting"> = prisma): Promise<boolean> {
+  const row = await db.systemSetting.findUnique({ where: { key: APPOINTMENT_PARTY_PLANNING_KEY }, select: { value: true } });
+  return row?.value === "true";
+}
+
 /** Upsert the recovery config. */
 export async function saveRecoveryConfig(config: RecoveryConfig): Promise<RecoveryConfig> {
   await prisma.$transaction([
@@ -101,6 +111,11 @@ export async function saveRecoveryConfig(config: RecoveryConfig): Promise<Recove
       where: { key: AUTO_TASKS_ENABLED_KEY },
       create: { key: AUTO_TASKS_ENABLED_KEY, value: config.autoTasksEnabled ? "true" : "false" },
       update: { value: config.autoTasksEnabled ? "true" : "false" },
+    }),
+    prisma.systemSetting.upsert({
+      where: { key: APPOINTMENT_PARTY_PLANNING_KEY },
+      create: { key: APPOINTMENT_PARTY_PLANNING_KEY, value: config.appointmentPartyPlanningEnabled ? "true" : "false" },
+      update: { value: config.appointmentPartyPlanningEnabled ? "true" : "false" },
     }),
   ]);
   calendarCacheGeneration += 1;

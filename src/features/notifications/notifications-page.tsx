@@ -16,6 +16,7 @@ interface Feed {
 }
 
 function hrefFor(n: NotificationItem): string | null {
+  if (n.href) return n.href;
   if (n.relatedEntityType === "DealerTagRequest") return "/planning/approvals";
   if (n.relatedEntityType === "SeasonPlan" && n.relatedEntityId) return `/planning/${n.relatedEntityId}`;
   if (n.relatedEntityType === "Announcement") return `/announcements`;

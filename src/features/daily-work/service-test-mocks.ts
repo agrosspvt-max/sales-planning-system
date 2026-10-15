@@ -54,9 +54,14 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
       countUnconfirmedBillingTasks: async () => 0,
       BILLING_CONTRIBUTION_UNION: Prisma.empty,
     },
+    // Daily Work → Dealer Appointment ↔ Monthly Party Planning (real-database suite: appointment.integration.ts); inert here.
+    "@/features/party-planning/monthly.server": {
+      ownerSendDocumentsInTx: async () => { throw new Error("Monthly Party Planning is not part of this fake"); },
+    },
     // The Auto Tasks visibility flag defaults OFF; a stub keeps status reads DB-double-free.
     "@/lib/recovery-config": {
       getAutoTasksEnabled: async () => false,
+      getAppointmentPartyPlanningEnabled: async () => false,
     },
     // Dealer DISPLAY-name layer — stubbed to "no aliases" so tests keep asserting the real dealer names.
     "@/lib/dealer-display-name.server": {
@@ -65,5 +70,21 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
       decorateDealerNames: async (rows: unknown[]) => rows.map((r) => ({ ...(r as object) })),
       dealerDisplayName: (name: string) => name,
     },
+  };
+}
+
+/**
+ * The result row of the combined "section facts" statement (data presence of every section + visits / others + the persisted No-Plan CSV) computed from a fake's
+ * in-memory DailyWorkEntry rows — for fakes that answer the service's raw SQL. `rows` = the entries of ONE (officer, date, batch).
+ */
+export function sectionFactsRow(rows: ReadonlyArray<{ section: string; rowKey?: string; typedDealerName?: string | null; monthlyPlanId?: string | null; dealerVisits?: number | null; newPartyVisits?: number | null; others?: string | null; noPlanSections?: string | null }>) {
+  const count = (pred: (r: (typeof rows)[number]) => boolean) => BigInt(rows.filter(pred).length);
+  const summary = rows.filter((r) => r.section === "SUMMARY" && (r.rowKey === undefined || r.rowKey === "SUMMARY" || r.rowKey === "__SUMMARY__"));
+  return {
+    sales: count((r) => r.section === "SALES"), recovery: count((r) => r.section === "RECOVERY"), conversion: count((r) => r.section === "SCHEME_CONVERSION"),
+    appointment: count((r) => r.section === "APPOINTMENT" && (!!r.monthlyPlanId || (r.typedDealerName ?? "").trim() !== "")),
+    visits: summary.length ? summary.some((r) => r.dealerVisits != null || r.newPartyVisits != null) : null,
+    others: summary.length ? summary.some((r) => (r.others ?? "").trim() !== "") : null,
+    noPlanSections: summary.map((r) => r.noPlanSections ?? null).find((v) => v != null) ?? null,
   };
 }

@@ -66,7 +66,7 @@ const entry = async (officer: string, date: string, dealerId: string) => (await 
 const manual = (officer: string, date: string, dealerId: string, plan: number) => prisma.$executeRaw`INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","status","createdAt","updatedAt") VALUES (${`m-${officer}-${date}-${dealerId}`},${officer},${dealerId},${dealerId},${date}::date,${batch(officer, date)},'RECOVERY',${plan},'REGULAR','DRAFT',NOW(),NOW())`;
 
 async function main() {
-  await prisma.$executeRawUnsafe(`TRUNCATE "BillingExceptionTask","BillingException","DealerPaymentReceipt","DealerLastPayment","DailyWorkEntry","DailyWorkDay","DealerAssignment","Dealer","AuditLog","User","UserGroup" CASCADE`);
+  await prisma.$executeRawUnsafe(`TRUNCATE "BillingExceptionTask","BillingException","DealerPaymentReceipt","DealerLastPayment","DailyWorkEntry","DailyWorkDay","DealerAssignment","Dealer","AuditLog","Notification","User","UserGroup" CASCADE`);
   await prisma.userGroup.create({ data: { id: "g1", name: "MP" } });
   for (const [id, role] of [["admin", Role.SUPER_ADMIN], ["so1", Role.SALES_OFFICER], ["so2", Role.SALES_OFFICER], ["rm", Role.REGIONAL_MANAGER]] as const) await prisma.user.create({ data: { id, name: id.toUpperCase(), username: id, passwordHash: "x", role, groupId: id === "admin" ? null : "g1" } });
   const dealers: Record<string, string> = { A: "Alpha Traders", B: "Beta Stores", C: "Gamma Agro", D: "Delta NoOwner" };
@@ -80,6 +80,11 @@ async function main() {
   /* ---- create: Yes / No / no assignment ---- */
   const no = await be.createBillingException(admin, input("A", { paymentCondition: "NO", billingAmount: 1250.5 }));
   eq([no.billingAmount, no.paymentCondition, no.paymentDate, no.task], [1250.5, "NO", null, null]);
+  /* ---- alerts (real Notification rows): No creates the exception alert for the owning SO, that SO's RM and the admin — and nobody else ---- */
+  const alertsOf = (entityId: string) => prisma.notification.findMany({ where: { relatedEntityType: "BillingException", relatedEntityId: entityId }, orderBy: { userId: "asc" } });
+  eq((await alertsOf(no.id)).map((n) => n.userId), ["admin", "rm", "so1"], "No → SO + RM + admin, no task needed");
+  assert.ok((await alertsOf(no.id)).every((n) => !n.isRead && n.type === "SYSTEM" && n.title === "New Billing Exception" && n.message.includes("Alpha Traders") && n.message.includes("Payment condition: No")), "unread, titled, complete");
+  assert.equal(await prisma.notification.count({ where: { userId: "so2" } }), 0, "an unrelated SO hears nothing");
   assert.equal(await prisma.billingExceptionTask.count(), 0, "No → no task");
   assert.equal(await code(be.createBillingException(admin, input("D", { paymentCondition: "YES", paymentDate: day(0), billingAmount: 100 }))), 422, "no assignment → clear error");
   assert.equal(await prisma.billingException.count({ where: { dealerId: "D" } }), 0, "…and no partial exception");
@@ -93,11 +98,17 @@ async function main() {
   eq(parallel, [0, 0, 0, 0, 0]);
   assert.equal(await prisma.billingExceptionTask.count({ where: { billingExceptionId: yes.id } }), 1, "five deliveries of one Save → one exception, ONE task");
   assert.equal(await prisma.billingExceptionTask.count(), 1);
+  const yesAlerts = await alertsOf(yes.id);
+  eq(yesAlerts.map((n) => n.userId), ["admin", "rm", "so1"], "Yes → one combined alert per recipient; five parallel deliveries of the SAME save add none");
+  assert.ok(yesAlerts.every((n) => n.title === "New Billing Exception · Recovery task assigned" && n.message.includes("Billing Amount ₹20,000") && n.message.includes("Promised payment") && n.message.includes("SO1")));
+  assert.equal(await prisma.notification.count({ where: { relatedEntityId: { in: [yes.id, no.id] } } }), 6);
+  assert.equal(await prisma.notification.count({ where: { relatedEntityType: "BillingException", message: { contains: "Delta NoOwner" } } }), 0, "the failed save (no assignment) left no alert");
   assert.equal(await code(be.createBillingException(admin, { ...cond, billingAmount: 20001 })), 409, "same request id, different amount → refused");
   await assert.rejects(prisma.billingExceptionTask.create({ data: { billingExceptionId: yes.id, dealerId: "B", officerId: "so1", amount: 1, promisedDate: new Date(day(2)), taskDate: new Date(day(2)) } }), "the database allows at most one task per exception");
   await assert.rejects(prisma.$executeRaw`UPDATE "BillingException" SET "paymentCondition" = true, "paymentDate" = NULL WHERE "id" = ${yes.id}`, "the shape rule is a database constraint too");
 
   /* ---- materialization: not before its day; then exactly once, next to a manual plan and another source's contribution ---- */
+  const alertCount = await prisma.notification.count();
   eq(await materialize("so1", day(1)), { materializedTasks: 0, affectedDealers: 0, finalized: false }, "a task is not due before its date");
   await manual("so1", day(2), "B", 5000);
   await prisma.$executeRaw`UPDATE "DailyWorkEntry" SET "todaysPlan" = "todaysPlan" + 3000 WHERE "id" = ${`m-so1-${day(2)}-B`}`; // stand-in for a CN / Calendar contribution already on the row
@@ -105,6 +116,7 @@ async function main() {
   assert.equal(first.materializedTasks, 1);
   assert.equal(Number((await entry("so1", day(2), "B"))!.todaysPlan), 28000, "manual 5,000 + other source 3,000 + Billing Exception 20,000");
   for (let i = 0; i < 3; i++) await materialize("so1", day(2));
+  assert.equal(await prisma.notification.count(), alertCount, "materializing a task into Daily Work (any number of times) never alerts");
   await Promise.all([materialize("so1", day(2)), materialize("so1", day(2)), materialize("so1", day(2))]);
   assert.equal(Number((await entry("so1", day(2), "B"))!.todaysPlan), 28000, "repeated / concurrent materialization never adds the amount again");
   const linked = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: t0.id } });
@@ -215,6 +227,15 @@ async function main() {
   eq([Number(sepRow.billingAmount), Number(sepRow.paymentAmount), Number(sepRow.task!.amount)], [50000, 15000, 15000], "Amount 50,000 and Payment 15,000 are two stored values; the task is planned for 15,000");
   assert.equal(await code(be.createBillingException(admin, { ...input("P", { paymentCondition: "YES", paymentDate: day(30) }), paymentAmount: undefined })), 422, "Payment is required");
   const sepMonth = { year: Number(day(30).slice(0, 4)), month: Number(day(30).slice(5, 7)) };
+  /* ---- Calendar Daily Task (a separate automatic-task source): a FUTURE-dated task alerts at creation; reminders and reads never do ---- */
+  const beforeCal = await prisma.notification.count();
+  const calTaskEntry = await cal.createCalendarEntry(so1, { kind: "TASK", date: day(40), section: "RECOVERY", dealerId: "A", amount: 7500, paymentMode: "UPI" });
+  const calAlerts = await prisma.notification.findMany({ where: { relatedEntityType: "CalendarEntry", relatedEntityId: calTaskEntry.id }, orderBy: { userId: "asc" } });
+  eq(calAlerts.map((n) => n.userId), ["admin", "rm", "so1"], "calendar task → the SO, the RM and the admin, on the creation day");
+  assert.ok(calAlerts.every((n) => n.message.includes("Calendar → Recovery") && n.message.includes("Alpha Traders") && n.message.includes(`${day(40).slice(8)}/${day(40).slice(5, 7)}/${day(40).slice(0, 4)}`) && n.message.includes("₹7,500")));
+  await cal.createCalendarEntry(so1, { kind: "REMINDER", date: day(41), text: "call" });
+  await cal.calendarMonth(so1, { ...sepMonth } as never); await cal.calendarMonth(admin, { ...sepMonth } as never);
+  assert.equal(await prisma.notification.count(), beforeCal + 3, "a reminder and calendar reads add no alert");
   eq(((await cal.calendarMonth(so1, sepMonth as never)).billingTasks.find((t) => t.id === sepRow.task!.id))?.amount, 15000, "the Calendar shows the promised Payment");
   clock = day(30); await materialize("so1", day(30));
   assert.equal(Number((await entry("so1", day(30), "P"))!.todaysPlan), 15000, "Today's Plan receives exactly the Payment");

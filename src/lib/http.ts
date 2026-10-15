@@ -3,6 +3,8 @@ import { ZodError } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { withDbRetry } from "@/lib/db-retry";
+import { sharedAuthUserCache } from "@/lib/auth-user-cache";
+import { DATABASE_BUSY_MESSAGE } from "@/lib/db-admission";
 import { can, type Action, type Resource } from "@/lib/rbac";
 import type { Role } from "@prisma/client";
 import { Role as Roles } from "@prisma/client";
@@ -47,36 +49,20 @@ type AuthUserRow = {
  * the DB read is throttled. Set AUTH_CACHE_TTL_MS=0 to disable the cache and revert to per-request reads.
  */
 const AUTH_TTL_MS = Number(process.env.AUTH_CACHE_TTL_MS ?? 8000);
-const authCache = new Map<string, { at: number; row: AuthUserRow }>();
-const inflightAuthUser = new Map<string, Promise<AuthUserRow>>();
+const authUserCache = sharedAuthUserCache<AuthUserRow>();
 
 function loadAuthUser(id: string, key: string): Promise<AuthUserRow> {
-  const cached = authCache.get(key);
-  if (cached && Date.now() - cached.at < AUTH_TTL_MS) return Promise.resolve(cached.row);
-
-  const existing = inflightAuthUser.get(key);
-  if (existing) return existing;
-
-  const p = withDbRetry(() =>
+  return authUserCache.load(id, key, AUTH_TTL_MS, () => withDbRetry(() =>
     prisma.user.findUnique({
       where: { id },
       select: { id: true, role: true, username: true, isActive: true, deletedAt: true, sessionValidAfter: true, groupId: true },
     }),
-  ).then((row) => {
-    if (AUTH_TTL_MS > 0) authCache.set(key, { at: Date.now(), row: row as AuthUserRow });
-    return row as AuthUserRow;
-  });
-  inflightAuthUser.set(key, p);
-  // Clear the in-flight entry on settle; errors still propagate to awaiters via the returned promise.
-  p.finally(() => {
-    if (inflightAuthUser.get(key) === p) inflightAuthUser.delete(key);
-  }).catch(() => {});
-  return p;
+  ));
 }
 
 /** Drop a user's cached auth row immediately (call after deactivate/delete/role or password changes). */
 export function invalidateAuthCache(userId: string): void {
-  for (const k of authCache.keys()) if (k.startsWith(`${userId}:`)) authCache.delete(k);
+  authUserCache.invalidate(userId);
 }
 
 /**
@@ -154,6 +140,12 @@ export function handle(fn: () => Promise<NextResponse>) {
           { error: "Validation failed", issues: error.flatten().fieldErrors },
           { status: 422 },
         );
+      }
+      if (prismaErrorCode(error) === "P2024") {
+        // Do not retry a saturated pool (which amplifies the queue) or render the Prisma stack through
+        // Next's source-map parser. An overload is a temporary service failure, not a lost session.
+        console.warn("[database] connection pool exhausted");
+        return NextResponse.json({ error: DATABASE_BUSY_MESSAGE }, { status: 503, headers: { "Retry-After": "3" } });
       }
       if (prismaErrorCode(error) === "P2002") {
         // Log the exact constraint so root causes are never masked by the generic message.

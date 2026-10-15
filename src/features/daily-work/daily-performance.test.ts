@@ -100,6 +100,8 @@ function makeFake(init: Partial<Store> = {}) {
   }
 
   const prisma = {
+
+    partyMonthlyPlan: { findMany: async () => [] }, // Monthly Party Planning is covered by appointment.integration.ts
     $queryRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest), true),
     $executeRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest), false),
     user: {

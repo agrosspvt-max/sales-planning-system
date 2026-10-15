@@ -30,7 +30,7 @@ interface DealerRow {
   entryType?: DailyWorkType; paymentMode?: RecoveryPaymentMode | null; recoverySource?: "BILLING_EXCEPTION" | "CN_REQUEST" | null;
 }
 interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds?: string[]; calendarEntryIds?: string[] }
-interface ApptRow { rowId: string; entryId?: string; dealerName: string; marketName: string; status: string | null }
+interface ApptRow { rowId: string; entryId?: string; dealerName: string; marketName: string; monthlyPlanId?: string | null; reportedDealerName?: string; status: string | null }
 interface ConvRow { dealerId: string; schemeId: string; dealerName: string; schemeName: string; todaysPlan: number | null; achievability: string | null }
 interface SummaryDto {
   /** Each submitted batch's saved No Plan sections (explicit decision) — the only source of the "No Plan" display. */
@@ -153,6 +153,7 @@ function useReviewColumns() {
   return {
     dealer: useLabel("col.dealer"),
     dealerClient: useLabel("daily_work.col.review_dealer_client"),
+    reportedDealer: useLabel("daily_work.appointment.dealer_name"),
     task: useLabel("daily_work.col.task_type"),
     planned: useLabel("daily_work.col.review_planned"),
     actual: useLabel("daily_work.col.review_actual"),
@@ -224,15 +225,17 @@ export function DealerSection({ title, rows, recovery = false, autoEntryIds = []
 export function AppointmentSection({ title, rows, noPlan = false }: { title: string; rows: ApptRow[]; noPlan?: boolean }) {
   const C = useReviewColumns();
   const result = (status: string | null) => status === "APPOINTED" ? C.appointed : status === "NOT_APPOINTED" ? C.notAppointed : dash;
+  // A linked row IS its Monthly Party Planning market; a legacy typed row keeps its dealer / client name and market text.
   return (
     <ReadSection title={title} section="appointment" empty={rows.length === 0} noPlan={noPlan}>
       <Table>
-        <TableHeader><TableRow><TableHead>{C.dealerClient}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
+        <TableHeader><TableRow><TableHead>{C.dealerClient}</TableHead><TableHead>{C.reportedDealer}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
           {rows.map((r) => (
             <TableRow key={r.rowId}>
-              <TableCell className="font-medium">{r.dealerName}</TableCell>
-              <TableCell>{r.marketName ? `${C.market}: ${r.marketName}` : C.planned}</TableCell>
+              <TableCell className="font-medium">{r.monthlyPlanId ? r.marketName || dash : r.dealerName}</TableCell>
+              <TableCell>{r.status === "APPOINTED" && r.reportedDealerName ? r.reportedDealerName : dash}</TableCell>
+              <TableCell>{!r.monthlyPlanId && r.marketName ? `${C.market}: ${r.marketName}` : C.planned}</TableCell>
               <TableCell>{result(r.status)}</TableCell>
             </TableRow>
           ))}

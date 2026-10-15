@@ -175,12 +175,32 @@ async function materializeDueCnTasksInTransaction(
   return { materializedTasks, affectedDealers, finalized: false };
 }
 
-/** Server-authoritative entry point used by Daily Work reads and the Auto Tasks endpoint. */
+/**
+ * A cheap, NON-locking look: is any Auto Task (CN payment event, legacy CN request or Billing Exception task) due for this officer that has not entered Daily Work yet?
+ * It only has to be a superset of what materialization would claim — "no" means there is certainly nothing to do, "yes" just means "go and take the lock and check".
+ */
+export async function hasDueAutoTasks(officerId: string, workDate: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<Array<{ due: boolean }>>(Prisma.sql`
+    SELECT (
+      EXISTS (SELECT 1 FROM "CnPaymentEvent" e JOIN "CnRequest" c ON c."id" = e."cnRequestId"
+              WHERE c."officerId" = ${officerId} AND c."paymentTrackingMode" = 'PAYMENT_V1' AND e."taskStatus" = 'SCHEDULED' AND e."taskDate" IS NOT NULL AND e."taskDate" <= ${workDate}::date AND e."dailyWorkEntryId" IS NULL)
+      OR EXISTS (SELECT 1 FROM "CnRequest" c WHERE c."officerId" = ${officerId} AND c."paymentTrackingMode" IS NULL AND c."status" = 'ACCEPTED_NOT_POSTED' AND c."taskDate" IS NOT NULL AND c."taskDate" <= ${workDate}::date AND c."legacyDailyWorkEntryId" IS NULL)
+      OR EXISTS (SELECT 1 FROM "BillingExceptionTask" t JOIN "DealerAssignment" da ON da."dealerId" = t."dealerId" AND da."officerId" = ${officerId} AND da."effectiveTo" IS NULL
+                 WHERE t."taskDate" <= ${workDate}::date AND t."dailyWorkEntryId" IS NULL)
+    ) AS "due"`);
+  return rows[0]?.due ?? true; // when in doubt, take the lock and let the authoritative path decide
+}
+
+/**
+ * Server-authoritative entry point used by Daily Work reads and the Auto Tasks endpoint. A read only opens the (row-locking) materialization transaction when there is
+ * something to materialize: otherwise every Sales / Recovery / status read would queue on the same DailyWorkDay lock — and so would a submission.
+ */
 export async function materializeDueDailyWorkTasks(ctx: AuthContext): Promise<MaterializationResult> {
   if (!autoTasksApplyToRole(ctx.role)) {
     return { materializedTasks: 0, affectedDealers: 0, finalized: false };
   }
   const workDate = currentBusinessDate();
+  if (!(await hasDueAutoTasks(ctx.userId, workDate))) return { materializedTasks: 0, affectedDealers: 0, finalized: false };
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, ctx.userId, workDate);
     return materializeDueDailyWorkTasksInTransaction(tx, ctx.userId, workDate, day);

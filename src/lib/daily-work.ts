@@ -524,6 +524,9 @@ export function planRequiredMessage(template: string, rows: PlanRowToCheck[], se
 export interface PerformanceEntryRow {
   section: string;
   typedDealerName: string | null;
+  /** Dealer Appointment: the approved Monthly Party Planning entry the row plans (null for legacy typed rows). */
+  monthlyPlanId?: string | null;
+  reportedDealerName?: string | null;
   todaysPlan: string | number | null;
   todaysActual: string | number | null;
   resultStatus: string | null;
@@ -575,7 +578,8 @@ export function performanceRowValue(r: PerformanceEntryRow, metric: PerformanceM
   if (info.key === "sales" || info.key === "recovery") return n(actual ? r.todaysActual : r.todaysPlan);
   if (info.key === "schemeConversion") return actual && r.resultStatus !== "YES" ? null : n(r.todaysPlan);
   if (info.key === "appointment") {
-    if ((r.typedDealerName ?? "").trim() === "") return null; // an unnamed placeholder row is not a planned appointment
+    // A planned appointment is a linked Monthly Party Planning market, or (legacy) a typed dealer; an unnamed placeholder row is neither.
+    if (!r.monthlyPlanId && (r.typedDealerName ?? "").trim() === "") return null;
     return actual && r.resultStatus !== "APPOINTED" ? null : 1;
   }
   const a = actual ? r.actualDealerVisits : r.dealerVisits, b = actual ? r.actualNewPartyVisits : r.newPartyVisits;

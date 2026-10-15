@@ -169,7 +169,9 @@ function ReportView({ view }: { view: ReportViewKey }) {
   const [bucket, setBucket] = useState<DayBucketKey | null>(null);
   // Billing Exception: the dealer whose status was clicked (action popup → form) and the exception whose Info is open.
   const [target, setTarget] = useState<{ dealerId: string; party: string } | null>(null);
-  const [infoId, setInfoId] = useState<string | null>(null);
+  // A Billing Exception notification opens straight on its details: /reports/last-payment?exception=<id> (the details API still enforces the caller's scope).
+  const linkedException = useSearchParams()?.get("exception") ?? null;
+  const [infoId, setInfoId] = useState<string | null>(linkedException);
   const loadingLabel = useLabel("last_payment.filter.loading");
   const failedLabel = useLabel("last_payment.filter.error");
   const daysLabels = { frozen: useLabel("billing_exception.days.frozen"), running: useLabel("billing_exception.days.running") };
@@ -426,7 +428,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
         </Table>
       </div>
       {canCreate && target && <BillingExceptionActionDialog dealerId={target.dealerId} party={target.party} onClose={() => setTarget(null)} />}
-      {infoId && <BillingExceptionInfoDialog exceptionId={infoId} onClose={() => setInfoId(null)} />}
+      {infoId && <BillingExceptionInfoDialog exceptionId={infoId} onClose={() => { setInfoId(null); if (linkedException && typeof window !== "undefined") window.history.replaceState(null, "", window.location.pathname); }} />}
       {data && data.totalPages > 1 && (
         <div className="flex items-center justify-between text-sm">
           <span className="text-muted-foreground">Page {data.page} of {data.totalPages} · {data.total} total</span>

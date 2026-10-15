@@ -27,7 +27,7 @@ for (const section of ["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", 
 for (const label of [
   "daily_work.col.monthly_sales_plan", "daily_work.col.todays_sales",
   "daily_work.col.monthly_recovery_plan", "daily_work.col.todays_recovery",
-  "daily_work.col.monthly_dealer_plan", "daily_work.col.appointment_status",
+  "daily_work.appointment.monthly_dealer_plan", "daily_work.appointment.result",
   "daily_work.col.planned_scheme_units", "daily_work.col.todays_conversion",
   "daily_work.visits.planned_dealer_visits", "daily_work.visits.actual_dealer_visits",
 ]) assert.ok(viewer.includes(label), `Admin viewer renders ${label}`);

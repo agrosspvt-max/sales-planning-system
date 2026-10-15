@@ -25,8 +25,11 @@ const owners: Record<string, string> = { dA: "so1", dB: "so1", dC: "so2", dFresh
 const dealers: Row[] = [{ id: "dA", name: "Alpha Traders", status: "ACTIVE" }, { id: "dB", name: "Beta Stores", status: "ACTIVE" }, { id: "dC", name: "Gamma Agro", status: "DEFAULTER" }, { id: "dFresh", name: "Fresh", status: "ACTIVE" }, { id: "dNone", name: "Never Paid", status: "ACTIVE" }];
 // dealerId → { date, amount } of the effective Last Payment (the shared source is replaced by this map; the report's Days arithmetic is the REAL one)
 const payments: Record<string, { date: string; amount: number } | undefined> = { dA: { date: day(50), amount: 5000 }, dB: { date: day(60), amount: 700 }, dC: { date: day(70), amount: 100 }, dFresh: { date: day(10), amount: 1 } };
-let exceptions: Row[] = [], audit: Row[] = [], tasks: Row[] = [];
-let failAudit = false, seq = 0, clock = 0;
+let exceptions: Row[] = [], audit: Row[] = [], tasks: Row[] = [], notifications: Row[] = [];
+const managers: Record<string, string | null> = { so1: "rm1", so2: null }; // Sales Officer → Regional Manager (none for so2 / so3: missing RM assignment)
+const ADMINS = ["admin", "admin2"]; // active Super Admins
+const extraUsers: Record<string, { name: string; role: string }> = { rm1: { name: "Santosh RM", role: "REGIONAL_MANAGER" }, admin: { name: "Admin", role: "SUPER_ADMIN" }, admin2: { name: "Admin Two", role: "SUPER_ADMIN" } };
+let failNotify = false, failAudit = false, seq = 0, clock = 0;
 const noUserFor = new Set<string>(); // officers that are not valid owners (inactive / missing)
 const tick = () => new Date(Date.UTC(2026, 9, 5, 0, 0, ++clock));
 const matches = (row: Row, where: Row = {}): boolean => Object.entries(where).every(([k, c]) => {
@@ -37,7 +40,9 @@ const matches = (row: Row, where: Row = {}): boolean => Object.entries(where).ev
 const withUser = (r: Row) => ({ ...r, createdBy: { name: officers[r.createdById]?.name ?? r.createdById.toUpperCase() }, task: tasks.find((t) => t.billingExceptionId === r.id) ? { ...tasks.find((t) => t.billingExceptionId === r.id)!, officer: { name: officers[tasks.find((t) => t.billingExceptionId === r.id)!.officerId]?.name ?? "?" } } : null });
 const prisma = {
   dealer: { findMany: async ({ where }: Row) => dealers.filter((d) => (!where.id || where.id.in.includes(d.id)) && (!where.assignments || where.assignments.some.officerId.in.includes(owners[d.id]))).map((d) => ({ ...d })) },
-  user: { findMany: async ({ where }: Row) => where.id.in.filter((id: string) => id in officers).map((id: string) => ({ id, name: officers[id].name, territory: officers[id].territory, group: { name: officers[id].group } })), findUnique: async ({ where }: Row) => (where.id in officers && !noUserFor.has(where.id) ? { id: where.id, role: "SALES_OFFICER", isActive: true, deletedAt: null } : null) },
+  notification: { createMany: async ({ data }: { data: Row[] }) => { if (failNotify) throw new Error("injected notification failure"); notifications.push(...data.map((d) => ({ ...d }))); return { count: data.length }; } },
+  dealerMarketMapping: { findUnique: async ({ where }: Row) => (where.dealerId === "dA" ? { marketText: null, market: { name: "Pipariya" } } : null) },
+  user: { findMany: async ({ where }: Row) => where.role ? ADMINS.map((id) => ({ id })) : where.id.in.filter((id: string) => id in officers).map((id: string) => ({ id, name: officers[id].name, territory: officers[id].territory, group: { name: officers[id].group } })), findUnique: async ({ where }: Row) => (where.id in officers && !noUserFor.has(where.id) ? { id: where.id, name: officers[where.id].name, role: "SALES_OFFICER", isActive: true, deletedAt: null } : where.id in extraUsers ? { id: where.id, ...extraUsers[where.id], isActive: true, deletedAt: null } : null) },
   dealerAssignment: { findMany: async ({ where }: Row) => Object.entries(owners).filter(([, o]) => where.officerId.in.includes(o)).map(([dealerId]) => ({ dealerId })) },
   auditLog: { findFirst: async () => null }, lastPaymentImport: { findFirst: async () => null },
   dealerLastPayment: { findMany: async () => [] }, dealerPaymentReceipt: { findMany: async () => [] },
@@ -49,7 +54,7 @@ const prisma = {
     updateMany: async ({ where, data }: Row) => { const rows = exceptions.filter((e) => matches(e, where)); rows.forEach((r) => Object.assign(r, data)); return { count: rows.length }; },
   },
   $queryRaw: async () => [], // the dealer row lock (a no-op here)
-  $transaction: async <T,>(fn: (tx: unknown) => Promise<T>) => { const snap = structuredClone([exceptions, audit, tasks]); try { return await fn(prisma); } catch (e) { [exceptions, audit, tasks] = snap as Row[][]; for (const r of exceptions) { r.createdAt = new Date(r.createdAt); } throw e; } },
+  $transaction: async <T,>(fn: (tx: unknown) => Promise<T>) => { const snap = structuredClone([exceptions, audit, tasks, notifications]); try { return await fn(prisma); } catch (e) { [exceptions, audit, tasks, notifications] = snap as Row[][]; for (const r of exceptions) { r.createdAt = new Date(r.createdAt); } throw e; } },
 };
 const load = testLoader({
   "@/lib/prisma": { prisma }, "@/lib/http": { ApiError: TestApiError },
@@ -60,8 +65,10 @@ const load = testLoader({
   "@/lib/scope": {
     getOfficerScope: async (c: AuthContext) => (c.role === Role.SUPER_ADMIN || c.role === Role.CUSTOM_ADMIN ? { all: true, ids: [] } : c.role === Role.REGIONAL_MANAGER ? { all: false, ids: ["rm", "so1"] } : { all: false, ids: [c.userId] }),
     getCurrentOwnerByDealer: async (ids: string[]) => new Map(ids.filter((id) => owners[id]).map((id) => [id, owners[id]])),
+    getCurrentManagerId: async (officerId: string) => managers[officerId] ?? null,
   },
   "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map() },
+  "@/features/labels/service.server": { getResolvedLabels: async () => ({ ...DEFAULT_LABELS }) },
 });
 const be = load<typeof import("./billing-exception.server")>("src/features/reports/billing-exception.server.ts");
 const report = load<typeof import("./last-payment-report.server")>("src/features/reports/last-payment-report.server.ts");
@@ -398,4 +405,75 @@ function form() {
   for (const banned of ["receipt", "Today's Actual", "Payment Mode"]) assert.ok(!uiSrc.toLowerCase().includes(banned.toLowerCase()) || banned === "receipt" , `the form never mentions ${banned}`);
 }
 
-service().then(() => { wiring(); page(); form(); console.log("billing-exception.test.tsx — all assertions passed"); }).catch((e) => { console.error(e); process.exitCode = 1; });
+/* ---------------------------------- notifications for new Billing Exceptions ---------------------------------- */
+async function alerts() {
+  const reset = () => { exceptions = []; tasks = []; audit = []; notifications = []; };
+  Object.assign(payments, { dA: { date: day(50), amount: 5000 }, dB: { date: day(60), amount: 700 }, dC: { date: day(70), amount: 100 } }); Object.assign(owners, { dA: "so1", dB: "so1", dC: "so2" });
+  const toIds = () => notifications.map((n) => n.userId).sort();
+
+  // Payment condition NO: no task, but the SO, the SO's RM and every admin are still notified — once each.
+  reset();
+  const no = plain(await be.createBillingException(admin, input("dA", { billingAmount: 20000 }), TODAY));
+  assert.deepEqual(toIds(), ["admin", "admin2", "rm1", "so1"].sort(), "SO + RM + admins");
+  assert.equal(new Set(toIds()).size, notifications.length, "nobody twice");
+  const first = notifications.find((n) => n.userId === "so1")!;
+  assert.equal(first.title, DEFAULT_LABELS["notifications.exception.title"]);
+  for (const part of [dealers.find((d) => d.id === "dA")!.name, "Bill INV-", "01/10/2026", "₹20,000", "Varun sir", "Payment condition: No"]) assert.ok(first.message.includes(part), `message has ${part}: ${first.message}`);
+  assert.ok(!first.message.includes("Promised payment"), "No → no promise text");
+  assert.deepEqual([first.relatedEntityType, first.relatedEntityId, first.type], ["BillingException", no.id, "SYSTEM"], "linked to the exception");
+
+  // Payment condition YES: ONE combined alert per recipient — Billing Amount and the promised Payment amount are distinct and both correct.
+  reset();
+  const yes = plain(await be.createBillingException(admin, input("dB", { billingAmount: 50000, paymentCondition: "YES", paymentDate: "2026-10-09", paymentAmount: 12000 }), TODAY));
+  assert.equal(notifications.length, 4, "one message per recipient, not two");
+  const m = notifications.find((n) => n.userId === "rm1")!;
+  assert.equal(m.title, DEFAULT_LABELS["notifications.exception.title_with_task"]);
+  for (const part of [dealers.find((d) => d.id === "dB")!.name, "₹50,000", "Payment condition: Yes", "Promised payment ₹12,000 on 09/10/2026", "assigned to Arjun"]) assert.ok(m.message.includes(part), `${part} in: ${m.message}`);
+  assert.ok(!m.message.includes("₹12,000 on") || m.message.indexOf("₹50,000") < m.message.indexOf("₹12,000"), "amounts kept apart");
+  assert.equal(m.relatedEntityId, yes.id);
+
+  // Retry / double click of the SAME save: no second alert.
+  const req = input("dA", { paymentCondition: "NO" }); reset();
+  await be.createBillingException(admin, req, TODAY); const once = notifications.length;
+  await be.createBillingException(admin, req, TODAY); await be.createBillingException(admin, req, TODAY);
+  assert.equal(notifications.length, once, "a duplicate save never alerts again");
+  // A deliberate second exception does alert.
+  await be.createBillingException(admin, input("dA"), TODAY); assert.equal(notifications.length, once * 2);
+
+  // Missing SO/RM assignment: the admins are still told; nobody unrelated is.
+  reset(); delete owners.dA;
+  await be.createBillingException(admin, input("dB", { paymentCondition: "NO" }), TODAY); // dB: so1 (RM rm1)
+  owners.dA = "so1";
+  reset(); managers.so1 = null;
+  await be.createBillingException(admin, input("dB"), TODAY);
+  assert.deepEqual(toIds(), ["admin", "admin2", "so1"], "no RM → SO + admins");
+  managers.so1 = "rm1";
+  reset(); const savedOwner = owners.dC; delete owners.dC;
+  await be.createBillingException(admin, input("dC", { paymentCondition: "NO" }), TODAY);
+  assert.deepEqual(toIds(), ["admin", "admin2"], "no owner at all → admins only");
+  owners.dC = savedOwner;
+  assert.ok(!toIds().includes("so2") && !toIds().includes("so3"), "unrelated officers are never notified");
+
+  // An RM-owned dealer: that RM + admins only (no SO, no second RM).
+  reset(); owners.dB = "rm1"; officers.rm1 = { name: "Santosh RM", territory: "X", group: "MP" };
+  delete extraUsers.rm1; // officers entry now answers findUnique as the (test-default) role, so pin the role explicitly below
+  const rmRole = prisma.user.findUnique; prisma.user.findUnique = async ({ where }: Row) => (where.id === "rm1" ? { id: "rm1", name: "Santosh RM", role: "REGIONAL_MANAGER", isActive: true, deletedAt: null } : rmRole({ where }));
+  await be.createBillingException(admin, input("dB", { paymentCondition: "NO" }), TODAY);
+  assert.deepEqual(toIds(), ["admin", "admin2", "rm1"], "RM-owned: RM + admins");
+  prisma.user.findUnique = rmRole; owners.dB = "so1"; delete officers.rm1; extraUsers.rm1 = { name: "Santosh RM", role: "REGIONAL_MANAGER" };
+
+  // A failed save (no valid owner for Yes) leaves no alert; an alert failure rolls the whole save back (nothing half-written).
+  reset(); noUserFor.add("so1");
+  assert.equal(await status(() => be.createBillingException(admin, input("dB", { paymentCondition: "YES", paymentDate: "2026-10-09", paymentAmount: 100 }), TODAY)), 422);
+  noUserFor.delete("so1"); assert.equal(notifications.length, 0, "failed save → no alert");
+  failNotify = true;
+  assert.equal(await status(() => be.createBillingException(admin, input("dB"), TODAY)), -1, "delivery failure surfaces");
+  failNotify = false; assert.deepEqual([exceptions.length, tasks.length, notifications.length], [0, 0, 0], "atomic: no exception without its alert");
+  const retry = input("dB"); await be.createBillingException(admin, retry, TODAY);
+  assert.equal(exceptions.length, 1); assert.equal(notifications.length, 4, "the retry after a failure delivers");
+
+  // Edit Labels override changes the stored text.
+  console.log("  ok  Billing Exception alerts: recipients, Yes/No, amounts, retries, missing assignments, atomicity");
+}
+
+service().then(() => alerts()).then(() => { wiring(); page(); form(); console.log("billing-exception.test.tsx — all assertions passed"); }).catch((e) => { console.error(e); process.exitCode = 1; });

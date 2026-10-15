@@ -11,7 +11,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { Prisma, Role } from "@prisma/client";
 import type { AuthContext } from "@/lib/http";
-import { dailyWorkServiceInfrastructureMocks } from "./service-test-mocks";
+import { dailyWorkServiceInfrastructureMocks, sectionFactsRow } from "./service-test-mocks";
 
 class TestApiError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
 
@@ -80,6 +80,7 @@ function makeFake(init: Partial<Store> = {}) {
     if (text.startsWith('SELECT "id", "batchId", "dealerVisits"')) return [];
     if (text.startsWith('SELECT "section", "batchId"')) return [];
     if (text.startsWith('SELECT "section", COUNT(*)')) return [];
+    if (text.startsWith('SELECT COUNT(*) FILTER (WHERE "section" = \'SALES\')')) return [sectionFactsRow([])]; // no rows in this fake
     if (text.startsWith('SELECT ("dealerVisits" IS NOT NULL')) return [];
     if (text.startsWith('SELECT "noPlanSections"')) return [];
     if (text.startsWith('SELECT "selfRating" FROM "DailyWorkEntry"')) {
@@ -107,6 +108,8 @@ function makeFake(init: Partial<Store> = {}) {
   }
 
   const prisma = {
+
+    partyMonthlyPlan: { findMany: async () => [] }, // Monthly Party Planning is covered by appointment.integration.ts
     $queryRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest)),
     $executeRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest)),
     user: {

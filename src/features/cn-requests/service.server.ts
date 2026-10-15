@@ -12,6 +12,7 @@ import { getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { getResolvedLabels } from "@/features/labels/service.server";
+import { notifyAutoTaskCreated } from "@/features/notifications/task-alerts.server";
 import { lockDailyWorkDay } from "@/features/daily-work/day-lock.server";
 import { reverseMaterializedDailyWorkContribution } from "@/features/daily-work/auto-task-materialization.server";
 import {
@@ -506,6 +507,16 @@ async function postAcceptedCnRequestInTransaction(
   return { posted: true, documentName: request.cnWorkingFileName };
 }
 
+/**
+ * Alert for a NEWLY created CN Recovery task (future-dated included): the CN's owning officer, that officer's RM and the Super Admins hear about it when the task is
+ * saved, not on its day. Runs inside the transaction that created the task event, so it is written exactly once and only for a successful change.
+ */
+async function alertNewCnTask(tx: Prisma.TransactionClient, labels: Awaited<ReturnType<typeof getResolvedLabels>>, eventId: string, cnRequestId: string, taskDate: string, amount: number): Promise<void> {
+  const cn = await tx.cnRequest.findUnique({ where: { id: cnRequestId }, select: { officerId: true, dealerId: true } });
+  if (!cn) return;
+  await notifyAutoTaskCreated(tx, labels, { source: "CN", section: "RECOVERY", ownerId: cn.officerId, dealerId: cn.dealerId, date: taskDate, amount, entityType: "CnPaymentEvent", entityId: eventId });
+}
+
 /** Admin acceptance/posting stores its authoritative amount, payment start/task, document and status atomically. */
 export async function acceptCnRequest(
   ctx: AuthContext,
@@ -576,7 +587,7 @@ export async function acceptCnRequest(
     if (transition.count === 0) throw new ApiError(409, L["cn_requests.error.request_changed"]);
 
     if (paymentPending) {
-      await tx.cnPaymentEvent.create({
+      const created = await tx.cnPaymentEvent.create({
         data: {
           cnRequestId: id,
           status: "PENDING",
@@ -592,6 +603,7 @@ export async function acceptCnRequest(
           recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
         },
       });
+      await alertNewCnTask(tx, L, created.id, id, defaultTaskDate!, parsed.data.outstandingAmount!);
     }
     if (directPosted) {
       // Same payment-history shape as an Admin-verified Paid (see verifyCnPayment): PAID, settles the whole amount, no task.
@@ -905,7 +917,7 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
         data: { taskStatus: "COMPLETED", taskCompletedAt: new Date() },
       });
     }
-    await tx.cnPaymentEvent.create({
+    const reported = await tx.cnPaymentEvent.create({
       data: {
         cnRequestId: id,
         status: data.status,
@@ -922,6 +934,8 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
         recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
       },
     });
+    // A Not Paid / Partial report opens a NEW follow-up task: alert once, in the same transaction (the requestKey / status guards above stop a replay before this point).
+    if (taskStatus === "SCHEDULED" && taskDate && taskAmount != null) await alertNewCnTask(tx, L, reported.id, id, taskDate.toISOString().slice(0, 10), taskAmount);
   });
   await writeAudit({
     userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequestPayment", entityId: id,
@@ -1062,7 +1076,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
       });
       if (updated.count === 0) throw new ApiError(409, L["cn_requests.error.payment_verify_changed"]);
 
-      await tx.cnPaymentEvent.create({
+      const verifiedEvent = await tx.cnPaymentEvent.create({
         data: {
           cnRequestId: id,
           status: data.status,
@@ -1080,6 +1094,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
           recordedById: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
         },
       });
+      if (nextTaskDate) await alertNewCnTask(tx, L, verifiedEvent.id, id, nextTaskDate, after);
       if (data.status !== "PAID") return { idempotent: false, posted: false, postedAmount: null, documentName: null, finalCnName: null };
 
       const postedAmount = Number(request.paymentOriginalAmount);
@@ -1416,20 +1431,23 @@ export async function countUnconfirmedMaterializedTasks(
   workDate: string,
   batchId: string,
 ): Promise<number> {
-  const events = await tx.$queryRaw<Array<{ n: number }>>(Prisma.sql`
-    SELECT COUNT(*)::int AS n FROM "CnPaymentEvent" e
-    JOIN "DailyWorkEntry" d ON d."id" = e."dailyWorkEntryId"
-    WHERE d."officerId" = ${officerId} AND d."workDate" = ${workDate}::date AND d."batchId" = ${batchId}
-      AND d."section" = 'RECOVERY' AND d."status" = 'DRAFT'
-      AND e."taskStatus" = 'SCHEDULED' AND e."dailyWorkConfirmed" = false`);
-  const legacy = await tx.$queryRaw<Array<{ n: number }>>(Prisma.sql`
-    SELECT COUNT(*)::int AS n FROM "CnRequest" c
-    JOIN "DailyWorkEntry" d ON d."id" = c."legacyDailyWorkEntryId"
-    WHERE d."officerId" = ${officerId} AND d."workDate" = ${workDate}::date AND d."batchId" = ${batchId}
-      AND d."section" = 'RECOVERY' AND d."status" = 'DRAFT'
-      AND c."paymentTrackingMode" IS NULL AND c."status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED}
-      AND c."legacyDailyWorkConfirmed" = false`);
-  return (events[0]?.n ?? 0) + (legacy[0]?.n ?? 0);
+  // ONE statement (payment-tracked events + legacy requests): this runs inside the submit transaction, where every statement is a network round trip.
+  const rows = await tx.$queryRaw<Array<{ n: number }>>(Prisma.sql`
+    SELECT (
+      SELECT COUNT(*)::int FROM "CnPaymentEvent" e
+      JOIN "DailyWorkEntry" d ON d."id" = e."dailyWorkEntryId"
+      WHERE d."officerId" = ${officerId} AND d."workDate" = ${workDate}::date AND d."batchId" = ${batchId}
+        AND d."section" = 'RECOVERY' AND d."status" = 'DRAFT'
+        AND e."taskStatus" = 'SCHEDULED' AND e."dailyWorkConfirmed" = false
+    ) + (
+      SELECT COUNT(*)::int FROM "CnRequest" c
+      JOIN "DailyWorkEntry" d ON d."id" = c."legacyDailyWorkEntryId"
+      WHERE d."officerId" = ${officerId} AND d."workDate" = ${workDate}::date AND d."batchId" = ${batchId}
+        AND d."section" = 'RECOVERY' AND d."status" = 'DRAFT'
+        AND c."paymentTrackingMode" IS NULL AND c."status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED}
+        AND c."legacyDailyWorkConfirmed" = false
+    ) AS n`);
+  return rows[0]?.n ?? 0;
 }
 
 export async function cnTasksForOfficerDate(officerId: string, workDate: string): Promise<CnTaskDto[]> {

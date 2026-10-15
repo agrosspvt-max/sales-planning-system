@@ -1,3 +1,4 @@
+import { alertLabels, notifyAutoTaskCreated, type AutoTaskSection } from "@/features/notifications/task-alerts.server";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -428,9 +429,20 @@ export async function createCalendarEntry(ctx: AuthContext, raw: unknown): Promi
     create = { kind: data.kind, text: data.text };
   }
 
-  const row = (await prisma.calendarEntry.create({
-    data: { ownerId: ctx.userId, date, ...create } as never,
-    select: ENTRY_SELECT,
+  // A new Daily Task is an automatic-task source: its alert is written in the SAME transaction as the entry (future dates included). Meetings / reminders / others never alert,
+  // and opening the Calendar or materializing the task into Daily Work never creates an entry, so neither can alert again.
+  const labels = data.kind === "TASK" ? await alertLabels() : null;
+  const row = (await prisma.$transaction(async (tx) => {
+    const created = await tx.calendarEntry.create({ data: { ownerId: ctx.userId, date, ...create } as never, select: ENTRY_SELECT });
+    if (labels && data.kind === "TASK") {
+      const typed = (create.typedDealerName as string | undefined) ?? null;
+      await notifyAutoTaskCreated(tx, labels, {
+        source: "CALENDAR", section: data.section as AutoTaskSection, ownerId: ctx.userId, dealerId: (create.dealerId as string | undefined) ?? null,
+        ...(typed ? { dealerName: typed, marketName: (create.marketName as string | null | undefined) ?? null } : data.section === "OTHERS" ? { dealerName: null } : {}),
+        date: data.date, amount: create.amount != null ? Number(create.amount) : null, entityType: "CalendarEntry", entityId: (created as { id: string }).id,
+      });
+    }
+    return created;
   })) as unknown as EntryRow;
   return (await toEntryDtos(ctx, [row]))[0]!;
 }

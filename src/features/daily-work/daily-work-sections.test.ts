@@ -174,44 +174,12 @@ async function expectStatus(fn: () => Promise<unknown>, status: number, label: s
 
 async function main() {
   /* ============ DEALER APPOINTMENT ============ */
-  // 1) Typed dealer + market persist; plan/pending are placeholders (null); status not available before submit.
+  // Dealer Appointment is connected to the owner's approved Monthly Party Planning (market selection, monthly totals, Daily Report results and the Appointed transition).
+  // That needs the real Monthly Party Planning tables, so it is covered against a real database: appointment.integration.ts (npm run test:daily-appointment:db).
   {
-    const f = makeFake({ assignedDealerIds: [], dealers: [] });
-    const svc = loadService(f.prisma, []);
-    await svc.saveDailyAppointment(SO, { workDate: DATE, rows: [
-      { rowId: "r1", dealerName: "Dealer A", marketName: "Bhopal" },
-      { rowId: "r2", dealerName: "Dealer B", marketName: "Sehore" },
-    ] });
-    const p = await svc.getDailyAppointment(SO, DATE);
-    assert.equal(p.rows.length, 2);
-    const a = p.rows.find((r) => r.dealerName === "Dealer A")!;
-    assert.equal(a.marketName, "Bhopal");
-    assert.equal(a.monthlyPlan, null, "Monthly Dealer Plan is a placeholder");
-    assert.equal(a.pending, null, "Pending is a placeholder");
-    assert.equal(a.status, null, "no status before submit");
-    assert.equal(p.canEnterStatus, false);
-  }
-
-  // 2) Status only after submit; only APPOINTED / NOT_APPOINTED; before submit → 409.
-  {
-    const f = makeFake({ assignedDealerIds: [], dealers: [] });
-    const svc = loadService(f.prisma, []);
-    await svc.saveDailyAppointment(SO, { workDate: DATE, rows: [{ rowId: "r1", dealerName: "Dealer A", marketName: "Bhopal" }] });
-    const entryId = f.store()[0].id;
-    await expectStatus(() => svc.enterAppointmentStatus(SO, { workDate: DATE, entries: [{ entryId, status: "APPOINTED" }] }), 409, "status before submit");
-    f.freezeCurrent("so1", DATE);
-    const r = await svc.enterAppointmentStatus(SO, { workDate: DATE, entries: [{ entryId, status: "NOT_APPOINTED" }] });
-    assert.equal(r.count, 1);
-    const p = await svc.getDailyAppointment(SO, DATE, undefined, "REPORT");
-    assert.equal(p.canEnterStatus, true);
-    assert.equal(p.rows[0].status, "NOT_APPOINTED");
-  }
-
-  // 3) Duplicate client row id rejected.
-  {
-    const f = makeFake({ assignedDealerIds: [], dealers: [] });
-    const svc = loadService(f.prisma, []);
-    await expectStatus(() => svc.saveDailyAppointment(SO, { workDate: DATE, rows: [{ rowId: "r1", dealerName: "A", marketName: "" }, { rowId: "r1", dealerName: "B", marketName: "" }] }), 422, "duplicate appointment row");
+    const src = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
+    assert.ok(src.includes("eligibleMonthlyMarkets") && src.includes("recordAppointedResult") && src.includes("appointmentMonthlyTotals"), "the connected appointment service is in place");
+    assert.ok(!src.includes("Monthly Dealer Plan + Pending are placeholders"), "no placeholder counts are left");
   }
 
   /* ============ SCHEME CONVERSION ============ */

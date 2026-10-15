@@ -114,31 +114,67 @@ async function main() {
   html = render(); assert.ok(html.includes("Returned by RM: Wrong parties") && count("Add Market") === 1 && count("Submit") === 1);
   // ---- Status column + dialogs ----
   const approved = { ...base, canEdit: false };
-  const SO_ROW = { ...PLAN, statusLabel: "Approved", allowedStatuses: [{ to: "DOC_SENT", label: "Doc Send By SO" }] };
+  const SO_ROW = { ...PLAN, statusLabel: "Pending", allowedStatuses: [{ to: "DOC_SENT", label: "Doc Send By SO" }] };
   sheet = approved; plans = [SO_ROW]; html = render();
-  assert.ok(html.includes("Approved ▾") && html.includes('aria-label="Change status of Pipariya"'), "the SO can click the status");
-  plans = [{ ...PLAN, statusLabel: "Approved", allowedStatuses: [] }]; html = render();
-  assert.ok(!html.includes("Change status of") && html.includes(">Approved<"), "no clickable status without an allowed move");
+  assert.ok(html.includes("Pending ▾") && html.includes('aria-label="Change status of Pipariya"'), "the SO can click the status");
+  plans = [{ ...PLAN, statusLabel: "Pending", allowedStatuses: [] }]; html = render();
+  assert.ok(!html.includes("Change status of") && html.includes(">Pending<"), "no clickable status without an allowed move");
   plans = [{ ...PLAN, statusLabel: "Draft" }]; sheet = { ...base }; assert.ok(render().includes(">Draft<"));
-  // ---- Status dialog (state seeded through the hook store: [to, doc, remarks, confirming, error]) ----
+  // ---- Status dialog (state seeded through the hook store: [to, doc, remarks, confirming, error, dealerOpen, sent]) ----
   const dlg = (plan: unknown, seed: unknown[] = []) => { hooks.length = 0; seed.forEach((v, i) => { hooks[i] = v; }); cursor = 0; buttons = []; const out = renderToStaticMarkup(<StatusDialog plan={plan as never} onClose={() => {}} onChanged={() => { invalidations += 100; }} />); hooks.length = cursor; return out; };
   const btn = (label: string) => buttons.filter((b) => String(b.children).includes(label)).at(-1)!;
-  // SO · Doc Send By SO
+  // SO · Doc Send By SO — Document / Cheque × Complete / Incomplete, plus "Appointed, Document Not Sent" at the top
+  const NONE = { notSent: false, documentStatus: null, chequeStatus: null, other: "" };
+  const seedSend = (sent: Record<string, unknown>, confirming = false) => ["DOC_SENT", { documents: false, checks: false, other: "" }, "", confirming, null, false, { ...NONE, ...sent }];
+  const box = (html: string, id: string) => { const m = new RegExp(`<input[^>]*data-testid="${id}"[^>]*>`).exec(html); assert.ok(m, `checkbox ${id}`); return { checked: /checked=""/.test(m![0]), disabled: /disabled=""/.test(m![0]) }; };
+  const IDS = ["document-complete", "document-incomplete", "cheque-complete", "cheque-incomplete"];
   let d = dlg(SO_ROW);
-  assert.ok(d.includes("Document Sent") && d.includes("Check Send") && d.includes("Other (optional)"), "SO fields: Document Sent, Check Send, optional Other");
-  assert.equal(btn("Continue").disabled, true, "at least one of Document Sent / Check Send is required");
-  d = dlg(SO_ROW, ["DOC_SENT", { documents: false, checks: false, other: "just text" }]);
-  assert.equal(btn("Continue").disabled, true, "Other alone does not satisfy the requirement");
-  d = dlg(SO_ROW, ["DOC_SENT", { documents: false, checks: true, other: "GST" }]);
+  assert.ok(d.includes("Appointed, Document Not Sent") && d.includes("Complete") && d.includes("Incomplete") && d.includes("Document") && d.includes("Cheque") && d.includes("Other Details (Optional)"), "special option + the Document / Cheque × Complete / Incomplete grid + optional Other Details");
+  assert.ok(!d.includes("Document Sent") && !d.includes("Check Send"), "the old single checkboxes are gone");
+  assert.ok(d.indexOf("Appointed, Document Not Sent") < d.indexOf("Complete") && d.indexOf("Appointed, Document Not Sent") < d.indexOf("Cheque"), "the special option sits above the Document / Cheque choices");
+  assert.ok(/text-base[^"]*font-medium/.test(d) && d.includes('class="h-5 w-5"'), "…and is slightly larger");
+  for (const id of IDS) assert.deepEqual(box(d, id), { checked: false, disabled: false }, `${id}: nothing is preselected`);
+  assert.equal(box(d, "not-sent-special").checked, false);
+  assert.equal(btn("Continue").disabled, true, "both answers are required");
+  assert.ok(d.includes('data-testid="sent-hint"'), "the unanswered hint is shown");
+  d = dlg(SO_ROW, seedSend({ documentStatus: "COMPLETE" })); assert.equal(btn("Continue").disabled, true, "Cheque unanswered");
+  d = dlg(SO_ROW, seedSend({ chequeStatus: "INCOMPLETE" })); assert.equal(btn("Continue").disabled, true, "Document unanswered");
+  d = dlg(SO_ROW, seedSend({ other: "just text" })); assert.equal(btn("Continue").disabled, true, "Other alone does not satisfy the requirement");
+  d = dlg(SO_ROW, seedSend({ documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE" }));
+  assert.deepEqual([box(d, "document-complete").checked, box(d, "document-incomplete").checked, box(d, "cheque-complete").checked, box(d, "cheque-incomplete").checked], [true, false, false, true], "one choice per item");
   assert.equal(btn("Continue").disabled, false);
+  d = dlg(SO_ROW, seedSend({ documentStatus: "INCOMPLETE", chequeStatus: "INCOMPLETE" })); assert.equal(btn("Continue").disabled, false, "both Incomplete is a valid explicit answer");
+  // Special option: clears + disables the four boxes, allows Continue, keeps Other Details
+  d = dlg(SO_ROW, seedSend({ notSent: true, other: "courier" }));
+  for (const id of IDS) assert.deepEqual(box(d, id), { checked: false, disabled: true }, `${id} cleared and disabled`);
+  assert.equal(box(d, "not-sent-special").checked, true); assert.equal(btn("Continue").disabled, false);
+  assert.ok(!d.includes('data-testid="sent-hint"') && d.includes("Other Details (Optional)"), "no answers required; Other Details stays available");
+  // Un-checking leaves the four unanswered and enabled again (previous choices are NOT silently restored)
+  d = dlg(SO_ROW, seedSend({ notSent: false }));
+  for (const id of IDS) assert.deepEqual(box(d, id), { checked: false, disabled: false });
+  assert.equal(btn("Continue").disabled, true);
   posts.length = 0;
-  d = dlg(SO_ROW, ["DOC_SENT", { documents: false, checks: true, other: "GST" }, "", true]);
-  assert.ok(d.includes("Change the status of") && d.includes("Doc Send By SO") && d.includes("Confirm Doc Send By SO"), "the SO must confirm before saving");
+  d = dlg(SO_ROW, seedSend({ documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE", other: "GST" }, true));
+  assert.ok(d.includes("Change the status of") && d.includes("Doc Send By SO") && d.includes("Confirm Doc Send By SO") && d.includes("Complete") && d.includes("Incomplete"), "the SO must confirm; the summary shows the answers");
+  assert.ok(d.includes('data-testid="sent-document">Complete<') && d.includes('data-testid="sent-cheque">Incomplete<'), "confirmation summary: Document Complete, Cheque Incomplete");
   assert.equal(posts.length, 0, "nothing is saved before Confirm");
   btn("Confirm Doc Send By SO").onClick!(); await tick();
-  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/party-monthly-plans/p1/status", body: { to: "DOC_SENT", sent: { documents: false, checks: true, other: "GST" } } }], "saved through the row status endpoint");
+  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/party-monthly-plans/p1/status", body: { to: "DOC_SENT", sent: { documentNotSent: false, documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE", other: "GST" } } }], "saved through the row status endpoint with the explicit answers");
   assert.ok(invalidations >= 100, "the table is refreshed");
   posts.length = 0; btn("Back").onClick!(); assert.equal(posts.length, 0, "Back / Cancel never save");
+  // Special option: confirmation names the resulting status; the saved body carries no Document / Cheque answers
+  posts.length = 0;
+  d = dlg(SO_ROW, seedSend({ notSent: true, documentStatus: "COMPLETE", other: "courier" }, true));
+  assert.ok(d.includes("Confirm Document Not Sent") && d.includes('data-testid="sent-not-sent"'), "confirms Document Not Sent");
+  assert.equal(posts.length, 0, "ticking the option alone saves nothing");
+  btn("Confirm Document Not Sent").onClick!(); await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/party-monthly-plans/p1/status", body: { to: "DOC_SENT", sent: { documentNotSent: true, documentStatus: null, chequeStatus: null, other: "courier" } } }], "stale answers are never sent with the special option");
+  // Later submission from a Document Not Sent row (same form; allowed move is Doc Send By SO)
+  const NOT_SENT_ROW = { ...SO_ROW, opStatus: "DOC_NOT_SENT", statusLabel: "Document Not Sent" };
+  d = dlg(NOT_SENT_ROW);
+  assert.ok(d.includes("Document Not Sent") && d.includes("Appointed, Document Not Sent") && d.includes("Cheque"), "a Document Not Sent row reopens the same form, shows its current status");
+  for (const id of IDS) assert.equal(box(d, id).checked, false, "unanswered, nothing restored");
+  assert.equal(btn("Continue").disabled, true);
   // Admin · Doc Received
   const ADMIN_ROW = { ...PLAN, opStatus: "DOC_SENT", statusLabel: "Doc Send By SO", allowedStatuses: [{ to: "DOC_RECEIVED", label: "Doc Received" }, { to: "REJECTED", label: "Rejected" }, ], sentInfo: { documents: true, checks: false, other: "GST certificate" } };
   d = dlg(ADMIN_ROW, ["DOC_RECEIVED"]);
@@ -181,10 +217,17 @@ async function main() {
   btn("Appointed").onClick!(); d = showDlg(); assert.ok(dp(), "retry opens the form again");
   // Timeline
   const tl = renderToStaticMarkup(<StatusTimelineDialog plan={{ ...LATE, statusEvents: [
-    { id: "e1", previousStatus: "NONE", newStatus: "DOC_SENT", previousLabel: "Approved", newLabel: "Doc Send By SO", actorName: "Officer One", actorRole: "SALES_OFFICER", remarks: null, sentInfo: { documents: true, checks: false, other: "GST" }, receivedInfo: null, createdAt: "2026-10-08T10:00:00.000Z" },
+    { id: "e1", previousStatus: "NONE", newStatus: "DOC_SENT", previousLabel: "Pending", newLabel: "Doc Send By SO", actorName: "Officer One", actorRole: "SALES_OFFICER", remarks: null, sentInfo: { documents: true, checks: false, other: "GST" }, receivedInfo: null, createdAt: "2026-10-08T10:00:00.000Z" },
     { id: "e2", previousStatus: "DOC_SENT", newStatus: "DOC_RECEIVED", previousLabel: "Doc Send By SO", newLabel: "Doc Received", actorName: "Admin", actorRole: "SUPER_ADMIN", remarks: "ok", sentInfo: null, receivedInfo: { documents: false, checks: true, other: null }, createdAt: "2026-10-08T11:00:00.000Z" },
   ] } as never} onClose={() => {}} />);
-  assert.ok(tl.includes("Approved → Doc Send By SO") && tl.includes("Doc Send By SO → Doc Received") && tl.includes("Officer One") && tl.includes("Remarks: ok") && tl.includes("Actually received (Admin)") && tl.indexOf("Officer One") < tl.indexOf("Admin"), "timeline: transitions, actors, remarks, sent vs received, chronological");
+  assert.ok(tl.includes("Pending → Doc Send By SO") && tl.includes("Doc Send By SO → Doc Received") && tl.includes("Officer One") && tl.includes("Remarks: ok") && tl.includes("Actually received (Admin)") && tl.indexOf("Officer One") < tl.indexOf("Admin"), "timeline: transitions, actors, remarks, sent vs received, chronological");
+  // Legacy history stays readable and keeps its original meaning (the old "sent" booleans are NOT turned into Complete / Incomplete)
+  assert.ok(tl.includes("Document Sent: <b>Selected</b>") && tl.includes("Check Send: <b>Not selected</b>") && tl.includes("completeness not recorded") && !tl.includes('data-testid="sent-document"'), "legacy record: original meaning, completeness unrecorded");
+  const tl2 = renderToStaticMarkup(<StatusTimelineDialog plan={{ ...LATE, statusEvents: [
+    { id: "n1", previousStatus: "NONE", newStatus: "DOC_NOT_SENT", previousLabel: "Pending", newLabel: "Document Not Sent", actorName: "Officer One", actorRole: "SALES_OFFICER", remarks: null, sentInfo: { documentStatus: null, chequeStatus: null, documentNotSent: true, other: "courier" }, receivedInfo: null, createdAt: "2026-10-09T10:00:00.000Z" },
+    { id: "n2", previousStatus: "DOC_NOT_SENT", newStatus: "DOC_SENT", previousLabel: "Document Not Sent", newLabel: "Doc Send By SO", actorName: "Officer One", actorRole: "SALES_OFFICER", remarks: null, sentInfo: { documentStatus: "INCOMPLETE", chequeStatus: "COMPLETE", documentNotSent: false, other: null }, receivedInfo: null, createdAt: "2026-10-10T10:00:00.000Z" },
+  ] } as never} onClose={() => {}} />);
+  assert.ok(tl2.includes("Pending → Document Not Sent") && tl2.includes("Document Not Sent → Doc Send By SO") && tl2.includes('data-testid="sent-not-sent"') && tl2.includes('data-testid="sent-document">Incomplete<') && tl2.includes('data-testid="sent-cheque">Complete<'), "timeline shows the special answer and the later Complete / Incomplete answers");
   console.log("monthly-detail-ui.test.tsx — all assertions passed");
 }
 main().catch((e) => { console.error(e); process.exit(1); });

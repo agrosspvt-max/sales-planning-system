@@ -11,7 +11,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { Prisma, Role } from "@prisma/client";
 import type { AuthContext } from "@/lib/http";
-import { dailyWorkServiceInfrastructureMocks } from "./service-test-mocks";
+import { dailyWorkServiceInfrastructureMocks, sectionFactsRow } from "./service-test-mocks";
 
 interface Entry {
   id: string; officerId: string; workDate: string; batchId: string; section: string; rowKey: string;
@@ -94,6 +94,10 @@ function makeFake() {
     if (text.startsWith('SELECT "currentBatchId", "status", "selfRating", "finalizedAt"')) {
       const day = days.get(dayKey(v[0] as string, v[1] as string));
       return day ? [{ ...day }] : [];
+    }
+    if (text.startsWith('SELECT COUNT(*) FILTER (WHERE "section" = \'SALES\')')) {
+      const officerId = v[3] as string, workDate = v[4] as string, batchId = v[5] as string; // values: [summary rowKey ×3, officerId, workDate, batchId]
+      return [sectionFactsRow(entries.filter((entry) => entry.officerId === officerId && entry.workDate === workDate && entry.batchId === batchId && entry.status === "DRAFT"))];
     }
     if (text.includes('SELECT "section", COUNT(*)')) {
       const officerId = v[0] as string, workDate = v[1] as string, batchId = v[2] as string;
@@ -185,6 +189,8 @@ function makeFake() {
   }
 
   const prisma = {
+
+    partyMonthlyPlan: { findMany: async () => [] }, // Monthly Party Planning is covered by appointment.integration.ts
     $queryRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest)),
     $executeRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest)),
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),

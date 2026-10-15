@@ -367,12 +367,13 @@ async function main() {
     assert.deepEqual(r[2], ["KISAN MITRA", "Auto", "₹5,000", "₹0", "—", "Scheme"], "Auto + no mode against zero recovery");
 
     const a = cellsOf(renderToStaticMarkup(<AppointmentSection title="Dealer Appointment" rows={[
-      { rowId: "a1", dealerName: "New Client", marketName: "Bhopal", status: "APPOINTED" },
-      { rowId: "a2", dealerName: "Other Client", marketName: "", status: "NOT_APPOINTED" },
+      { rowId: "a1", dealerName: "New Client", marketName: "Bhopal", status: "APPOINTED", reportedDealerName: "Ravi Traders" },
+      { rowId: "a2", dealerName: "Other Client", marketName: "", status: "NOT_APPOINTED", reportedDealerName: "stale name" },
       { rowId: "a3", dealerName: "Pending Client", marketName: "", status: null },
     ]} />));
-    assert.deepEqual(a[0], ["Dealer / Client", "Planned", "Actual"]);
-    assert.deepEqual([a[1][2], a[2][2], a[3][2]], ["Appointed", "Not Appointed", "—"]);
+    assert.deepEqual(a[0], ["Dealer / Client", "Dealer Name", "Planned", "Actual"]);
+    assert.deepEqual([a[1][3], a[2][3], a[3][3]], ["Appointed", "Not Appointed", "—"]);
+    assert.deepEqual([a[1][1], a[2][1], a[3][1]], ["Ravi Traders", "—", "—"], "the reported dealer name shows for Appointed only; Not Appointed / no result show —");
 
     const c = cellsOf(renderToStaticMarkup(<ConversionSection title="Scheme Conversion" rows={[
       { dealerId: "d1", schemeId: "s1", dealerName: "GAURI AGRO", schemeName: "Kharif Scheme", todaysPlan: 2, achievability: "YES" },

@@ -147,7 +147,8 @@ function loadService() {
 const ctxOf = (userId: string): AuthContext => { const u = USERS.find((x) => x.id === userId)!; return { userId, role: u.role, username: userId, groupId: u.groupId, designation: null } as unknown as AuthContext; };
 const SO1 = ctxOf("so1"), SO2 = ctxOf("so2"), SO3 = ctxOf("so3"), RM1 = ctxOf("rm1"), ADMIN = ctxOf("admin");
 async function status(fn: () => Promise<unknown>): Promise<number> { try { await fn(); return 0; } catch (e) { return (e as { status?: number }).status ?? -1; } }
-const DOCS = { documents: true, checks: true, other: true, otherDetails: "GST certificate" };
+const DOCS = { documentStatus: "COMPLETE", chequeStatus: "COMPLETE", other: "GST certificate" }; // a valid "Doc Send By SO" answer (Complete / Incomplete)
+const SENT = { documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE" };
 const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 type Svc = ReturnType<typeof loadService>["service"];
 const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
@@ -263,23 +264,25 @@ async function main() {
     assert.equal(t.options.filter((o) => o.monthlyPlanId === plan.id).length, 2, "Option 1 / 2 exist as names");
     assert.ok(!("status" in plan.options[0]!) && !("events" in plan.options[0]!), "options expose no status or timeline");
     // Not allowed until the PLAN is approved
-    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: true } }, { approve: false })), 409, "plan not approved → no status change");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: SENT }, { approve: false })), 409, "plan not approved → no status change");
     approveSheetOf(service, plan);
-    assert.equal(plain(await service.getMonthlySheet(SO1, plan.sheetId)).plans[0]!.statusLabel, "Approved", "an approved plan shows Approved until the workflow starts");
+    assert.equal(plain(await service.getMonthlySheet(SO1, plan.sheetId)).plans[0]!.statusLabel, "Pending", "an approved plan shows Pending until the workflow starts");
     assert.deepEqual(plain(await service.getMonthlySheet(SO1, plan.sheetId)).plans[0]!.allowedStatuses.map((a) => a.label), ["Doc Send By SO"], "the SO may only choose Doc Send By SO");
     // SO: Doc Send By SO — validation
     assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT" })), 422, "needs the Document / Check selection");
-    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { other: "only text" } })), 422, "Other alone is not enough: Document Sent or Check Send is required");
-    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: false, checks: false } })), 422);
-    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: true, other: "x".repeat(501) } })), 422);
-    assert.equal(await status(() => move(service, ADMIN, plan, { to: "DOC_SENT", sent: { documents: true } })), 403, "Admin does not do the SO step");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { other: "only text" } })), 422, "Other alone is not an answer: Document and Cheque must each be Complete or Incomplete");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documentStatus: "COMPLETE" } })), 422, "Cheque is unanswered");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: true, checks: true } })), 422, "the old checkbox payload no longer proves anything");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documentNotSent: true, documentStatus: "COMPLETE" } })), 422, "the special option takes no answers");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documentStatus: "COMPLETE", chequeStatus: "COMPLETE", other: "x".repeat(501) } })), 422);
+    assert.equal(await status(() => move(service, ADMIN, plan, { to: "DOC_SENT", sent: SENT })), 403, "Admin does not do the SO step");
     for (const [adminOnly, code] of [["DOC_RECEIVED", 409], ["SD_BOUNCE", 409], ["APPOINTED", 422], ["REJECTED", 403]] as const) assert.equal(await status(() => move(service, SO1, plan, { to: adminOnly, received: { documents: true }, remarks: "x" })), code, `the SO cannot set ${adminOnly}`);
     assert.equal(await status(() => move(service, SO1, plan, { to: "NONE" })), 422);
     assert.equal(await status(() => move(service, SO1, plan, { to: "BOGUS" })), 422);
     const before = row();
     assert.deepEqual([row().opStatus, t.statusEvents.length], ["NONE", 0], "refused attempts changed nothing");
-    const sent = plain(await move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: true, checks: false, other: "  GST  certificate " }, actorId: "admin", opStatus: "APPOINTED" }));
-    assert.deepEqual([sent.opStatus, sent.statusLabel, sent.sentInfo, sent.receivedInfo], ["DOC_SENT", "Doc Send By SO", { documents: true, checks: false, other: "GST certificate" }, null], "saved exactly as the SO entered it; nothing inferred as received");
+    const sent = plain(await move(service, SO1, plan, { to: "DOC_SENT", sent: { documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE", other: "  GST  certificate " }, actorId: "admin", opStatus: "APPOINTED" }));
+    assert.deepEqual([sent.opStatus, sent.statusLabel, sent.sentInfo, sent.receivedInfo], ["DOC_SENT", "Doc Send By SO", { documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE", documentNotSent: false, other: "GST certificate" }, null], "saved exactly as the SO entered it; nothing inferred as received");
     const e1 = t.statusEvents[0]!;
     assert.deepEqual([e1.previousStatus, e1.newStatus, e1.actorId, e1.actorName, e1.actorRole, e1.createdAt instanceof Date], ["NONE", "DOC_SENT", "so1", "Officer One", "SALES_OFFICER", true], "actor + role + timestamp recorded server-side (spoofed fields ignored)");
     void before;
@@ -296,7 +299,7 @@ async function main() {
     assert.equal(await status(() => move(service, RM1, plan, { to: "DOC_RECEIVED", received: { documents: true } })), 403, "an RM cannot take the Admin step on a team plan");
     assert.equal(await status(() => move(service, SO2, plan, { to: "DOC_RECEIVED", received: { documents: true } })), 404, "another SO cannot even see it");
     assert.equal(await status(() => move(service, { ...ADMIN, role: Role.CUSTOM_ADMIN, permissions: {} } as unknown as AuthContext, plan, { to: "DOC_RECEIVED", received: { documents: true } })), 403, "a custom admin needs the Party Planning permission");
-    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: true } })), 409, "no repeating / jumping back");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: SENT })), 409, "no repeating / jumping back");
     assert.equal(await status(() => appoint(service, ADMIN, plan)), 409, "Doc Send By SO → Appointed is not a valid move");
     assert.equal(await status(() => move(service, ADMIN, plan, { to: "APPOINTED" })), 422, "Appointed can only be set through the create-dealer step");
     // Admin: Doc Received — received kept SEPARATE from sent
@@ -305,7 +308,7 @@ async function main() {
     assert.deepEqual(admin1.sentInfo, sent.sentInfo, "the SO's submission is shown to Admin");
     assert.equal(await status(() => move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: { documents: false, checks: false, other: "they said so" } })), 422, "nothing is assumed to be received");
     const got = plain(await move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: { documents: false, checks: true, other: "Cheque only" } }));
-    assert.deepEqual([got.opStatus, got.receivedInfo, got.sentInfo], ["DOC_RECEIVED", { documents: false, checks: true, other: "Cheque only" }, { documents: true, checks: false, other: "GST certificate" }], "received is stored separately; the SO's original submission is untouched");
+    assert.deepEqual([got.opStatus, got.receivedInfo, got.sentInfo], ["DOC_RECEIVED", { documents: false, checks: true, other: "Cheque only" }, { documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE", documentNotSent: false, other: "GST certificate" }], "received is stored separately; the SO's original submission is untouched");
     assert.equal(t.statusEvents[0]!.sentInfo.other, "GST certificate"); assert.equal(t.statusEvents[1]!.sentInfo, null);
     const e2 = t.statusEvents[1]!;
     assert.deepEqual([e2.previousStatus, e2.newStatus, e2.actorId, e2.actorName, e2.actorRole], ["DOC_SENT", "DOC_RECEIVED", "admin", "Admin", "SUPER_ADMIN"]);
@@ -331,7 +334,7 @@ async function main() {
     // Rejected path + Admin rejection from the start; remarks optional
     const r2 = await planFor(service, { seasonalPlanId: "sp-so1-new", seasonMonthId: "sm-july", planDate: "2026-07-20" });
     assert.equal(plain(await move(service, ADMIN, r2, { to: "REJECTED" })).statusLabel, "Rejected", "Admin may reject an approved plan's row; remarks are optional");
-    assert.equal(await status(() => move(service, SO1, r2, { to: "DOC_SENT", sent: { documents: true } })), 409);
+    assert.equal(await status(() => move(service, SO1, r2, { to: "DOC_SENT", sent: SENT })), 409);
   }
 
   /* ---- Appointed = create the Dealer (Dealer Alias service) + mark the row, atomically ---- */
@@ -339,7 +342,7 @@ async function main() {
     const { service, t } = loadService();
     const plan = plain(await planFor(service));
     approveSheetOf(service, plan);
-    await move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: true } });
+    await move(service, SO1, plan, { to: "DOC_SENT", sent: SENT });
     await move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: { documents: true } });
     const snapshot = () => JSON.stringify([t.plans.map((p) => [p.id, p.opStatus, p.appointedDealerId, p.planDate]), t.statusEvents.length, t.dateChanges.length, t.dealers.length, t.audit.length]);
     const before = snapshot();
@@ -386,7 +389,7 @@ async function main() {
     // a lost race: another request wins between our read and our claim → our dealer is rolled back
     const plan2 = plain(await planFor(service, { seasonalPlanId: "sp-so1-new", seasonMonthId: "sm-july", planDate: "2026-07-20" }));
     approveSheetOf(service, plan2);
-    await move(service, SO1, plan2, { to: "DOC_SENT", sent: { checks: true } }); await move(service, ADMIN, plan2, { to: "DOC_RECEIVED", received: { checks: true } });
+    await move(service, SO1, plan2, { to: "DOC_SENT", sent: SENT }); await move(service, ADMIN, plan2, { to: "DOC_RECEIVED", received: { checks: true } });
     const race = t.plans.find((p) => p.id === plan2.id)!;
     t.onClaim = () => { race.opStatus = "REJECTED"; };
     const dealersBefore = t.dealers.length;
@@ -410,13 +413,13 @@ async function main() {
     const fresh = await planFor(service, { seasonalPlanId: "sp-so1-new" });
     const snapshot = JSON.stringify([t.plans.map((p) => [p.id, p.opStatus, p.planDate]), t.statusEvents.length, t.dateChanges.length]);
     t.failNextEvent = true;
-    assert.equal(await status(() => move(service, SO1, fresh, { to: "DOC_SENT", sent: { documents: true } })), -1);
+    assert.equal(await status(() => move(service, SO1, fresh, { to: "DOC_SENT", sent: SENT })), -1);
     assert.equal(JSON.stringify([t.plans.map((p) => [p.id, p.opStatus, p.planDate]), t.statusEvents.length, t.dateChanges.length]), snapshot, "status, Conversion Date and history stay consistent: all or nothing");
     const racing = await planFor(service, { seasonalPlanId: "sp-so1-new", seasonMonthId: "sm-july", planDate: "2026-07-10" });
     approveSheetOf(service, racing);
     const claim = t.plans.find((p) => p.id === racing.id)!;
     t.onClaim = () => { claim.opStatus = "DOC_SENT"; }; // someone else moves the row after we read it, right before our claim
-    assert.equal(await status(() => service.changeRowStatus(SO1, racing.id, { to: "DOC_SENT", sent: { documents: true } })), 409, "a stale read is refused");
+    assert.equal(await status(() => service.changeRowStatus(SO1, racing.id, { to: "DOC_SENT", sent: SENT })), 409, "a stale read is refused");
     assert.equal(t.statusEvents.length, 0, "and no event was appended");
   }
 
@@ -514,8 +517,8 @@ async function main() {
     assert.equal(plain(await service.submitMonthlySheet(SO1, so.id)).counts.submitted, 1, "resubmitted through the same path");
     assert.equal(row(b.id).rejectionReason, null);
     // status workflow needs an APPROVED entry, not an approved plan
-    assert.equal(await status(() => move(service, SO1, b, { to: "DOC_SENT", sent: { documents: true } }, { approve: false })), 409, "a submitted entry cannot start the status workflow");
-    assert.equal(plain(await move(service, SO1, a, { to: "DOC_SENT", sent: { documents: true } }, { approve: false })).opStatus, "DOC_SENT", "an approved entry can");
+    assert.equal(await status(() => move(service, SO1, b, { to: "DOC_SENT", sent: SENT }, { approve: false })), 409, "a submitted entry cannot start the status workflow");
+    assert.equal(plain(await move(service, SO1, a, { to: "DOC_SENT", sent: SENT }, { approve: false })).opStatus, "DOC_SENT", "an approved entry can");
     // isolation
     assert.ok([403, 404].includes(await status(() => service.actOnMonthlySheet(SO2, so.id, { action: "approve" }))));
     assert.equal(await status(() => service.getMonthlySheet(SO2, so.id)), 404, "another officer cannot open it");
@@ -563,7 +566,7 @@ async function main() {
     assert.ok(!("adminConfirmed" in cur) && !("canConfirmDate" in cur) && !("setConversionDate" in service));
     approveSheetOf(service, plan);
     // after the first status change the date follows the status automatically and old history is kept
-    const sent = plain(await move(service, SO1, plan, { to: "DOC_SENT", sent: { documents: true } }));
+    const sent = plain(await move(service, SO1, plan, { to: "DOC_SENT", sent: SENT }));
     const today = currentBusinessDate();
     assert.deepEqual([sent.planDate, sent.dateChangeCount, sent.dateHistory.length, sent.dateHistory.at(-1)!.automatic, sent.dateHistory.at(-1)!.previousDate], [today, 3, 4, true, "2026-06-25"], "Conversion Date = transition date; the 3 manual edits and their history are preserved");
     assert.equal(sent.daysFinal, false, "Days keep counting until Appointed");
@@ -613,7 +616,7 @@ async function main() {
     assert.equal(await status(() => move(service, SO2, so1Plan, { to: "DOC_SENT", sent: DOCS })), 404, "an SO cannot touch another SO's plan by id");
     assert.equal(await status(() => move(service, RM1, so1Plan, { to: "DOC_SENT", sent: DOCS })), 403, "an RM can see but not act on a team member's plan");
     assert.equal(await status(() => move(service, RM1, rmPlan, { to: "DOC_SENT", sent: DOCS })), 0, "an RM plans their OWN markets like an SO");
-    assert.equal(await status(() => move(service, RM1, rmPlan, { to: "DOC_RECEIVED", received: DOCS })), 403, "…but cannot do the Admin step");
+    assert.equal(await status(() => move(service, RM1, rmPlan, { to: "DOC_RECEIVED", received: { documents: true, checks: true, other: "GST certificate" } })), 403, "…but cannot do the Admin step");
     assert.equal(await status(() => move(service, ADMIN, so1Plan, { to: "DOC_SENT", sent: DOCS })), 403, "Admin does not do the owner step");
     assert.equal(await status(() => move(service, { ...SO1, role: undefined } as unknown as AuthContext, so1Plan, { to: "DOC_SENT", sent: DOCS })), 403, "unknown role");
     // Filters: by season, and "needs my action" (Admin: waiting on Admin; owner: still Pending).
@@ -636,7 +639,7 @@ async function main() {
     const plan = await planFor(service);
     await move(service, SO1, plan, { to: "DOC_SENT", sent: DOCS });
     t.seasons.find((s) => s.id === "s-kharif")!.status = "CLOSED";
-    assert.equal(await status(() => move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: DOCS })), 409, "a plan of a closed season is read-only");
+    assert.equal(await status(() => move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: { documents: true, checks: true, other: "GST certificate" } })), 409, "a plan of a closed season is read-only");
     assert.equal(await status(() => service.updateMonthlyPlan(SO1, plan.id, { planDate: "2026-06-18" })), 409);
     assert.equal(t.plans.length, 1);
     assert.equal(t.statusEvents.filter((e) => e.monthlyPlanId === plan.id).length, 1, "history is never deleted");
@@ -672,6 +675,59 @@ async function main() {
     assert.ok(/model PartyMonthlySheet \{[\s\S]*?@@unique\(\[ownerId, seasonMonthId\]\)/.test(schema) && /model PartyMonthlyPlan \{[\s\S]*?@@unique\(\[seasonalPlanId, seasonMonthId\]\)/.test(schema));
   }
   void SO3;
+
+  /* ---- "Appointed, Document Not Sent": an unfinished, owner-actionable status ---- */
+  {
+    const { service, t } = loadService();
+    const plan = plain(await planFor(service));
+    approveSheetOf(service, plan);
+    const sheet = async (c: AuthContext = SO1) => plain(await service.getMonthlySheet(c, plan.sheetId)).plans[0]!;
+    // The special answer alone: validation first, nothing saved by a refused attempt.
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documentNotSent: true, chequeStatus: "COMPLETE" } })), 422);
+    assert.deepEqual([(await sheet()).opStatus, t.statusEvents.length], ["NONE", 0]);
+    const ns = plain(await move(service, SO1, plan, { to: "DOC_SENT", sent: { documentNotSent: true, other: "courier on Monday" } }));
+    assert.deepEqual([ns.opStatus, ns.statusLabel, ns.sentInfo], ["DOC_NOT_SENT", "Document Not Sent", { documentStatus: null, chequeStatus: null, documentNotSent: true, other: "courier on Monday" }], "saved as Document Not Sent with no Document / Cheque answers");
+    assert.deepEqual([t.statusEvents[0]!.previousStatus, t.statusEvents[0]!.newStatus, t.statusEvents[0]!.sentInfo.documentNotSent], ["NONE", "DOC_NOT_SENT", true]);
+    assert.equal(t.dateChanges.length, 1, "a genuine transition sets the Conversion Date (history kept)");
+    // Still actionable for the owner (the same "Doc Send By SO" form); Admin can only reject it — it cannot skip receipt / appointment.
+    assert.deepEqual((await sheet()).allowedStatuses.map((a) => a.to), ["DOC_SENT"], "the owner can submit the answers later");
+    assert.deepEqual((await sheet(ADMIN)).allowedStatuses.map((a) => a.to), ["REJECTED"], "Admin has no receipt / appointment step until the documents are submitted");
+    for (const to of ["DOC_RECEIVED", "SD_BOUNCE"]) assert.equal(await status(() => move(service, ADMIN, plan, { to, received: { documents: true } })), 409, `Document Not Sent cannot jump to ${to}`);
+    assert.equal(await status(() => appoint(service, ADMIN, plan)), 409, "…nor to Appointed");
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documentNotSent: true } })), 409, "no repeating the special answer");
+    assert.equal(await status(() => move(service, SO2, plan, { to: "DOC_SENT", sent: SENT })), 404, "another SO cannot touch it");
+    assert.equal(await status(() => move(service, RM1, plan, { to: "DOC_SENT", sent: SENT })), 403, "an RM cannot act on a team member's row");
+    // Later submission: unanswered stays unanswered; both Incomplete is a valid explicit answer and NOT Document Not Sent.
+    assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_SENT", sent: { documentStatus: "COMPLETE" } })), 422);
+    const later = plain(await move(service, SO1, plan, { to: "DOC_SENT", sent: { documentStatus: "INCOMPLETE", chequeStatus: "INCOMPLETE" } }));
+    assert.deepEqual([later.opStatus, later.sentInfo], ["DOC_SENT", { documentStatus: "INCOMPLETE", chequeStatus: "INCOMPLETE", documentNotSent: false, other: null }], "both Incomplete → Doc Send By SO");
+    assert.deepEqual(t.statusEvents.map((e) => [e.previousStatus, e.newStatus]), [["NONE", "DOC_NOT_SENT"], ["DOC_NOT_SENT", "DOC_SENT"]], "append-only timeline of both genuine transitions");
+    assert.equal(t.dateChanges.length >= 1, true);
+    assert.deepEqual((await sheet(ADMIN)).allowedStatuses.map((a) => a.to).sort(), ["DOC_RECEIVED", "REJECTED"], "now the normal Admin receipt step is available");
+    assert.deepEqual((await sheet(ADMIN)).sentInfo, later.sentInfo, "Admin sees the latest answers");
+    const got = plain(await move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: { documents: true } }));
+    assert.equal(got.opStatus, "DOC_RECEIVED", "the lifecycle continues exactly as before");
+
+    // Admin may reject a Document Not Sent row (existing rejection rule); a permission-less admin may not.
+    const other = plain(await planFor(service, { seasonalPlanId: "sp-so1-new" }));
+    approveSheetOf(service, other);
+    await move(service, SO1, other, { to: "DOC_SENT", sent: { documentNotSent: true } });
+    assert.equal(await status(() => move(service, { ...ADMIN, role: Role.CUSTOM_ADMIN, permissions: {} } as unknown as AuthContext, other, { to: "REJECTED" })), 403);
+    assert.equal(plain(await move(service, ADMIN, other, { to: "REJECTED", remarks: "no documents" })).opStatus, "REJECTED");
+
+    // Failure / concurrency: all or nothing; a stale read is refused and no event is appended.
+    const f = plain(await planFor(service, { seasonalPlanId: "sp-so1-new", seasonMonthId: "sm-july", planDate: "2026-07-10" }));
+    approveSheetOf(service, f);
+    const snap = JSON.stringify([t.plans.map((p) => [p.id, p.opStatus, p.planDate]), t.statusEvents.length, t.dateChanges.length]);
+    t.failNextEvent = true;
+    assert.equal(await status(() => move(service, SO1, f, { to: "DOC_SENT", sent: { documentNotSent: true } })), -1);
+    assert.equal(JSON.stringify([t.plans.map((p) => [p.id, p.opStatus, p.planDate]), t.statusEvents.length, t.dateChanges.length]), snap, "a failed save leaves status, date and history unchanged");
+    const claim = t.plans.find((p) => p.id === f.id)!;
+    t.onClaim = () => { claim.opStatus = "DOC_SENT"; };
+    assert.equal(await status(() => service.changeRowStatus(SO1, f.id, { to: "DOC_SENT", sent: { documentNotSent: true } })), 409, "a concurrent change is refused");
+    t.onClaim = undefined as never;
+  }
+
   console.log("monthly.test.ts — all assertions passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });

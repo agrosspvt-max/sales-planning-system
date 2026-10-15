@@ -330,7 +330,16 @@ test("Task Type is the second column in all four dealer-based Daily Plan tables"
   const salesRecovery = section("function DailyWorkSection(", "function MaterializedTaskRescheduleDialog(");
   assertSecond(salesRecovery, "{L.plan}", "Sales");
   assertSecond(salesRecovery, "{L.plan}", "Recovery");
-  assertSecond(section("function AppointmentSection(", "function ConversionSection("), "{L.market}", "Dealer Appointment");
+  {
+    // Dealer Appointment is market-based: Market → Task Type → Monthly Dealer Plan → Pending (no Dealer Name column, no Today's Appointment column).
+    const head = header(section("function AppointmentSection(", "function ConversionSection("));
+    const order = ["{L.market}", "{L.taskType}", "{L.plan}", "{L.pending}"].map((c) => head.indexOf(c));
+    assert.ok(order.every((v, i) => v >= 0 && (i === 0 || order[i - 1]! < v)), "Dealer Appointment: Market → Task Type → Monthly Dealer Plan → Pending");
+    assert.ok(!head.includes("L.dealer}") && !head.includes("L.work"), "no legacy Dealer / Today's Appointment column");
+    // Dealer Name is a Daily REPORT field only (the Daily Plan stays market-based): right after Market (and Task Type, which the report hides), before the monthly counts.
+    assert.ok(/\{showResults && <TableHead[^>]*>\{L\.dealerName\}<\/TableHead>\}/.test(head), "Dealer Name column exists only when results are shown (Daily Report)");
+    assert.ok(head.indexOf("{L.market}") < head.indexOf("{L.dealerName}") && head.indexOf("{L.dealerName}") < head.indexOf("{L.plan}"), "Market → Dealer Name → Monthly Dealer Plan");
+  }
   assertSecond(section("function ConversionSection(", "function SummarySection("), "{L.scheme}", "Scheme Conversion");
 });
 test("combined rows render neutral labels for dealer-level fields while individual rows retain their values", () => {
@@ -345,9 +354,9 @@ test("combined rows render neutral labels for dealer-level fields while individu
   assert.match(salesRecovery, /options=\{typeOptions\}/, "individual Sales/Recovery Type stays selectable");
 
   const appointment = section("function AppointmentSection(", "function ConversionSection(");
-  assert.match(appointment, /<TableCell>\{combined\.dealerLabel\}<\/TableCell>\s*\{showTaskType && <TableCell>\{L\.none\}<\/TableCell>}\s*<TableCell>\{L\.none\}<\/TableCell>/, "Task Type and Market summaries are neutral");
+  assert.match(appointment, /data-testid="appointment-summary"[\s\S]*?\{combined\.marketLabel\}[\s\S]*?data\.monthlyDealerPlan[\s\S]*?data\.pending/, "the summary row carries the monthly totals once");
   assert.match(appointment, /taskTypeText\(rowTaskType\(false, \(data\?\.calendarEntryIds \?\? \[\]\)\.includes\(r\.entryId\)\), taskTypeL\)/, "individual appointment Task Type is Calendar (from a Calendar task) or Manual");
-
+  assert.ok(!/<TableCell className="text-right[^>]*>\{data/.test(appointment.slice(appointment.indexOf("visibleRows.map((r) => {"))), "row cells never repeat (and so never get summed) the monthly totals");
   const conversion = section("function ConversionSection(", "function SummarySection(");
   assert.match(conversion, /<TableCell>\{combined\.dealerLabel\}<\/TableCell>\s*\{showTaskType && <TableCell>\{L\.none\}<\/TableCell>}\s*<TableCell>\{L\.none\}<\/TableCell>/, "Task Type and Scheme summaries are neutral");
   assert.match(conversion, /taskTypeText\(rowTaskType\(false\), taskTypeL\)/, "individual conversion Task Type stays Manual");
@@ -492,3 +501,14 @@ test("invalidPlanRows names every failing (section, dealer) and checks the same 
 });
 
 console.log(`\n${passed} daily-work helper tests passed`);
+
+/* ---------- Dealer Appointment ↔ Monthly Party Planning: the monthly totals ---------- */
+import { appointmentMonthlyTotals, isMonthlyWorkflowOpen } from "./monthly-plan";
+test("Monthly Dealer Plan counts unique MARKETS; Pending excludes only terminal Appointed / Rejected", () => {
+  const e = (marketId: string, opStatus: string) => ({ marketId, opStatus });
+  assert.deepEqual(appointmentMonthlyTotals([]), { monthlyDealerPlan: 0, pending: 0 });
+  assert.deepEqual(appointmentMonthlyTotals([e("m1", "NONE"), e("m2", "DOC_SENT"), e("m3", "DOC_RECEIVED"), e("m4", "SD_BOUNCE"), e("m5", "APPOINTED"), e("m6", "REJECTED")]), { monthlyDealerPlan: 6, pending: 4 }, "Doc Sent / Received / SD Bounce are not final: still pending");
+  assert.deepEqual(appointmentMonthlyTotals([e("m1", "NONE"), e("m1", "NONE")]), { monthlyDealerPlan: 1, pending: 1 }, "a market is counted once, never per entry / candidate party");
+  assert.deepEqual(appointmentMonthlyTotals([e("m1", "APPOINTED"), e("m1", "NONE")]), { monthlyDealerPlan: 1, pending: 1 }, "pending while any of its entries is still open");
+  assert.equal(isMonthlyWorkflowOpen("DOC_SENT"), true); assert.equal(isMonthlyWorkflowOpen("APPOINTED"), false); assert.equal(isMonthlyWorkflowOpen("REJECTED"), false);
+});

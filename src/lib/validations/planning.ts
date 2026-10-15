@@ -46,16 +46,23 @@ export const createPlanSchema = z.object({
  * single officer, several officers, or all active Sales Officers; officers plan for
  * themselves (officer fields ignored server-side).
  */
-export const createSeasonalPlanSchema = z.object({
-  season: z.object({
-    name: z.string().trim().min(1).transform(canonicalSeasonName),
-    year: z.coerce.number().int().min(2000).max(2100),
-    startMonth: z.coerce.number().int().min(1).max(12),
-    endMonth: z.coerce.number().int().min(1).max(12),
-  }),
-  officerScope: z.enum(["single", "multiple", "all"]).optional(),
-  officerIds: z.array(z.string().min(1)).optional(),
-});
+export const createSeasonalPlanSchema = z
+  .object({
+    // The Seasons master is authoritative: the client sends only the chosen season's stable id and the server
+    // derives name / year / period from the database. The descriptor below is the legacy ADMIN-only path.
+    seasonId: z.string().trim().min(1).optional(),
+    season: z
+      .object({
+        name: z.string().trim().min(1).transform(canonicalSeasonName),
+        year: z.coerce.number().int().min(2000).max(2100),
+        startMonth: z.coerce.number().int().min(1).max(12),
+        endMonth: z.coerce.number().int().min(1).max(12),
+      })
+      .optional(),
+    officerScope: z.enum(["single", "multiple", "all"]).optional(),
+    officerIds: z.array(z.string().min(1)).optional(),
+  })
+  .refine((v) => !!v.seasonId || !!v.season, { message: "Select a season", path: ["seasonId"] });
 
 export const remarksSchema = z.object({
   remarks: z.string().min(1, "Remarks are required"), // V14

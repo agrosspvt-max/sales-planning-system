@@ -203,3 +203,30 @@ export function groupEventsByOfficer<T extends { salesOfficerId: string; salesOf
   }
   return [...map.values()].sort((a, b) => a.salesOfficerName.localeCompare(b.salesOfficerName));
 }
+
+/**
+ * One selected day, grouped by EMPLOYEE for the Calendar's details panel: every authorized entry of every source (scheme conversions, party appointments, Billing Exception
+ * recovery tasks, Calendar tasks / meetings / reminders / other, notes) lands under the employee it belongs to; employees are sorted by name; `count` is the number of entries.
+ * It only regroups what the server already authorized — it never adds, widens or reveals anything.
+ */
+export interface DayGroupInput {
+  events: readonly { salesOfficerId: string; salesOfficerName: string }[];
+  partyEvents: readonly { salesOfficerId: string; salesOfficerName: string }[];
+  billingTasks: readonly { ownerId: string; ownerName: string }[];
+  entries: readonly { ownerId: string; ownerName: string }[];
+  notes: readonly { ownerId: string; ownerName: string }[];
+}
+export interface DayEmployeeGroup<I extends DayGroupInput> {
+  employeeId: string; employeeName: string; count: number;
+  events: I["events"][number][]; partyEvents: I["partyEvents"][number][]; billingTasks: I["billingTasks"][number][]; entries: I["entries"][number][]; notes: I["notes"][number][];
+}
+export function groupDayByEmployee<I extends DayGroupInput>(day: I): DayEmployeeGroup<I>[] {
+  const map = new Map<string, DayEmployeeGroup<I>>();
+  const slot = (id: string, name: string) => { let g = map.get(id); if (!g) { g = { employeeId: id, employeeName: name, count: 0, events: [], partyEvents: [], billingTasks: [], entries: [], notes: [] }; map.set(id, g); } return g; };
+  for (const e of day.events) { const g = slot(e.salesOfficerId, e.salesOfficerName); g.events.push(e); g.count++; }
+  for (const e of day.partyEvents) { const g = slot(e.salesOfficerId, e.salesOfficerName); g.partyEvents.push(e); g.count++; }
+  for (const t of day.billingTasks) { const g = slot(t.ownerId, t.ownerName); g.billingTasks.push(t); g.count++; }
+  for (const e of day.entries) { const g = slot(e.ownerId, e.ownerName); g.entries.push(e); g.count++; }
+  for (const n of day.notes) { const g = slot(n.ownerId, n.ownerName); g.notes.push(n); g.count++; }
+  return [...map.values()].sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.employeeId.localeCompare(b.employeeId));
+}

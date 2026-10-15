@@ -64,12 +64,29 @@ async function main() {
   await test("saveRecoveryConfig round-trips the Auto Tasks flag", async () => {
     const store = new Map<string, string>();
     const cfg = loadConfig(store);
-    await cfg.saveRecoveryConfig({ dueValidation: true, calendarEnabled: true, autoTasksEnabled: true });
+    await cfg.saveRecoveryConfig({ dueValidation: true, calendarEnabled: true, autoTasksEnabled: true, appointmentPartyPlanningEnabled: false });
     assert.equal(store.get(cfg_key()), "true");
     assert.equal(await cfg.getAutoTasksEnabled(), true);
-    await cfg.saveRecoveryConfig({ dueValidation: true, calendarEnabled: true, autoTasksEnabled: false });
+    await cfg.saveRecoveryConfig({ dueValidation: true, calendarEnabled: true, autoTasksEnabled: false, appointmentPartyPlanningEnabled: false });
     assert.equal(store.get(cfg_key()), "false");
     assert.equal(await cfg.getAutoTasksEnabled(), false);
+  });
+
+  await test("Appointment connection defaults OFF and requires explicit true", async () => {
+    for (const value of [undefined, "false", "1", "yes", "TRUE", ""]) {
+      const store = new Map<string, string>();
+      if (value !== undefined) store.set("dailyWork.appointmentPartyPlanningEnabled", value);
+      const cfg = loadConfig(store);
+      assert.equal((await cfg.getRecoveryConfig()).appointmentPartyPlanningEnabled, false);
+      assert.equal(await cfg.getAppointmentPartyPlanningEnabled(), false);
+    }
+    const store = new Map<string, string>();
+    const cfg = loadConfig(store);
+    await cfg.saveRecoveryConfig({ dueValidation: true, calendarEnabled: true, autoTasksEnabled: false, appointmentPartyPlanningEnabled: true });
+    assert.equal(await cfg.getAppointmentPartyPlanningEnabled(), true);
+    assert.equal((await loadConfig(store).getRecoveryConfig()).appointmentPartyPlanningEnabled, true, "persists across processes");
+    await cfg.saveRecoveryConfig({ dueValidation: true, calendarEnabled: true, autoTasksEnabled: false, appointmentPartyPlanningEnabled: false });
+    assert.equal(await cfg.getAppointmentPartyPlanningEnabled(), false);
   });
 
   console.log(`\n${passed} recovery-config tests passed`);

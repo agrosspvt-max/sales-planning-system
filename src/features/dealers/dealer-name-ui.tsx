@@ -27,8 +27,10 @@ export function DealerNameProvider({ children }: { children: ReactNode }) {
   const { data } = useQuery<{ overrides: Record<string, string>; tags: DealerMarkerMap }>({
     queryKey: ["dealer-display-names"],
     queryFn: () => api.get("/api/dealer-display-names"),
-    staleTime: 15_000,
-    refetchInterval: 15_000,
+    // Polled while the tab is visible only. It loads every alias and the caller's tag markers, so it must not hammer a slow database: 30 s (was 15 s). A change the
+    // user makes themselves refreshes immediately (refreshDealerTags), so only OTHER people's alias / tag changes arrive on the poll.
+    staleTime: 30_000,
+    refetchInterval: 30_000,
   });
   // Paginated dealer lists must refetch their complete server ordering when metadata changes;
   // reordering only an already-loaded page would miss tagged dealers on other pages.

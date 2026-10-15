@@ -18,7 +18,9 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as unknown;
     // New simplified Seasonal flow (season descriptor + officer selection). Falls back to
     // the legacy seasonId payload so existing callers keep working.
-    if (body && typeof body === "object" && "season" in (body as Record<string, unknown>)) {
+    // New flow = a season descriptor (admin-only, legacy) or a bare season id; the legacy typed payload carries planningType.
+    const b = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    if ("season" in b || ("seasonId" in b && !("planningType" in b))) {
       const input = createSeasonalPlanSchema.parse(body);
       const { ids } = await createSeasonalPlans(ctx, input);
       return ok({ ids, id: ids[0] ?? null }, 201);

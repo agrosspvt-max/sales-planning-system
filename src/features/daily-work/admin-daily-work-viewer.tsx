@@ -34,7 +34,8 @@ interface DealerRow {
 }
 interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds: string[] }
 interface AppointmentPayload {
-  rows: { entryId: string; dealerName: string; marketName: string; status: "APPOINTED" | "NOT_APPOINTED" | null }[];
+  monthlyDealerPlan?: number; pending?: number;
+  rows: { entryId: string; dealerName: string; marketName: string; monthlyPlanId?: string | null; reportedDealerName?: string; status: "APPOINTED" | "NOT_APPOINTED" | null }[];
 }
 interface ConversionPayload {
   rows: { entryId: string; dealerId: string; schemeId: string; dealerName: string; schemeName: string; plannedUnits: number; pending: number; todaysPlan: number | null; achievability: "YES" | "NO" | null }[];
@@ -195,11 +196,16 @@ function AdminDealerReport({ section, data }: { section: "SALES" | "RECOVERY"; d
 }
 
 function AdminAppointmentReport({ data }: { data: AppointmentPayload }) {
-  const L = { dealer: useLabel("col.dealer"), dealers: useLabel("daily_work.count.dealers"), task: useLabel("daily_work.col.task_type"), manual: useLabel("daily_work.task_type.manual"), market: useLabel("daily_work.col.market"), markets: useLabel("daily_work.count.markets"), plan: useLabel("daily_work.col.monthly_dealer_plan"), pending: useLabel("col.pending"), work: useLabel("daily_work.col.todays_appointment"), result: useLabel("daily_work.col.appointment_status"), appointed: useLabel("daily_work.status.appointed"), not: useLabel("daily_work.status.not_appointed"), none: useLabel("daily_work.combined.none") };
+  const L = {
+    market: useLabel("daily_work.appointment.market"), markets: useLabel("daily_work.count.markets"), dealer: useLabel("col.dealer"), dealers: useLabel("daily_work.count.dealers"),
+    task: useLabel("daily_work.col.task_type"), manual: useLabel("daily_work.task_type.manual"), plan: useLabel("daily_work.appointment.monthly_dealer_plan"), pending: useLabel("daily_work.appointment.pending"),
+    result: useLabel("daily_work.appointment.result"), dealerName: useLabel("daily_work.appointment.dealer_name"), appointed: useLabel("daily_work.appointment.result_appointed"), not: useLabel("daily_work.appointment.result_not_appointed"), none: useLabel("daily_work.combined.none"),
+  };
   const combined = combineAppointmentRows(data.rows.map((row): AppointmentRow => ({ marketName: row.marketName, status: row.status })), { dealer: L.dealer, dealers: L.dealers, market: L.market, markets: L.markets });
-  return <div className="overflow-auto rounded-lg border bg-background"><Table className="min-w-[960px] table-fixed"><TableHeader><TableRow><TableHead className="w-52">{L.dealer}</TableHead><TableHead className="w-32">{L.task}</TableHead><TableHead className="w-44">{L.market}</TableHead><TableHead className="w-44 text-right">{L.plan}</TableHead><TableHead className="w-32 text-right">{L.pending}</TableHead><TableHead className="w-40">{L.work}</TableHead><TableHead className="w-44">{L.result}</TableHead></TableRow></TableHeader><TableBody>
-    <TableRow className="border-b-2 bg-muted/40 font-semibold"><TableCell>{combined.dealerLabel}</TableCell><TableCell>{L.none}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right">{L.none}</TableCell><TableCell className="text-right">{L.none}</TableCell><TableCell>{L.none}</TableCell><TableCell>{L.none}</TableCell></TableRow>
-    {data.rows.map((row) => <TableRow key={row.entryId}><TableCell className="font-medium">{row.dealerName}</TableCell><TableCell>{L.manual}</TableCell><TableCell>{row.marketName || dash}</TableCell><TableCell className="text-right">{dash}</TableCell><TableCell className="text-right">{dash}</TableCell><TableCell>{dash}</TableCell><TableCell>{row.status === "APPOINTED" ? L.appointed : row.status === "NOT_APPOINTED" ? L.not : dash}</TableCell></TableRow>)}
+  // Monthly Dealer Plan / Pending are monthly TOTALS (unique approved markets / unfinished ones): shown once in the summary row, never per row.
+  return <div className="overflow-auto rounded-lg border bg-background"><Table className="min-w-[900px] table-fixed"><TableHeader><TableRow><TableHead className="w-64">{L.market}</TableHead><TableHead className="w-48">{L.dealerName}</TableHead><TableHead className="w-32">{L.task}</TableHead><TableHead className="w-44 text-right">{L.plan}</TableHead><TableHead className="w-32 text-right">{L.pending}</TableHead><TableHead className="w-44">{L.result}</TableHead></TableRow></TableHeader><TableBody>
+    <TableRow className="border-b-2 bg-muted/40 font-semibold"><TableCell>{combined.marketLabel}</TableCell><TableCell>{L.none}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{data.monthlyDealerPlan ?? L.none}</TableCell><TableCell className="text-right tabular-nums">{data.pending ?? L.none}</TableCell><TableCell>{L.none}</TableCell></TableRow>
+    {data.rows.map((row) => <TableRow key={row.entryId}><TableCell className="font-medium">{row.marketName || dash}{!row.monthlyPlanId && row.dealerName && <span className="block text-xs font-normal text-muted-foreground">{row.dealerName}</span>}</TableCell><TableCell>{row.status === "APPOINTED" && row.reportedDealerName ? row.reportedDealerName : dash}</TableCell><TableCell>{L.manual}</TableCell><TableCell className="text-right">{dash}</TableCell><TableCell className="text-right">{dash}</TableCell><TableCell>{row.status === "APPOINTED" ? L.appointed : row.status === "NOT_APPOINTED" ? L.not : dash}</TableCell></TableRow>)}
   </TableBody></Table></div>;
 }
 

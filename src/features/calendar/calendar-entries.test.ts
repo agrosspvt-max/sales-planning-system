@@ -3,6 +3,7 @@
  * server-side scope rules. Loads the REAL calendar.server.ts against a DB-free fake. (Materialization into Daily Work is
  * covered by daily-work/calendar-task-materialization.test.ts.)
  */
+import { DEFAULT_LABELS } from "@/features/labels/labels";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -38,7 +39,9 @@ const scopeOf = (c: AuthContext): { all: boolean; ids: string[] } => {
 };
 const withOwner = (r: Row) => { const u = USERS[r.ownerId]!; return { ...r, owner: { name: u.name, role: u.role, group: u.groupId ? { id: u.groupId, name: GROUPS[u.groupId]! } : null } }; };
 
+const alertCalls: Record<string, unknown>[] = []; // every automatic-task alert the service asked for
 const prisma = {
+  $transaction: async <T,>(fn: (tx: unknown) => Promise<T>) => fn(prisma),
   calendarEntry: {
     findMany: async ({ where }: { where: { date: { gte: Date; lt: Date }; ownerId?: { in: string[] } } }) =>
       store.filter((r) => r.date >= where.date.gte && r.date < where.date.lt && (!where.ownerId || where.ownerId.in.includes(r.ownerId))).map(withOwner),
@@ -82,6 +85,7 @@ function load(current: { ctx: AuthContext | null }) {
     },
     "@/features/daily-work/billing-task-visibility.server": { loadCalendarBillingTasks: async () => [] }, // own suite: billing-calendar.test.ts
     "@/lib/calendar": localRequire(resolve("src/lib/calendar.ts")),
+    "@/features/notifications/task-alerts.server": { alertLabels: async () => ({}), notifyAutoTaskCreated: async (_tx: unknown, _labels: unknown, alert: Record<string, unknown>) => { alertCalls.push(alert); } }, // own suite: notifications/task-alerts.test.ts
   };
   void current;
   runInNewContext(code, { exports, Date, console, require: (id: string) => (id in mocks ? mocks[id] : localRequire(id.startsWith("@/") ? resolve("src", id.slice(2)) : id)) }, { filename });
@@ -108,15 +112,20 @@ async function main() {
   assert.equal(task.kind, "TASK"); assert.equal(task.ownerId, "so1"); assert.equal(task.ownerName, "Rahul Patidar"); assert.equal(task.ownerRoleLabel, "Sales Officer");
   same([task.task?.section, task.task?.dealerName, task.task?.amount, task.task?.paymentMode], ["RECOVERY", "ABC Traders", 25000, "UPI"]);
   assert.equal(store.find((r) => r.id === task.id)!.entryType, "REGULAR");
+  // A new Daily Task asks for exactly ONE alert (future date included); reminders never do.
+  assert.equal(alertCalls.length, 1); assert.deepEqual([alertCalls[0].source, alertCalls[0].section, alertCalls[0].ownerId, alertCalls[0].date, alertCalls[0].amount, alertCalls[0].entityType, alertCalls[0].entityId], ["CALENDAR", "RECOVERY", "so1", FUTURE, 25000, "CalendarEntry", task.id]);
   const reminder = await svc.createCalendarEntry(ctx("so2"), { kind: "REMINDER", date: FUTURE, text: "Call dealer" });
   const rmReminder = await svc.createCalendarEntry(ctx("rm1"), { kind: "REMINDER", date: FUTURE, text: "Review distributors" });
   assert.equal(reminder.kind, "REMINDER");
   assert.equal(rmReminder.ownerRoleLabel, "Regional Manager"); assert.equal(rmReminder.ownerState, "CG");
+  assert.equal(alertCalls.length, 1, "reminders raise no task alert");
   for (const e of [reminder, rmReminder]) assert.equal(e.task, null, "non-task entries carry no Daily Work payload");
   // Meeting / Other are no longer creatable by anyone (UI removed; the API refuses them and stores nothing).
   const stored = store.length;
   for (const kind of ["MEETING", "OTHER"]) for (const who of ["so1", "rm1", "admin"]) assert.equal(await status(() => svc.createCalendarEntry(ctx(who), { kind, date: FUTURE, text: "x" })), 422, `${kind} by ${who} is refused`);
   assert.equal(store.length, stored, "refused Meeting/Other creates write nothing");
+  assert.equal(alertCalls.length, 1, "refused creates raise no alert");
+  await calendar("so1"); await calendar("admin"); assert.equal(alertCalls.length, 1, "reading the calendar never alerts");
 
   // 2 — every active Daily Work section is accepted with the Daily Work fields; a disabled/unknown one is rejected.
   const base = { kind: "TASK", date: FUTURE };
@@ -226,6 +235,18 @@ async function main() {
     assert.ok(readFileSync("src/features/calendar/calendar-view.tsx", "utf8").includes("payload?.taskSections"), "Daily Task types come from the server's ACTIVE Daily Work sections, not a hard-coded list");
   }
 
-  console.log("calendar-entries.test.ts — all assertions passed");
+
+// ---- Calendar redesign: ONE selected date + ONE data source drive both layouts; the details are grouped / collapsible; wording from Edit Labels ----
+{
+  const ui = readFileSync("src/features/calendar/calendar-view.tsx", "utf8");
+  assert.equal((ui.match(/useQuery</g) ?? []).length, 1, "one calendar query for both the desktop panel and the phone agenda");
+  assert.equal((ui.match(/<DayDetails/g) ?? []).length, 1, "the details are rendered once (CSS places them: right of the grid on desktop, below it on a phone)");
+  assert.ok(ui.includes("lg:grid-cols-[minmax(0,58fr)_minmax(0,42fr)]") && ui.includes("lg:hidden") && ui.includes('data-testid="calendar-dots"'), "58 / 42 desktop split; dots (not event strips) on a phone");
+  assert.ok(ui.includes("aria-expanded={expanded}") && ui.includes("useState<ReadonlySet<string>>(new Set())") && ui.includes("key={selected}"), "employee sections: collapsed to start, several may be open, reset for each date");
+  assert.ok(ui.includes("isPhone()") && ui.includes("setSelected(todayKey)"), "Today selects today; month navigation never leaves stale details");
+  for (const key of ["selected_day", "entry_count_one", "entry_count_many", "expand_employee", "collapse_employee"]) assert.ok(ui.includes(`calendar.${key}`) && (DEFAULT_LABELS as Record<string, string>)[`calendar.${key}`], `label calendar.${key}`);
+  assert.ok(!ui.includes("DateDetailDialog"), "the date dialog was replaced by the inline panel");
+}
+console.log("calendar-entries.test.ts — all assertions passed");
 }
 main().catch((e) => { console.error(e); process.exit(1); });

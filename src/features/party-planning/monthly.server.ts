@@ -13,7 +13,7 @@ import { createDealerForOfficer } from "@/features/planning/monthly-plan.server"
 import { applyAppointment, derivedType, isEditable, reviewTransition, shownMarketPotential, shownMarketSource, submitTarget } from "@/lib/seasonal-plan";
 import {
   APPROVAL_LABEL, ADMIN_PENDING_STATUSES, OPTION_NUMBERS, STAGE_ROW_STATUSES, sheetInStage, type PlanStage, type StageCounts, conversionDays, summarizeDateHistory, ROW_STATUS_LABEL, TRANSITIONS, adminActionFor, cleanParty, displayRowStatus, isRowStatus, monthKey, monthlySheetStatus, parseTransition, transitionActor, validatePartyName, validatePlanDate,
-  type DocInfo, type TransitionInput, type MonthlySheetStatus, type OptionNo, type RowStatus,
+  type DocInfo, type StoredSentInfo, type TransitionInput, type MonthlySheetStatus, type OptionNo, type RowStatus,
 } from "@/lib/monthly-plan";
 
 /**
@@ -177,7 +177,7 @@ export async function getMonthlySheet(ctx: AuthContext, id: string, stage?: stri
 
 /** Option 1 / Option 2 are only candidate party names — no status, no timeline of their own. */
 export interface OptionDto { id: string; optionNo: OptionNo; partyName: string | null }
-export interface StatusEventDto { id: string; dealerId: string | null; previousStatus: string; newStatus: string; previousLabel: string; newLabel: string; actorName: string; actorRole: string; remarks: string | null; sentInfo: DocInfo | null; receivedInfo: DocInfo | null; createdAt: string }
+export interface StatusEventDto { id: string; dealerId: string | null; previousStatus: string; newStatus: string; previousLabel: string; newLabel: string; actorName: string; actorRole: string; remarks: string | null; sentInfo: StoredSentInfo | null; receivedInfo: DocInfo | null; createdAt: string }
 export interface MonthlyPlanDto {
   id: string; sheetId: string; seasonalPlanId: string; seasonId: string; seasonMonthId: string; monthLabel: string; monthKey: string;
   ownerId: string; ownerName: string; ownerGroupId: string | null; marketId: string; marketName: string; marketPotential: string | null;
@@ -191,7 +191,7 @@ export interface MonthlyPlanDto {
   /** The moves the CALLER may make now (the server re-checks every one). */
   allowedStatuses: { to: RowStatus; label: string }[];
   /** What the SO last said was sent / what Admin last said was actually received — kept apart, never merged. */
-  sentInfo: DocInfo | null; receivedInfo: DocInfo | null; statusEvents: StatusEventDto[];
+  sentInfo: StoredSentInfo | null; receivedInfo: DocInfo | null; statusEvents: StatusEventDto[];
   /** Conversion Date (= planDate): hand-editable by the SO only before the status workflow begins, then set automatically on every status change. */
   canEditDate: boolean; dateChangeCount: number; seasonalAddedOn: string; days: number; daysFinal: boolean;
   dateHistory: DateChangeDto[];
@@ -223,10 +223,12 @@ async function toDtos(ctx: AuthContext, rows: PlanRow[], teamIds: readonly strin
     const seasonalAddedOn = currentBusinessDate(r.seasonalPlan.createdAt); // Asia/Kolkata calendar date
     const aging = conversionDays(seasonalAddedOn, opStatus === "APPOINTED" ? planDay : null, todayIst); // freezes at the Appointed date
     const allowedStatuses = !open || r.approvalStatus !== "APPROVED" ? [] : TRANSITIONS[opStatus]
-      .filter((t) => (t.actor === "OWNER" ? own : admin && hasAdminPermission(ctx, "partyPlanning", adminActionFor(t.to)) && (t.to !== "APPOINTED" || hasAdminPermission(ctx, "dealers", "create")))).map((t) => ({ to: t.to, label: ROW_STATUS_LABEL[t.to] }));
+      .filter((t) => (t.actor === "OWNER" ? own : admin && hasAdminPermission(ctx, "partyPlanning", adminActionFor(t.to)) && (t.to !== "APPOINTED" || hasAdminPermission(ctx, "dealers", "create"))))
+      .filter((t) => t.to !== "DOC_NOT_SENT") // one "Doc Send By SO" action: the form's "Appointed, Document Not Sent" answer resolves to Document Not Sent on the server
+      .map((t) => ({ to: t.to, label: ROW_STATUS_LABEL[t.to] }));
     const events: StatusEventDto[] = r.statusEvents.map((e) => ({
       id: e.id, dealerId: e.dealerId ?? null, previousStatus: e.previousStatus, newStatus: e.newStatus, previousLabel: displayRowStatus(e.previousStatus, "APPROVED"), newLabel: displayRowStatus(e.newStatus, "APPROVED"),
-      actorName: e.actorName, actorRole: e.actorRole, remarks: e.remarks, sentInfo: (e.sentInfo ?? null) as DocInfo | null, receivedInfo: (e.receivedInfo ?? null) as DocInfo | null, createdAt: e.createdAt.toISOString(),
+      actorName: e.actorName, actorRole: e.actorRole, remarks: e.remarks, sentInfo: (e.sentInfo ?? null) as StoredSentInfo | null, receivedInfo: (e.receivedInfo ?? null) as DocInfo | null, createdAt: e.createdAt.toISOString(),
     }));
     return {
       id: r.id, sheetId: r.sheetId, seasonalPlanId: r.seasonalPlanId, seasonId: r.seasonId, seasonMonthId: r.seasonMonthId,
@@ -238,7 +240,7 @@ async function toDtos(ctx: AuthContext, rows: PlanRow[], teamIds: readonly strin
       opStatus, statusLabel: displayRowStatus(opStatus, r.approvalStatus),
       approvalStatus: r.approvalStatus, approvalLabel: APPROVAL_LABEL[r.approvalStatus] ?? r.approvalStatus, rejectionStage: r.rejectionStage, rejectionReason: r.rejectionReason,
       canEditEntry: own && open && isEditable(r.approvalStatus) && opStatus === "NONE", canReview: open && canReviewEntry(ctx, r, teamIds), statusChangedAt: r.opStatusChangedAt?.toISOString() ?? null, allowedStatuses,
-      sentInfo: [...events].reverse().find((e) => e.newStatus === "DOC_SENT")?.sentInfo ?? null,
+      sentInfo: [...events].reverse().find((e) => e.newStatus === "DOC_SENT" || e.newStatus === "DOC_NOT_SENT")?.sentInfo ?? null,
       receivedInfo: [...events].reverse().find((e) => e.newStatus === "DOC_RECEIVED")?.receivedInfo ?? null, statusEvents: events,
       canEditDate: own && open && opStatus === "NONE", dateChangeCount: history.soChanges, seasonalAddedOn, days: aging.days, daysFinal: aging.final,
       dateHistory: r.dateChanges.map((c) => ({ id: c.id, previousDate: dayOf(c.previousDate), newDate: dayOf(c.newDate), byAdmin: c.byAdmin, automatic: c.automatic, actorName: c.actorName, actorRole: c.actorRole, createdAt: c.createdAt.toISOString() })),
@@ -423,19 +425,11 @@ export async function actOnMonthlySheet(ctx: AuthContext, id: string, raw: unkno
 /* ------------------------------------------------ row status workflow ------------------------------------------------ */
 
 /**
- * Move ONE market row to a new operational status. Valid moves come from TRANSITIONS (NONE → Doc Send By SO by the owner; every later step by
- * Admin); the plan must already be APPROVED. The row update (claimed on the status it was read at), the automatic Conversion Date change and the
- * append-only status event are written in ONE transaction. Option 1 / Option 2 are untouched.
+ * The permission / state checks of ONE status move (shared by the Monthly Planning endpoint and the Daily Work "Appointed" action, so both enforce exactly the same rules):
+ * the owner may take the owner steps, Admin the Admin steps, an RM only sees their team's, an unrelated caller cannot tell the plan exists; the season must be open and the entry
+ * APPROVED; the move must exist in TRANSITIONS. Returns the status the row is currently at.
  */
-export async function changeRowStatus(ctx: AuthContext, planId: string, raw: unknown): Promise<MonthlyPlanDto> {
-  assertReader(ctx);
-  const input = parseTransition(raw);
-  if (!input.ok) throw new ApiError(422, input.message);
-  const move = input.value;
-  if (move.to === "APPOINTED") throw new ApiError(422, "Use the Appointed action: it creates the dealer and marks the row Appointed together");
-
-  const plan = await prisma.partyMonthlyPlan.findUnique({ where: { id: planId }, include });
-  if (!plan) throw new ApiError(404, "Monthly Plan not found");
+async function assertMoveAllowed(ctx: AuthContext, plan: PlanRow, move: TransitionInput): Promise<RowStatus> {
   const admin = isAdministrativeRole(ctx.role);
   const own = planner(ctx) && plan.ownerId === ctx.userId;
   if (!admin && !own) {
@@ -455,6 +449,49 @@ export async function changeRowStatus(ctx: AuthContext, planId: string, raw: unk
     if (!admin) throw new ApiError(403, "Only an Admin can do this step");
     assertAdminPermission(ctx, "partyPlanning", adminActionFor(move.to));
   }
+  return from;
+}
+
+/**
+ * The owner's "Doc Send By SO" step, run INSIDE the caller's transaction (Daily Work → Dealer Appointment → Appointed). Same validation, same row claim, same Conversion Date change, same
+ * append-only status event and audit as the Monthly Planning status dialog — it is that transition, not a copy. Returns the plan's status event it created.
+ */
+export async function ownerSendDocumentsInTx(tx: Prisma.TransactionClient, ctx: AuthContext, planId: string, rawSent: unknown): Promise<{ eventId: string; status: RowStatus }> {
+  const input = parseTransition({ to: "DOC_SENT", sent: rawSent });
+  if (!input.ok) throw new ApiError(422, input.message);
+  const plan = await tx.partyMonthlyPlan.findUnique({ where: { id: planId }, include });
+  if (!plan) throw new ApiError(404, "Monthly Plan not found");
+  const from = await assertMoveAllowed(ctx, plan, input.value);
+  const actor = await actorOf(ctx);
+  await applyRowStatus(tx, ctx, actor, plan, from, input.value);
+  const event = await tx.partyMonthlyStatusEvent.findFirst({ where: { monthlyPlanId: planId, newStatus: input.value.to }, orderBy: { createdAt: "desc" }, select: { id: true } });
+  if (!event) throw new ApiError(500, "The status event was not recorded");
+  return { eventId: event.id, status: input.value.to as RowStatus };
+}
+
+/** The Monthly Plan entry as the status dialog needs it, for its OWNER only (anyone else cannot tell it exists). */
+export async function getOwnPlanDto(ctx: AuthContext, planId: string): Promise<MonthlyPlanDto> {
+  assertPlanner(ctx);
+  const plan = await prisma.partyMonthlyPlan.findUnique({ where: { id: planId }, include });
+  if (!plan || plan.ownerId !== ctx.userId) throw new ApiError(404, "Monthly Plan not found");
+  return (await toDtos(ctx, [plan]))[0]!;
+}
+
+/**
+ * Move ONE market row to a new operational status. Valid moves come from TRANSITIONS (NONE → Doc Send By SO by the owner; every later step by
+ * Admin); the plan must already be APPROVED. The row update (claimed on the status it was read at), the automatic Conversion Date change and the
+ * append-only status event are written in ONE transaction. Option 1 / Option 2 are untouched.
+ */
+export async function changeRowStatus(ctx: AuthContext, planId: string, raw: unknown): Promise<MonthlyPlanDto> {
+  assertReader(ctx);
+  const input = parseTransition(raw);
+  if (!input.ok) throw new ApiError(422, input.message);
+  const move = input.value;
+  if (move.to === "APPOINTED") throw new ApiError(422, "Use the Appointed action: it creates the dealer and marks the row Appointed together");
+
+  const plan = await prisma.partyMonthlyPlan.findUnique({ where: { id: planId }, include });
+  if (!plan) throw new ApiError(404, "Monthly Plan not found");
+  const from = await assertMoveAllowed(ctx, plan, move);
 
   const actor = await actorOf(ctx);
   const updated = await prisma.$transaction((tx) => applyRowStatus(tx, ctx, actor, plan, from, move));
@@ -483,7 +520,7 @@ async function applyRowStatus(tx: Prisma.TransactionClient, ctx: AuthContext, ac
   }
   await tx.partyMonthlyStatusEvent.create({ data: {
     monthlyPlanId: plan.id, previousStatus: from, newStatus: move.to, actorId: ctx.userId, actorName: actor.name, actorRole: actor.role, dealerId: dealerId ?? null,
-    remarks: "remarks" in move ? move.remarks : null, sentInfo: move.to === "DOC_SENT" ? (move.sent as unknown as Prisma.InputJsonValue) : undefined, receivedInfo: move.to === "DOC_RECEIVED" ? (move.received as unknown as Prisma.InputJsonValue) : undefined,
+    remarks: "remarks" in move ? move.remarks : null, sentInfo: move.to === "DOC_SENT" || move.to === "DOC_NOT_SENT" ? (move.sent as unknown as Prisma.InputJsonValue) : undefined, receivedInfo: move.to === "DOC_RECEIVED" ? (move.received as unknown as Prisma.InputJsonValue) : undefined,
   } });
   await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyMonthlyPlan", entityId: plan.id, summary: `Monthly Plan status · ${plan.marketNameAtPlanning} · ${displayRowStatus(from, "APPROVED")} → ${ROW_STATUS_LABEL[move.to]}${dealerId ? " (dealer created)" : ""}` }, tx);
   return (await tx.partyMonthlyPlan.findUnique({ where: { id: plan.id }, include }))!;

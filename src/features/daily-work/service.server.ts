@@ -18,12 +18,15 @@ import { figuresForMode, type PlanningMode } from "@/lib/calc";
 import { effectiveProceedingSchemeUnits } from "@/lib/scheme-plan-quantity";
 import { getResolvedLabels } from "@/features/labels/service.server";
 import { cnTasksForOfficerDate, materializedCnTasksForEntries, countUnconfirmedMaterializedTasks } from "@/features/cn-requests/service.server";
-import { getAutoTasksEnabled } from "@/lib/recovery-config";
+import { getAutoTasksEnabled, getAppointmentPartyPlanningEnabled } from "@/lib/recovery-config";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
+import { isPartyPlanningEnabled } from "@/lib/feature-flags";
+import { ownerSendDocumentsInTx } from "@/features/party-planning/monthly.server";
+import { appointmentMonthlyTotals } from "@/lib/monthly-plan";
 import { billingTasksForEntries, billingLinkedEntryIds, BILLING_CONTRIBUTION_UNION, type BillingTaskDto } from "./billing-task.server";
 import {
   currentBusinessDate, monthNameForDate, performanceSectionTotals, performanceRowValue, isPerformanceMetric, PERFORMANCE_METRIC_INFO, type PerformanceMetric, type PerformanceUnit, type PerformanceEntryRow, type PerformanceSectionTotals, salesPending, recoveryPending, conversionPending, combineDailyWorkRows, round2,
@@ -77,9 +80,14 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     /** Recovery: the automatic amount the editor was showing for this row — a stale draft (a task was rescheduled meanwhile) is refused. */
     autoAmount: z.coerce.number().min(0).max(1e12).optional(),
   });
+  /** The dealer name reported with an Appointed result: trimmed, blank = none. */
+  const reportedName = z.string().trim().max(200, L["daily_work.validation.dealer_name_length"]);
   const appointmentRowSchema = z.object({
     rowId: z.string().min(1, L["daily_work.validation.invalid_option"]),
-    dealerName: z.string().trim().max(200, L["daily_work.validation.dealer_name_length"]),
+    /** A Monthly Party Planning entry (linked row); the market identity and name are always taken from it on the server. */
+    monthlyPlanId: z.string().min(1).optional().nullable(),
+    /** Manual mode accepts typed names; connected mode only echoes existing unlinked rows unchanged. */
+    dealerName: z.string().trim().max(200, L["daily_work.validation.dealer_name_length"]).optional().default(""),
     marketName: z.string().trim().max(200, L["daily_work.validation.market_length"]).optional().default(""),
   });
   const conversionRowSchema = z.object({
@@ -99,8 +107,9 @@ function dailyWorkSchemas(L: ResolvedLabels) {
       // Recovery Daily Report only: HOW the actual recovery was received. Absent = leave the stored value alone.
       paymentMode: z.enum(RECOVERY_PAYMENT_MODES, invalidOption).nullable().optional(),
     })) }),
-    appointmentSave: z.object({ workDate: dateStr, rows: maxRows(appointmentRowSchema) }),
-    appointmentStatus: z.object({ workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), status: z.enum(["APPOINTED", "NOT_APPOINTED"], invalidOption) })) }),
+    appointmentSave: z.object({ workDate: dateStr, partyPlanningEnabled: z.boolean().optional(), rows: maxRows(appointmentRowSchema) }),
+    appointedResult: z.object({ workDate: dateStr, entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), sent: z.unknown().optional(), dealerName: reportedName.optional() }),
+    appointmentStatus: z.object({ workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), status: z.enum(["APPOINTED", "NOT_APPOINTED"], invalidOption), dealerName: reportedName.optional() })) }),
     conversionSave: z.object({ workDate: dateStr, rows: maxRows(conversionRowSchema) }),
     conversionAchievability: z.object({ workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), achievability: z.enum(["YES", "NO"], invalidOption) })) }),
     visitsActual: z.object({ workDate: dateStr, entries: maxRows(z.object({
@@ -193,17 +202,32 @@ export interface AppointmentRowDto {
   entryId: string;
   batchId: string;
   rowId: string;
-  dealerName: string; // typed
-  marketName: string; // typed
-  monthlyPlan: null; // PLACEHOLDER — Dealer Planning not built yet (never a fabricated value)
-  pending: null; // PLACEHOLDER — connected in a later Dealer Planning phase
+  /** The approved Monthly Party Planning entry this row plans (stable reference), its market id, and the display snapshot of the market name. Legacy typed rows have no plan link. */
+  monthlyPlanId: string | null;
+  marketId: string | null;
+  marketName: string;
+  /** Manually typed dealer name (manual mode, older rows, and calendar-generated rows). Empty for linked rows. */
+  dealerName: string;
+  legacy: boolean;
+  /** The linked entry's CURRENT monthly operational status (NONE / DOC_SENT / …), for the Daily Report; null for legacy rows. */
+  monthlyStatus: string | null;
+  /** The monthly status event the "Appointed" result initiated (null when none was needed / not Appointed). */
+  resultEventId: string | null;
+  /** Daily Report: the dealer name reported for an Appointed result ("" when none; always "" for Not Appointed). Report information only. */
+  reportedDealerName: string;
   status: "APPOINTED" | "NOT_APPOINTED" | null; // post-submit
   rowStatus: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED";
 }
 export interface AppointmentPayload {
   section: "APPOINTMENT";
   workDate: string;
+  partyPlanningEnabled: boolean;
   canEnterStatus: boolean; // frozen report rows expose the Appointed/Not Appointed selector
+  /** The owner's APPROVED Monthly Party Planning markets for the month of the Daily Work date (one per entry), the Daily Plan's selector options. */
+  eligibleMarkets: { monthlyPlanId: string; marketId: string; marketName: string; monthlyStatus: string }[];
+  /** Monthly Dealer Plan = unique approved markets; Pending = those whose monthly workflow is not finished (see appointmentMonthlyTotals). Not per-row values. */
+  monthlyDealerPlan: number;
+  pending: number;
   rows: AppointmentRowDto[];
   calendarEntryIds: string[]; // rows created from a Calendar Daily Task → Task Type "Calendar"
 }
@@ -447,13 +471,15 @@ interface DailyRow {
   id: string; batchId: string; dealerId: string | null; rowKey: string; typedDealerName: string | null; marketName: string | null;
   todaysPlan: string | null; todaysActual: string | null; resultStatus: string | null; entryType: string; schemeId: string | null; status: string;
   paymentMode: RecoveryPaymentMode | null;
+  monthlyPlanId: string | null; marketId: string | null; resultEventId: string | null; reportedDealerName: string | null;
 }
 /** Current editable rows for PLAN, or every frozen immutable batch row for REPORT. */
 async function loadDailyRows(officerId: string, section: DailyWorkSection, workDate: string, mode: DailyWorkMode): Promise<DailyRow[]> {
   const { day } = await readBatchContext(officerId, workDate);
   const rows = await prisma.$queryRaw<DailyRow[]>(Prisma.sql`
     SELECT "id", "batchId", "dealerId", "rowKey", "typedDealerName", "marketName",
-           "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "resultStatus", "entryType", "schemeId", "status", "paymentMode"
+           "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "resultStatus", "entryType", "schemeId", "status", "paymentMode",
+           "monthlyPlanId", "marketId", "resultEventId", "reportedDealerName"
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "section" = ${section} AND "workDate" = ${workDate}::date
       AND ${mode === "PLAN"
@@ -766,60 +792,139 @@ export function combineDailyWork(dealers: DailyWorkDealerDto[]) {
 }
 
 /* =====================================================================================
- * SECTION 3 — DEALER APPOINTMENT (typed dealer + market; plan/pending are placeholders)
+ * SECTION 3 — DEALER APPOINTMENT (connected to the owner's APPROVED Monthly Party Planning)
+ *
+ * Daily Plan: the officer picks MARKETS from their own approved Monthly Party Planning entries of the calendar month/year of the Daily Work date (entry-level approval
+ * APPROVED — not the parent sheet's status —, season open, owner = the officer; never draft / submitted / rejected entries, other officers' plans or other months).
+ * Each row stores the stable PartyMonthlyPlan id (+ market id, with the market name as a display snapshot); rowKey = the plan id, so the existing unique key makes a
+ * second selection of the same entry in one planning batch impossible.
+ * Monthly Dealer Plan / Pending are the monthly COUNTS in appointmentMonthlyTotals (unique markets; Pending excludes terminal Appointed / Rejected). They are payload-level
+ * totals shown in the summary row — never repeated and summed per row.
+ * Daily Report: the result is Appointed / Not Appointed (no default). Not Appointed only saves the Daily Work result. Appointed runs the owner's monthly "Doc Send By SO"
+ * transition and saves the result in ONE transaction (recordAppointedResult) — it never creates a dealer, never bypasses Admin receipt / approval, and a document submission
+ * is not a final appointment. Legacy typed rows (and calendar-generated ones) stay readable and keep their old behaviour; they are never matched to a plan by name.
  * ===================================================================================== */
 
-/** Read the officer's Dealer Appointment rows for a date. Monthly Dealer Plan + Pending are placeholders. */
+type EligibleMarket = { monthlyPlanId: string; marketId: string; marketName: string; monthlyStatus: string };
+/** The officer's approved Monthly Party Planning entries for the calendar month of `workDate` (the ONE eligibility rule for the selector, the totals and the save). */
+async function eligibleMonthlyMarkets(officerId: string, workDate: string, db: Pick<typeof prisma, "partyMonthlyPlan"> = prisma): Promise<EligibleMarket[]> {
+  if (!isPartyPlanningEnabled()) return []; // Party Planning switched off (PARTY_PLANNING_ENABLED): there is no approved monthly plan to plan from
+  const [year, month] = workDate.split("-").map(Number) as [number, number];
+  const plans = await db.partyMonthlyPlan.findMany({
+    where: { ownerId: officerId, approvalStatus: "APPROVED", season: { status: "OPEN" }, seasonMonth: { calendarYear: year, calendarMonth: month } },
+    select: { id: true, marketId: true, marketNameAtPlanning: true, opStatus: true },
+    orderBy: [{ marketNameAtPlanning: "asc" }, { id: "asc" }],
+  });
+  return plans.map((p) => ({ monthlyPlanId: p.id, marketId: p.marketId, marketName: p.marketNameAtPlanning, monthlyStatus: p.opStatus }));
+}
+
+/** Read the officer's Dealer Appointment rows for a date (+ the eligible markets and the monthly totals). */
 export async function getDailyAppointment(ctx: AuthContext, rawDate?: string, targetOfficerId?: string, rawMode?: string): Promise<AppointmentPayload> {
   await assertReadRole(ctx, targetOfficerId);
   const workDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate ?? "") ? rawDate! : currentBusinessDate();
   const apptOfficerId = await resolveReadOfficer(ctx, targetOfficerId);
   await materializeCalendarForRead(ctx, apptOfficerId, workDate, parseDailyWorkMode(rawMode));
   const entries = await loadDailyRows(apptOfficerId, "APPOINTMENT", workDate, parseDailyWorkMode(rawMode));
+  const partyPlanningEnabled = await getAppointmentPartyPlanningEnabled();
+  const eligibleMarkets = partyPlanningEnabled ? await eligibleMonthlyMarkets(apptOfficerId, workDate) : [];
+  const linkedIds = [...new Set(entries.map((r) => r.monthlyPlanId).filter((id): id is string => !!id))];
+  const linked = partyPlanningEnabled && linkedIds.length ? await prisma.partyMonthlyPlan.findMany({ where: { id: { in: linkedIds } }, select: { id: true, opStatus: true } }) : [];
+  const monthlyStatus = new Map(linked.map((p) => [p.id, p.opStatus]));
+  const totals = appointmentMonthlyTotals(eligibleMarkets.map((m) => ({ marketId: m.marketId, opStatus: m.monthlyStatus })));
   const rows: AppointmentRowDto[] = entries.map((r) => ({
     entryId: r.id,
     batchId: r.batchId,
     rowId: r.rowKey,
-    dealerName: r.typedDealerName ?? "",
+    monthlyPlanId: r.monthlyPlanId ?? null,
+    marketId: r.marketId ?? null,
     marketName: r.marketName ?? "",
-    monthlyPlan: null,
-    pending: null,
+    dealerName: r.typedDealerName ?? "",
+    legacy: !r.monthlyPlanId,
+    monthlyStatus: r.monthlyPlanId ? monthlyStatus.get(r.monthlyPlanId) ?? null : null,
+    resultEventId: r.resultEventId ?? null,
+    reportedDealerName: r.resultStatus === "APPOINTED" ? r.reportedDealerName ?? "" : "",
     status: (r.resultStatus as "APPOINTED" | "NOT_APPOINTED" | null) ?? null,
     rowStatus: (r.status as AppointmentRowDto["rowStatus"]) ?? "DRAFT",
   }));
-  return { section: "APPOINTMENT", workDate, canEnterStatus: parseDailyWorkMode(rawMode) === "REPORT" && rows.some((r) => r.rowStatus !== "DRAFT"), rows, calendarEntryIds: await calendarLinkedEntryIds(entries.map((r) => r.id)) };
+  return {
+    section: "APPOINTMENT", workDate, partyPlanningEnabled, canEnterStatus: parseDailyWorkMode(rawMode) === "REPORT" && rows.some((r) => r.rowStatus !== "DRAFT"),
+    eligibleMarkets, monthlyDealerPlan: totals.monthlyDealerPlan, pending: totals.pending, rows, calendarEntryIds: await calendarLinkedEntryIds(entries.map((r) => r.id)),
+  };
 }
 
-/** Persist the officer's Dealer Appointment rows for a date as DRAFT (replace-set, atomic). Dealer is required. */
+/**
+ * Persist the officer's Dealer Appointment rows for a date as DRAFT (replace-set, atomic). A new row names a Monthly Party Planning entry (`monthlyPlanId`), which must be one of the
+ * officer's own eligible entries for the month of the date; the market identity / name come from that entry, never from the browser. Legacy typed rows (existing drafts and
+ * calendar-generated tasks) can only be echoed back unchanged while the connection is ON. OFF restores manual creation/editing without monthly side effects.
+ */
 export async function saveDailyAppointment(ctx: AuthContext, raw: unknown): Promise<{ count: number }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
-  const { workDate, rows } = dailyWorkSchemas(L).appointmentSave.parse(raw);
+  const { workDate, rows, partyPlanningEnabled: expectedMode } = dailyWorkSchemas(L).appointmentSave.parse(raw);
   const officerId = ownerId(ctx);
-  const meaningful = rows.filter((r) => r.dealerName.trim().length > 0);
 
-  // Unique client row ids within the payload (the natural key for typed rows).
+  // One selection per entry (rowKey = the plan id) and unique row ids within the payload.
   const seen = new Set<string>();
-  for (const r of meaningful) { if (seen.has(r.rowId)) throw new ApiError(422, L["daily_work.validation.duplicate_appointment"]); seen.add(r.rowId); }
+  for (const r of rows) {
+    const key = r.monthlyPlanId || r.rowId;
+    if (seen.has(key)) throw new ApiError(422, L["daily_work.validation.duplicate_appointment"]);
+    seen.add(key);
+  }
+  const linkedRows = rows.filter((r) => r.monthlyPlanId);
+  const legacyRows = rows.filter((r) => !r.monthlyPlanId);
 
-  const keep = meaningful.map((r) => r.rowId);
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    const partyPlanningEnabled = await getAppointmentPartyPlanningEnabled(tx);
+    if (expectedMode !== undefined && expectedMode !== partyPlanningEnabled) throw new ApiError(409, L["daily_work.validation.appointment_mode_changed"]);
+    // The current server setting controls NEW rows. Stored links never become typed rows (or vice versa).
+    const existing = await tx.$queryRaw<{ rowKey: string; typedDealerName: string | null; marketName: string | null; monthlyPlanId: string | null }[]>(Prisma.sql`
+      SELECT "rowKey", "typedDealerName", "marketName", "monthlyPlanId" FROM "DailyWorkEntry"
+      WHERE "officerId" = ${officerId} AND "section" = 'APPOINTMENT' AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "status" = 'DRAFT'`);
+    const legacyExisting = new Map(existing.filter((e) => !e.monthlyPlanId).map((e) => [e.rowKey, e]));
+    for (const r of legacyRows) {
+      const was = legacyExisting.get(r.rowId);
+      if (partyPlanningEnabled) {
+        if (!was || (was.typedDealerName ?? "") !== r.dealerName || (was.marketName ?? "") !== r.marketName) throw new ApiError(422, L["daily_work.validation.appointment_market_required"]);
+      } else {
+        if (!r.dealerName) throw new ApiError(422, L["daily_work.validation.appointment_dealer_required"]);
+        if (existing.some((e) => e.rowKey === r.rowId && e.monthlyPlanId)) throw new ApiError(409, L["daily_work.validation.appointment_mode_changed"]);
+      }
+    }
+    if (!partyPlanningEnabled) {
+      // Previously linked rows can be kept unchanged while OFF, but stale clients cannot create new links.
+      for (const r of linkedRows) if (!existing.some((e) => e.monthlyPlanId === r.monthlyPlanId && e.rowKey === r.monthlyPlanId)) throw new ApiError(409, L["daily_work.validation.appointment_connection_disabled"]);
+    }
+    const keep = [...linkedRows.map((r) => r.monthlyPlanId!), ...legacyRows.map((r) => r.rowId)];
     await tx.$executeRaw(Prisma.sql`
       DELETE FROM "DailyWorkEntry"
       WHERE "officerId" = ${officerId} AND "section" = 'APPOINTMENT' AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId}
       ${keep.length > 0 ? Prisma.sql`AND "rowKey" NOT IN (${Prisma.join(keep)})` : Prisma.empty}`);
-    for (const r of meaningful) {
-      const market = r.marketName?.trim() || null;
-      await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","typedDealerName","marketName","status","createdAt","updatedAt")
-        VALUES (${randomUUID()}, ${officerId}, NULL, ${r.rowId}, ${workDate}::date, ${day.currentBatchId}, 'APPOINTMENT', ${r.dealerName.trim()}, ${market}, 'DRAFT', NOW(), NOW())
-        ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
-        DO UPDATE SET "typedDealerName" = EXCLUDED."typedDealerName", "marketName" = EXCLUDED."marketName", "updatedAt" = NOW()`);
+    if (partyPlanningEnabled && linkedRows.length > 0) {
+      const eligible = new Map((await eligibleMonthlyMarkets(officerId, workDate, tx)).map((m) => [m.monthlyPlanId, m]));
+      for (const r of linkedRows) {
+        const m = eligible.get(r.monthlyPlanId!);
+        if (!m) throw new ApiError(422, L["daily_work.validation.appointment_market_not_eligible"]);
+        await tx.$executeRaw(Prisma.sql`
+          INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","typedDealerName","marketName","monthlyPlanId","marketId","status","createdAt","updatedAt")
+          VALUES (${randomUUID()}, ${officerId}, NULL, ${m.monthlyPlanId}, ${workDate}::date, ${day.currentBatchId}, 'APPOINTMENT', NULL, ${m.marketName}, ${m.monthlyPlanId}, ${m.marketId}, 'DRAFT', NOW(), NOW())
+          ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
+          DO UPDATE SET "marketName" = EXCLUDED."marketName", "marketId" = EXCLUDED."marketId", "monthlyPlanId" = EXCLUDED."monthlyPlanId", "updatedAt" = NOW()`);
+      }
     }
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Saved ${meaningful.length} dealer appointment row(s)` }, tx);
-    return { count: meaningful.length };
+    if (!partyPlanningEnabled) {
+      for (const r of legacyRows) {
+        await tx.$executeRaw(Prisma.sql`
+          INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","typedDealerName","marketName","status","createdAt","updatedAt")
+          VALUES (${randomUUID()}, ${officerId}, NULL, ${r.rowId}, ${workDate}::date, ${day.currentBatchId}, 'APPOINTMENT', ${r.dealerName}, ${r.marketName || null}, 'DRAFT', NOW(), NOW())
+          ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
+          DO UPDATE SET "typedDealerName" = EXCLUDED."typedDealerName", "marketName" = EXCLUDED."marketName", "updatedAt" = NOW()`);
+      }
+    }
+    // In connected mode, legacy rows stay unchanged; names are never used to infer a monthly link.
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Saved ${rows.length} dealer appointment market row(s)` }, tx);
+    return { count: rows.length };
   });
 }
 
@@ -842,18 +947,90 @@ export async function enterAppointmentStatus(ctx: AuthContext, raw: unknown): Pr
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     assertReportWindowOpen(workDate, L); // a Missed report (past its noon deadline) is read-only
-    let count = 0;
+    const partyPlanningEnabled = await getAppointmentPartyPlanningEnabled(tx);
+    let count = 0, matched = 0;
     for (const e of entries) {
+      // A LINKED row's result is protected: "Appointed" can only be recorded by recordAppointedResult (it needs the monthly transition), so this generic save (and any stale
+      // autosave) can never submit an unverified Appointed, and an Appointed result that initiated a monthly status event can never be silently reversed.
+      const row = (await tx.$queryRaw<{ monthlyPlanId: string | null; resultStatus: string | null; resultEventId: string | null }[]>(Prisma.sql`
+        SELECT "monthlyPlanId", "resultStatus", "resultEventId" FROM "DailyWorkEntry"
+        WHERE "id" = ${e.entryId} AND "officerId" = ${officerId} AND "section" = 'APPOINTMENT' AND "workDate" = ${workDate}::date AND "batchId" <> ${day.currentBatchId} AND "status" = 'PLAN_SUBMITTED'
+        FOR UPDATE`))[0];
+      if (!row) continue;
+      matched++;
+      // The reported dealer name belongs to an APPOINTED result only: Not Appointed ALWAYS clears it, whatever the request carries.
+      const name = e.status === "APPOINTED" ? (e.dealerName?.trim() || null) : null;
+      if (row.monthlyPlanId) {
+        if (row.resultStatus === "APPOINTED" && row.resultEventId) {
+          if (e.status !== "APPOINTED") throw new ApiError(409, L["daily_work.validation.appointment_result_locked"]);
+          // Echo of the recorded result — the only thing that may change is the reported name (no monthly transition, no new event).
+          count += Number(await tx.$executeRaw(Prisma.sql`UPDATE "DailyWorkEntry" SET "reportedDealerName" = ${name}, "updatedAt" = NOW() WHERE "id" = ${e.entryId} AND "reportedDealerName" IS DISTINCT FROM ${name}`));
+          continue;
+        }
+        if (e.status === "APPOINTED") {
+          if (row.resultStatus === "APPOINTED") { // recorded earlier without a new transition (already progressed): only the name may change
+            count += Number(await tx.$executeRaw(Prisma.sql`UPDATE "DailyWorkEntry" SET "reportedDealerName" = ${name}, "updatedAt" = NOW() WHERE "id" = ${e.entryId} AND "reportedDealerName" IS DISTINCT FROM ${name}`));
+            continue;
+          }
+          if (partyPlanningEnabled) throw new ApiError(409, L["daily_work.validation.appointment_use_popup"]);
+        }
+      }
       const n = await tx.$executeRaw(Prisma.sql`
-        UPDATE "DailyWorkEntry" SET "resultStatus" = ${e.status}, "updatedAt" = NOW()
-        WHERE "id" = ${e.entryId} AND "officerId" = ${officerId} AND "section" = 'APPOINTMENT'
-          AND "workDate" = ${workDate}::date AND "batchId" <> ${day.currentBatchId} AND "status" = 'PLAN_SUBMITTED'`);
+        UPDATE "DailyWorkEntry" SET "resultStatus" = ${e.status}, "reportedDealerName" = ${name}, "updatedAt" = NOW() WHERE "id" = ${e.entryId}`);
       count += Number(n);
     }
-    if (count === 0) throw new ApiError(409, L["daily_work.validation.appointment_after_submit"]);
+    if (matched === 0) throw new ApiError(409, L["daily_work.validation.appointment_after_submit"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Set appointment status for ${count} row(s)` }, tx);
     return { count };
   });
+}
+
+/**
+ * Daily Report → "Appointed" for a LINKED row: the owner's monthly "Doc Send By SO" transition and the Daily Work result in ONE transaction (nothing partial can persist).
+ *  - the day lock serializes the owner's actions; the entry row is locked FOR UPDATE; an already-recorded result is returned as is (a retry / double click replays nothing);
+ *  - the monthly step reuses the Monthly Planning rules exactly (owner only, approved entry, open season, row claimed on its status, Conversion Date, append-only status event, audit);
+ *  - the daily row then stores Appointed + a reference to that status event;
+ *  - an entry that already progressed (Doc Sent / later) gets no second transition: the result is recorded against its latest event; a Rejected entry is refused;
+ *  - owner, submitted batch, report window and finalized day are all enforced here. It never creates a dealer and never touches Admin steps.
+ */
+export async function recordAppointedResult(ctx: AuthContext, raw: unknown): Promise<{ entryId: string; status: "APPOINTED"; eventId: string | null; transitioned: boolean }> {
+  const L = await getResolvedLabels();
+  await assertOwnerRole(ctx, L);
+  const { workDate, entryId, sent, dealerName } = dailyWorkSchemas(L).appointedResult.parse(raw);
+  const officerId = ownerId(ctx);
+  return prisma.$transaction(async (tx) => {
+    if (!(await getAppointmentPartyPlanningEnabled(tx))) throw new ApiError(409, L["daily_work.validation.appointment_connection_disabled"]);
+    const day = await lockDailyWorkDay(tx, officerId, workDate);
+    assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    assertReportWindowOpen(workDate, L);
+    const row = (await tx.$queryRaw<{ monthlyPlanId: string | null; resultStatus: string | null; resultEventId: string | null }[]>(Prisma.sql`
+      SELECT "monthlyPlanId", "resultStatus", "resultEventId" FROM "DailyWorkEntry"
+      WHERE "id" = ${entryId} AND "officerId" = ${officerId} AND "section" = 'APPOINTMENT' AND "workDate" = ${workDate}::date AND "batchId" <> ${day.currentBatchId} AND "status" = 'PLAN_SUBMITTED'
+      FOR UPDATE`))[0];
+    if (!row) throw new ApiError(409, L["daily_work.validation.appointment_after_submit"]);
+    if (!row.monthlyPlanId) throw new ApiError(422, L["daily_work.validation.appointment_use_popup"]);
+    if (row.resultStatus === "APPOINTED") return { entryId, status: "APPOINTED" as const, eventId: row.resultEventId, transitioned: false }; // retry: nothing replayed
+    const plan = await tx.partyMonthlyPlan.findUnique({ where: { id: row.monthlyPlanId }, select: { id: true, ownerId: true, opStatus: true, approvalStatus: true } });
+    if (!plan || plan.ownerId !== officerId || plan.approvalStatus !== "APPROVED") throw new ApiError(409, L["daily_work.validation.appointment_market_not_eligible"]);
+    let eventId: string | null;
+    let transitioned = false;
+    const documentNotSentAgain = plan.opStatus === "DOC_NOT_SENT" && (sent as { documentNotSent?: unknown } | null | undefined)?.documentNotSent === true;
+    let movedTo: string | null = null;
+    if ((plan.opStatus === "NONE" || plan.opStatus === "DOC_NOT_SENT") && !documentNotSentAgain) {
+      // The SAME owner step as the Monthly Planning dialog: NONE → Doc Send By SO (answers) or Document Not Sent ("Appointed, Document Not Sent"); a row that is already
+      // Document Not Sent can later be moved on to Doc Send By SO by submitting the Document / Cheque answers.
+      ({ eventId, status: movedTo } = await ownerSendDocumentsInTx(tx, ctx, plan.id, sent));
+      transitioned = true;
+    } else if (plan.opStatus === "REJECTED") {
+      throw new ApiError(409, L["daily_work.validation.appointment_monthly_rejected"]);
+    } else {
+      // Already progressed (Doc Sent / Received / SD Bounce / Appointed): no second transition; the result references the latest status event.
+      eventId = (await tx.partyMonthlyStatusEvent.findFirst({ where: { monthlyPlanId: plan.id }, orderBy: { createdAt: "desc" }, select: { id: true } }))?.id ?? null;
+    }
+    await tx.$executeRaw(Prisma.sql`UPDATE "DailyWorkEntry" SET "resultStatus" = 'APPOINTED', "resultEventId" = ${eventId}, "reportedDealerName" = ${dealerName?.trim() || null}, "updatedAt" = NOW() WHERE "id" = ${entryId}`);
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Appointed result recorded for a Monthly Party Planning market${transitioned ? (movedTo === "DOC_NOT_SENT" ? " (document not sent)" : " (documents sent)") : " (monthly status unchanged)"}` }, tx);
+    return { entryId, status: "APPOINTED" as const, eventId, transitioned };
+  }, { timeout: 20_000 });
 }
 
 /* =====================================================================================
@@ -1140,33 +1317,28 @@ export async function submitDailySummary(ctx: AuthContext, raw: unknown): Promis
  *   VISITS             → the SUMMARY visit columns are set (an explicit 0 counts; untouched/NULL does not)
  */
 async function sectionDataPresence(officerId: string, workDate: string, batchId: string, db: DbClient = prisma): Promise<SectionDataPresence> {
-  const rows = await db.$queryRaw<{ section: string; n: bigint }[]>(Prisma.sql`
-    SELECT "section", COUNT(*)::bigint AS n
-    FROM "DailyWorkEntry"
-    WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${batchId}
-      AND (
-        ("section" IN ('SALES','RECOVERY','SCHEME_CONVERSION'))
-        OR ("section" = 'APPOINTMENT' AND COALESCE(TRIM("typedDealerName"), '') <> '')
-      )
-    GROUP BY "section"`);
-  const count = new Map(rows.map((r) => [r.section, Number(r.n)]));
+  return (await sectionFacts(officerId, workDate, batchId, db)).presence;
+}
 
-  // Visits: entered when its columns are non-null (a VISITS save happened). Others: entered when the free-text
-  // note is non-empty. Both live on the day's SUMMARY row.
-  const summary = await db.$queryRaw<{ visits: boolean; others: boolean }[]>(Prisma.sql`
-    SELECT ("dealerVisits" IS NOT NULL OR "newPartyVisits" IS NOT NULL) AS visits,
-           (COALESCE(TRIM("others"), '') <> '') AS others
+/**
+ * Data presence of every mandatory section AND the persisted No-Plan set in ONE statement (they all read the same batch of DailyWorkEntry rows). This is what the submit
+ * transaction and the status read use: three round trips became one, which matters because every statement of an interactive transaction costs a network round trip.
+ */
+async function sectionFacts(officerId: string, workDate: string, batchId: string, db: DbClient = prisma): Promise<{ presence: SectionDataPresence; noPlanSet: Set<MandatorySection> }> {
+  const rows = await db.$queryRaw<{ sales: bigint; recovery: bigint; appointment: bigint; conversion: bigint; visits: boolean | null; others: boolean | null; noPlanSections: string | null }[]>(Prisma.sql`
+    SELECT COUNT(*) FILTER (WHERE "section" = 'SALES')::bigint AS "sales",
+           COUNT(*) FILTER (WHERE "section" = 'RECOVERY')::bigint AS "recovery",
+           COUNT(*) FILTER (WHERE "section" = 'APPOINTMENT' AND ("monthlyPlanId" IS NOT NULL OR COALESCE(TRIM("typedDealerName"), '') <> ''))::bigint AS "appointment",
+           COUNT(*) FILTER (WHERE "section" = 'SCHEME_CONVERSION')::bigint AS "conversion",
+           BOOL_OR("section" = 'SUMMARY' AND "rowKey" = ${SUMMARY_ROWKEY} AND ("dealerVisits" IS NOT NULL OR "newPartyVisits" IS NOT NULL)) AS "visits",
+           BOOL_OR("section" = 'SUMMARY' AND "rowKey" = ${SUMMARY_ROWKEY} AND COALESCE(TRIM("others"), '') <> '') AS "others",
+           MAX("noPlanSections") FILTER (WHERE "section" = 'SUMMARY' AND "rowKey" = ${SUMMARY_ROWKEY}) AS "noPlanSections"
     FROM "DailyWorkEntry"
-    WHERE "officerId" = ${officerId} AND "section" = 'SUMMARY' AND "workDate" = ${workDate}::date AND "batchId" = ${batchId} AND "rowKey" = ${SUMMARY_ROWKEY}
-    LIMIT 1`);
-
+    WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${batchId}`);
+  const r = rows[0];
   return {
-    SALES: (count.get("SALES") ?? 0) > 0,
-    RECOVERY: (count.get("RECOVERY") ?? 0) > 0,
-    APPOINTMENT: (count.get("APPOINTMENT") ?? 0) > 0,
-    SCHEME_CONVERSION: (count.get("SCHEME_CONVERSION") ?? 0) > 0,
-    VISITS: summary[0]?.visits ?? false,
-    OTHERS: summary[0]?.others ?? false,
+    presence: { SALES: Number(r?.sales ?? 0) > 0, RECOVERY: Number(r?.recovery ?? 0) > 0, APPOINTMENT: Number(r?.appointment ?? 0) > 0, SCHEME_CONVERSION: Number(r?.conversion ?? 0) > 0, VISITS: r?.visits ?? false, OTHERS: r?.others ?? false },
+    noPlanSet: parseNoPlanSet(r?.noPlanSections),
   };
 }
 
@@ -1293,9 +1465,8 @@ export async function getDailyStatus(ctx: AuthContext, rawDate?: string, targetO
   await materializeCalendarForRead(ctx, officerId, workDate, "PLAN"); // the status (progress bar) must see Calendar tasks too
   const { day } = await readBatchContext(officerId, workDate);
   const now = dailyWorkClock.now();
-  const [data, noPlanSet, report, autoTasksEnabled, previous] = await Promise.all([
-    sectionDataPresence(officerId, workDate, day.currentBatchId),
-    loadNoPlanSet(officerId, workDate, day.currentBatchId),
+  const [{ presence: data, noPlanSet }, report, autoTasksEnabled, previous] = await Promise.all([
+    sectionFacts(officerId, workDate, day.currentBatchId),
     reportCompletion(prisma, officerId, workDate, day.currentBatchId),
     getAutoTasksEnabled(),
     previousReportGate(prisma, officerId, workDate, now),
@@ -1349,12 +1520,23 @@ export async function setDailyNoPlan(ctx: AuthContext, raw: unknown): Promise<Da
  * and REJECTS if any is still REMAINING (a manipulated client cannot bypass this). On success, freezes ALL
  * current-batch DRAFT rows as PLAN_SUBMITTED and rotates a fresh current batch in one transaction.
  */
+/**
+ * The submit transaction's own, BOUNDED limits (not a global change): `timeout` is how long the whole interactive transaction may run, `maxWait` how long it may wait for a
+ * pooled connection before starting. Measured: the transaction is ~15 statements plus BEGIN / COMMIT and the database spends ~1–30 ms on all of them; what takes time is the
+ * network round trip of EACH statement (and queueing behind other requests), so the default 5 s fails as soon as a round trip reaches ~300 ms. 30 s tolerates ~1.7 s per
+ * statement; anything slower is failed with a retryable message instead of hanging.
+ */
+export const SUBMIT_DAY_TRANSACTION = { timeout: 30_000, maxWait: 10_000 } as const;
+/** A Prisma transaction that closed (P2028), could not get a connection (P2024) or lost a write conflict / deadlock (P2034): nothing was committed, so the request is safely retryable. */
+export const isRetryableTransactionError = (e: unknown): boolean => typeof e === "object" && e !== null && ["P2028", "P2024", "P2034"].includes((e as { code?: string }).code ?? "");
+
 export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promise<{ ok: true; batchId: string }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
   const { workDate } = dailyWorkSchemas(L).batchSubmit.parse(raw);
   const officerId = ownerId(ctx);
   let submittedBatchId = "";
+  try {
   await prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
@@ -1373,10 +1555,7 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
       // Billing Exception tasks need no confirmation: a due task is in the plan once, and submitting it is the officer's confirmation.
       if (unconfirmed > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
     }
-    const [data, noPlanSet] = await Promise.all([
-      sectionDataPresence(officerId, workDate, day.currentBatchId, tx),
-      loadNoPlanSet(officerId, workDate, day.currentBatchId, tx),
-    ]);
+    const { presence: data, noPlanSet } = await sectionFacts(officerId, workDate, day.currentBatchId, tx);
     const statuses = computeSectionStatuses(data, noPlanSet);
     if (!canSubmitDailyWork(statuses)) {
       const remaining = MANDATORY_SECTIONS.filter((s) => statuses[s] === SectionStatus.REMAINING);
@@ -1410,7 +1589,12 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
       UPDATE "DailyWorkDay" SET "currentBatchId" = ${randomUUID()}, "updatedAt" = NOW()
       WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date`);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `BATCH:${workDate}:${submittedBatchId}`, summary: "Submitted Daily Work planning batch" }, tx);
-  });
+  }, SUBMIT_DAY_TRANSACTION);
+  } catch (e) {
+    // Everything (materialization, status change, batch rotation, audit) rolls back together; the draft is untouched, so a retry is safe and cannot duplicate anything.
+    if (isRetryableTransactionError(e)) throw new ApiError(503, L["daily_work.validation.submit_timeout"]);
+    throw e;
+  }
   return { ok: true, batchId: submittedBatchId };
 }
 
@@ -1973,7 +2157,7 @@ async function loadPerformanceEntryRows(ids: string[], from: string, to: string)
   return prisma.$queryRaw<PerformanceEntryRow[]>(Prisma.sql`
     SELECT e."id", e."officerId", e."workDate", e."dealerId", e."schemeId", e."marketName", e."entryType", e."batchId",
            e."section", e."typedDealerName", e."todaysPlan"::text AS "todaysPlan", e."todaysActual"::text AS "todaysActual", e."resultStatus",
-           e."dealerVisits", e."newPartyVisits", e."actualDealerVisits", e."actualNewPartyVisits",
+           e."dealerVisits", e."newPartyVisits", e."actualDealerVisits", e."actualNewPartyVisits", e."monthlyPlanId", e."reportedDealerName",
            (d."finalizedAt" IS NOT NULL OR d."status" = 'FINALIZED') AS "reportFinalized"
     FROM "DailyWorkEntry" e
     LEFT JOIN "DailyWorkDay" d ON d."officerId" = e."officerId" AND d."workDate" = e."workDate"
@@ -2181,8 +2365,8 @@ export async function getPerformanceMetricDetail(ctx: AuthContext, raw: unknown 
     return {
       entryId: String(r.id), date, officerId: person.id, employeeName: person.name, role: person.role, stateName: person.groupName,
       section: info.section, value,
-      record: appointment ? (r.typedDealerName ?? "").trim() || null : dealer,
-      recordDetail: appointment ? r.marketName ?? null : scheme,
+      record: appointment ? (r.typedDealerName ?? "").trim() || r.marketName || null : dealer,
+      recordDetail: appointment ? ((r.typedDealerName ?? "").trim() ? r.marketName ?? null : (r.reportedDealerName ?? "").trim() || null) : scheme,
       visitParts: info.section === "SUMMARY"
         ? (info.kind === "planned" ? { dealer: r.dealerVisits ?? 0, newParty: r.newPartyVisits ?? 0 } : { dealer: r.actualDealerVisits ?? 0, newParty: r.actualNewPartyVisits ?? 0 })
         : null,

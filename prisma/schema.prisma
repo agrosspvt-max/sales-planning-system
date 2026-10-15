@@ -678,18 +678,18 @@ model ProductMerge {
 
 /// Dealer master. Ownership over time is expressed via DealerAssignment.
 model Dealer {
-  id                        String                @id @default(cuid())
+  id                        String                 @id @default(cuid())
   name                      String
   town                      String?
-  isActive                  Boolean               @default(true)
-  createdAt                 DateTime              @default(now())
-  updatedAt                 DateTime              @updatedAt
+  isActive                  Boolean                @default(true)
+  createdAt                 DateTime               @default(now())
+  updatedAt                 DateTime               @updatedAt
   mobile                    String?
   village                   String?
   tehsil                    String?
   district                  String?
   address                   String?
-  status                    String                @default("ACTIVE")
+  status                    String                 @default("ACTIVE")
   createdByUserId           String?
   createdFrom               String?
   deletedAt                 DateTime?
@@ -705,7 +705,7 @@ model Dealer {
   recoveryPlanDealers       RecoveryPlanDealer[]
   schemeSales               SchemeSale[]
   marketMapping             DealerMarketMapping?
-  appointedFromMonthlyPlans PartyMonthlyPlan[]    @relation("PartyMonthlyAppointedDealer")
+  appointedFromMonthlyPlans PartyMonthlyPlan[]     @relation("PartyMonthlyAppointedDealer")
   marketEdits               TerritoryMarketEdit[]
   statusRequests            DealerStatusRequest[]
   billingExceptions         BillingException[]
@@ -849,19 +849,19 @@ model PartyPlan {
 /// Post-submit fields (Today's Sales/Recovery `todaysActual`; Appointment/Achievability `resultStatus`) are
 /// entered only on the exact frozen entry. `workDate` is a pure business date (@db.Date) — no timezone shift.
 model DailyWorkEntry {
-  id                   String           @id @default(cuid())
+  id                   String            @id @default(cuid())
   officerId            String
   dealerId             String?
-  workDate             DateTime         @db.Date
+  workDate             DateTime          @db.Date
   section              String
-  todaysPlan           Decimal?         @db.Decimal(14, 2)
-  todaysActual         Decimal?         @db.Decimal(14, 2)
-  entryType            String           @default("REGULAR")
+  todaysPlan           Decimal?          @db.Decimal(14, 2)
+  todaysActual         Decimal?          @db.Decimal(14, 2)
+  entryType            String            @default("REGULAR")
   schemeId             String?
-  status               String           @default("DRAFT")
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
-  rowKey               String           @default("")
+  status               String            @default("DRAFT")
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  rowKey               String            @default("")
   typedDealerName      String?
   marketName           String?
   resultStatus         String?
@@ -870,16 +870,24 @@ model DailyWorkEntry {
   others               String?
   noPlanSections       String?
   selfRating           Int?
-  batchId              String           @default("")
+  batchId              String            @default("")
   actualDealerVisits   Int?
   actualNewPartyVisits Int?
   planSubmittedAt      DateTime?
   paymentMode          String?
-  cnPaymentTasks       CnPaymentEvent[] @relation("CnPaymentEventDailyWorkEntry")
-  legacyCnTasks        CnRequest[]      @relation("LegacyCnTaskDailyWorkEntry")
-  dealer               Dealer?          @relation(fields: [dealerId], references: [id], onDelete: Restrict)
-  officer              User             @relation("DailyWorkOfficer", fields: [officerId], references: [id])
-  scheme               Scheme?          @relation(fields: [schemeId], references: [id])
+  /// Dealer Appointment (Daily Work): the approved Monthly Party Planning entry this row plans, its market (stable ids; `marketName` is the display snapshot), and the monthly
+  /// status event the "Appointed" result initiated (null until/unless that happened). Legacy typed rows have none of these.
+  monthlyPlanId        String?
+  marketId             String?
+  resultEventId        String?
+  /// Daily Report only: the dealer name the officer reported for an Appointed result (null for Not Appointed / no result). Report information — not a Dealer record.
+  reportedDealerName   String?
+  monthlyPlan          PartyMonthlyPlan? @relation("DailyWorkAppointmentPlan", fields: [monthlyPlanId], references: [id], onDelete: SetNull)
+  cnPaymentTasks       CnPaymentEvent[]  @relation("CnPaymentEventDailyWorkEntry")
+  legacyCnTasks        CnRequest[]       @relation("LegacyCnTaskDailyWorkEntry")
+  dealer               Dealer?           @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+  officer              User              @relation("DailyWorkOfficer", fields: [officerId], references: [id])
+  scheme               Scheme?           @relation(fields: [schemeId], references: [id])
 
   @@unique([officerId, workDate, batchId, section, rowKey])
   @@index([officerId])
@@ -887,6 +895,7 @@ model DailyWorkEntry {
   @@index([schemeId])
   @@index([workDate])
   @@index([batchId])
+  @@index([monthlyPlanId])
 }
 
 /// One authoritative lifecycle record per officer and business date. Planning batches remain in DailyWorkEntry;
@@ -2086,6 +2095,7 @@ model PartyMonthlyPlan {
   appointedDealerId         String?
   appointedDealer           Dealer?                   @relation("PartyMonthlyAppointedDealer", fields: [appointedDealerId], references: [id], onDelete: SetNull)
   statusEvents              PartyMonthlyStatusEvent[]
+  dailyAppointments         DailyWorkEntry[]          @relation("DailyWorkAppointmentPlan")
   createdAt                 DateTime                  @default(now())
   updatedAt                 DateTime                  @updatedAt
   seasonalPlan              SeasonalPlan              @relation(fields: [seasonalPlanId], references: [id])
@@ -2242,17 +2252,17 @@ model PartyMonthlySheet {
 /// unique within its state (`nameKey` = normalized name) while the same name may exist in another state. Districts are never deleted by an
 /// upload; `isActive=false` hides one from the Territory Mapping dropdown without touching dealers that already use it.
 model District {
-  id          String                @id @default(cuid())
-  groupId     String
-  name        String
-  nameKey     String
-  isActive    Boolean               @default(true)
-  createdById String?
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
-  group       UserGroup             @relation(fields: [groupId], references: [id], onDelete: Restrict)
-  aliases     DistrictAlias[]
-  mappings    DealerMarketMapping[]
+  id             String                @id @default(cuid())
+  groupId        String
+  name           String
+  nameKey        String
+  isActive       Boolean               @default(true)
+  createdById    String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  group          UserGroup             @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  aliases        DistrictAlias[]
+  mappings       DealerMarketMapping[]
   marketRequests MarketRequest[]
 
   @@unique([groupId, nameKey])
@@ -2307,27 +2317,27 @@ model DealerStatusRequest {
 /// rewritten; only the lifecycle columns (status / resolved*) change, when the dealer's live Days falls to 45 or less. Rows are never deleted
 /// (Restrict foreign keys), so History survives. Informational record only — nothing here blocks or changes billing.
 model BillingException {
-  id                  String    @id @default(cuid())
+  id                  String                @id @default(cuid())
   dealerId            String
   /// "Date of Billing" entered on the form (calendar date).
-  billingDate         DateTime  @db.Date
+  billingDate         DateTime              @db.Date
   billNo              String
   /// One of the two fixed authorizing-person choices (validated in the service; not a user account).
   authPerson          String
   createdById         String
-  createdAt           DateTime  @default(now())
+  createdAt           DateTime              @default(now())
   /// Idempotency key of ONE logical Save (generated when the form opens): a retry / double click re-delivers the same key; a deliberate second exception uses a new one.
   requestId           String
   /// CURRENT | RESOLVED
-  status              String    @default("CURRENT")
+  status              String                @default("CURRENT")
   resolvedAt          DateTime?
   /// PAYMENT_RECEIVED (live Days fell to 45 or less).
   resolutionReason    String?
   /// The live Days at the moment of resolution (lifecycle metadata; the creation Days stays in snapDays).
   resolvedDays        Int?
   snapDays            Int
-  snapLastPaymentDate DateTime? @db.Date
-  snapAmount          Decimal?  @db.Decimal(14, 2)
+  snapLastPaymentDate DateTime?             @db.Date
+  snapAmount          Decimal?              @db.Decimal(14, 2)
   snapParty           String
   snapDealerStatus    String
   snapState           String?
@@ -2336,15 +2346,15 @@ model BillingException {
   /// Display/filter snapshot only — access is always decided from the dealer's CURRENT owner, never from this column.
   snapSalesOfficerId  String?
   /// The exception's own billing / payment-condition amount (NOT the dealer's previous payment and never a receipt). NULL = an exception recorded before this field existed (not invented).
-  billingAmount       Decimal?  @db.Decimal(14, 2)
+  billingAmount       Decimal?              @db.Decimal(14, 2)
   /// "Is there any payment condition?" — true = Yes, false = No, NULL = recorded before the question existed.
   paymentCondition    Boolean?
   /// The promised recovery date (Yes only; NULL for No / legacy). A promise, not proof of payment.
-  paymentDate         DateTime? @db.Date
+  paymentDate         DateTime?             @db.Date
   /// The PROMISED RECOVERY amount (Yes only; NULL for No and for exceptions recorded before it existed). Separate from billingAmount; it is the planned value of the Recovery task. A promise, not a payment.
-  paymentAmount       Decimal?  @db.Decimal(14, 2)
-  dealer              Dealer    @relation(fields: [dealerId], references: [id], onDelete: Restrict)
-  createdBy           User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  paymentAmount       Decimal?              @db.Decimal(14, 2)
+  dealer              Dealer                @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+  createdBy           User                  @relation(fields: [createdById], references: [id], onDelete: Restrict)
   task                BillingExceptionTask?
 
   @@unique([createdById, requestId])

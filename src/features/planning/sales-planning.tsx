@@ -10,7 +10,8 @@ import { Role } from "@prisma/client";
 import { Plus, FileInput } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
-import { MONTH_OPTIONS } from "@/lib/season-months";
+import { MONTH_NAMES, formatPeriod } from "@/lib/season-months";
+import { useLabels } from "@/features/party-planning/party-labels";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -38,7 +39,14 @@ interface Options { officers: OfficerOption[] }
 type OfficerScope = "single" | "multiple" | "all";
 
 const TABS: Tab[] = ["SEASONAL", "MONTHLY", "YEARLY"];
-const SEASON_NAMES = ["Kharif", "Rabi", "Zaid"];
+
+/** An OPEN season from the Seasons master, as served by /api/planning/season-plans/open-seasons. */
+interface OpenSeason {
+  id: string; name: string; year: number; months: string[];
+  period: { startMonth: number; startYear: number; endMonth: number; endYear: number } | null;
+}
+const periodText = (s: OpenSeason) => (s.period ? formatPeriod(s.period.startMonth, s.period.startYear, s.period.endMonth, s.period.endYear) : s.months.join(", "));
+const monthYear = (m: number, y: number) => `${MONTH_NAMES[m - 1]} ${y}`;
 const VIEW_SUBS: { value: ViewSub; label: string }[] = [
   { value: "SUBMITTED", label: "Submitted" },
   { value: "APPROVED", label: "Approved" },
@@ -71,11 +79,14 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
   const [open, setOpen] = useState(false);
 
   // New Seasonal draft form.
-  const now = new Date();
-  const [seasonName, setSeasonName] = useState(SEASON_NAMES[0]);
-  const [year, setYear] = useState(now.getFullYear());
-  const [startMonth, setStartMonth] = useState(6);
-  const [endMonth, setEndMonth] = useState(11);
+  // Only an existing OPEN season (Seasons master) can be chosen, by its stable id; its period is shown read-only.
+  const [seasonId, setSeasonId] = useState("");
+  const L = useLabels({
+    season: "sales_planning.create_seasonal.season", select: "sales_planning.create_seasonal.select_season", year: "sales_planning.create_seasonal.year",
+    start: "sales_planning.create_seasonal.start_month", end: "sales_planning.create_seasonal.end_month", months: "sales_planning.create_seasonal.months",
+    none: "sales_planning.create_seasonal.no_open_seasons", loading: "sales_planning.create_seasonal.loading", required: "sales_planning.create_seasonal.season_required",
+    closed: "sales_planning.create_seasonal.season_closed", note: "sales_planning.create_seasonal.period_note",
+  });
   const [scope, setScope] = useState<OfficerScope>("single");
   const [officerIds, setOfficerIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -161,10 +172,19 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
     ];
   }, [allPlans, tab]);
 
+  const canCreateSeasonal = isCreate && tab === "SEASONAL" && (isAdmin || isOfficer || isManager);
+  const { data: openSeasons, isLoading: seasonsLoading, refetch: refetchSeasons } = useQuery<OpenSeason[]>({
+    queryKey: ["open-seasons"],
+    queryFn: () => api.get<OpenSeason[]>("/api/planning/season-plans/open-seasons"),
+    enabled: open && canCreateSeasonal,
+    staleTime: 0,
+  });
+  const chosen = openSeasons?.find((x) => x.id === seasonId) ?? null;
+
   const createMut = useMutation({
     mutationFn: () =>
       api.post<{ ids: string[]; id: string | null }>("/api/planning/season-plans", {
-        season: { name: seasonName, year, startMonth, endMonth },
+        seasonId,
         ...(isAdmin ? { officerScope: scope, officerIds: scope === "all" ? undefined : officerIds } : {}),
       }),
     onSuccess: (res) => {
@@ -172,21 +192,24 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
       if (res.ids?.length === 1 && res.id) router.push(`/planning/${res.id}`);
       else qc.invalidateQueries({ queryKey: ["plans"] });
     },
-    onError: (e) => setError((e as Error).message),
+    onError: async (e) => {
+      // If the season was closed (or removed) while the popup was open, say so and drop it from the list.
+      const fresh = (await refetchSeasons()).data;
+      if (fresh && !fresh.some((x) => x.id === seasonId)) { setSeasonId(""); setError(L.closed); } else setError((e as Error).message);
+    },
   });
 
   function openCreate() {
-    setSeasonName(SEASON_NAMES[0]); setYear(now.getFullYear()); setStartMonth(6); setEndMonth(11);
+    setSeasonId("");
     setScope("single"); setOfficerIds([]); setError(null); setOpen(true);
   }
   function submit() {
     setError(null);
+    if (!seasonId || !chosen) return setError(L.required);
     if (isAdmin && scope !== "all" && officerIds.length === 0) return setError("Select at least one Sales Officer.");
     createMut.mutate();
   }
 
-  const years = Array.from({ length: 5 }, (_, i) => now.getFullYear() + i);
-  const canCreateSeasonal = isCreate && tab === "SEASONAL" && (isAdmin || isOfficer || isManager);
 
   return (
     <div className="space-y-5">
@@ -258,23 +281,30 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
         <DialogContent className="max-w-lg">
           <DialogHeader><DialogTitle>Create Seasonal Plan</DialogTitle></DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-3">
               <div className="space-y-1.5">
-                <Label>Season</Label>
-                <NativeSelect options={SEASON_NAMES.map((n) => ({ value: n, label: n }))} value={seasonName} onChange={(e) => setSeasonName(e.target.value)} />
+                <Label>{L.season}</Label>
+                <NativeSelect
+                  aria-label={L.season}
+                  placeholder={seasonsLoading ? L.loading : L.select}
+                  options={(openSeasons ?? []).map((x) => ({ value: x.id, label: `${x.name} · ${periodText(x)}` }))}
+                  value={seasonId}
+                  disabled={seasonsLoading || (openSeasons?.length ?? 0) === 0}
+                  onChange={(e) => { setSeasonId(e.target.value); setError(null); }}
+                />
+                {!seasonsLoading && openSeasons && openSeasons.length === 0 && <p role="status" className="text-sm text-muted-foreground">{L.none}</p>}
               </div>
-              <div className="space-y-1.5">
-                <Label>Year</Label>
-                <NativeSelect options={years.map((y) => ({ value: String(y), label: String(y) }))} value={String(year)} onChange={(e) => setYear(Number(e.target.value))} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Start Month</Label>
-                <NativeSelect options={MONTH_OPTIONS} value={String(startMonth)} onChange={(e) => setStartMonth(Number(e.target.value))} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>End Month</Label>
-                <NativeSelect options={MONTH_OPTIONS} value={String(endMonth)} onChange={(e) => setEndMonth(Number(e.target.value))} />
-              </div>
+              {chosen && (
+                <div className="space-y-2" data-testid="season-period">
+                  <div className="grid grid-cols-3 gap-3 text-sm">
+                    <div className="space-y-1"><Label>{L.year}</Label><p className="rounded-md border bg-muted/40 px-3 py-1.5" data-testid="season-year">{chosen.year}</p></div>
+                    <div className="space-y-1"><Label>{L.start}</Label><p className="rounded-md border bg-muted/40 px-3 py-1.5" data-testid="season-start">{chosen.period ? monthYear(chosen.period.startMonth, chosen.period.startYear) : "—"}</p></div>
+                    <div className="space-y-1"><Label>{L.end}</Label><p className="rounded-md border bg-muted/40 px-3 py-1.5" data-testid="season-end">{chosen.period ? monthYear(chosen.period.endMonth, chosen.period.endYear) : "—"}</p></div>
+                  </div>
+                  <p className="text-xs text-muted-foreground"><span className="font-medium">{L.months}:</span> {chosen.months.join(" → ")}</p>
+                  <p className="text-xs text-muted-foreground">{L.note}</p>
+                </div>
+              )}
             </div>
 
             {isAdmin && (
@@ -312,7 +342,7 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} disabled={createMut.isPending}>{createMut.isPending ? "Creating…" : "Create"}</Button>
+            <Button onClick={submit} disabled={createMut.isPending || seasonsLoading || (openSeasons?.length ?? 0) === 0}>{createMut.isPending ? "Creating…" : "Create"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

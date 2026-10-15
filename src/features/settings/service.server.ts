@@ -6,6 +6,8 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { PLANNING_MODES } from "@/lib/calc";
 import { getPlanningConfig, savePlanningConfig, type PlanningConfig } from "@/lib/planning-config";
 import { getRecoveryConfig, saveRecoveryConfig, type RecoveryConfig } from "@/lib/recovery-config";
+import { isPartyPlanningEnabled } from "@/lib/feature-flags";
+import { getResolvedLabels } from "@/features/labels/service.server";
 import { writeAudit } from "@/lib/audit";
 
 function assertAdmin(ctx: AuthContext) {
@@ -44,6 +46,7 @@ const recoveryConfigSchema = z.object({
   dueValidation: z.coerce.boolean(),
   calendarEnabled: z.coerce.boolean().default(true),
   autoTasksEnabled: z.coerce.boolean().default(false),
+  appointmentPartyPlanningEnabled: z.boolean().default(false),
 });
 
 export async function loadRecoveryConfig(ctx: AuthContext): Promise<RecoveryConfig> {
@@ -54,12 +57,15 @@ export async function loadRecoveryConfig(ctx: AuthContext): Promise<RecoveryConf
 export async function updateRecoveryConfig(ctx: AuthContext, raw: unknown): Promise<RecoveryConfig> {
   assertAdmin(ctx);
   const config = recoveryConfigSchema.parse(raw) as RecoveryConfig;
+  if (config.appointmentPartyPlanningEnabled && !isPartyPlanningEnabled()) {
+    throw new ApiError(422, (await getResolvedLabels())["settings.recovery.appointment_party_planning_unavailable"]);
+  }
   const saved = await saveRecoveryConfig(config);
   await writeAudit({
     userId: ctx.userId, actorDesignation: ctx.designation,
     action: "UPDATE",
     entity: "recoveryConfig",
-    summary: `Recovery configuration set — Due Recovery Validation: ${saved.dueValidation ? "ON" : "OFF"}, Calendar: ${saved.calendarEnabled ? "ON" : "OFF"}, Auto Tasks: ${saved.autoTasksEnabled ? "ON" : "OFF"}`,
+    summary: `Recovery configuration set — Due Recovery Validation: ${saved.dueValidation ? "ON" : "OFF"}, Calendar: ${saved.calendarEnabled ? "ON" : "OFF"}, Auto Tasks: ${saved.autoTasksEnabled ? "ON" : "OFF"}, Dealer Appointment Party Planning: ${saved.appointmentPartyPlanningEnabled ? "ON" : "OFF"}`,
   });
   return saved;
 }

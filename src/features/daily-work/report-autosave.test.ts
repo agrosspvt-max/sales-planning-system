@@ -28,7 +28,7 @@ assert.ok(hook.includes("new AutosaveController"), "the engine still lives only 
 for (const [name, src, section] of [["Sales/Recovery", sales, "section"], ["Appointment", appt, 'section: "APPOINTMENT"'], ["Visits", visits, 'section: "VISITS"']] as const) {
   assert.ok(src.includes("isReport"), `${name}: Report mode is handled`);
   assert.ok(src.includes(`api.post("/api/daily-work/actual", { ${section}`), `${name}: Report autosave posts actuals to the existing /actual endpoint`);
-  assert.ok(/draftKey = isReport \? `R\|/.test(src), `${name}: Report has its own dirty-key (payload of the editable actuals)`);
+  assert.ok(name === "Appointment" ? src.includes("const draftKey = `${partyPlanningEnabled}|") : /draftKey = isReport \? `R\|/.test(src), `${name}: Report has its own dirty-key (payload of the editable actuals)`);
   assert.ok(src.includes("useRegisterSaveDraft(autosaveEnabled"), `${name}: Report publishes the same Save Draft handle/state`);
   assert.ok(!/saveActuals\b.*Button|statusMut|actualMut\.mutate|achMut/.test(src.replace(/saveActuals: useLabel[^\n]*/g, "")), `${name}: the manual Save Actuals mutation/button is gone`);
 }
@@ -41,7 +41,7 @@ assert.ok(visits.includes('disabled={busy || locked || view === DailyWorkView.RE
 assert.ok(visits.includes('isReport && focus === "VISITS"'), "only Visits actuals autosave in Report");
 // Plan behaviour is unchanged: same endpoint and payloads, enabled only in PLAN view.
 assert.ok(sales.includes('api.post("/api/daily-work/save", { section, workDate, rows: payloadRows() })'));
-assert.ok(appt.includes('api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, rows: payloadRows() })'));
+assert.ok(appt.includes('api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, partyPlanningEnabled, rows: payloadRows() })'));
 assert.ok(visits.includes('api.post("/api/daily-work/save", body())'));
 assert.ok(sales.includes(": view === DailyWorkView.PLAN && !locked") && appt.includes(": view === DailyWorkView.PLAN && !locked") && visits.includes(": view === DailyWorkView.PLAN && !locked"));
 // Never submits / finalizes / reviews from autosave.

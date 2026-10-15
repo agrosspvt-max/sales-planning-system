@@ -11,10 +11,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
+import { useLabel } from "@/features/labels/label-ui";
+
 interface RecoveryConfig {
   dueValidation: boolean;
   calendarEnabled: boolean;
   autoTasksEnabled: boolean;
+  appointmentPartyPlanningEnabled: boolean;
 }
 
 /** Accessible ON/OFF switch (no external dependency — a styled button with role=switch). */
@@ -36,10 +39,12 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
   );
 }
 
-/** Settings → Recovery Settings. Global DB-backed switches for Recovery validation and Calendar visibility. */
+/** Settings → Recovery Settings. Global persisted switches for Recovery, Calendar and Dealer Appointment. */
 export function RecoveryConfigPage() {
   const qc = useQueryClient();
   const router = useRouter();
+  const appointmentLabel = useLabel("settings.recovery.appointment_party_planning");
+  const appointmentDescription = useLabel("settings.recovery.appointment_party_planning_description");
   const { data, isLoading } = useQuery<RecoveryConfig>({
     queryKey: ["recovery-config"],
     queryFn: () => api.get<RecoveryConfig>("/api/settings/recovery-config"),
@@ -48,6 +53,7 @@ export function RecoveryConfigPage() {
   const [dueValidation, setDueValidation] = useState(true);
   const [calendarEnabled, setCalendarEnabled] = useState(true);
   const [autoTasksEnabled, setAutoTasksEnabled] = useState(false);
+  const [appointmentPartyPlanningEnabled, setAppointmentPartyPlanningEnabled] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -55,22 +61,24 @@ export function RecoveryConfigPage() {
       setDueValidation(data.dueValidation);
       setCalendarEnabled(data.calendarEnabled);
       setAutoTasksEnabled(data.autoTasksEnabled);
+      setAppointmentPartyPlanningEnabled(data.appointmentPartyPlanningEnabled ?? false);
     }
   }, [data]);
 
   const saveMut = useMutation({
-    mutationFn: () => api.put<RecoveryConfig>("/api/settings/recovery-config", { dueValidation, calendarEnabled, autoTasksEnabled }),
+    mutationFn: () => api.put<RecoveryConfig>("/api/settings/recovery-config", { dueValidation, calendarEnabled, autoTasksEnabled, appointmentPartyPlanningEnabled }),
     onSuccess: (c) => {
       qc.setQueryData(["recovery-config"], c);
       qc.invalidateQueries({ queryKey: ["calendar"] });
       qc.invalidateQueries({ queryKey: ["calendar-upcoming"] });
+      qc.invalidateQueries({ queryKey: ["daily-work"] });
       router.refresh();
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     },
   });
 
-  const dirty = !!data && (data.dueValidation !== dueValidation || data.calendarEnabled !== calendarEnabled || data.autoTasksEnabled !== autoTasksEnabled);
+  const dirty = !!data && (data.dueValidation !== dueValidation || data.calendarEnabled !== calendarEnabled || data.autoTasksEnabled !== autoTasksEnabled || (data.appointmentPartyPlanningEnabled ?? false) !== appointmentPartyPlanningEnabled);
 
   return (
     <div className="max-w-2xl space-y-5">
@@ -132,6 +140,19 @@ export function RecoveryConfigPage() {
                     visibility of that block — Auto Tasks continue to schedule, materialize, reschedule and flow
                     into the Daily Plan and Daily Report exactly as before whether this is ON or OFF.
                   </span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle className="text-base">{appointmentLabel}</CardTitle></CardHeader>
+            <CardContent>
+              <div className="flex items-start gap-3">
+                <Toggle checked={appointmentPartyPlanningEnabled} onChange={setAppointmentPartyPlanningEnabled} label={appointmentLabel} />
+                <div className="text-sm">
+                  <span className="font-medium">{appointmentPartyPlanningEnabled ? "ON" : "OFF"}</span>
+                  <span className="block text-xs text-muted-foreground">{appointmentDescription}</span>
                 </div>
               </div>
             </CardContent>

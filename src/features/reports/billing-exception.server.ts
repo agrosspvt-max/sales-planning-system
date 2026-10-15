@@ -16,6 +16,7 @@ import {
   type BillingExceptionDetail, type BillingExceptionRow, type BillingTaskSummary, type ExceptionStatus, type ExceptionView, type PaymentCondition,
   summarizeExceptions, type ExceptionSummary, type SummarySource,
 } from "@/lib/billing-exception";
+import { alertLabels, notifyBillingExceptionCreated } from "@/features/notifications/task-alerts.server";
 import { buildLastPaymentReport, loadAuthorizedRows, loadLastDayBookUpdate, paymentSnapshotByDealer } from "./last-payment-report.server";
 
 /**
@@ -91,6 +92,7 @@ export async function createBillingException(ctx: AuthContext, raw: unknown, tod
   const [dealer] = await loadAuthorizedRows(ctx, [input.dealerId]);
   if (!dealer) throw new ApiError(404, "Dealer not found");
 
+  const labels = await alertLabels(); // Edit Labels text for the alert, read before the transaction
   const result = await prisma.$transaction(async (tx) => {
     await lockDealer(tx, dealer.dealerId);
     // A re-delivery of the SAME Save returns what was saved, even if the dealer has since become Open.
@@ -132,6 +134,11 @@ export async function createBillingException(ctx: AuthContext, raw: unknown, tod
       userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "billingException", entityId: row.id,
       summary: `Billing Exception · ${dealer.party} · Bill ${input.billNo} · ${input.authPerson} · Days ${payment.days} · Amount ${input.billingAmount} · Payment condition ${input.paymentCondition}${input.paymentDate ? ` (promised ${input.paymentAmount} on ${input.paymentDate}, Recovery task for officer ${officerId})` : ""}`,
     }, tx);
+    // The alert is written in the SAME transaction as the exception (and its task), only for a NEW save: a retried / double-clicked Save returned above, so it never alerts twice.
+    await notifyBillingExceptionCreated(tx, labels, {
+      exceptionId: row.id, dealerId: dealer.dealerId, dealerName: dealer.party, billNo: input.billNo, billingDate: input.billingDate, billingAmount: input.billingAmount,
+      authPerson: input.authPerson, paymentCondition: input.paymentCondition === "YES", paymentDate: input.paymentDate, paymentAmount: input.paymentAmount, taskOfficerId: officerId,
+    });
     return { row, duplicate: false };
   }, TX_OPTIONS);
   return { ...toDetail(result.row, today), duplicate: result.duplicate };

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   dateKey, monthRange, upcomingRange, isUpcoming, conversionEventStatus,
   projectConversionEvents, groupEventsByOfficer, type ConversionEventInput,
-  projectPartyAppointmentEvents, type PartyAppointmentInput,
+  projectPartyAppointmentEvents, type PartyAppointmentInput, groupDayByEmployee,
 } from "./calendar";
 
 let passed = 0;
@@ -162,6 +162,23 @@ test("Party + Conversion can share a date without interfering", () => {
   assert.equal(parties[0].type, "PARTY_APPOINTMENT");
   // Distinct event streams — one does not overwrite or absorb the other.
   assert.notEqual(conv[0].type, parties[0].type);
+});
+
+test("one selected day is grouped by EMPLOYEE across every source, sorted by name, with entry counts", () => {
+  const day = {
+    events: [{ salesOfficerId: "u2", salesOfficerName: "Rahul" }],
+    partyEvents: [{ salesOfficerId: "u2", salesOfficerName: "Rahul" }],
+    billingTasks: [{ ownerId: "u1", ownerName: "Amit" }, { ownerId: "u2", ownerName: "Rahul" }],
+    entries: [{ ownerId: "u1", ownerName: "Amit" }, { ownerId: "u3", ownerName: "Zoya" }],
+    notes: [{ ownerId: "u1", ownerName: "Amit" }],
+  };
+  const groups = groupDayByEmployee(day);
+  assert.deepEqual(groups.map((g) => [g.employeeName, g.count]), [["Amit", 3], ["Rahul", 3], ["Zoya", 1]]);
+  assert.deepEqual(groups.map((g) => g.events.length + g.partyEvents.length + g.billingTasks.length + g.entries.length + g.notes.length), groups.map((g) => g.count), "count = entries in the group");
+  assert.equal(groups.reduce((n, g) => n + g.count, 0), 7, "nothing dropped, nothing duplicated");
+  assert.deepEqual(groupDayByEmployee({ events: [], partyEvents: [], billingTasks: [], entries: [], notes: [] }), [], "an empty day has no groups");
+  // regrouping never reveals anything the server did not send: only the given rows appear
+  assert.equal(groups.flatMap((g) => g.notes).length, 1);
 });
 
 console.log(`\n${passed} calendar projection tests passed`);

@@ -61,6 +61,7 @@ function makeFake() {
     throw new Error("Unhandled raw SQL: " + text);
   }
   const prisma = {
+    partyMonthlyPlan: { findMany: async () => [] }, // Monthly Party Planning is covered by appointment.integration.ts
     $queryRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest)),
     $executeRaw: async (a: unknown, ...rest: unknown[]) => runRaw(norm(a, rest)),
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),

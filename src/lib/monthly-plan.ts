@@ -4,34 +4,39 @@
  * the server applies it and the UI only reads it.
  *
  *   NONE ──SO──► DOC_SENT ──Admin──► DOC_RECEIVED ──Admin──► SD_BOUNCE ──Admin──► APPOINTED   (terminal)
- *     │              │                    └──────────────────────┴───────────────────► REJECTED   (Admin, terminal)
+ *     │  └─SO─► DOC_NOT_SENT ─SO─► DOC_SENT        └──────────────────────┴───────────────────► REJECTED   (Admin, terminal)
  *     └──────────────┴─► REJECTED (Admin)
+ *
+ * DOC_NOT_SENT ("Appointed, Document Not Sent") is an UNFINISHED, owner-actionable state: the owner may later submit the Document / Cheque answers
+ * (→ DOC_SENT). It can never skip Admin receipt, and it stays open for the Pending counts and plan-completion rules.
  *
  * NONE means the status workflow has not begun. It can begin only once the PLAN is approved (a separate, plan-level approval); an operational
  * status change never approves a plan. Only the owning SO/RM moves NONE → DOC_SENT; every other step is an Admin step.
  */
 
-export const ROW_STATUSES = ["NONE", "DOC_SENT", "DOC_RECEIVED", "SD_BOUNCE", "APPOINTED", "REJECTED"] as const;
+export const ROW_STATUSES = ["NONE", "DOC_NOT_SENT", "DOC_SENT", "DOC_RECEIVED", "SD_BOUNCE", "APPOINTED", "REJECTED"] as const;
 export type RowStatus = (typeof ROW_STATUSES)[number];
 export const OPTION_NUMBERS = [1, 2] as const;
 export type OptionNo = (typeof OPTION_NUMBERS)[number];
 
 export const ROW_STATUS_LABEL: Record<RowStatus, string> = {
-  NONE: "Approved", DOC_SENT: "Doc Send By SO", DOC_RECEIVED: "Doc Received", SD_BOUNCE: "SD Bounce", APPOINTED: "Appointed", REJECTED: "Rejected",
+  NONE: "Pending", DOC_NOT_SENT: "Document Not Sent", DOC_SENT: "Doc Send By SO", DOC_RECEIVED: "Doc Received", SD_BOUNCE: "SD Bounce", APPOINTED: "Appointed", REJECTED: "Rejected",
 };
 export const isRowStatus = (v: unknown): v is RowStatus => typeof v === "string" && (ROW_STATUSES as readonly string[]).includes(v);
 
 /** What the Status column shows: the operational status once it has begun, otherwise the plan's own stage (Draft / Submitted / Approved). */
 export function displayRowStatus(rowStatus: string, planApprovalStatus: string): string {
   if (isRowStatus(rowStatus) && rowStatus !== "NONE") return ROW_STATUS_LABEL[rowStatus];
-  if (planApprovalStatus === "APPROVED") return "Approved";
+  // An approved entry whose appointment process has not started is operationally PENDING (the approval itself is unchanged).
+  if (planApprovalStatus === "APPROVED") return ROW_STATUS_LABEL.NONE;
   if (planApprovalStatus === "PENDING_RM" || planApprovalStatus === "PENDING_ADMIN") return "Submitted";
   return "Draft";
 }
 
 export type Actor = "OWNER" | "ADMIN";
 export const TRANSITIONS: Record<RowStatus, { to: RowStatus; actor: Actor }[]> = {
-  NONE: [{ to: "DOC_SENT", actor: "OWNER" }, { to: "REJECTED", actor: "ADMIN" }],
+  NONE: [{ to: "DOC_SENT", actor: "OWNER" }, { to: "DOC_NOT_SENT", actor: "OWNER" }, { to: "REJECTED", actor: "ADMIN" }],
+  DOC_NOT_SENT: [{ to: "DOC_SENT", actor: "OWNER" }, { to: "REJECTED", actor: "ADMIN" }],
   DOC_SENT: [{ to: "DOC_RECEIVED", actor: "ADMIN" }, { to: "REJECTED", actor: "ADMIN" }],
   DOC_RECEIVED: [{ to: "SD_BOUNCE", actor: "ADMIN" }, { to: "APPOINTED", actor: "ADMIN" }, { to: "REJECTED", actor: "ADMIN" }],
   SD_BOUNCE: [{ to: "APPOINTED", actor: "ADMIN" }, { to: "REJECTED", actor: "ADMIN" }],
@@ -54,7 +59,7 @@ export interface DocInfo { documents: boolean; checks: boolean; other: string | 
 const MAX_TEXT = 500;
 const text = (v: unknown): string => (typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "");
 
-/** At least one of Document / Check must be ticked; "Other" is optional free text. Stored exactly as given. */
+/** At least one of Document / Check must be ticked; "Other" is optional free text. Stored exactly as given. (Admin's "what was actually received" — unchanged.) */
 export function parseDocInfo(raw: unknown): { ok: true; value: DocInfo } | { ok: false; message: string } {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const documents = r.documents === true, checks = r.checks === true;
@@ -64,20 +69,69 @@ export function parseDocInfo(raw: unknown): { ok: true; value: DocInfo } | { ok:
   return { ok: true, value: { documents, checks, other: other || null } };
 }
 
+/**
+ * What the owning SO / RM answers on the "Doc Send By SO" form. Document and Cheque each have THREE distinguishable states — Complete, Incomplete and unanswered —
+ * so completeness is stored as explicit values, never as a boolean. "Appointed, Document Not Sent" is its own answer: both items stay unanswered.
+ * Rows recorded before this form existed carry only the old `documents` / `checks` booleans; those were "was it sent", NOT "is it complete", and are never converted.
+ */
+export const COMPLETENESS = ["COMPLETE", "INCOMPLETE"] as const;
+export type Completeness = (typeof COMPLETENESS)[number];
+export const isCompleteness = (v: unknown): v is Completeness => typeof v === "string" && (COMPLETENESS as readonly string[]).includes(v);
+export interface SentInfo { documentStatus: Completeness | null; chequeStatus: Completeness | null; documentNotSent: boolean; other: string | null }
+/** A stored "sent" answer: the current shape, or the legacy booleans (completeness not recorded). */
+export type StoredSentInfo = Partial<SentInfo> & Partial<DocInfo>;
+/** True for a row saved by the old checkbox form (no completeness recorded). */
+export const isLegacySentInfo = (i: StoredSentInfo | null | undefined): boolean => !!i && i.documentStatus === undefined && i.chequeStatus === undefined && i.documentNotSent === undefined;
+
+/** The owner's form state. Document and Cheque each start unanswered (null) — nothing is preselected. */
+export interface SentForm { notSent: boolean; documentStatus: Completeness | null; chequeStatus: Completeness | null; other: string }
+export const EMPTY_SENT_FORM: SentForm = { notSent: false, documentStatus: null, chequeStatus: null, other: "" };
+/** Ticking Complete / Incomplete selects that value (which clears the other of the pair); unticking it leaves the item unanswered. */
+export function chooseSentAnswer(f: SentForm, item: "documentStatus" | "chequeStatus", value: Completeness, checked: boolean): SentForm {
+  return f.notSent ? f : { ...f, [item]: checked ? value : null };
+}
+/** "Appointed, Document Not Sent": ticking it clears every Document / Cheque answer; unticking leaves them unanswered (previous answers are never restored). */
+export const setSentNotSent = (f: SentForm, checked: boolean): SentForm => ({ ...f, notSent: checked, documentStatus: null, chequeStatus: null });
+export const sentFormAnswered = (f: SentForm): boolean => f.notSent || (f.documentStatus !== null && f.chequeStatus !== null);
+/** The request body: the special option never carries answers. */
+export const sentFormBody = (f: SentForm) => ({ documentNotSent: f.notSent, documentStatus: f.notSent ? null : f.documentStatus, chequeStatus: f.notSent ? null : f.chequeStatus, other: f.other });
+
+export function parseSentInfo(raw: unknown): { ok: true; value: SentInfo } | { ok: false; message: string } {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const other = text(r.other);
+  if (other.length > MAX_TEXT) return { ok: false, message: `Other can be at most ${MAX_TEXT} characters.` };
+  const hasDoc = r.documentStatus != null && r.documentStatus !== "", hasCheque = r.chequeStatus != null && r.chequeStatus !== "";
+  if (r.documentNotSent === true) {
+    if (hasDoc || hasCheque) return { ok: false, message: "Appointed, Document Not Sent cannot be combined with Document / Cheque answers." };
+    return { ok: true, value: { documentStatus: null, chequeStatus: null, documentNotSent: true, other: other || null } };
+  }
+  if (!isCompleteness(r.documentStatus) || !isCompleteness(r.chequeStatus)) return { ok: false, message: "Select Complete or Incomplete for both Document and Cheque." };
+  return { ok: true, value: { documentStatus: r.documentStatus, chequeStatus: r.chequeStatus, documentNotSent: false, other: other || null } };
+}
+
 export type TransitionInput =
-  | { to: "DOC_SENT"; sent: DocInfo }
+  | { to: "DOC_SENT" | "DOC_NOT_SENT"; sent: SentInfo }
   | { to: "DOC_RECEIVED"; received: DocInfo }
   | { to: "SD_BOUNCE" | "APPOINTED" | "REJECTED"; remarks: string | null };
 
-/** Validates the data a transition requires. Nothing the browser sends is trusted beyond these fields (actor, date and status come from the server). */
+/**
+ * Validates the data a transition requires. Nothing the browser sends is trusted beyond these fields (actor, date and status come from the server).
+ * The owner's form always posts `to: DOC_SENT` with its answers: the "Appointed, Document Not Sent" answer resolves HERE to the Document Not Sent status, so the
+ * same form, validation and transition serve the Monthly Planning dialog and the Daily Report alike.
+ */
 export function parseTransition(raw: unknown): { ok: true; value: TransitionInput } | { ok: false; message: string } {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const to = r.to;
   if (!isRowStatus(to) || to === "NONE") return { ok: false, message: "Choose a valid status." };
-  if (to === "DOC_SENT" || to === "DOC_RECEIVED") {
-    const info = parseDocInfo(to === "DOC_SENT" ? r.sent : r.received);
+  if (to === "DOC_SENT" || to === "DOC_NOT_SENT") {
+    const info = parseSentInfo(to === "DOC_NOT_SENT" ? { documentNotSent: true, other: (r.sent as { other?: unknown } | null | undefined)?.other } : r.sent);
     if (!info.ok) return info;
-    return { ok: true, value: to === "DOC_SENT" ? { to, sent: info.value } : { to, received: info.value } };
+    return { ok: true, value: { to: info.value.documentNotSent ? "DOC_NOT_SENT" : "DOC_SENT", sent: info.value } };
+  }
+  if (to === "DOC_RECEIVED") {
+    const info = parseDocInfo(r.received);
+    if (!info.ok) return info;
+    return { ok: true, value: { to, received: info.value } };
   }
   const remarks = text(r.remarks);
   if (remarks.length > MAX_TEXT) return { ok: false, message: `Remarks can be at most ${MAX_TEXT} characters.` };
@@ -113,6 +167,21 @@ export function monthlySheetStatus(rows: { opStatus: string }[]): MonthlySheetSt
   if (rows.length === 0) return "Draft";
   return rows.every((r) => r.opStatus === "APPOINTED" || r.opStatus === "REJECTED") ? "Completed" : "In Progress";
 }
+/**
+ * DAILY WORK → DEALER APPOINTMENT totals, over the owner's APPROVED Monthly Party Planning entries of one calendar month (the caller passes only those entries):
+ *  • Monthly Dealer Plan = the number of UNIQUE markets (by market id — never candidate party options, never Daily Work rows);
+ *  • Pending = how many of those markets are still unfinished in the monthly appointment workflow: every operational status except the terminal Appointed / Rejected
+ *    (None/Approved, Doc Send By SO, Doc Received and SD Bounce are all still open). Sending documents is NOT a final appointment, so it never reduces Pending.
+ * A market that appears in more than one entry is counted once, and is pending when any of its entries is still open.
+ */
+export const TERMINAL_ROW_STATUSES: readonly RowStatus[] = ["APPOINTED", "REJECTED"];
+export const isMonthlyWorkflowOpen = (opStatus: string): boolean => !(TERMINAL_ROW_STATUSES as readonly string[]).includes(opStatus);
+export function appointmentMonthlyTotals(entries: readonly { marketId: string; opStatus: string }[]): { monthlyDealerPlan: number; pending: number } {
+  const markets = new Map<string, boolean>();
+  for (const e of entries) markets.set(e.marketId, (markets.get(e.marketId) ?? false) || isMonthlyWorkflowOpen(e.opStatus));
+  return { monthlyDealerPlan: markets.size, pending: [...markets.values()].filter(Boolean).length };
+}
+
 /** Row statuses that are waiting on an Admin: what Admin filters by to find work. */
 export const ADMIN_PENDING_STATUSES: readonly RowStatus[] = ["DOC_SENT", "DOC_RECEIVED", "SD_BOUNCE"];
 

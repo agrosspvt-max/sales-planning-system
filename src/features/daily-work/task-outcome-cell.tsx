@@ -55,7 +55,7 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
 }) {
   const L = {
     select: useLabel("daily_work.outcome.select"), completed: useLabel("daily_work.outcome.completed"), rescheduled: useLabel("daily_work.outcome.rescheduled"), abandon: useLabel("daily_work.outcome.abandon"),
-    aria: useLabel("daily_work.outcome.aria"), amount: useLabel("daily_work.outcome.actual_amount"), nextDate: useLabel("daily_work.outcome.next_date"), reason: useLabel("daily_work.outcome.reason"),
+    aria: useLabel("daily_work.outcome.aria"), amount: useLabel("daily_work.outcome.actual_amount"), amountPlaceholder: useLabel("daily_work.outcome.amount_placeholder"), nextDate: useLabel("daily_work.outcome.next_date"), reason: useLabel("daily_work.outcome.reason"),
     reasonPlaceholder: useLabel("daily_work.outcome.reason_placeholder"), reasonHelp: useLabel("daily_work.outcome.reason_help"), dateHelp: useLabel("daily_work.outcome.date_help"), dateCnHelp: useLabel("daily_work.outcome.date_cn_help"),
     manual: useLabel("daily_work.outcome.type_manual"), auto: useLabel("daily_work.outcome.type_auto"), planned: useLabel("daily_work.outcome.task_planned"), tasksTitle: useLabel("daily_work.outcome.tasks_title"),
     badgeFrom: useLabel("daily_work.outcome.badge_rescheduled_from"), resRescheduled: useLabel("daily_work.outcome.result_rescheduled"), resAbandoned: useLabel("daily_work.outcome.result_abandoned"), resCompleted: useLabel("daily_work.outcome.result_completed"),
@@ -85,6 +85,26 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
               </div>
             )}
             {!many && u.rescheduledFrom && <Badge variant="warning" data-testid="rescheduled-badge">{L.badgeFrom.replace("{date}", formatDMY(u.rescheduledFrom))}</Badge>}
+            {/* Row 1: the outcome and the Actual Amount side by side (stacked on a phone) — the amount is ALWAYS shown; only Completed enables it. Row 2: the date or the reason. */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start" data-testid="outcome-controls">
+              <NativeSelect
+                className={cn("h-8 w-full sm:w-56 sm:shrink-0", u.outcome === "ABANDONED" && "border-destructive font-medium text-destructive")}
+                aria-label={L.aria.replace("{task}", taskName)} disabled={disabled || committed} value={u.outcome} placeholder={L.select}
+                options={[{ value: "COMPLETED", label: L.completed }, { value: "RESCHEDULED", label: L.rescheduled }, { value: "ABANDONED", label: L.abandon, className: "text-destructive" }]}
+                onChange={(e) => {
+                  const outcome = isTaskOutcome(e.target.value) ? e.target.value : "";
+                  // Leaving Completed clears the amount (it is never kept, sent or replaced by 0).
+                  onChange(u.unitId, outcome === "COMPLETED" ? { outcome } : { outcome, actualAmount: "" });
+                }}
+              />
+              <div className="w-full min-w-[160px] sm:w-44 sm:shrink-0" data-testid="outcome-amount">
+                <Input type="number" min={0} step="0.01" inputMode="decimal"
+                  className={cn("h-8 min-w-[160px] text-right tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none disabled:cursor-not-allowed disabled:bg-muted/60 disabled:opacity-100", u.outcome === "COMPLETED" && !committed && !amount.ok && "border-destructive")}
+                  aria-label={`${L.amount} — ${taskName}`} placeholder={L.amountPlaceholder} value={u.outcome === "COMPLETED" ? u.actualAmount : ""}
+                  disabled={disabled || committed || u.outcome !== "COMPLETED"} onChange={(e) => onChange(u.unitId, { actualAmount: e.target.value })} />
+                {u.outcome === "COMPLETED" && !committed && (!amount.ok || (u.actualAmount.trim() !== "" && amount.ok && amount.value === null)) && <p className="mt-0.5 text-[11px] text-destructive">{L.errAmount}</p>}
+              </div>
+            </div>
             {committed ? (
               <p className={cn("text-sm", u.outcome === "ABANDONED" && "font-medium text-destructive")} data-testid="outcome-result">
                 {u.outcome === "COMPLETED" ? L.resCompleted.replace("{amount}", formatCurrency(Number(u.actualAmount)))
@@ -92,28 +112,15 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
                     : L.resAbandoned.replace("{reason}", u.reason)}
               </p>
             ) : (
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-start" data-testid="outcome-controls">
-                <NativeSelect
-                  className={cn("h-8 w-full sm:w-56", u.outcome === "ABANDONED" && "border-destructive font-medium text-destructive")}
-                  aria-label={L.aria.replace("{task}", taskName)} disabled={disabled} value={u.outcome} placeholder={L.select}
-                  options={[{ value: "COMPLETED", label: L.completed }, { value: "RESCHEDULED", label: L.rescheduled }, { value: "ABANDONED", label: L.abandon, className: "text-destructive" }]}
-                  onChange={(e) => onChange(u.unitId, { outcome: isTaskOutcome(e.target.value) ? e.target.value : "" })}
-                />
-                {u.outcome === "COMPLETED" && (
-                  <div className="w-full sm:w-44" data-testid="outcome-amount">
-                    <Input type="number" min={0} step="0.01" inputMode="decimal" className={cn("h-8 text-right", !amount.ok && "border-destructive")} aria-label={`${L.amount} — ${taskName}`} placeholder={L.amount} value={u.actualAmount} disabled={disabled}
-                      onChange={(e) => onChange(u.unitId, { actualAmount: e.target.value })} />
-                    {(!amount.ok || (u.actualAmount.trim() !== "" && amount.ok && amount.value === null)) && <p className="mt-0.5 text-[11px] text-destructive">{L.errAmount}</p>}
-                  </div>
-                )}
+              <>
                 {u.outcome === "RESCHEDULED" && (
-                  <div className="w-full sm:w-44" data-testid="outcome-date">
+                  <div className="w-full sm:w-56" data-testid="outcome-date">
                     <DateInputDMY value={u.nextDate} min={minDate} max={u.dateRule?.maxDate ?? undefined} disabled={disabled} aria-label={`${L.nextDate} — ${taskName}`} onChange={(v) => onChange(u.unitId, { nextDate: v })} />
                     <p className="mt-0.5 text-[11px] text-muted-foreground">{u.dateRule?.maxDate ? L.dateCnHelp.replace("{date}", formatDMY(u.dateRule.maxDate)) : L.dateHelp}</p>
                   </div>
                 )}
                 {u.outcome === "ABANDONED" && (
-                  <div className="w-full sm:flex-1" data-testid="outcome-reason">
+                  <div className="w-full" data-testid="outcome-reason">
                     <Textarea rows={3} maxLength={MAX_REASON_LENGTH} className={cn("text-sm", (reasonCheck === "reason_short" || reasonCheck === "reason_meaningless") && "border-destructive")} aria-label={`${L.reason} — ${taskName}`} placeholder={L.reasonPlaceholder}
                       value={u.reason} disabled={disabled} onChange={(e) => onChange(u.unitId, { reason: e.target.value })} />
                     <p className="mt-0.5 text-[11px] text-muted-foreground">{L.reasonHelp}</p>
@@ -121,7 +128,7 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
                     {reasonCheck === "reason_meaningless" && <p className="text-[11px] text-destructive">{L.errMeaningless}</p>}
                   </div>
                 )}
-              </div>
+              </>
             )}
             {u.outcome === "ABANDONED" && !committed && !err && <Badge variant="destructive">{L.badgeAbandoned}</Badge>}
           </div>

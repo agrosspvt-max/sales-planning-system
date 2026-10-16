@@ -915,6 +915,7 @@ export const DEFAULT_LABELS = {
   "daily_work.outcome.abandon": "Abandon",
   "daily_work.outcome.aria": "Outcome for {task}",
   "daily_work.outcome.actual_amount": "Actual Amount",
+  "daily_work.outcome.amount_placeholder": "Enter actual amount",
   "daily_work.outcome.next_date": "Next scheduled date",
   "daily_work.outcome.reason": "Reason for abandonment",
   "daily_work.outcome.reason_placeholder": "Why is this task being abandoned?",

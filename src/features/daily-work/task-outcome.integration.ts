@@ -31,7 +31,7 @@ const load = testLoader({
 
 // The real Daily Work service on the same disposable database (everything outside this feature stubbed to its neutral value).
 const DEFAULT_LABELS = realLabels.DEFAULT_LABELS as Record<string, string>;
-const dw = testLoader({
+const serviceMocks = {
   "@/lib/prisma": { prisma }, "@/lib/http": { ApiError: TestApiError }, "@/lib/audit": { writeAudit: async () => ({}) },
   "@/lib/daily-work": { ...realDailyWork, currentBusinessDate: (d?: Date) => (d ? realDailyWork.currentBusinessDate(d) : clock) },
   "@/lib/scope": { getCurrentDealerIds: async (id: string) => (await prisma.dealerAssignment.findMany({ where: { officerId: id } })).map((a) => a.dealerId), getOfficerScope: async (c: AuthContext) => ({ all: false, ids: [c.userId] }), assertOfficerInScope: async () => undefined },
@@ -43,7 +43,8 @@ const dw = testLoader({
   "@/lib/recovery-config": { getAutoTasksEnabled: async () => false, getCalendarEnabled: async () => true },
   "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (r: unknown[]) => r, dealerDisplayName: (n: string) => n },
   "./auto-task-materialization.server": { materializeDueDailyWorkTasks: async () => ({}), materializeDueDailyWorkTasksInTransaction: async () => ({}), autoTasksApplyToRole: () => true },
-});
+};
+const dw = testLoader(serviceMocks);
 const svc = dw<typeof import("./service.server")>("src/features/daily-work/service.server.ts");
 const lock = load<typeof import("./day-lock.server")>("src/features/daily-work/day-lock.server.ts");
 
@@ -65,6 +66,112 @@ const counts = async () => ({
   outcomes: await prisma.dailyTaskOutcome.count(), committed: await prisma.dailyTaskOutcome.count({ where: { state: "COMMITTED" } }), calendar: await prisma.calendarEntry.count(),
   events: await prisma.taskRescheduleEvent.count(), receipts: await prisma.dealerPaymentReceipt.count(), exceptions: await prisma.billingException.count(), tasks: await prisma.billingExceptionTask.count(),
 });
+
+/** Real transactions with injected network latency: row count must not multiply round trips. */
+async function batchDraftRegression() {
+  const date = day(20), workDate = new Date(`${date}T00:00:00Z`);
+  setClock(date);
+  await prisma.dailyWorkDay.create({ data: { officerId: "so1", workDate, currentBatchId: "batch-benchmark-open", status: "OPEN" } });
+  const createRows = async (prefix: string, n: number) => {
+    const data = Array.from({ length: n }, (_, i) => ({ id: `${prefix}-${i}`, officerId: "so1", dealerId: "A", rowKey: `${prefix}-${i}`, workDate, batchId: "batch-benchmark-submitted", section: "RECOVERY", todaysPlan: 1000, status: "PLAN_SUBMITTED" }));
+    await prisma.dailyWorkEntry.createMany({ data });
+    return data.map((r) => ({ entryId: r.id, units: [{ unitType: "MANUAL_ROW", unitId: r.id, outcome: "COMPLETED", actualAmount: 800 }], paymentMode: "UPI" }));
+  };
+  let latencyMs = 0, failAudit = false;
+  const statements: string[] = [];
+  const roundTrip = async (name: string) => { statements.push(name); if (latencyMs) await new Promise((resolve) => setTimeout(resolve, latencyMs)); };
+  const measuredPrisma = new Proxy(prisma, {
+    get(target, key, receiver) {
+      if (key !== "$transaction") return Reflect.get(target, key, receiver);
+      return (fn: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: unknown) => {
+        assert.equal(options, undefined, "outcome autosave must retain Prisma's default 5-second timeout");
+        return target.$transaction(async (tx) => fn(new Proxy(tx, {
+          get(t, k, r) {
+            const value = Reflect.get(t, k, r);
+            if (k !== "$queryRaw" && k !== "$executeRaw") return value;
+            return async (...args: unknown[]) => { await roundTrip(String(k)); return Reflect.apply(value, t, args); };
+          },
+        })));
+      };
+    },
+  });
+  const measured = testLoader({ ...serviceMocks, "@/lib/prisma": { prisma: measuredPrisma },
+    "@/lib/audit": { writeAudit: async (data: Prisma.AuditLogUncheckedCreateInput, tx: Prisma.TransactionClient) => { await roundTrip("audit"); if (failAudit) throw new Error("test audit failure"); return tx.auditLog.create({ data }); } },
+  })<typeof import("./service.server")>("src/features/daily-work/service.server.ts");
+  const send = (entries: unknown[]) => measured.enterTaskOutcomes(so1, { section: "RECOVERY", workDate: date, entries });
+  // Reproduce the screenshot: two automatic Billing Exception tasks for the SAME dealer.
+  const autoRows = await createRows("batch-auto", 2);
+  const automatic = [];
+  for (const [i, row] of autoRows.entries()) {
+    const exception = await prisma.billingException.create({ data: { dealerId: "A", billingDate: workDate, billNo: `benchmark-${i}`, authPerson: "Admin", createdById: "admin", requestId: `benchmark-${i}`, snapDays: 90, snapParty: "Alpha Traders", snapDealerStatus: "ACTIVE" } });
+    const task = await prisma.billingExceptionTask.create({ data: { billingExceptionId: exception.id, dealerId: "A", officerId: "so1", amount: i ? 11111 : 12444, promisedDate: workDate, taskDate: workDate, dailyWorkEntryId: row.entryId, dailyWorkContribution: i ? 11111 : 12444 } });
+    await prisma.dailyWorkEntry.update({ where: { id: row.entryId }, data: { todaysPlan: task.amount } });
+    automatic.push({ entryId: row.entryId, units: [{ unitType: "BILLING_EXCEPTION", unitId: task.id, outcome: null }] });
+  }
+  latencyMs = 250; statements.length = 0;
+  assert.equal((await send(automatic)).count, 2);
+  assert.equal(statements.length, 7, "two unselected auto tasks are saved with bounded round trips");
+  const autoSnapshots = await prisma.dailyTaskOutcome.findMany({ where: { entryId: { in: autoRows.map((e) => e.entryId) } }, orderBy: { plannedAmount: "asc" } });
+  eq(autoSnapshots.map((o) => [o.unitType, Number(o.plannedAmount), o.outcome]), [["BILLING_EXCEPTION", 11111, null], ["BILLING_EXCEPTION", 12444, null]], "automatic tasks keep separate identities/amounts and incomplete choices");
+  assert.ok((await prisma.dailyWorkEntry.findMany({ where: { id: { in: autoRows.map((e) => e.entryId) } } })).every((r) => r.todaysActual === null));
+  latencyMs = 0;
+
+  // Both CN representations must retain their individual Sunday/expiry rules after UNION batching.
+  const cnRows = await createRows("batch-cn", 2);
+  const cnData = { officerId: "so1", dealerId: "A", cnType: "RATE_DIFFERENCE", amount: 1000, acceptedAt: workDate, cnExpiryDays: 10, status: "ACCEPTED_NOT_POSTED", acceptanceReason: "PAYMENT_PENDING" };
+  const request = await prisma.cnRequest.create({ data: { ...cnData, paymentTrackingMode: "TRACKED" } });
+  const event = await prisma.cnPaymentEvent.create({ data: { cnRequestId: request.id, status: "NOT_PAID", eventDate: workDate, outstandingBefore: 1000, outstandingAfter: 1000, taskAmount: 1000, taskDate: workDate, taskStatus: "SCHEDULED", source: "TEST", requestKey: "batch-cn-event", recordedById: "so1", dailyWorkEntryId: cnRows[0].entryId, dailyWorkContribution: 1000 } });
+  const legacy = await prisma.cnRequest.create({ data: { ...cnData, taskDate: workDate, legacyDailyWorkEntryId: cnRows[1].entryId, legacyDailyWorkContribution: 1000 } });
+  const cnInputs = [{ entryId: cnRows[0].entryId, units: [{ unitType: "CN_PAYMENT", unitId: event.id, outcome: "RESCHEDULED", nextDate: day(21) }] }, { entryId: cnRows[1].entryId, units: [{ unitType: "CN_LEGACY", unitId: legacy.id, outcome: "RESCHEDULED", nextDate: day(21) }] }];
+  // day(21) is a Wednesday; day(25) is Sunday and day(35) is past CN expiry.
+  assert.equal((await send(cnInputs)).count, 2);
+  for (const badDate of [day(25), day(35)]) assert.equal(await code(send(cnInputs.map((r) => ({ ...r, units: [{ ...r.units[0], nextDate: badDate }] })))), 422);
+  eq((await prisma.dailyTaskOutcome.findMany({ where: { entryId: { in: cnRows.map((e) => e.entryId) } }, orderBy: { unitType: "asc" } })).map((o) => [o.unitType, dateOf(o.nextDate)]), [["CN_LEGACY", day(21)], ["CN_PAYMENT", day(21)]]);
+
+  const one = await createRows("batch-one", 1), many = await createRows("batch-many", 20);
+  latencyMs = 250; // all calls run through a REAL PostgreSQL transaction with its unchanged timeout
+  statements.length = 0;
+  await send(one);
+  const oneTrips = statements.length;
+  statements.length = 0;
+  const start = performance.now();
+  eq((await send(many)).count, 20);
+  const elapsed = performance.now() - start;
+  assert.equal(statements.length, oneTrips, "twenty tasks cost the same number of round trips as one");
+  assert.ok(oneTrips <= 7, `cold save took ${oneTrips} statements`);
+  assert.ok(elapsed < 5000, `slow-network save must finish inside the unchanged timeout: ${elapsed}ms`);
+  eq((await prisma.dailyWorkEntry.findMany({ where: { id: { in: many.map((e) => e.entryId) } } })).map((r) => [Number(r.todaysActual), r.paymentMode]), Array.from({ length: 20 }, () => [800, "UPI"]));
+  assert.equal(await prisma.dailyTaskOutcome.count({ where: { entryId: { in: many.map((e) => e.entryId) } } }), 20);
+  latencyMs = 0;
+
+  // Warm edits retain each task's snapshot and update only the chosen outcome; switching clears modes.
+  await send(many.map((e, i) => ({ entryId: e.entryId, units: [{ ...e.units[0], outcome: i % 2 ? "RESCHEDULED" : "ABANDONED", actualAmount: 123, nextDate: day(21), reason: "Dealer closed this branch and requested no further collection visits" }] })));
+  const warm = await prisma.dailyWorkEntry.findMany({ where: { id: { in: many.map((e) => e.entryId) } } });
+  assert.ok(warm.every((r) => Number(r.todaysActual) === 0 && r.paymentMode === null));
+  assert.equal(await prisma.dailyTaskOutcome.count({ where: { entryId: { in: many.map((e) => e.entryId) } } }), 20, "retries/editing never create duplicate task snapshots");
+  assert.ok((await prisma.dailyTaskOutcome.findMany({ where: { entryId: { in: many.map((e) => e.entryId) } } })).every((o) => o.actualAmount === null && o.state === "DRAFT"));
+  assert.equal(await prisma.calendarEntry.count({ where: { date: new Date(`${day(21)}T00:00:00Z`) } }), 0, "draft reschedules have no effects");
+
+  // A bad later row rolls back the ENTIRE multi-row save, including previously valid edits.
+  const snapshot = JSON.stringify(await prisma.dailyTaskOutcome.findMany({ where: { entryId: { in: many.map((e) => e.entryId) } }, orderBy: { id: "asc" } }));
+  assert.equal(await code(send([many[0], { ...many[1], units: [{ ...many[1].units[0], actualAmount: 0 }] }])), 422);
+  assert.equal(JSON.stringify(await prisma.dailyTaskOutcome.findMany({ where: { entryId: { in: many.map((e) => e.entryId) } }, orderBy: { id: "asc" } })), snapshot);
+  failAudit = true;
+  await assert.rejects(send(many), /test audit failure/, "a failure AFTER the bulk write must roll it all back");
+  failAudit = false;
+  assert.equal(JSON.stringify(await prisma.dailyTaskOutcome.findMany({ where: { entryId: { in: many.map((e) => e.entryId) } }, orderBy: { id: "asc" } })), snapshot);
+  assert.ok((await prisma.dailyWorkEntry.findMany({ where: { id: { in: many.map((e) => e.entryId) } } })).every((r) => Number(r.todaysActual) === 0 && r.paymentMode === null));
+  assert.equal(await code(send([{ ...many[0], units: [{ unitType: "MANUAL_ROW", unitId: many[1].entryId, outcome: "COMPLETED", actualAmount: 1 }] }])), 409, "task from another row is refused");
+  const foreign = await prisma.dailyWorkEntry.create({ data: { officerId: "so2", dealerId: "A", rowKey: "foreign", workDate, batchId: "frozen", section: "RECOVERY", todaysPlan: 1000, status: "PLAN_SUBMITTED" } });
+  assert.equal(await code(send([{ entryId: foreign.id, units: [{ unitType: "MANUAL_ROW", unitId: foreign.id, outcome: "COMPLETED", actualAmount: 20 }] }])), 409);
+  assert.equal(await prisma.dailyTaskOutcome.count({ where: { entryId: foreign.id } }), 0);
+  const beforeRetry = await prisma.dailyTaskOutcome.count({ where: { entryId: one[0].entryId } });
+  await Promise.all([send(one), send(one)]);
+  assert.equal(await prisma.dailyTaskOutcome.count({ where: { entryId: one[0].entryId } }), beforeRetry, "day lock serializes concurrent retries");
+  await prisma.dailyWorkDay.update({ where: { officerId_workDate: { officerId: "so1", workDate } }, data: { status: "FINALIZED" } });
+  assert.equal(await code(send(one)), 409, "final day lock still prevents writes");
+  console.log(`batch draft regression — ${oneTrips} statements for 1 or 20 new tasks; 20 tasks with 250ms/call: ${Math.round(elapsed)}ms (default timeout 5000ms)`);
+}
 
 async function main() {
   await prisma.$executeRawUnsafe(`TRUNCATE "CalendarEntry","BillingExceptionTask","BillingException","DealerPaymentReceipt","DealerLastPayment","DailyTaskOutcome","DailyWorkEntry","DailyWorkDay","DealerAssignment","Dealer","AuditLog","Notification","TaskRescheduleEvent","User","UserGroup" CASCADE`);
@@ -205,6 +312,7 @@ async function main() {
   const madeOn = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // outcomes were committed "now" in real time
   const act = await ana.getTaskActivity(scope as never, madeOn, madeOn);
   eq([act.get(`so1|${madeOn}`)?.abandoned, act.get(`so1|${madeOn}`)?.reschedules], [2, 2], "Task Activity counts abandonments and reschedules on the business date they were made");
+  await batchDraftRegression();
   console.log("task-outcome.integration.ts — all scenarios passed");
 }
 main().then(async () => { await prisma.$disconnect(); }, async (e) => { console.error(e); await prisma.$disconnect(); process.exit(1); });

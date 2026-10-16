@@ -76,6 +76,7 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
       readRowUnits: async () => new Map(),
       rescheduledEntryIds: async () => [],
       writeOutcomeDrafts: async () => 0,
+      writeOutcomeDraftBatch: async () => 0,
     },
     // Performance → Task Activity (own suites: tasks/task-analysis.test.ts + the real-database integration); inert here.
     "@/features/tasks/task-analysis.server": { getTaskActivity: async () => new Map() },

@@ -47,14 +47,17 @@ async function liveUnits(db: DailyWorkDb, entries: readonly EntryFacts[]): Promi
   const out = new Map<string, LiveUnit[]>(entries.map((e) => [e.id, []]));
   if (entries.length === 0) return out;
   const entryIds = entries.map((e) => e.id);
-  const [billing, cn, legacy, calendar] = await Promise.all([
-    db.$queryRaw<{ id: string; entryId: string; c: string }[]>(Prisma.sql`SELECT t."id", t."dailyWorkEntryId" AS "entryId", t."dailyWorkContribution"::text AS "c" FROM "BillingExceptionTask" t WHERE t."dailyWorkEntryId" IN (${ids(entryIds)}) AND t."abandonedAt" IS NULL`),
-    db.$queryRaw<{ id: string; entryId: string; c: string }[]>(Prisma.sql`SELECT e."id", e."dailyWorkEntryId" AS "entryId", e."dailyWorkContribution"::text AS "c" FROM "CnPaymentEvent" e WHERE e."dailyWorkEntryId" IN (${ids(entryIds)})`),
-    db.$queryRaw<{ id: string; entryId: string; c: string }[]>(Prisma.sql`SELECT c."id", c."legacyDailyWorkEntryId" AS "entryId", c."legacyDailyWorkContribution"::text AS "c" FROM "CnRequest" c WHERE c."legacyDailyWorkEntryId" IN (${ids(entryIds)})`),
-    db.$queryRaw<{ id: string; entryId: string; c: string }[]>(Prisma.sql`SELECT c."id", c."dailyWorkEntryId" AS "entryId", c."dailyWorkContribution"::text AS "c" FROM "CalendarEntry" c WHERE c."dailyWorkEntryId" IN (${ids(entryIds)}) AND c."abandonedAt" IS NULL`),
-  ]);
-  const add = (rows: { id: string; entryId: string; c: string }[], unitType: OutcomeUnitType) => { for (const r of rows) out.get(r.entryId)?.push({ unitType, unitId: r.id, plannedAmount: Number(r.c ?? 0) }); };
-  add(billing, "BILLING_EXCEPTION"); add(cn, "CN_PAYMENT"); add(legacy, "CN_LEGACY"); add(calendar, "CALENDAR_ENTRY");
+  // A transaction uses one connection: Promise.all still takes four network round trips.
+  const linkedRows = await db.$queryRaw<{ id: string; entryId: string; c: string; unitType: OutcomeUnitType }[]>(Prisma.sql`
+    SELECT t."id", t."dailyWorkEntryId" AS "entryId", t."dailyWorkContribution"::text AS "c", 'BILLING_EXCEPTION' AS "unitType"
+      FROM "BillingExceptionTask" t WHERE t."dailyWorkEntryId" IN (${ids(entryIds)}) AND t."abandonedAt" IS NULL
+    UNION ALL SELECT e."id", e."dailyWorkEntryId", e."dailyWorkContribution"::text, 'CN_PAYMENT'
+      FROM "CnPaymentEvent" e WHERE e."dailyWorkEntryId" IN (${ids(entryIds)})
+    UNION ALL SELECT c."id", c."legacyDailyWorkEntryId", c."legacyDailyWorkContribution"::text, 'CN_LEGACY'
+      FROM "CnRequest" c WHERE c."legacyDailyWorkEntryId" IN (${ids(entryIds)})
+    UNION ALL SELECT c."id", c."dailyWorkEntryId", c."dailyWorkContribution"::text, 'CALENDAR_ENTRY'
+      FROM "CalendarEntry" c WHERE c."dailyWorkEntryId" IN (${ids(entryIds)}) AND c."abandonedAt" IS NULL`);
+  for (const r of linkedRows) out.get(r.entryId)?.push({ unitType: r.unitType, unitId: r.id, plannedAmount: Number(r.c ?? 0) });
   for (const e of entries) {
     const list = out.get(e.id)!;
     const linked = list.reduce((s, u) => s + u.plannedAmount, 0);
@@ -69,11 +72,13 @@ async function liveUnits(db: DailyWorkDb, entries: readonly EntryFacts[]): Promi
 async function dateRules(db: DailyWorkDb, units: readonly { unitType: OutcomeUnitType; unitId: string }[]): Promise<Map<string, DateRule>> {
   const rules = new Map<string, DateRule>();
   const cnEvents = units.filter((u) => u.unitType === "CN_PAYMENT").map((u) => u.unitId), cnLegacy = units.filter((u) => u.unitType === "CN_LEGACY").map((u) => u.unitId);
-  const [ev, lg] = await Promise.all([
-    cnEvents.length ? db.$queryRaw<{ id: string; acceptedAt: Date | null; days: number | null }[]>(Prisma.sql`SELECT e."id", c."acceptedAt", c."cnExpiryDays" AS "days" FROM "CnPaymentEvent" e JOIN "CnRequest" c ON c."id" = e."cnRequestId" WHERE e."id" IN (${ids(cnEvents)})`) : [],
-    cnLegacy.length ? db.$queryRaw<{ id: string; acceptedAt: Date | null; days: number | null }[]>(Prisma.sql`SELECT c."id", c."acceptedAt", c."cnExpiryDays" AS "days" FROM "CnRequest" c WHERE c."id" IN (${ids(cnLegacy)})`) : [],
-  ]);
-  for (const [type, rows] of [["CN_PAYMENT", ev], ["CN_LEGACY", lg]] as const) for (const r of rows) rules.set(`${type}:${r.id}`, { maxDate: r.acceptedAt && r.days != null ? cnRequestExpiryDateKey(r.acceptedAt, r.days) : null, noSunday: true });
+  const queries: Prisma.Sql[] = [];
+  if (cnEvents.length) queries.push(Prisma.sql`SELECT e."id", c."acceptedAt", c."cnExpiryDays" AS "days", 'CN_PAYMENT' AS "unitType" FROM "CnPaymentEvent" e JOIN "CnRequest" c ON c."id" = e."cnRequestId" WHERE e."id" IN (${ids(cnEvents)})`);
+  if (cnLegacy.length) queries.push(Prisma.sql`SELECT c."id", c."acceptedAt", c."cnExpiryDays" AS "days", 'CN_LEGACY' AS "unitType" FROM "CnRequest" c WHERE c."id" IN (${ids(cnLegacy)})`);
+  if (queries.length) {
+    const rows = await db.$queryRaw<{ id: string; acceptedAt: Date | null; days: number | null; unitType: string }[]>(Prisma.sql`${Prisma.join(queries, " UNION ALL ")}`);
+    for (const r of rows) rules.set(`${r.unitType}:${r.id}`, { maxDate: r.acceptedAt && r.days != null ? cnRequestExpiryDateKey(r.acceptedAt, r.days) : null, noSunday: true });
+  }
   return rules;
 }
 export function dateRuleError(rule: DateRule | null | undefined, date: string): OutcomeError | "date_cn_rule" | null {
@@ -142,45 +147,79 @@ export function outcomeMessage(L: Labels, code: OutcomeError | "date_cn_rule" | 
 
 export interface UnitInput { unitType: string; unitId: string; outcome?: unknown; actualAmount?: unknown; nextDate?: unknown; reason?: unknown }
 
-/**
- * Store the officer's CHOICES for one submitted row (a draft: nothing is rescheduled, abandoned or paid). Every task of the row is frozen on first use. Only the fields of the
- * chosen outcome are kept. The row's own `todaysActual` is derived: null until every task has a valid outcome, then the sum of the Completed amounts.
- */
+/** Single-row compatibility entry point; the report endpoint uses the batched writer below. */
 export async function writeOutcomeDrafts(tx: Prisma.TransactionClient, entry: EntryFacts, inputs: readonly UnitInput[], today: string, L: Labels): Promise<number> {
-  let rows = await tx.$queryRaw<OutcomeRow[]>(Prisma.sql`SELECT ${OUTCOME_COLS} FROM "DailyTaskOutcome" o WHERE o."entryId" = ${entry.id} ORDER BY o."unitType", o."unitId" FOR UPDATE`);
-  if (rows.length === 0) {
-    if (entry.todaysActual !== null) throw new ApiError(409, outcomeMessage(L, "row_legacy")); // reported before outcomes existed: read-only history
-    const live = (await liveUnits(tx, [entry])).get(entry.id) ?? [];
-    for (const u of live) {
-      await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "DailyTaskOutcome" ("id","entryId","unitType","unitId","officerId","workDate","section","plannedAmount","state","createdAt","updatedAt")
-        VALUES (${randomUUID()}, ${entry.id}, ${u.unitType}, ${u.unitId}, ${entry.officerId}, ${entry.workDate}::date, ${entry.section}, ${u.plannedAmount}, 'DRAFT', NOW(), NOW())
-        ON CONFLICT ("entryId","unitType","unitId") DO NOTHING`);
-    }
-    rows = await tx.$queryRaw<OutcomeRow[]>(Prisma.sql`SELECT ${OUTCOME_COLS} FROM "DailyTaskOutcome" o WHERE o."entryId" = ${entry.id} ORDER BY o."unitType", o."unitId" FOR UPDATE`);
+  return writeOutcomeDraftBatch(tx, [{ entry, inputs }], today, L);
+}
+
+export interface OutcomeDraftInput { entry: EntryFacts; inputs: readonly UnitInput[]; paymentMode?: string | null }
+
+/**
+ * Save all requested report rows under the caller's day/entry locks. Snapshot missing units in memory,
+ * validate EVERY choice before writing, then persist snapshots, choices, derived totals and payment
+ * modes in one statement. Round trips are bounded, independent of the number of rows/tasks. Drafts
+ * still have no scheduling, abandonment or financial effects. Partial choices are allowed.
+ */
+export async function writeOutcomeDraftBatch(tx: Prisma.TransactionClient, drafts: readonly OutcomeDraftInput[], today: string, L: Labels): Promise<number> {
+  if (drafts.length === 0) return 0;
+  const entries = [...new Map(drafts.map((d) => [d.entry.id, d.entry])).values()];
+  const stored = await tx.$queryRaw<OutcomeRow[]>(Prisma.sql`SELECT ${OUTCOME_COLS} FROM "DailyTaskOutcome" o WHERE o."entryId" IN (${ids(entries.map((e) => e.id))}) ORDER BY o."entryId", o."unitType", o."unitId" FOR UPDATE`);
+  const byEntry = new Map<string, OutcomeRow[]>(entries.map((e) => [e.id, []]));
+  for (const row of stored) byEntry.get(row.entryId)!.push(row);
+  const missing = entries.filter((e) => byEntry.get(e.id)!.length === 0);
+  if (missing.some((e) => e.todaysActual !== null)) throw new ApiError(409, outcomeMessage(L, "row_legacy"));
+  const live = await liveUnits(tx, missing);
+  const writes = new Map<string, OutcomeRow>();
+  for (const entry of missing) for (const unit of live.get(entry.id) ?? []) {
+    const row: OutcomeRow = { ...unit, id: randomUUID(), entryId: entry.id, officerId: entry.officerId, workDate: entry.workDate, section: entry.section,
+      plannedAmount: String(unit.plannedAmount), outcome: null, actualAmount: null, nextDate: null, reason: null, state: "DRAFT", committedAt: null, committedByName: null };
+    byEntry.get(entry.id)!.push(row);
+    writes.set(row.id, row);
   }
-  const rules = await dateRules(tx, rows);
+  // Only date-bearing reschedules need CN rules, fetched once for the whole request.
+  const rules = await dateRules(tx, drafts.flatMap((d) => d.inputs.filter((i) => i.outcome === "RESCHEDULED" && i.nextDate).map((i) => ({ unitType: i.unitType as OutcomeUnitType, unitId: i.unitId }))));
   let changed = 0;
-  for (const input of inputs) {
-    const row = rows.find((r) => r.unitType === input.unitType && r.unitId === input.unitId);
-    if (!row || !(OUTCOME_UNIT_TYPES as readonly string[]).includes(input.unitType)) throw new ApiError(409, outcomeMessage(L, "unit_unknown")); // a forged / foreign task id never matches this officer's row
-    if (row.state === "COMMITTED") throw new ApiError(409, outcomeMessage(L, "unit_committed"));
-    const clean = sanitizeOutcomeFields(input);
-    if (!clean.ok) throw new ApiError(422, outcomeMessage(L, clean.error));
-    const f = clean.value;
-    if (f.outcome === "RESCHEDULED" && f.nextDate !== null) {
-      if (f.nextDate <= today) throw new ApiError(422, outcomeMessage(L, "date_not_future"));
-      const rule = dateRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.nextDate);
-      if (rule) throw new ApiError(422, outcomeMessage(L, rule));
+  const paymentModes = new Map<string, string | null>();
+  for (const { entry, inputs, paymentMode } of drafts) {
+    if (paymentMode !== undefined) paymentModes.set(entry.id, paymentMode);
+    const rows = byEntry.get(entry.id)!;
+    for (const input of inputs) {
+      const row = rows.find((r) => r.unitType === input.unitType && r.unitId === input.unitId);
+      if (!row || !(OUTCOME_UNIT_TYPES as readonly string[]).includes(input.unitType)) throw new ApiError(409, outcomeMessage(L, "unit_unknown"));
+      if (row.state === "COMMITTED") throw new ApiError(409, outcomeMessage(L, "unit_committed"));
+      const clean = sanitizeOutcomeFields(input);
+      if (!clean.ok) throw new ApiError(422, outcomeMessage(L, clean.error));
+      const f = clean.value;
+      if (f.outcome === "RESCHEDULED" && f.nextDate !== null) {
+        if (f.nextDate <= today) throw new ApiError(422, outcomeMessage(L, "date_not_future"));
+        const rule = dateRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.nextDate);
+        if (rule) throw new ApiError(422, outcomeMessage(L, rule));
+      }
+      Object.assign(row, { outcome: f.outcome, actualAmount: f.actualAmount === null ? null : String(f.actualAmount), nextDate: f.nextDate, reason: f.reason });
+      writes.set(row.id, row);
+      changed++;
     }
-    await tx.$executeRaw(Prisma.sql`
-      UPDATE "DailyTaskOutcome" SET "outcome" = ${f.outcome}, "actualAmount" = ${f.actualAmount}, "nextDate" = ${f.nextDate}::date, "reason" = ${f.reason}, "updatedAt" = NOW()
-      WHERE "id" = ${row.id} AND "state" = 'DRAFT'`);
-    Object.assign(row, { outcome: f.outcome, actualAmount: f.actualAmount === null ? null : String(f.actualAmount), nextDate: f.nextDate, reason: f.reason });
-    changed++;
   }
-  const actual = rowActualFromOutcomes(rows.map((r): OutcomeFields => ({ outcome: r.outcome, actualAmount: r.actualAmount == null ? null : Number(r.actualAmount), nextDate: r.nextDate, reason: r.reason })), today);
-  await tx.$executeRaw(Prisma.sql`UPDATE "DailyWorkEntry" SET "todaysActual" = ${actual}, "updatedAt" = NOW() WHERE "id" = ${entry.id}`);
+  const totals = entries.map((entry) => {
+    const actual = rowActualFromOutcomes(byEntry.get(entry.id)!.map((r): OutcomeFields => ({ outcome: r.outcome, actualAmount: r.actualAmount == null ? null : Number(r.actualAmount), nextDate: r.nextDate, reason: r.reason })), today);
+    const clearMode = entry.section === "RECOVERY" && (actual === null || actual <= 0);
+    return { id: entry.id, actual, setPaymentMode: entry.section === "RECOVERY" && (clearMode || paymentModes.has(entry.id)), paymentMode: clearMode ? null : paymentModes.get(entry.id) ?? null };
+  });
+  // JSON recordsets use two bound parameters even at the request's maximum row/unit count.
+  // The saved-row guard prevents publishing derived totals if an outcome became immutable.
+  const saved = writes.size ? Prisma.sql`
+    INSERT INTO "DailyTaskOutcome" ("id","entryId","unitType","unitId","officerId","workDate","section","plannedAmount","outcome","actualAmount","nextDate","reason","state","createdAt","updatedAt")
+    SELECT v."id",v."entryId",v."unitType",v."unitId",v."officerId",v."workDate",v."section",v."plannedAmount",v."outcome",v."actualAmount",v."nextDate",v."reason",'DRAFT',NOW(),NOW()
+    FROM jsonb_to_recordset(${JSON.stringify([...writes.values()])}::jsonb) AS v("id" text,"entryId" text,"unitType" text,"unitId" text,"officerId" text,"workDate" date,"section" text,"plannedAmount" numeric,"outcome" text,"actualAmount" numeric,"nextDate" date,"reason" text) WHERE TRUE
+    ON CONFLICT ("entryId","unitType","unitId") DO UPDATE SET "outcome" = EXCLUDED."outcome", "actualAmount" = EXCLUDED."actualAmount", "nextDate" = EXCLUDED."nextDate", "reason" = EXCLUDED."reason", "updatedAt" = NOW()
+    WHERE "DailyTaskOutcome"."state" = 'DRAFT' RETURNING "id"` : Prisma.sql`SELECT NULL::text AS "id" WHERE FALSE`;
+  const updated = await tx.$executeRaw(Prisma.sql`
+    WITH saved AS (${saved})
+    UPDATE "DailyWorkEntry" w SET "todaysActual" = v.actual,
+      "paymentMode" = CASE WHEN v."setPaymentMode" THEN v."paymentMode" ELSE w."paymentMode" END, "updatedAt" = NOW()
+    FROM jsonb_to_recordset(${JSON.stringify(totals)}::jsonb) AS v("id" text,actual numeric,"setPaymentMode" boolean,"paymentMode" text)
+    WHERE w."id" = v."id" AND (SELECT COUNT(*) FROM saved) = ${writes.size}`);
+  if (Number(updated) !== entries.length) throw new ApiError(409, outcomeMessage(L, "unit_committed"));
   return changed;
 }
 

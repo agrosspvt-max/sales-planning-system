@@ -767,8 +767,20 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
       <div className="overflow-auto rounded-lg border bg-background">
         <Table className={cn("table-fixed", compactRecovery
           ? "min-w-[960px] [&_th]:w-auto [&_th]:px-2 [&_td]:px-2 [&_input]:ml-auto [&_input]:w-full [&_select]:w-full"
-          : isSales ? (showResults ? "min-w-[1008px]" : "min-w-[928px]") : (showResults ? "min-w-[1152px]" : "min-w-[1072px]"))}>
+          : showResults
+            // Daily REPORT: the columns are set by the <colgroup> below (Dealer wraps, the outcome column is wide enough for the dropdown + a readable amount); narrow screens scroll the table.
+            ? cn("[&_th]:w-auto [&_th]:px-2 [&_td]:px-2", isSales ? "min-w-[1090px]" : "min-w-[1230px]")
+            : isSales ? "min-w-[928px]" : "min-w-[1072px]")}>
           {/* Recovery Plan: Dealer absorbs the remaining width; all three row layers share these columns. */}
+          {showResults && <colgroup data-testid="report-columns">
+            <col className="w-[190px]" />
+            <col className="w-[120px]" />
+            <col className="w-[110px]" />
+            <col className="w-[120px]" />
+            <col className="w-[140px]" />
+            <col className="w-[440px]" />
+            {showPaymentMode && <col className="w-[140px]" />}
+          </colgroup>}
           {compactRecovery && <colgroup>
             <col className="w-[220px]" />
             <col className="w-[88px]" />
@@ -786,7 +798,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
               <TableHead className="w-32 text-right">{L.pending}</TableHead>
               <TableHead className="w-36 text-right">{L.todaysPlan}</TableHead>
               <TableHead className="w-44">{L.type}</TableHead>
-              {showResults && <TableHead className="w-36 text-right">{L.actual}</TableHead>}
+              {showResults && <TableHead className="w-36">{L.actual}</TableHead>}
               {showPaymentMode && <TableHead className="w-36">{L.paymentMode}</TableHead>}
               {view === DailyWorkView.PLAN && <TableHead className="w-16" />}
             </TableRow>
@@ -800,7 +812,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
               <TableCell className="text-right tabular-nums">{money(combined.pending)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(combined.todaysPlan)}</TableCell>
               <TableCell>{L.none}</TableCell>
-              {showResults && <TableCell className="text-right tabular-nums">{money(combined.todaysActual)}</TableCell>}
+              {showResults && <TableCell className="tabular-nums">{money(combined.todaysActual)}</TableCell>}
               {showPaymentMode && <TableCell>{L.none}</TableCell>}
               {view === DailyWorkView.PLAN && <TableCell />}
             </TableRow>
@@ -817,7 +829,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                 const rowAutoTasks = (data?.materializedCnTasks ?? []).filter((task) => task.entryId === r.entryId);
                 return (
                   <TableRow data-dealer-id={r.dealerId} data-entry-id={r.entryId} data-row-kind={r.rowKind} key={r.entryId}>
-                    <TableCell className={cn("font-medium", compactRecovery && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} />{(data?.rescheduledEntryIds ?? []).includes(r.entryId) && <Badge variant="warning" className="ml-2" data-testid="rescheduled-row-badge">{L.badgeRescheduled}</Badge>}{!isSales && !showTaskType && billingEntrySet.has(r.entryId) && <span className="ml-2 rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-normal text-purple-700 dark:text-purple-300">{taskTypeL.auto}</span>}</TableCell>
+                    <TableCell className={cn("font-medium", (compactRecovery || showResults) && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} />{(data?.rescheduledEntryIds ?? []).includes(r.entryId) && <Badge variant="warning" className="ml-2" data-testid="rescheduled-row-badge">{L.badgeRescheduled}</Badge>}{!isSales && !showTaskType && billingEntrySet.has(r.entryId) && <span className="ml-2 rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-normal text-purple-700 dark:text-purple-300">{taskTypeL.auto}</span>}</TableCell>
                     {/* Task Type — derived from the authoritative Auto Task contribution link (Daily Plan only). */}
                     {showTaskType && <TableCell data-task-type>{taskTypeCell(r.entryId)}</TableCell>}
                     {/* Monthly plan + pending are SOURCED and non-editable. */}
@@ -866,7 +878,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                       </div>
                     </TableCell>
                     {/* Today's Sales/Recovery belongs to Daily Report and remains post-submit only. */}
-                    {showResults && <TableCell className="p-1 text-right align-top" data-testid="outcome-cell">
+                    {showResults && <TableCell className="p-1 align-top" data-testid="outcome-cell">
                       {r.legacyOutcome ? (
                         // Reported before outcomes were collected: the recorded Actual (possibly zero) is shown read-only — no outcome or reason is invented.
                         <div className="py-1 text-right" data-testid="legacy-actual"><div className="tabular-nums">{money(numOr0(r.todaysActual))}</div><div className="text-[11px] text-muted-foreground">{L.legacyOutcome}</div></div>

@@ -24,7 +24,7 @@ import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { hasCombinedDraftRows, isTaskRowKey, splitCombinedDraftRows, submittedManualDealerIds } from "./task-rows.server";
-import { commitTaskOutcomes, readRowUnits, rescheduledEntryIds, writeOutcomeDrafts, type EntryFacts, type TaskUnitDto } from "./task-outcome.server";
+import { commitTaskOutcomes, readRowUnits, rescheduledEntryIds, writeOutcomeDraftBatch, type EntryFacts, type TaskUnitDto } from "./task-outcome.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
 import { isPartyPlanningEnabled } from "@/lib/feature-flags";
@@ -803,22 +803,20 @@ export async function enterTaskOutcomes(ctx: AuthContext, raw: unknown): Promise
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     assertReportWindowOpen(workDate, L);
     const today = currentBusinessDate();
-    let count = 0;
-    for (const e of entries) {
-      const row = (await tx.$queryRaw<{ id: string; dealerId: string | null; todaysPlan: string | null; todaysActual: string | null; entryType: string; schemeId: string | null }[]>(Prisma.sql`
-        SELECT "id", "dealerId", "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "entryType", "schemeId" FROM "DailyWorkEntry"
-        WHERE "id" = ${e.entryId} AND "officerId" = ${officerId} AND "section" = ${section} AND "workDate" = ${workDate}::date AND "batchId" <> ${day.currentBatchId} AND "status" = 'PLAN_SUBMITTED'
-        FOR UPDATE`))[0];
-      if (!row) continue; // not the caller's submitted row (or already finalized): nothing to write
-      const facts: EntryFacts = { id: row.id, officerId, workDate, section, dealerId: row.dealerId, todaysPlan: row.todaysPlan == null ? 0 : num(row.todaysPlan), todaysActual: row.todaysActual == null ? null : num(row.todaysActual), entryType: row.entryType, schemeId: row.schemeId };
-      count += await writeOutcomeDrafts(tx, facts, e.units, today, L as Record<string, string>);
-      // Payment Mode describes a RECEIVED amount: it is kept only while the row's reported total is positive (the existing Recovery rule), otherwise cleared.
-      if (section === "RECOVERY") {
-        const total = (await tx.$queryRaw<{ a: string | null }[]>(Prisma.sql`SELECT "todaysActual"::text AS "a" FROM "DailyWorkEntry" WHERE "id" = ${row.id}`))[0]?.a;
-        const mode = total == null || Number(total) <= 0 ? null : "paymentMode" in e ? e.paymentMode ?? null : undefined;
-        if (mode !== undefined) await tx.$executeRaw(Prisma.sql`UPDATE "DailyWorkEntry" SET "paymentMode" = ${mode}, "updatedAt" = NOW() WHERE "id" = ${row.id}`);
-      }
-    }
+    // Lock and authorize all submitted rows together; never perform the task-source lookup per row.
+    const rows = await tx.$queryRaw<{ id: string; dealerId: string | null; todaysPlan: string | null; todaysActual: string | null; entryType: string; schemeId: string | null }[]>(Prisma.sql`
+      SELECT "id", "dealerId", "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "entryType", "schemeId" FROM "DailyWorkEntry"
+      WHERE "id" IN (${Prisma.join([...new Set(entries.map((e) => e.entryId))])}) AND "officerId" = ${officerId} AND "section" = ${section}
+        AND "workDate" = ${workDate}::date AND "batchId" <> ${day.currentBatchId} AND "status" = 'PLAN_SUBMITTED'
+      ORDER BY "id" FOR UPDATE`);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const drafts = entries.flatMap((e) => {
+      const row = byId.get(e.entryId);
+      if (!row) return []; // not the caller's submitted row (or already finalized): nothing to write
+      const entry: EntryFacts = { id: row.id, officerId, workDate, section, dealerId: row.dealerId, todaysPlan: row.todaysPlan == null ? 0 : num(row.todaysPlan), todaysActual: row.todaysActual == null ? null : num(row.todaysActual), entryType: row.entryType, schemeId: row.schemeId };
+      return [{ entry, inputs: e.units, ...("paymentMode" in e ? { paymentMode: e.paymentMode } : {}) }];
+    });
+    const count = await writeOutcomeDraftBatch(tx, drafts, today, L as Record<string, string>);
     if (count === 0 && entries.some((e) => e.units.length > 0)) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Saved task outcomes (draft) for ${entries.length} daily ${section.toLowerCase()} row(s)` }, tx);
     return { count };

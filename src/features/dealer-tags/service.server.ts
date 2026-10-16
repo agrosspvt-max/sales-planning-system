@@ -18,6 +18,14 @@ import { loadDealerMarkerMap } from "@/lib/dealer-tags.server";
 import { taggedDealersFirst } from "@/lib/dealer-tags";
 import { writeAudit } from "@/lib/audit";
 import { notifyMany, getSuperAdminIds } from "@/features/notifications/service.server";
+import { DEFAULT_LABELS, type LabelKey } from "@/features/labels/labels";
+import { getResolvedLabels } from "@/features/labels/service.server";
+
+/** Server messages come from the same Edit Labels store as the screen text (override → default); a lookup problem falls back to the defaults and never blocks an action. */
+type Labels = Record<LabelKey, string>;
+async function labels(): Promise<Labels> {
+  try { return await getResolvedLabels(); } catch { return { ...DEFAULT_LABELS } as Labels; }
+}
 
 const tagSchema = z
   .object({
@@ -56,19 +64,18 @@ const decisionSchema = z
   .object({ action: z.enum(["approve", "reject"]), remarks: z.string().trim().max(500).optional() })
   .strict();
 const pending = [PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN];
-const admin = (ctx: AuthContext) => {
-  if (!isAdministrativeRole(ctx.role))
-    throw new ApiError(403, "Only Super Admin can manage tags or directly assign/revoke them.");
+const admin = (ctx: AuthContext, L: Labels) => {
+  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["dealer_tags.error.admin_only"]);
 };
 
-async function assertDealerScope(ctx: AuthContext, dealerId: string, db?: ScopeReadClient) {
+async function assertDealerScope(ctx: AuthContext, dealerId: string, L: Labels, db?: ScopeReadClient) {
   const scope = await getOfficerScope(ctx, db);
   if (scope.all) return;
   const owner = (await getCurrentOwnerByDealer([dealerId], db)).get(dealerId);
   if (!owner || !scope.ids.includes(owner))
-    throw new ApiError(403, "This dealer is outside your current authorized scope.");
+    throw new ApiError(403, L["dealer_tags.error.out_of_scope"]);
 }
-async function lockPair(tx: Prisma.TransactionClient, dealerId: string, tagId: string) {
+async function lockPair(tx: Prisma.TransactionClient, dealerId: string, tagId: string, L: Labels) {
   // Same lock order for every request/approval/direct action. No ownership rows are changed.
   await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Dealer" WHERE "id" = ${dealerId} FOR UPDATE`);
   await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "DealerTag" WHERE "id" = ${tagId} FOR UPDATE`);
@@ -77,8 +84,8 @@ async function lockPair(tx: Prisma.TransactionClient, dealerId: string, tagId: s
     tx.dealerTag.findUnique({ where: { id: tagId } }),
     tx.dealerTagAssignment.findUnique({ where: { dealerId_tagId: { dealerId, tagId } } }),
   ]);
-  if (!dealer || dealer.deletedAt) throw new ApiError(404, "Dealer not found.");
-  if (!tag) throw new ApiError(404, "Tag not found.");
+  if (!dealer || dealer.deletedAt) throw new ApiError(404, L["dealer_tags.error.dealer_not_found"]);
+  if (!tag) throw new ApiError(404, L["dealer_tags.error.tag_not_found"]);
   return { tag, assignment };
 }
 async function applyAssignment(
@@ -131,7 +138,8 @@ export async function listTags() {
   return prisma.dealerTag.findMany({ orderBy: [{ name: "asc" }, { id: "asc" }] });
 }
 export async function saveTag(ctx: AuthContext, raw: unknown, id?: string) {
-  admin(ctx);
+  const L = await labels();
+  admin(ctx, L);
   const value = tagSchema.parse(raw);
   const data = { ...value, nameKey: value.name.normalize("NFKC").toLocaleLowerCase("en-IN") };
   return prisma.$transaction(
@@ -139,7 +147,7 @@ export async function saveTag(ctx: AuthContext, raw: unknown, id?: string) {
       if (id) {
         await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "DealerTag" WHERE "id" = ${id} FOR UPDATE`);
         const old = await tx.dealerTag.findUnique({ where: { id } });
-        if (!old) throw new ApiError(404, "Tag not found.");
+        if (!old) throw new ApiError(404, L["dealer_tags.error.tag_not_found"]);
         const row = await tx.dealerTag.update({ where: { id }, data });
         await audit(
           tx,
@@ -230,31 +238,32 @@ export async function listTagSalesOfficers(ctx: AuthContext) {
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 export async function requestTag(ctx: AuthContext, raw: unknown) {
+  const L = await labels();
   if (isAdministrativeRole(ctx.role))
-    throw new ApiError(403, "Use the separate Admin direct action.");
+    throw new ApiError(403, L["dealer_tags.error.use_direct"]);
   const pair = pairSchema.parse(raw);
-  await assertDealerScope(ctx, pair.dealerId);
+  await assertDealerScope(ctx, pair.dealerId, L);
   const admins = await getSuperAdminIds();
   return prisma.$transaction(
     async (tx) => {
-      const { tag, assignment } = await lockPair(tx, pair.dealerId, pair.tagId);
-      await assertDealerScope(ctx, pair.dealerId, tx);
+      const { tag, assignment } = await lockPair(tx, pair.dealerId, pair.tagId, L);
+      await assertDealerScope(ctx, pair.dealerId, L, tx);
       const managerId =
         ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId, tx) : null;
       const recipients = managerId ? [managerId] : admins;
       if (pair.operation === "ADD" && !tag.isActive)
-        throw new ApiError(422, "Inactive tags cannot be assigned.");
+        throw new ApiError(422, L["dealer_tags.error.inactive_tag"]);
       if (!!assignment?.isActive === (pair.operation === "ADD"))
         throw new ApiError(
           409,
-          pair.operation === "ADD" ? "This tag is already assigned." : "This tag is not assigned.",
+          pair.operation === "ADD" ? L["dealer_tags.error.already_assigned"] : L["dealer_tags.error.not_assigned"],
         );
       if (
         await tx.dealerTagRequest.findFirst({
           where: { dealerId: pair.dealerId, tagId: pair.tagId, status: { in: pending } },
         })
       )
-        throw new ApiError(409, "A request for this dealer/tag is already awaiting approval.");
+        throw new ApiError(409, L["dealer_tags.error.duplicate_pending"]);
       const row = await tx.dealerTagRequest.create({
         data: {
           ...pair,
@@ -280,7 +289,7 @@ export async function requestTag(ctx: AuthContext, raw: unknown) {
         tx,
         recipients,
         row.id,
-        `Dealer tag ${pair.operation === "ADD" ? "addition" : "revocation"} awaiting approval`,
+        pair.operation === "ADD" ? L["dealer_tags.notify.add_pending"] : L["dealer_tags.notify.revoke_pending"],
       );
       return row;
     },
@@ -288,14 +297,15 @@ export async function requestTag(ctx: AuthContext, raw: unknown) {
   );
 }
 export async function directTag(ctx: AuthContext, raw: unknown) {
-  admin(ctx);
+  const L = await labels();
+  admin(ctx, L);
   const pair = pairSchema.parse(raw);
   assertAdminPermission(ctx, "dealerTags", pair.operation === "ADD" ? "assign" : "revoke");
   return prisma.$transaction(
     async (tx) => {
-      const { tag, assignment } = await lockPair(tx, pair.dealerId, pair.tagId);
+      const { tag, assignment } = await lockPair(tx, pair.dealerId, pair.tagId, L);
       if (pair.operation === "ADD" && !tag.isActive)
-        throw new ApiError(422, "Inactive tags cannot be assigned.");
+        throw new ApiError(422, L["dealer_tags.error.inactive_tag"]);
       const changedAssignment = await applyAssignment(
         tx,
         pair.dealerId,
@@ -314,21 +324,22 @@ export async function directTag(ctx: AuthContext, raw: unknown) {
   );
 }
 export async function decideTagRequest(ctx: AuthContext, id: string, raw: unknown) {
+  const L = await labels();
   const { action, remarks } = decisionSchema.parse(raw);
   assertAdminPermission(ctx, "dealerTags", action);
   if (action === "reject" && !remarks)
-    throw new ApiError(422, "A reason is required to reject a tag request.");
+    throw new ApiError(422, L["dealer_tags.error.reason_required"]);
   if (ctx.role === Role.SALES_OFFICER)
-    throw new ApiError(403, "Only the applicable RM or Super Admin can decide requests.");
+    throw new ApiError(403, L["dealer_tags.error.decide_forbidden"]);
   const initial = await prisma.dealerTagRequest.findUnique({ where: { id } });
-  if (!initial) throw new ApiError(404, "Tag request not found.");
+  if (!initial) throw new ApiError(404, L["dealer_tags.error.request_not_found"]);
   const admins = await getSuperAdminIds();
   return prisma.$transaction(
     async (tx) => {
-      const { tag, assignment } = await lockPair(tx, initial.dealerId, initial.tagId);
+      const { tag, assignment } = await lockPair(tx, initial.dealerId, initial.tagId, L);
       const row = await tx.dealerTagRequest.findUniqueOrThrow({ where: { id } });
       if (!pending.includes(row.status as (typeof pending)[number]))
-        throw new ApiError(409, "This request has already been decided.");
+        throw new ApiError(409, L["dealer_tags.error.already_decided"]);
       if (row.status === PlanStatus.PENDING_RM) {
         const managerId = await getCurrentManagerId(row.requestedById, tx);
         if (
@@ -336,18 +347,12 @@ export async function decideTagRequest(ctx: AuthContext, id: string, raw: unknow
           ctx.userId !== managerId ||
           ctx.userId === row.requestedById
         )
-          throw new ApiError(
-            403,
-            "The applicable RM must review this request before Admin final approval.",
-          );
+          throw new ApiError(403, L["dealer_tags.error.rm_must_review"]);
       } else if (!isAdministrativeRole(ctx.role))
-        throw new ApiError(403, "Only Super Admin can perform final approval.");
-      await assertDealerScope(ctx, row.dealerId, tx);
+        throw new ApiError(403, L["dealer_tags.error.final_admin_only"]);
+      await assertDealerScope(ctx, row.dealerId, L, tx);
       if (action === "approve" && row.operation === "ADD" && !tag.isActive)
-        throw new ApiError(
-          422,
-          "Inactive tags cannot be assigned. Reactivate the tag or reject the request.",
-        );
+        throw new ApiError(422, L["dealer_tags.error.inactive_tag_approve"]);
       const next =
         action === "reject"
           ? PlanStatus.REJECTED
@@ -388,8 +393,8 @@ export async function decideTagRequest(ctx: AuthContext, id: string, raw: unknow
         next === PlanStatus.PENDING_ADMIN ? admins : [row.requestedById],
         id,
         next === PlanStatus.PENDING_ADMIN
-          ? "Dealer tag request awaiting Admin final approval"
-          : `Dealer tag request ${next.toLowerCase()}`,
+          ? L["dealer_tags.notify.awaiting_final"]
+          : L["dealer_tags.notify.decided"].replace("{status}", next.toLowerCase()),
       );
       return { status: next };
     },

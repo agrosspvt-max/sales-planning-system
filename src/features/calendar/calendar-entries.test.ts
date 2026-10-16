@@ -15,8 +15,8 @@ import type { AuthContext } from "@/lib/http";
 
 /* ---------------------------------- fixture ---------------------------------- */
 const GROUPS: Record<string, string> = { g1: "CG", g2: "MP" };
-const USERS: Record<string, { name: string; role: Role; groupId: string | null }> = {
-  so1: { name: "Rahul Patidar", role: Role.SALES_OFFICER, groupId: "g1" },
+const USERS: Record<string, { name: string; role: Role; groupId: string | null; territory?: string }> = {
+  so1: { name: "Rahul Patidar", role: Role.SALES_OFFICER, groupId: "g1", territory: "Raigarh" },
   so2: { name: "Deepak", role: Role.SALES_OFFICER, groupId: "g1" },
   so3: { name: "Outsider", role: Role.SALES_OFFICER, groupId: "g2" },
   rm1: { name: "Santosh Tripathi", role: Role.REGIONAL_MANAGER, groupId: "g1" },
@@ -27,7 +27,7 @@ const ctx = (userId: string): AuthContext => ({ userId, username: userId, role: 
 const DEALERS: Record<string, { name: string; officer: string }> = { d1: { name: "ABC Traders", officer: "so1" }, d2: { name: "XYZ Stores", officer: "so2" } };
 const TODAY = "2026-10-05"; // currentBusinessDate() is real here; the tests use dates relative to the real "today" instead (below)
 
-type Row = { id: string; ownerId: string; date: Date; kind: string; text: string | null; taskSection: string | null; dealerId: string | null; amount: number | null; entryType: string | null; paymentMode: string | null; typedDealerName: string | null; marketName: string | null; dealerVisits: number | null; newPartyVisits: number | null; materializedAt: Date | null; createdAt: Date };
+type Row = { id: string; ownerId: string; date: Date; kind: string; text: string | null; taskSection: string | null; dealerId: string | null; amount: number | null; entryType: string | null; paymentMode: string | null; typedDealerName: string | null; marketName: string | null; dealerVisits: number | null; newPartyVisits: number | null; materializedAt: Date | null; createdAt: Date; createdById?: string | null };
 let store: Row[] = [];
 const finalizedDays = new Set<string>(); // "owner|YYYY-MM-DD"
 let seq = 0;
@@ -37,8 +37,10 @@ const scopeOf = (c: AuthContext): { all: boolean; ids: string[] } => {
   if (c.role === Role.SALES_OFFICER) return { all: false, ids: [c.userId] };
   return { all: false, ids: [c.userId, ...Object.entries(USERS).filter(([, u]) => u.role === Role.SALES_OFFICER && u.groupId === c.groupId).map(([id]) => id)] };
 };
-const withOwner = (r: Row) => { const u = USERS[r.ownerId]!; return { ...r, owner: { name: u.name, role: u.role, group: u.groupId ? { id: u.groupId, name: GROUPS[u.groupId]! } : null } }; };
+const withOwner = (r: Row) => { const u = USERS[r.ownerId]!; const c = r.createdById ? USERS[r.createdById as string] : null; return { ...r, owner: { name: u.name, role: u.role, group: u.groupId ? { id: u.groupId, name: GROUPS[u.groupId]! } : null }, createdBy: c ? { name: c.name, role: c.role } : null }; };
 
+const inactive = new Set<string>();
+const reminderAlerts: Record<string, unknown>[] = []; // every assigned-reminder alert the service asked for
 const alertCalls: Record<string, unknown>[] = []; // every automatic-task alert the service asked for
 const prisma = {
   $transaction: async <T,>(fn: (tx: unknown) => Promise<T>) => fn(prisma),
@@ -50,6 +52,7 @@ const prisma = {
     update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => { const r = store.find((x) => x.id === where.id)!; Object.assign(r, data); return withOwner(r); },
     delete: async ({ where }: { where: { id: string } }) => { store = store.filter((r) => r.id !== where.id); return {}; },
   },
+  scheme: { findMany: async () => [{ id: "sch1", schemeName: "Monsoon Offer" }] },
   calendarNote: { findMany: async () => [] },
   dealerSchemePlan: { findMany: async () => [] },
   dealer: { findMany: async ({ where }: { where: { id: { in: string[] } } }) => where.id.in.filter((id) => DEALERS[id]).map((id) => ({ id, name: DEALERS[id]!.name })) },
@@ -57,7 +60,8 @@ const prisma = {
     findMany: async ({ where }: { where: { groupId?: string; id?: { in: string[] }; role?: { in: Role[] } } }) =>
       Object.entries(USERS)
         .filter(([id, u]) => (!where.groupId || u.groupId === where.groupId) && (!where.id || where.id.in.includes(id)) && (!where.role || where.role.in.includes(u.role)))
-        .map(([id, u]) => ({ id, name: u.name, role: u.role, group: u.groupId ? { id: u.groupId, name: GROUPS[u.groupId]! } : null })),
+        .map(([id, u]) => ({ id, name: u.name, role: u.role, territory: u.territory ?? null, group: u.groupId ? { id: u.groupId, name: GROUPS[u.groupId]! } : null })),
+    findUnique: async ({ where }: { where: { id: string } }) => { const u = USERS[where.id]; return u ? { id: where.id, name: u.name, role: u.role, isActive: !inactive.has(where.id), deletedAt: null } : null; },
   },
   $queryRaw: async (a: unknown, ...rest: unknown[]) => {
     const sql = (Array.isArray(a) ? Prisma.sql(a as unknown as TemplateStringsArray, ...rest) : a) as Prisma.Sql;
@@ -85,7 +89,7 @@ function load(current: { ctx: AuthContext | null }) {
     },
     "@/features/daily-work/billing-task-visibility.server": { loadCalendarBillingTasks: async () => [] }, // own suite: billing-calendar.test.ts
     "@/lib/calendar": localRequire(resolve("src/lib/calendar.ts")),
-    "@/features/notifications/task-alerts.server": { alertLabels: async () => ({}), notifyAutoTaskCreated: async (_tx: unknown, _labels: unknown, alert: Record<string, unknown>) => { alertCalls.push(alert); } }, // own suite: notifications/task-alerts.test.ts
+    "@/features/notifications/task-alerts.server": { alertLabels: async () => ({ ...DEFAULT_LABELS }), notifyAutoTaskCreated: async (_tx: unknown, _labels: unknown, alert: Record<string, unknown>) => { alertCalls.push(alert); }, notifyReminderAssigned: async (_tx: unknown, _labels: unknown, alert: Record<string, unknown>) => { reminderAlerts.push(alert); } }, // own suite: notifications/task-alerts.test.ts
   };
   void current;
   runInNewContext(code, { exports, Date, console, require: (id: string) => (id in mocks ? mocks[id] : localRequire(id.startsWith("@/") ? resolve("src", id.slice(2)) : id)) }, { filename });
@@ -150,7 +154,7 @@ async function main() {
   assert.equal(await status(() => svc.createCalendarEntry(ctx("so1"), { ...base, section: "VISITS" })), 422, "visits need a count");
   assert.equal(await status(() => svc.createCalendarEntry(ctx("so1"), { ...base, section: "APPOINTMENT", dealerName: " " })), 422);
   assert.equal(await status(() => svc.createCalendarEntry(ctx("so1"), { ...base, section: "OTHERS", text: "" })), 422);
-  assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { ...base, section: "OTHERS", text: "x" })), 403, "only SO/RM own Daily Work");
+  assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { ...base, section: "OTHERS", text: "x" })), 422, "an Admin owns no Daily Work: a task needs a Sales Officer recipient");
   assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "REMINDER", date: FUTURE, text: "Board" })), 0, "Admin can still add calendar-only entries");
   // A finalized Daily Work for TODAY is never mutated: today's task is refused, a future one is fine.
   const today = dayKey(0);
@@ -219,6 +223,70 @@ async function main() {
   assert.ok(ids(so1.entries).length > 0 && so1.myDealers.map((d) => d.name).join() === "ABC Traders", "the Daily Task form is offered only the caller's own dealers");
   assert.equal((await calendar("admin")).myDealers.length, 0, "Admin has no Daily Task form data");
 
+  { const opts = (await calendar("admin")).officers; const byId = (id: string) => opts.find((o) => o.id === id)!; same([[byId("so1").territory, byId("so1").state], [byId("so2").territory, byId("so2").state]], [["Raigarh", "CG"], [null, "CG"]], "officer options carry territory + State (so same-name officers can be told apart in the recipient list)"); }
+  // 11 — Admin assigns a Manual Task / Reminder to a Sales Officer; the creator is kept; nothing widens for SO / RM.
+  {
+    alertCalls.length = 0; reminderAlerts.length = 0; const before = store.length;
+    const assigned = await svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "RECOVERY", dealerId: "d1", amount: 4000, paymentMode: "UPI", ownerId: "so1" });
+    same([assigned.ownerId, assigned.assignedBy, assigned.task?.entryType, assigned.task?.section, assigned.canDelete], ["so1", { id: "admin", name: "Admin", roleLabel: "Admin" }, "REGULAR", "RECOVERY", true], "owned by the SO, Admin recorded as the creator, Regular recovery task");
+    same([store.find((r) => r.id === assigned.id)!.ownerId, store.find((r) => r.id === assigned.id)!.createdById], ["so1", "admin"], "stored: owner = recipient, createdBy = Admin (audit)");
+    same(alertCalls.map((a) => [a.source, a.ownerId, a.date, a.amount]), [["CALENDAR", "so1", FUTURE, 4000]], "exactly ONE alert, for the recipient's concerned people");
+    // the recipient's dealers decide validity (not the Admin's)
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "SALES", dealerId: "d2", amount: 10, ownerId: "so1" })), 403, "a dealer of ANOTHER officer is refused");
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "SALES", dealerId: "d1", amount: 10, ownerId: "so1" })), 0);
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "SALES", dealerId: "d1", amount: 0, ownerId: "so1" })), 422, "same validation as the SO's own form");
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: dayKey(-1), section: "OTHERS", text: "x", ownerId: "so1" })), 422, "no past date");
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "NOPE", ownerId: "so1" })), 422, "an unavailable section");
+    // recipient rules
+    for (const [who, why] of [["admin", "Admin owns no Daily Work"], ["ghost", "an unknown user"]] as const)
+      assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "OTHERS", text: "x", ownerId: who })), who === "admin" ? 422 : 422, why);
+    const rmTask = await svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "OTHERS", text: "RM assignment", ownerId: "rm1" });
+    same([store.find((r) => r.id === rmTask.id)!.ownerId, store.find((r) => r.id === rmTask.id)!.createdById], ["rm1", "admin"], "Admin can assign a task to an RM with creator preserved");
+    const rmReminder = await svc.createCalendarEntry(ctx("admin"), { kind: "REMINDER", date: FUTURE, text: "RM reminder", ownerId: "rm1" });
+    assert.equal(store.find((r) => r.id === rmReminder.id)!.ownerId, "rm1");
+    inactive.add("rm1");
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: FUTURE, section: "OTHERS", text: "x", ownerId: "rm1" })), 422, "inactive RM refused");
+    inactive.delete("rm1");
+    inactive.add("so2");
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "REMINDER", date: FUTURE, text: "x", ownerId: "so2" })), 422, "an inactive Sales Officer cannot receive work");
+    inactive.delete("so2");
+    // SO / RM can never assign (and an SO cannot create for a colleague)
+    for (const [who, target] of [["so1", "so2"], ["rm1", "so1"], ["so2", "so1"]] as const) {
+      assert.equal(await status(() => svc.createCalendarEntry(ctx(who), { kind: "TASK", date: FUTURE, section: "OTHERS", text: "x", ownerId: target })), 403, `${who} cannot assign a task to ${target}`);
+      assert.equal(await status(() => svc.createCalendarEntry(ctx(who), { kind: "REMINDER", date: FUTURE, text: "x", ownerId: target })), 403, `${who} cannot assign a reminder to ${target}`);
+    }
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("so1"), { kind: "TASK", date: FUTURE, section: "OTHERS", text: "mine", ownerId: "so1" })), 0, "naming yourself is just your own entry");
+    // finalized day: the recipient's day decides
+    const today2 = dayKey(0); finalizedDays.add(`so1|${today2}`);
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: today2, section: "OTHERS", text: "late", ownerId: "so1" })), 409, "a finalized day is never mutated");
+    assert.equal(await status(() => svc.createCalendarEntry(ctx("admin"), { kind: "TASK", date: today2, section: "OTHERS", text: "ok", ownerId: "so2" })), 0, "another officer's open day is fine");
+    finalizedDays.clear();
+    const stored = store.length;
+    // reminders: personal stays personal and silent; assigned goes to the SO, stays a reminder
+    reminderAlerts.length = 0;
+    const personal = await svc.createCalendarEntry(ctx("admin"), { kind: "REMINDER", date: FUTURE, text: "my own" });
+    same([personal.ownerId, personal.assignedBy, personal.task, reminderAlerts.length], ["admin", null, null, 0], "personal reminder: owner Admin, no attribution line, no alert");
+    const rem = await svc.createCalendarEntry(ctx("admin"), { kind: "REMINDER", date: FUTURE, text: "call dealers", ownerId: "so2" });
+    same([rem.ownerId, rem.kind, rem.task, rem.assignedBy?.name, rem.materialized, reminderAlerts.map((a) => [a.ownerId, a.creatorId, a.entityId === rem.id])], ["so2", "REMINDER", null, "Admin", false, [["so2", "admin", true]]], "assigned reminder: SO-owned, still a reminder (no Daily Work task), one alert");
+    assert.equal(store.length - stored, 2);
+    // visibility + edit / delete rules
+    const so2Cal = await calendar("so2"); assert.ok(so2Cal.entries.some((e) => e.id === rem.id), "shows in the recipient's Calendar");
+    const so2Entry = so2Cal.entries.find((e) => e.id === rem.id)!; same([so2Entry.canEdit, so2Entry.canDelete], [false, false], "the recipient cannot remove / edit an Admin assignment");
+    assert.equal(await status(() => svc.deleteCalendarEntry(ctx("so2"), rem.id)), 403); assert.equal(await status(() => svc.updateCalendarEntry(ctx("so2"), rem.id, { text: "x" })), 403);
+    assert.ok(!(await calendar("so1")).entries.some((e) => e.id === rem.id), "another officer never sees it");
+    assert.equal(await status(() => svc.updateCalendarEntry(ctx("admin"), rem.id, { text: "call all dealers" })), 0, "the creator edits it");
+    assert.equal(await status(() => svc.deleteCalendarEntry(ctx("admin"), assigned.id)), 0, "the creator deletes an un-materialized assignment");
+    assert.equal(await status(() => svc.deleteCalendarEntry(ctx("admin"), personal.id)), 0);
+    // profile facts for the accordion header: the entry owner's own territory / State (never the creator's), missing values stay null
+    const people = (await calendar("admin")).people;
+    same([people.so1, people.so2, people.rm1], [{ role: "SALES_OFFICER", territory: "Raigarh", state: "CG" }, { role: "SALES_OFFICER", territory: null, state: "CG" }, { role: "REGIONAL_MANAGER", territory: null, state: "CG" }], "territory / state / role come from each employee's own profile");
+    assert.equal((await calendar("admin")).canAssign, true); assert.equal((await calendar("rm1")).canAssign, false); assert.equal((await calendar("so1")).canAssign, false);
+    // the recipient's dealers for the Admin form
+    same((await svc.recipientDealers(ctx("admin"), "so1")).map((d) => d.id), ["d1"], "the SO's own dealers (not the Admin's, not another SO's)");
+    for (const who of ["so1", "so2", "rm1"]) assert.equal(await status(() => svc.recipientDealers(ctx(who), "so1")), 403, `${who} cannot read a recipient's dealers`);
+    same(await svc.recipientDealers(ctx("admin"), "rm1"), [], "RM recipients are accepted; their own dealer list may be empty"); assert.equal(store.length >= before, true);
+  }
+
   // 10 — UI wiring (source-level): the two actions (Daily Task + Reminder), My/Team switch (RM only), State + Sales Officer filters, creator shown.
   {
     const ui = readFileSync("src/features/calendar/calendar-view.tsx", "utf8");
@@ -229,9 +297,9 @@ async function main() {
     assert.ok(ui.includes("role === Role.REGIONAL_MANAGER && (") && ui.includes("L.myCalendar") && ui.includes("L.teamCalendar"), "My/Team switch is RM-only");
     assert.ok(ui.includes('params.set("groupId", groupId)') && ui.includes('params.set("view", view)'), "filters travel to the server (which re-validates them)");
     assert.ok(ui.includes("`${o.name} — ${o.roleLabel}`"), "Sales Officer filter shows name + role (RMs included)");
-    assert.ok(ui.includes("L.addedBy") && ui.includes("e.ownerName") && ui.includes("e.ownerRoleLabel"), "every entry shows who added it");
+    assert.ok(ui.includes("L.assignedBy") && ui.includes("e.assignedBy.name") && ui.includes("e.assignedBy.roleLabel"), "work assigned by an Admin shows who assigned it");
     assert.ok(!ui.includes("L.addNote"), "the old Add Note button is replaced by the two actions (existing notes still render)");
-    assert.ok(ui.includes("function NotesSection") && ui.includes("L.editNote"), "existing notes keep view/edit/delete");
+    assert.ok(ui.includes("function NoteItem") && ui.includes("L.editNote"), "existing notes keep view/edit/delete");
     assert.ok(readFileSync("src/features/calendar/calendar-view.tsx", "utf8").includes("payload?.taskSections"), "Daily Task types come from the server's ACTIVE Daily Work sections, not a hard-coded list");
   }
 
@@ -239,13 +307,21 @@ async function main() {
 // ---- Calendar redesign: ONE selected date + ONE data source drive both layouts; the details are grouped / collapsible; wording from Edit Labels ----
 {
   const ui = readFileSync("src/features/calendar/calendar-view.tsx", "utf8");
-  assert.equal((ui.match(/useQuery</g) ?? []).length, 1, "one calendar query for both the desktop panel and the phone agenda");
+  assert.equal((ui.match(/useQuery<CalendarPayload>/g) ?? []).length, 1, "one calendar query for both the desktop panel and the phone agenda (the only other query is the Admin form's recipient-dealer list, enabled on demand)");
   assert.equal((ui.match(/<DayDetails/g) ?? []).length, 1, "the details are rendered once (CSS places them: right of the grid on desktop, below it on a phone)");
   assert.ok(ui.includes("lg:grid-cols-[minmax(0,58fr)_minmax(0,42fr)]") && ui.includes("lg:hidden") && ui.includes('data-testid="calendar-dots"'), "58 / 42 desktop split; dots (not event strips) on a phone");
   assert.ok(ui.includes("aria-expanded={expanded}") && ui.includes("useState<ReadonlySet<string>>(new Set())") && ui.includes("key={selected}"), "employee sections: collapsed to start, several may be open, reset for each date");
   assert.ok(ui.includes("isPhone()") && ui.includes("setSelected(todayKey)"), "Today selects today; month navigation never leaves stale details");
   for (const key of ["selected_day", "entry_count_one", "entry_count_many", "expand_employee", "collapse_employee"]) assert.ok(ui.includes(`calendar.${key}`) && (DEFAULT_LABELS as Record<string, string>)[`calendar.${key}`], `label calendar.${key}`);
   assert.ok(!ui.includes("DateDetailDialog"), "the date dialog was replaced by the inline panel");
+  // Selected-day list: one numbered list per employee, no per-task boxes, headings from label templates, totals for Admin / RM, Admin assignment.
+  assert.ok(ui.includes('data-testid="day-list"') && ui.includes('data-testid="item-number"') && ui.includes("orderedDayItems(g)") && ui.includes("divide-y"), "ONE numbered list per employee");
+  assert.ok(!/rounded-md border bg-card p-3[^\n]*data-testid="calendar-billing-task"|function (ConversionCard|BillingTaskCard|EntryCard|PartyAppointmentCard)\b/.test(ui), "the bordered per-task cards are gone");
+  assert.ok(!ui.includes("L.colTaskType") && !ui.includes("L.colRecoveryType") && !ui.includes("L.btScheduledDate") && !ui.includes('L.salesOfficer}: {t.ownerName}'), "redundant Task Type / Recovery Type / Sales Officer / Scheduled date lines are removed");
+  assert.ok(ui.includes('taskHeading(L, "MANUAL"') && ui.includes('taskHeading(L, "AUTO"') && ui.includes("employeeHeaderText(") && ui.includes('data-testid="day-totals"') && ui.includes("dayTotals(groups"), "headings, employee header and totals");
+  assert.ok(ui.includes('showTotals = role !== Role.SALES_OFFICER') && ui.includes("canAssign") && ui.includes("/api/calendar/recipient-dealers"), "totals for Admin / RM; Admin assignment with the recipient's dealers");
+  assert.ok(!/Calendar Task|taskTypeCalendar/.test(ui) && !ui.includes('"CALENDAR"'), "Calendar is never a task type");
+  for (const key of ["heading.manual", "heading.manual_sub", "heading.auto", "heading.auto_sub", "subtype.regular", "subtype.scheme", "subtype.billing_exception", "assigned_by", "totals", "assign.recipient", "assign.select_officer", "assign.reminder_for", "assign.myself", "error.assign_forbidden", "error.recipient_invalid", "error.select_recipient", "error.dealer_not_recipient"]) assert.ok((DEFAULT_LABELS as Record<string, string>)[`calendar.${key}`], `label calendar.${key}`);
 }
 console.log("calendar-entries.test.ts — all assertions passed");
 }

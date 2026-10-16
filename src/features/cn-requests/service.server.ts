@@ -13,6 +13,7 @@ import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { getResolvedLabels } from "@/features/labels/service.server";
 import { notifyAutoTaskCreated } from "@/features/notifications/task-alerts.server";
+import { recordTaskReschedule } from "@/features/tasks/task-history.server";
 import { lockDailyWorkDay } from "@/features/daily-work/day-lock.server";
 import { reverseMaterializedDailyWorkContribution } from "@/features/daily-work/auto-task-materialization.server";
 import {
@@ -1306,6 +1307,9 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
         },
       });
       if (updated.count === 0) throw new ApiError(409, L["cn_requests.error.task_changed"]);
+      // A genuine date CHANGE (an already-dated task moved) appends its history row in this same transaction; first-time scheduling (no previous date) and a same-date save do not.
+      const previousTaskDate = event.taskDate?.toISOString().slice(0, 10) ?? null;
+      if (previousTaskDate) await recordTaskReschedule(tx, ctx, { sourceType: "CN_PAYMENT", sourceId: taskId, ownerId: event.cnRequest.officerId, previousDate: previousTaskDate, newDate: taskDate });
       // Rescheduling returns the task to a future date, so its "confirmed for today" acknowledgement is cleared.
       // (Raw SQL — the column is not part of the generated client type.)
       await tx.$executeRaw(Prisma.sql`UPDATE "CnPaymentEvent" SET "dailyWorkConfirmed" = false WHERE "id" = ${taskId}`);
@@ -1319,7 +1323,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
     if (locked.length === 0) throw new ApiError(404, L["cn_requests.error.not_found"]);
     const existing = await tx.cnRequest.findUnique({
       where: { id },
-      select: { id: true, officerId: true, status: true, paymentTrackingMode: true, acceptedAt: true, cnExpiryDays: true,
+      select: { id: true, officerId: true, status: true, paymentTrackingMode: true, acceptedAt: true, cnExpiryDays: true, taskDate: true,
         legacyDailyWorkEntryId: true, legacyDailyWorkContribution: true },
     });
     if (!existing) throw new ApiError(404, L["cn_requests.error.not_found"]);
@@ -1342,6 +1346,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
         AND "status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED}
         AND "legacyDailyWorkEntryId" IS NOT DISTINCT FROM ${existing.legacyDailyWorkEntryId}`);
     if (updated === 0) throw new ApiError(409, L["cn_requests.error.legacy_task_inactive"]);
+    if (existing.taskDate) await recordTaskReschedule(tx, ctx, { sourceType: "CN_LEGACY", sourceId: id, ownerId: existing.officerId, previousDate: String(existing.taskDate instanceof Date ? existing.taskDate.toISOString() : existing.taskDate).slice(0, 10), newDate: taskDate });
     const rows = await tx.$queryRaw<LegacyCnTaskRawRow[]>(Prisma.sql`${LEGACY_TASK_SELECT} WHERE c."id" = ${id}`);
     if (!rows[0]) throw new ApiError(409, L["cn_requests.error.legacy_task_inactive"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `Legacy CN follow-up task scheduled for ${taskDate}` }, tx);

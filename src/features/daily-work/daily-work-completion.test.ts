@@ -15,7 +15,7 @@ import { dailyWorkServiceInfrastructureMocks, sectionFactsRow } from "./service-
 
 interface Entry {
   id: string; officerId: string; workDate: string; batchId: string; section: string; rowKey: string;
-  dealerId: string | null; typedDealerName: string | null; todaysPlan: string | null; todaysActual: string | null;
+  dealerId: string | null; typedDealerName: string | null; marketName?: string | null; monthlyPlanId?: string | null; todaysPlan: string | null; todaysActual: string | null;
   resultStatus: string | null; entryType: string; schemeId: string | null;
   dealerVisits: number | null; newPartyVisits: number | null;
   actualDealerVisits: number | null; actualNewPartyVisits: number | null;
@@ -121,7 +121,8 @@ function makeFake() {
     }
     if (text.startsWith('SELECT "section", "batchId"')) {
       const officerId = v[0] as string, workDate = v[1] as string, currentBatchId = v[2] as string;
-      return entries.filter((row) => row.officerId === officerId && row.workDate === workDate && row.batchId !== currentBatchId && ["PLAN_SUBMITTED", "FINALIZED", "SUBMITTED"].includes(row.status)).map((row) => ({ ...row }));
+      return entries.filter((row) => row.officerId === officerId && row.workDate === workDate && row.batchId !== currentBatchId && ["PLAN_SUBMITTED", "FINALIZED", "SUBMITTED"].includes(row.status)
+        && (row.section !== "APPOINTMENT" || row.monthlyPlanId || (row.typedDealerName ?? "").trim() || (row.marketName ?? "").trim())).map((row) => ({ ...row }));
     }
     if (text.startsWith('SELECT "id", "batchId", "dealerId", "rowKey"')) {
       const officerId = v[0] as string, section = v[1] as string, workDate = v[2] as string, currentBatchId = v[3] as string;
@@ -534,7 +535,37 @@ async function todaysPlanRules() {
   assert.ok(!between("export async function saveDailyWork(", "export async function submitDailyWork(").includes("invalidPlanRows"), "Save Draft is not gated");
 }
 
+async function appointmentPlanValidation() {
+  at("2026-09-21T10:00:00+05:30");
+  for (const [name, market] of [["", ""], ["Dealer", ""], ["", "Market"], ["  ", "  "]]) {
+    const f = makeFake(), svc = await readyToday(f);
+    const template = f.entries.find((r) => r.section === "SALES")!;
+    f.entries.push({ ...template, id: "appt", section: "APPOINTMENT", dealerId: null, typedDealerName: name, marketName: market });
+    f.entries.push({ ...template, id: "valid-appt", section: "APPOINTMENT", dealerId: null, typedDealerName: "Valid Dealer", marketName: "Valid Market" });
+    const batch = f.currentDay().currentBatchId;
+    const status = await svc.getDailyStatus(SO, DATE);
+    assert.equal(status.canSubmit, false, "partial appointments cannot be submitted even with a saved No Plan flag");
+    await expectStatus(() => svc.submitDailyWorkDay(SO, { workDate: DATE }), 422, "incomplete appointment");
+    assert.equal(f.currentDay().currentBatchId, batch);
+    assert.ok(f.entries.every((r) => r.status === "DRAFT"));
+  }
+  for (const linked of [false, true]) {
+    const f = makeFake(), svc = await readyToday(f);
+    const template = f.entries.find((r) => r.section === "SALES")!;
+    f.entries.push({ ...template, id: "appt", section: "APPOINTMENT", dealerId: null, typedDealerName: linked ? null : "Dealer", marketName: "Market", monthlyPlanId: linked ? "approved-plan" : null });
+    assert.equal((await svc.submitDailyWorkDay(SO, { workDate: DATE })).ok, true, "complete manual and linked appointments submit");
+  }
+  // Historical blank submitted placeholders must not block a valid report.
+  const f = makeFake(), svc = await readyToday(f);
+  await svc.submitDailyWorkDay(SO, { workDate: DATE });
+  const sales = f.entries.find((r) => r.section === "SALES")!;
+  f.entries.push({ ...sales, id: "old-blank", section: "APPOINTMENT", dealerId: null, typedDealerName: " ", marketName: null });
+  await svc.enterDailyActual(SO, { section: "SALES", workDate: DATE, entries: [{ entryId: sales.id, todaysActual: 90 }] });
+  assert.equal((await svc.submitDailyReport(SO, { workDate: DATE, selfRating: 7 })).ok, true, "no result is required for a wholly empty historical row");
+}
+
 async function main() {
+  await appointmentPlanValidation();
   await todaysPlanRules();
   at("2026-09-22T09:00:00+05:30"); // the legacy scenarios below submit DATE's report the next morning, inside its window
   await previousDayRules();

@@ -1,3 +1,4 @@
+import { recordTaskReschedule } from "@/features/tasks/task-history.server";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { Prisma, Role } from "@prisma/client";
@@ -198,6 +199,8 @@ export async function rescheduleBillingTask(ctx: AuthContext, id: string, rawDat
       data: { taskDate: new Date(`${taskDate}T00:00:00Z`), rescheduled: true, dailyWorkEntryId: null, dailyWorkContribution: null, dailyWorkConfirmed: false, materializedAt: null },
     });
     if (updated.count === 0) throw new ApiError(409, L["daily_work.billing_tasks.error.changed"]);
+    // The immutable history row commits with the new date (same transaction) — see task-history.server.ts.
+    await recordTaskReschedule(tx, ctx, { sourceType: "BILLING_EXCEPTION", sourceId: id, ownerId: owner!, previousDate: previous, newDate: taskDate });
     if (entryId) {
       // The row now carries nothing (no plan, no other automatic / calendar source): drop it so today's plan no longer lists the dealer.
       await tx.$executeRaw(Prisma.sql`

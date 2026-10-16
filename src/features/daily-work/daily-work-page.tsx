@@ -1131,15 +1131,14 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   const seedHydrationPendingRef = useRef(false);
   useEffect(() => {
     if (!data) return;
-    setRows(data.rows.length > 0
-      ? data.rows.map((r) => ({ entryId: r.entryId, batchId: r.batchId, rowId: r.rowId, monthlyPlanId: r.monthlyPlanId ?? "", marketName: r.marketName, dealerName: r.dealerName, legacy: r.legacy, monthlyStatus: r.monthlyStatus, resultEventId: r.resultEventId, reportedDealerName: r.reportedDealerName ?? "", status: r.status ?? "", rowStatus: r.rowStatus }))
-      : [newApptRow(!!data.partyPlanningEnabled)]);
+    setRows(data.rows.map((r) => ({ entryId: r.entryId, batchId: r.batchId, rowId: r.rowId, monthlyPlanId: r.monthlyPlanId ?? "", marketName: r.marketName, dealerName: r.dealerName, legacy: r.legacy, monthlyStatus: r.monthlyStatus, resultEventId: r.resultEventId, reportedDealerName: r.reportedDealerName ?? "", status: r.status ?? "", rowStatus: r.rowStatus })));
     hydratedRef.current = false;
     seedHydrationPendingRef.current = true;
   }, [data]);
 
   const canEnterStatus = data?.canEnterStatus ?? false;
   const L = {
+    incomplete: useLabel("daily_work.validation.appointment_details_required"),
     dealer: useLabel("col.dealer"), dealers: useLabel("daily_work.count.dealers"),
     manualDealerPlaceholder: useLabel("daily_work.placeholder.dealer_name"), manualMarketPlaceholder: useLabel("daily_work.placeholder.market"),
     addDealer: useLabel("daily_work.action.add_row"), work: useLabel("daily_work.col.todays_appointment"),
@@ -1165,6 +1164,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
     [rows, view],
   );
   const eligible = data?.eligibleMarkets ?? [];
+  const incompleteRows = visibleRows.some((r) => !r.monthlyPlanId && (!r.dealerName.trim() || !r.marketName.trim()));
 
   const combined = useMemo(() => {
     const src: AppointmentRow[] = visibleRows.map((r) => ({ marketName: r.marketName, status: r.status === "" ? null : r.status }));
@@ -1174,9 +1174,11 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   // Dealer Appointment has no Auto Task source: a row is Calendar (from a Calendar Daily Task) or Manual.
   const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.none, calendar: L.taskTypeCalendar };
 
-  // Plan: linked markets by plan id, plus untouched legacy rows echoed back as stored (nothing new can be typed).
-  const payloadRows = () => rows.filter((r) => r.monthlyPlanId !== "" || (r.legacy && r.dealerName.trim() !== ""))
-    .map((r) => (r.legacy ? { rowId: r.rowId, dealerName: r.dealerName, marketName: r.marketName } : { rowId: r.rowId, monthlyPlanId: r.monthlyPlanId }));
+  // Persist explicitly added rows even while incomplete. The submit boundary validates them; silently
+  // dropping a blank/partial row here could submit an older saved version instead of the visible draft.
+  const payloadRows = () => rows.map((r) => (r.legacy
+    ? { rowId: r.rowId, dealerName: r.dealerName, marketName: r.marketName }
+    : { rowId: r.rowId, ...(r.monthlyPlanId ? { monthlyPlanId: r.monthlyPlanId } : {}) }));
 
   const isReport = view === DailyWorkView.REPORT;
   // The result autosave carries ONLY verified choices: Not Appointed (any row), and an Appointed that was already recorded (an echo). A new Appointed on a linked row never travels here.
@@ -1207,7 +1209,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   const updateRow = (entryId: string, patch: Partial<ApptEditRow>) => setRows((rs) => rs.map((r) => (r.entryId === entryId ? { ...r, ...patch } : r)));
   const taken = new Set(rows.map((r) => r.monthlyPlanId).filter((id) => id !== ""));
   const addRow = () => setRows((rs) => [...rs, newApptRow(partyPlanningEnabled)]);
-  const removeRow = (i: number) => setRows((rs) => (rs.length <= 1 ? [newApptRow(partyPlanningEnabled)] : rs.filter((_, j) => j !== i)));
+  const removeRow = (i: number) => setRows((rs) => rs.filter((_, j) => j !== i));
   const chooseResult = (r: ApptEditRow, value: string) => {
     if (value === "APPOINTED" && !r.legacy && partyPlanningEnabled) { setAppointedFor(r); return; } // verified only by the popup's final save
     // Not Appointed clears the name (and the input is disabled for that result); a legacy row's Appointed keeps whatever was typed.
@@ -1315,6 +1317,7 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
         </Table>
       </div>
 
+      {view === DailyWorkView.PLAN && incompleteRows && <p role="alert" className="text-sm text-destructive">{L.incomplete}</p>}
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       {/* Save Draft + save status live in the Plan Type toolbar (Plan and Report); Add Market stays here for PLAN. */}

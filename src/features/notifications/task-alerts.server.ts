@@ -125,3 +125,19 @@ export async function notifyBillingExceptionCreated(tx: Db, L: AlertLabels, e: B
   });
   await notifyMany(recipients, { type: NotificationType.SYSTEM, title, message, relatedEntityType: "BillingException", relatedEntityId: e.exceptionId }, tx);
 }
+
+export interface ReminderAssignedAlert { ownerId: string; creatorId: string; date: string; text: string | null; entityId: string }
+/**
+ * ONE alert per recipient (the Sales Officer, their Regional Manager, the Super Admins — deduplicated) for a reminder an Admin ASSIGNED to someone else. A personal reminder never
+ * alerts; the reminder stays a reminder (no Daily Work task). Written in the transaction that created the entry, so a retry can never repeat it.
+ */
+export async function notifyReminderAssigned(tx: Db, L: AlertLabels, r: ReminderAssignedAlert): Promise<void> {
+  const [owner, creator, recipients] = await Promise.all([
+    tx.user.findUnique({ where: { id: r.ownerId }, select: { name: true } }),
+    tx.user.findUnique({ where: { id: r.creatorId }, select: { name: true } }),
+    alertRecipients(tx, r.ownerId),
+  ]);
+  const text = (r.text ?? "").replace(/\s+/g, " ").trim();
+  const message = fill(L["notifications.reminder.message"], { creator: creator?.name ?? "—", employee: owner?.name ?? "—", date: formatDMY(r.date), text: text.length > 120 ? `${text.slice(0, 117)}…` : text });
+  await notifyMany(recipients, { type: NotificationType.SYSTEM, title: L["notifications.reminder.title"], message, relatedEntityType: "CalendarEntry", relatedEntityId: r.entityId }, tx);
+}

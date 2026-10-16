@@ -17,11 +17,12 @@ import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { useLabel } from "@/features/labels/label-ui";
 import { type LabelKey } from "@/features/labels/labels";
-import { dateKey, groupDayByEmployee, type ConversionEvent, type ConversionStatus, type PartyAppointmentEvent } from "@/lib/calendar";
+import { dateKey, dayTotals, employeeHeaderText, groupDayByEmployee, orderedDayItems, taskSubtype, type ConversionEvent, type TaskSubtype, type TaskTypeKind, type ConversionStatus, type PartyAppointmentEvent } from "@/lib/calendar";
 import { BillingTaskDetailDialog } from "@/features/daily-work/billing-task-ui";
 import type { CalendarBillingTaskDto } from "@/features/daily-work/billing-task-visibility.server";
 import type { CalendarPayload, CalendarNoteDto, CalendarEntryDto, CalendarEntryKind } from "@/features/calendar/calendar.server";
@@ -155,6 +156,12 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
     pmUPI: useLabel("daily_work.payment_mode.upi"),
     pmNEFT_RTGS: useLabel("daily_work.payment_mode.neft_rtgs"),
     pmCASH: useLabel("daily_work.payment_mode.cash"),
+    headingManual: useLabel("calendar.heading.manual"), headingManualSub: useLabel("calendar.heading.manual_sub"),
+    headingAuto: useLabel("calendar.heading.auto"), headingAutoSub: useLabel("calendar.heading.auto_sub"),
+    subREGULAR: useLabel("calendar.subtype.regular"), subSCHEME: useLabel("calendar.subtype.scheme"), subBILLING_EXCEPTION: useLabel("calendar.subtype.billing_exception"), subCN_REQUEST: useLabel("calendar.subtype.cn_request"),
+    schemeName: useLabel("calendar.scheme_name"), assignedBy: useLabel("calendar.assigned_by"), totals: useLabel("calendar.totals"),
+    assignRecipient: useLabel("calendar.assign.recipient"), assignSelect: useLabel("calendar.assign.select_officer"), assignSearch: useLabel("calendar.assign.search"), assignEmpty: useLabel("calendar.assign.empty"),
+    reminderFor: useLabel("calendar.assign.reminder_for"), myself: useLabel("calendar.assign.myself"), pickFirst: useLabel("calendar.assign.pick_first"),
   };
 
   const params = new URLSearchParams({ year: String(cursor.year), month: String(cursor.month) });
@@ -381,10 +388,19 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
 
 type Labels = Record<string, string>;
 
+/** "Manual Task - Recovery [Regular]" / "Auto Task - Recovery [Billing Exception]": the task type, the real section and the real subtype (none → no brackets), from the label templates. */
+function taskHeading(L: Labels, type: TaskTypeKind, section: string, subtype: TaskSubtype): string {
+  const sectionText = L[`sec${section}`] ?? section;
+  const subText = subtype ? L[`sub${subtype}`] ?? "" : "";
+  const template = type === "MANUAL" ? (subText ? L.headingManualSub : L.headingManual) : (subText ? L.headingAutoSub : L.headingAuto);
+  return template.replace("{section}", sectionText).replace("{subtype}", subText);
+}
+
 /**
  * The selected day's details (the old date dialog's content, now inline). With several employees visible (Admin / RM team view) the day's entries are grouped by EMPLOYEE in
- * collapsible sections — name + entry count, collapsed to start, several may stay open; a Sales Officer (or anyone viewing a single employee) sees the entries directly.
- * Expanding / collapsing and picking a date only change the view; every card keeps its own permitted actions.
+ * collapsible sections — "Name [Territory] State" + entry count, collapsed to start, several may stay open; a Sales Officer (or anyone viewing a single employee) sees the
+ * entries directly. Inside each employee ONE numbered list (1, 2, 3… for the date) replaces the per-task boxes. Admin / RM also see the day's totals. Admin may add a Manual Task or
+ * Reminder for a Sales Officer. Expanding / collapsing and picking a date only change the view; every entry keeps its own permitted actions.
  */
 function DayDetails({ dateKey: dk, title, events, partyEvents, notes, entries, billingTasks, payload, loading, role, groupByOfficer, partyPlanningEnabled, labels: L, onChanged }: {
   partyPlanningEnabled: boolean; loading: boolean;
@@ -393,30 +409,44 @@ function DayDetails({ dateKey: dk, title, events, partyEvents, notes, entries, b
 }) {
   const [adding, setAdding] = useState<CalendarEntryKind | null>(null);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set()); // expanded employees (several allowed); starts collapsed for every new date
-  const canTask = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
+  const people = useMemo(() => payload?.people ?? {}, [payload]);
+  const canAssign = payload?.canAssign ?? false;
+  const canTask = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER || canAssign;
   const isPast = dk < dateKey(new Date())!;
   const actions: { kind: CalendarEntryKind; label: string; disabled?: boolean; hint?: string }[] = [
     ...(canTask ? [{ kind: "TASK" as const, label: L.addTask, disabled: isPast, hint: isPast ? L.taskPastDate : undefined }] : []),
     { kind: "REMINDER", label: L.addReminder },
   ];
-  const total = events.length + partyEvents.length + notes.length + entries.length + billingTasks.length;
   const groups = useMemo(() => groupDayByEmployee({ events, partyEvents, billingTasks, entries, notes }), [events, partyEvents, billingTasks, entries, notes]);
+  const total = groups.reduce((n, g) => n + g.count, 0);
+  const totals = useMemo(() => dayTotals(groups, (id) => people[id]?.role), [groups, people]);
+  const showTotals = role !== Role.SALES_OFFICER; // Admin and RM
   const countText = (n: number) => (n === 1 ? L.entryOne : L.entryMany).replace("{n}", String(n));
   const toggle = (id: string) => setOpen((cur) => { const next = new Set(cur); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  const body = (g: { events: ConversionEvent[]; partyEvents: PartyAppointmentEvent[]; billingTasks: CalendarBillingTaskDto[]; entries: CalendarEntryDto[]; notes: CalendarNoteDto[] }) => (
-    <div className="space-y-2">
-      {g.events.map((e) => <ConversionCard key={e.planId} e={e} labels={L} />)}
-      {g.partyEvents.map((e) => <PartyAppointmentCard key={e.planId} e={e} labels={L} linked={partyPlanningEnabled} />)}
-      {g.billingTasks.map((t) => <BillingTaskCard key={t.id} t={t} labels={L} />)}
-      {g.entries.map((e) => <EntryCard key={e.id} e={e} labels={L} onChanged={onChanged} />)}
-      {/* Existing notes keep working (view / edit / delete); new entries are added through the actions above. */}
-      <NotesSection dateKey={dk} notes={g.notes} labels={L} onChanged={onChanged} />
-    </div>
+  const list = (g: (typeof groups)[number]) => (
+    <ol className="divide-y" data-testid="day-list">
+      {orderedDayItems(g).map((it, i) => (
+        <li key={`${it.type}:${it.id}`} className="flex gap-3 py-3 first:pt-0 last:pb-0" data-testid="day-item">
+          <span className="w-6 shrink-0 text-right text-sm font-semibold tabular-nums text-muted-foreground" data-testid="item-number">{i + 1}.</span>
+          <div className="min-w-0 flex-1">
+            {it.type === "event" && <ConversionItem e={it.data as ConversionEvent} labels={L} />}
+            {it.type === "party" && <PartyAppointmentItem e={it.data as PartyAppointmentEvent} labels={L} linked={partyPlanningEnabled} />}
+            {it.type === "billing" && <BillingTaskItem t={it.data as CalendarBillingTaskDto} labels={L} />}
+            {(it.type === "task" || it.type === "entry") && <EntryItem e={it.data as CalendarEntryDto} labels={L} onChanged={onChanged} />}
+            {it.type === "note" && <NoteItem n={it.data as CalendarNoteDto} labels={L} onChanged={onChanged} />}
+          </div>
+        </li>
+      ))}
+    </ol>
   );
+  const accordion = groupByOfficer || groups.length > 1;
   return (
     <section className="space-y-4 rounded-lg border bg-background p-4 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto" aria-label={`${L.selectedDay} ${title}`} data-testid="calendar-day-details">
-      <h2 className="text-base font-semibold" data-testid="selected-date">{title}</h2>
-      {/* Two clear actions (Add Daily Task for SO/RM, Add Reminder for all); each opens its own small form below. */}
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold" data-testid="selected-date">{title}</h2>
+        {showTotals && !loading && <p className="text-sm text-muted-foreground" data-testid="day-totals">{L.totals.replace("{officers}", String(totals.officers)).replace("{tasks}", String(totals.tasks))}</p>}
+      </div>
+      {/* Two clear actions (Add Task for SO / RM / Admin, Add Reminder for all); each opens its own small form below. */}
       <div className="grid grid-cols-2 gap-2">
         {actions.map((a) => (
           <Button key={a.kind} variant={adding === a.kind ? "default" : "outline"} size="sm" className="min-h-9" disabled={a.disabled} title={a.hint} onClick={() => setAdding(adding === a.kind ? null : a.kind)}>
@@ -424,77 +454,74 @@ function DayDetails({ dateKey: dk, title, events, partyEvents, notes, entries, b
           </Button>
         ))}
       </div>
+      {canTask && isPast && <p className="text-xs text-muted-foreground" role="status">{L.taskPastDate}</p>}
       {adding && <AddEntryForm kind={adding} dateKey={dk} payload={payload} labels={L} onCancel={() => setAdding(null)} onSaved={() => { setAdding(null); onChanged(); }} />}
 
       {loading ? <Skeleton className="h-24 w-full" /> : total === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="day-empty">{L.noEvents}</p>
-      ) : groupByOfficer ? (
+      ) : accordion ? (
         <div className="space-y-2" data-testid="employee-groups">
           {groups.map((g) => {
             const expanded = open.has(g.employeeId);
             const panelId = `emp-${dk}-${g.employeeId}`;
+            const header = employeeHeaderText(g.employeeName, people[g.employeeId]?.territory, people[g.employeeId]?.state);
             return (
               <div key={g.employeeId} className="rounded-md border" data-employee-id={g.employeeId}>
                 <button
                   type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => toggle(g.employeeId)}
-                  aria-label={`${expanded ? L.collapseSection : L.expandSection} ${g.employeeName}`}
+                  aria-label={`${expanded ? L.collapseSection : L.expandSection} ${header}`}
                   className="flex min-h-11 w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  <span className="min-w-0 truncate text-sm font-semibold">{g.employeeName}</span>
+                  <span className="min-w-0 break-words text-sm font-semibold" data-testid="employee-header">{header}</span>
                   <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">{countText(g.count)}<ChevronDown className={cn("h-4 w-4 transition-transform", expanded && "rotate-180")} aria-hidden /></span>
                 </button>
-                {expanded && <div id={panelId} className="border-t p-3">{body(g)}</div>}
+                {expanded && <div id={panelId} className="border-t p-3">{list(g)}</div>}
               </div>
             );
           })}
         </div>
       ) : (
-        body({ events, partyEvents, billingTasks, entries, notes })
+        <div data-testid="employee-groups-flat">{groups.map((g) => <div key={g.employeeId}>{list(g)}</div>)}</div>
       )}
     </section>
   );
 }
 
-/** A scheduled Billing Exception recovery task — a read-only view of the ONE task (the same row the Sales Officer sees in Daily Work); details open the originating exception. */
-function BillingTaskCard({ t, labels: L }: { t: CalendarBillingTaskDto; labels: Labels }) {
+const itemHeading = "text-sm font-semibold";
+
+/** A scheduled Billing Exception recovery task — an AUTO task generated by a business workflow; a read-only view of the ONE task (the same row the Sales Officer sees in Daily Work). */
+function BillingTaskItem({ t, labels: L }: { t: CalendarBillingTaskDto; labels: Labels }) {
   const [open, setOpen] = useState(false);
   const statusLabel = t.status === "IN_DAILY_WORK" ? L.btInDailyWork : t.status === "OVERDUE" ? L.btOverdue : L.btScheduled;
-  const dmy = (dk: string) => formatDMY(dk);
   return (
-    <div className="rounded-md border bg-card p-3" data-testid="calendar-billing-task">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"><span className="h-2 w-2 rounded-full bg-purple-500" />{L.billingTask}</span>
+    <div data-testid="calendar-billing-task">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className={itemHeading} data-testid="item-heading">{taskHeading(L, "AUTO", "RECOVERY", taskSubtype("RECOVERY", null, "BILLING_EXCEPTION"))}</span>
         <div className="flex items-center gap-1">
           {t.rescheduled && <Badge variant="muted">{L.btRescheduled}</Badge>}
           {t.confirmed && <Badge variant="success">{L.btConfirmed}</Badge>}
           <Badge variant={t.status === "OVERDUE" ? "destructive" : t.status === "IN_DAILY_WORK" ? "success" : "secondary"}>{statusLabel}</Badge>
         </div>
       </div>
-      <div className="space-y-0.5 text-sm">
-        <div className="font-medium"><DealerName id={t.dealerId} name={t.dealerName} /> — {formatCurrency(t.amount)}</div>
-        <div className="text-muted-foreground">{L.salesOfficer}: {t.ownerName} · {L.btScheduledDate}: {dmy(t.dateKey)}</div>
-        <div className="text-muted-foreground" data-testid="calendar-billing-types">{L.colTaskType}: {L.taskTypeAuto} · {L.colRecoveryType}: {L.sourceBilling}</div>
-      </div>
+      <div className="mt-0.5 text-sm"><span className="font-medium"><DealerName id={t.dealerId} name={t.dealerName} /> — {formatCurrency(t.amount)}</span></div>
       <div className="mt-1 flex justify-end"><Button variant="ghost" size="sm" onClick={() => setOpen(true)}>{L.btDetails}</Button></div>
       {open && <BillingTaskDetailDialog id={t.id} onClose={() => setOpen(false)} />}
     </div>
   );
 }
 
-/** One Calendar entry: what it is, the details, and WHO ADDED IT (important in Team / Admin views). */
-function EntryCard({ e, labels: L, onChanged }: { e: CalendarEntryDto; labels: Labels; onChanged: () => void }) {
+/** One Calendar entry. A Daily Task is a MANUAL task (deliberately created by its owner or by an Admin) — also after it moves into Daily Work; a reminder / meeting / other keeps its own name. */
+function EntryItem({ e, labels: L, onChanged }: { e: CalendarEntryDto; labels: Labels; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(e.text ?? "");
   const update = useMutation({ mutationFn: () => api.patch(`/api/calendar/entries/${e.id}`, { text: text.trim() }), onSuccess: () => { setEditing(false); onChanged(); }, onError: (err) => alert((err as Error).message) });
   const remove = useMutation({ mutationFn: () => api.del(`/api/calendar/entries/${e.id}`), onSuccess: onChanged, onError: (err) => alert((err as Error).message) });
   const t = e.task;
+  const heading = t ? taskHeading(L, "MANUAL", t.section, taskSubtype(t.section, t.entryType, null)) : L[KIND_LABEL_PROP[e.kind]];
   return (
-    <div className="rounded-md border bg-card p-3">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          <span className={cn("h-2 w-2 rounded-full", ENTRY_DOT[e.kind])} />
-          {L[KIND_LABEL_PROP[e.kind]]}{t ? ` — ${L[`sec${t.section}`] ?? t.section}` : ""}
-        </span>
+    <div data-testid={t ? "calendar-manual-task" : "calendar-entry"}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className={itemHeading} data-testid="item-heading">{heading}</span>
         <div className="flex items-center gap-1">
           {e.materialized && <Badge variant="success">{L.inDailyWork}</Badge>}
           {e.canEdit && !editing && <Button variant="ghost" size="sm" title={L.editNote} onClick={() => { setEditing(true); setText(e.text ?? ""); }}><Pencil className="h-3.5 w-3.5" /></Button>}
@@ -502,15 +529,16 @@ function EntryCard({ e, labels: L, onChanged }: { e: CalendarEntryDto; labels: L
         </div>
       </div>
       {t ? (
-        <div className="space-y-0.5 text-sm">
+        <div className="mt-0.5 space-y-0.5 text-sm">
           {t.dealerName && <div className="font-medium"><DealerName id={t.dealerId ?? ""} name={t.dealerName} />{t.amount != null ? ` — ${formatCurrency(t.amount)}` : ""}</div>}
+          {t.entryType === "SCHEME" && t.schemeName && <div className="text-muted-foreground">{L.schemeName.replace("{name}", t.schemeName)}</div>}
           {t.paymentMode && <div className="text-muted-foreground">{L.paymentMode}: {L[`pm${t.paymentMode}`] ?? t.paymentMode}</div>}
           {t.typedDealerName && <div className="font-medium">{t.typedDealerName}{t.marketName ? ` · ${t.marketName}` : ""}</div>}
           {(t.dealerVisits != null || t.newPartyVisits != null) && <div>{L.dealerVisits}: {t.dealerVisits ?? 0} · {L.newPartyVisits}: {t.newPartyVisits ?? 0}</div>}
           {e.text && <p className="whitespace-pre-wrap">{e.text}</p>}
         </div>
       ) : editing ? (
-        <div className="space-y-2">
+        <div className="mt-1 space-y-2">
           <Textarea value={text} onChange={(ev) => setText(ev.target.value)} rows={3} maxLength={2000} />
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" onClick={() => setEditing(false)}>{L.cancel}</Button>
@@ -518,18 +546,21 @@ function EntryCard({ e, labels: L, onChanged }: { e: CalendarEntryDto; labels: L
           </div>
         </div>
       ) : (
-        <p className="whitespace-pre-wrap text-sm">{e.text}</p>
+        <p className="mt-0.5 whitespace-pre-wrap text-sm">{e.text}</p>
       )}
-      <div className="mt-1 text-xs text-muted-foreground">{L.addedBy}: {e.ownerName} ({e.ownerRoleLabel}){e.ownerState ? ` · ${e.ownerState}` : ""}</div>
+      {/* The employee is the accordion header; the creator is shown only when someone ELSE assigned this entry (an Admin). */}
+      {e.assignedBy && <div className="mt-1 text-xs text-muted-foreground" data-testid="assigned-by">{L.assignedBy}: {e.assignedBy.name} ({e.assignedBy.roleLabel})</div>}
     </div>
   );
 }
 
-/** The form for one of the four actions. A Daily Task reuses the Daily Work section fields; the rest are a text box. */
+/** The form for one of the actions. A Daily Task reuses the Daily Work section fields; a reminder is a text box. Admin adds an SO/RM recipient selector (task: required; reminder: optional). */
 function AddEntryForm({ kind, dateKey: dk, payload, labels: L, onCancel, onSaved }: {
   kind: CalendarEntryKind; dateKey: string; payload: CalendarPayload | undefined; labels: Labels; onCancel: () => void; onSaved: () => void;
 }) {
   const sections = payload?.taskSections ?? [];
+  const canAssign = payload?.canAssign ?? false;
+  const [recipientId, setRecipientId] = useState(""); // Admin: the SO/RM the task / reminder is for ("" = personal reminder)
   const [section, setSection] = useState(sections[0] ?? "SALES");
   const [dealerId, setDealerId] = useState("");
   const [amount, setAmount] = useState("");
@@ -540,37 +571,59 @@ function AddEntryForm({ kind, dateKey: dk, payload, labels: L, onCancel, onSaved
   const [newPartyVisits, setNewPartyVisits] = useState("");
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const dealers = payload?.myDealers ?? [];
+  const assigning = canAssign && recipientId !== "";
+  const needsRecipient = canAssign && kind === "TASK"; // an Admin owns no Daily Work, so a task always needs an SO/RM recipient
+  const officers = (payload?.officers ?? []).filter((o) => o.role === "SALES_OFFICER" || o.role === "REGIONAL_MANAGER");
+  const recipientOptions = officers.map((o) => ({ value: o.id, label: employeeHeaderText(o.name, o.territory, o.state) })); // same-name officers stay distinguishable
+  const dealerSection = section === "SALES" || section === "RECOVERY";
+  // The dealer choices are the RECIPIENT's own (never the Admin's); an SO / RM uses their own list.
+  const recipientDealerQuery = useQuery<{ id: string; name: string }[]>({
+    queryKey: ["calendar", "recipient-dealers", recipientId],
+    queryFn: () => api.get(`/api/calendar/recipient-dealers?ownerId=${encodeURIComponent(recipientId)}`),
+    enabled: needsRecipient && recipientId !== "" && dealerSection,
+  });
+  const dealers = canAssign ? (recipientDealerQuery.data ?? []) : (payload?.myDealers ?? []);
 
-  const body = () => kind !== "TASK" ? { kind, date: dk, text: text.trim() } : {
-    kind, date: dk, section,
-    ...(section === "SALES" || section === "RECOVERY" ? { dealerId, amount: amount === "" ? undefined : Number(amount), ...(section === "RECOVERY" && paymentMode ? { paymentMode } : {}) } : {}),
+  const body = () => kind !== "TASK" ? { kind, date: dk, text: text.trim(), ...(assigning ? { ownerId: recipientId } : {}) } : {
+    kind, date: dk, section, ...(assigning ? { ownerId: recipientId } : {}),
+    ...(dealerSection ? { dealerId, amount: amount === "" ? undefined : Number(amount), ...(section === "RECOVERY" && paymentMode ? { paymentMode } : {}) } : {}),
     ...(section === "APPOINTMENT" ? { dealerName: dealerName.trim(), marketName: marketName.trim() } : {}),
     ...(section === "VISITS" ? { dealerVisits: dealerVisits === "" ? 0 : Number(dealerVisits), newPartyVisits: newPartyVisits === "" ? 0 : Number(newPartyVisits) } : {}),
     ...(section === "OTHERS" ? { text: text.trim() } : {}),
   };
-  const valid = kind !== "TASK" ? text.trim() !== ""
-    : section === "SALES" || section === "RECOVERY" ? dealerId !== "" && Number(amount) > 0
+  const valid = (needsRecipient ? recipientId !== "" : true) && (kind !== "TASK" ? text.trim() !== ""
+    : dealerSection ? dealerId !== "" && Number(amount) > 0
       : section === "APPOINTMENT" ? dealerName.trim() !== ""
         : section === "VISITS" ? Number(dealerVisits || 0) + Number(newPartyVisits || 0) > 0
-          : text.trim() !== "";
+          : text.trim() !== "");
   const save = useMutation({ mutationFn: () => api.post("/api/calendar/entries", body()), onSuccess: onSaved, onError: (e) => setError((e as Error).message) });
   const whole = (set: (v: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => { const v = e.target.value; if (v === "" || /^\d+$/.test(v)) set(v); };
   const placeholder = L.reminderPlaceholder;
 
   return (
     <div className="space-y-3 rounded-md border bg-card p-3">
+      {canAssign && (
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-muted-foreground">{kind === "TASK" ? L.assignRecipient : L.reminderFor}</label>
+          {kind === "REMINDER" && (
+            <NativeSelect aria-label={L.reminderFor} value={recipientId} onChange={(e) => setRecipientId(e.target.value)} options={[{ value: "", label: L.myself }, ...recipientOptions]} />
+          )}
+          {kind === "TASK" && (
+            <SearchableSelect ariaLabel={L.assignSearch} placeholder={L.assignSelect} emptyText={L.assignEmpty} value={recipientId} onChange={(v) => { setRecipientId(v); setDealerId(""); setError(null); }} options={recipientOptions} />
+          )}
+        </div>
+      )}
       {kind === "TASK" ? (
         <>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">{L.taskType}</label>
             <NativeSelect value={section} onChange={(e) => { setSection(e.target.value); setError(null); }} options={sections.map((x) => ({ value: x, label: L[`sec${x}`] ?? x }))} />
           </div>
-          {(section === "SALES" || section === "RECOVERY") && (
+          {dealerSection && (
             <>
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">{L.dealer}</label>
-                <NativeSelect dealerOptions value={dealerId} onChange={(e) => setDealerId(e.target.value)} placeholder={dealers.length === 0 ? L.noDealers : L.selectDealer} options={dealers.map((d) => ({ value: d.id, label: d.name }))} />
+                <NativeSelect dealerOptions value={dealerId} onChange={(e) => setDealerId(e.target.value)} placeholder={needsRecipient && recipientId === "" ? L.pickFirst : dealers.length === 0 ? L.noDealers : L.selectDealer} options={dealers.map((d) => ({ value: d.id, label: d.name }))} />
               </div>
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">{L.amount}</label>
@@ -610,28 +663,26 @@ function AddEntryForm({ kind, dateKey: dk, payload, labels: L, onCancel, onSaved
   );
 }
 
-/** Party Appointment detail card — Party Name + Market. Links to Party Planning → View (read-only here). */
-function PartyAppointmentCard({ e, labels: L, linked }: { e: PartyAppointmentEvent; labels: Labels; linked: boolean }) {
+/** Party Appointment detail — Party Name + Market. Links to Party Planning → View (read-only here). */
+function PartyAppointmentItem({ e, labels: L, linked }: { e: PartyAppointmentEvent; labels: Labels; linked: boolean }) {
   return (
-    <div className="rounded-md border bg-card p-3">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.partyAppointment}</span>
-      </div>
-      <PartyLink enabled={linked} className="font-medium text-primary">{e.partyName}</PartyLink>
+    <div>
+      <span className={itemHeading} data-testid="item-heading">{L.partyAppointment}</span>
+      <div><PartyLink enabled={linked} className="font-medium text-primary">{e.partyName}</PartyLink></div>
       {e.marketName && <div className="text-sm text-muted-foreground">{L.market}: {e.marketName}</div>}
     </div>
   );
 }
 
-function ConversionCard({ e, labels: L }: { e: ConversionEvent; labels: Labels }) {
+function ConversionItem({ e, labels: L }: { e: ConversionEvent; labels: Labels }) {
   const schemesLabel = e.numberOfSchemes === 1 ? L.scheme : L.schemes;
   return (
-    <div className="rounded-md border bg-card p-3">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.conversion}</span>
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className={itemHeading} data-testid="item-heading">{L.conversion}</span>
         <StatusBadge status={e.status} label={L[STATUS_META[e.status].key] ?? e.status} />
       </div>
-      {/* The authoritative edit lives in Scheme Planning; the card links there, it is not editable here. */}
+      {/* The authoritative edit lives in Scheme Planning; the item links there, it is not editable here. */}
       <Link href="/planning/scheme/plans" className="font-medium text-primary hover:underline"><DealerName id={e.dealerId} name={e.dealerName} /></Link>
       <div className="text-sm text-muted-foreground">{e.schemeName}</div>
       <div className="mt-1 text-sm">{e.numberOfSchemes} {schemesLabel} · {formatCurrency(e.totalSchemeAmount)}</div>
@@ -645,40 +696,34 @@ function ConversionCard({ e, labels: L }: { e: ConversionEvent; labels: Labels }
   );
 }
 
-function NotesSection({ notes, labels: L, onChanged }: { dateKey: string; notes: CalendarNoteDto[]; labels: Labels; onChanged: () => void }) {
-  const [editId, setEditId] = useState<string | null>(null);
+/** A note: existing notes keep working (view / edit / delete by their owner). */
+function NoteItem({ n, labels: L, onChanged }: { n: CalendarNoteDto; labels: Labels; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
-
-  const update = useMutation({ mutationFn: (v: { id: string }) => api.patch(`/api/calendar/notes/${v.id}`, { text: editText.trim() }), onSuccess: () => { setEditId(null); setEditText(""); onChanged(); }, onError: (e) => alert((e as Error).message) });
-  const remove = useMutation({ mutationFn: (id: string) => api.del(`/api/calendar/notes/${id}`), onSuccess: onChanged, onError: (e) => alert((e as Error).message) });
-
+  const update = useMutation({ mutationFn: () => api.patch(`/api/calendar/notes/${n.id}`, { text: editText.trim() }), onSuccess: () => { setEditing(false); setEditText(""); onChanged(); }, onError: (e) => alert((e as Error).message) });
+  const remove = useMutation({ mutationFn: () => api.del(`/api/calendar/notes/${n.id}`), onSuccess: onChanged, onError: (e) => alert((e as Error).message) });
   return (
-    <div className="space-y-2 border-t pt-3">
-      {notes.map((n) => (
-        <div key={n.id} className="rounded-md border bg-card p-3">
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{L.note}{!n.canEdit && n.ownerName ? ` · ${n.ownerName}` : ""}</span>
-            {n.canEdit && editId !== n.id && (
-              <div className="flex items-center gap-1">
-                <Button variant="ghost" size="sm" title={L.editNote} onClick={() => { setEditId(n.id); setEditText(n.text); }}><Pencil className="h-3.5 w-3.5" /></Button>
-                <Button variant="ghost" size="sm" title={L.deleteNote} onClick={() => remove.mutate(n.id)}><Trash2 className="h-3.5 w-3.5" /></Button>
-              </div>
-            )}
+    <div data-testid="calendar-note">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className={itemHeading} data-testid="item-heading">{L.note}</span>
+        {n.canEdit && !editing && (
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" title={L.editNote} onClick={() => { setEditing(true); setEditText(n.text); }}><Pencil className="h-3.5 w-3.5" /></Button>
+            <Button variant="ghost" size="sm" title={L.deleteNote} onClick={() => remove.mutate()}><Trash2 className="h-3.5 w-3.5" /></Button>
           </div>
-          {editId === n.id ? (
-            <div className="space-y-2">
-              <Textarea value={editText} onChange={(e) => setEditText(e.target.value)} rows={3} maxLength={2000} />
-              <div className="flex justify-end gap-2">
-                <Button variant="outline" size="sm" onClick={() => setEditId(null)}>{L.cancel}</Button>
-                <Button size="sm" disabled={!editText.trim() || update.isPending} onClick={() => update.mutate({ id: n.id })}>{L.saveNote}</Button>
-              </div>
-            </div>
-          ) : (
-            <p className="whitespace-pre-wrap text-sm">{n.text}</p>
-          )}
+        )}
+      </div>
+      {editing ? (
+        <div className="mt-1 space-y-2">
+          <Textarea value={editText} onChange={(e) => setEditText(e.target.value)} rows={3} maxLength={2000} />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEditing(false)}>{L.cancel}</Button>
+            <Button size="sm" disabled={!editText.trim() || update.isPending} onClick={() => update.mutate()}>{L.saveNote}</Button>
+          </div>
         </div>
-      ))}
-
+      ) : (
+        <p className="mt-0.5 whitespace-pre-wrap text-sm">{n.text}</p>
+      )}
     </div>
   );
 }

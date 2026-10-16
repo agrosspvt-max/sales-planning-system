@@ -9,14 +9,14 @@ import { api } from "@/lib/api-client";
 import { PageHeader } from "@/components/layout/page-header";
 import { NativeSelect } from "@/components/ui/select";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { useLabel } from "@/features/labels/label-ui";
+import { useLabel, Th } from "@/features/labels/label-ui";
 import { taggedDealersFirst } from "@/lib/dealer-tags";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { DealerName, useDealerMarkers } from "@/features/dealers/dealer-name-ui";
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
-import { Table, TableHeader, TableHead, TableRow, TableCell } from "@/components/ui/table";
+import { Table, TableHeader, TableRow, TableCell } from "@/components/ui/table";
 import { DealerTagRequests } from "./dealer-tag-requests";
 import { SalesOfficerFilterHeader, type SalesOfficerOption } from "./sales-officer-filter";
 import type { TagDefinition, TagDealer } from "./types";
@@ -26,6 +26,28 @@ export function DealerTagsPage({ role }: { role: Role }) {
     dealerPlaceholder: useLabel("dealer_tags.dealer.placeholder"),
     dealerSearch: useLabel("dealer_tags.dealer.search"),
     dealerEmpty: useLabel("dealer_tags.dealer.empty"),
+    crumb: useLabel("dealer_tags.crumb.dealer_tags"),
+    title: useLabel("dealer_tags.page.title"),
+    subtitleAdmin: useLabel("dealer_tags.page.subtitle_admin"),
+    subtitleUser: useLabel("dealer_tags.page.subtitle_user"),
+    fieldDealer: useLabel("dealer_tags.field.dealer"),
+    fieldAction: useLabel("dealer_tags.field.action"),
+    fieldTag: useLabel("dealer_tags.field.tag"),
+    addTag: useLabel("dealer_tags.action.add_tag"),
+    revokeTag: useLabel("dealer_tags.action.revoke_tag"),
+    tagPlaceholder: useLabel("dealer_tags.tag.placeholder"),
+    inactiveSuffix: useLabel("dealer_tags.tag.inactive_suffix"),
+    inactiveAssigned: useLabel("dealer_tags.tag.inactive_assigned"),
+    assign: useLabel("dealer_tags.button.assign"),
+    revoke: useLabel("dealer_tags.button.revoke"),
+    request: useLabel("dealer_tags.button.request"),
+    requestRevoke: useLabel("dealer_tags.button.request_revoke"),
+    updated: useLabel("dealer_tags.msg.updated"),
+    submitted: useLabel("dealer_tags.msg.submitted"),
+    searchPlaceholder: useLabel("dealer_tags.search.placeholder"),
+    clearFilter: useLabel("dealer_tags.filter.clear"),
+    active: useLabel("dealer_tags.status.active"),
+    inactive: useLabel("dealer_tags.status.inactive"),
   };
   const markers = useDealerMarkers();
   const [dealerId, setDealerId] = useState(""),
@@ -74,16 +96,14 @@ export function DealerTagsPage({ role }: { role: Role }) {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Dealer Tags"
-        subtitle={
-          isAdministrativeRole(role)
-            ? "Direct Admin assignment/revocation takes effect immediately."
-            : "Request an addition or revocation. Existing markers change only after final approval."
-        }
+        title={L.title}
+        crumbs={[{ label: L.crumb }]}
+        showBack={false}
+        subtitle={isAdministrativeRole(role) ? L.subtitleAdmin : L.subtitleUser}
       />
       <div className="grid gap-3 rounded-lg border p-4 md:grid-cols-4">
         <div className="space-y-1">
-          <Label>Dealer *</Label>
+          <Label>{L.fieldDealer}</Label>
           {/* Searchable over the FULL authorized dealer list (never just the table page). The submitted value stays the dealer's id. */}
           <SearchableSelect
             ariaLabel={L.dealerSearch}
@@ -98,7 +118,7 @@ export function DealerTagsPage({ role }: { role: Role }) {
           />
         </div>
         <div className="space-y-1">
-          <Label>Action *</Label>
+          <Label>{L.fieldAction}</Label>
           <NativeSelect
             value={operation}
             onChange={(e) => {
@@ -106,20 +126,20 @@ export function DealerTagsPage({ role }: { role: Role }) {
               setTagId("");
             }}
             options={[
-              { value: "ADD", label: "Add Tag" },
-              { value: "REVOKE", label: "Revoke Tag" },
+              { value: "ADD", label: L.addTag },
+              { value: "REVOKE", label: L.revokeTag },
             ]}
           />
         </div>
         <div className="space-y-1">
-          <Label>Tag *</Label>
+          <Label>{L.fieldTag}</Label>
           <NativeSelect
-            placeholder="Select a tag…"
+            placeholder={L.tagPlaceholder}
             value={tagId}
             onChange={(e) => setTagId(e.target.value)}
             options={choices.map((t) => ({
               value: t.id,
-              label: `${t.name} (${t.marker})${t.isActive ? "" : " — Inactive"}`,
+              label: `${t.name} (${t.marker})${t.isActive ? "" : L.inactiveSuffix}`,
             }))}
           />
         </div>
@@ -130,11 +150,11 @@ export function DealerTagsPage({ role }: { role: Role }) {
           >
             {isAdministrativeRole(role)
               ? operation === "ADD"
-                ? "Assign Tag"
-                : "Revoke Tag"
+                ? L.assign
+                : L.revoke
               : operation === "ADD"
-                ? "Request Tag"
-                : "Request Revoke"}
+                ? L.request
+                : L.requestRevoke}
           </Button>
         </div>
       </div>
@@ -145,29 +165,29 @@ export function DealerTagsPage({ role }: { role: Role }) {
       )}
       {act.isSuccess && (
         <p className="text-sm text-muted-foreground">
-          {isAdministrativeRole(role) ? "Dealer tag updated." : "Request submitted for approval."}
+          {isAdministrativeRole(role) ? L.updated : L.submitted}
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2">
         <Input
           className="max-w-sm"
-          placeholder="Search dealers…"
+          placeholder={L.searchPlaceholder}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
         {officerIds.length > 0 && (
           <Button variant="ghost" size="sm" onClick={() => setOfficerIds([])}>
-            Clear Sales Officer filter ({officerIds.length})
+            {L.clearFilter.replace("{count}", String(officerIds.length))}
           </Button>
         )}
       </div>
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Dealer</TableHead>
+            <Th labelKey="dealer_tags.col.dealer" />
             <SalesOfficerFilterHeader options={officers.data ?? []} selected={officerIds} onChange={setOfficerIds} />
-            <TableHead>Status</TableHead>
-            <TableHead>Assignments</TableHead>
+            <Th labelKey="dealer_tags.col.status" />
+            <Th labelKey="dealer_tags.col.assignments" />
           </TableRow>
         </TableHeader>
         <DealerTableBody>
@@ -181,10 +201,10 @@ export function DealerTagsPage({ role }: { role: Role }) {
                 <TableCell className="break-words">
                   {d.salesOfficers?.map((o) => o.name).join(", ") || "—"}
                 </TableCell>
-                <TableCell>{d.isActive ? "Active" : "Inactive"}</TableCell>
+                <TableCell>{d.isActive ? L.active : L.inactive}</TableCell>
                 <TableCell>
                   {d.assignedTags
-                    .map((t) => `${t.name}${t.isActive ? "" : " (Inactive tag)"}`)
+                    .map((t) => `${t.name}${t.isActive ? "" : L.inactiveAssigned}`)
                     .join(", ") || "—"}
                 </TableCell>
               </TableRow>

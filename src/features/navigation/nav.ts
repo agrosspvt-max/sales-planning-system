@@ -1,3 +1,4 @@
+import type { LabelKey } from "@/features/labels/labels";
 import { Role } from "@prisma/client";
 import { mayEnterPage, type AdminPermissions } from "@/features/accounts/permissions";
 import {
@@ -33,6 +34,8 @@ import {
 
 export interface NavItem {
   label: string;
+  /** Optional Edit Labels key: when set, the sidebar shows the (editable) label text instead of the default `label`. */
+  labelKey?: LabelKey;
   href: string;
   icon: LucideIcon;
   roles: Role[];
@@ -85,7 +88,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Payments", href: "/payments", icon: Wallet, roles: ADMIN_ONLY, group: "Planning" },
   // Requests — Sales Officers raise them; RM/Admin act on them. CN Requests is the first type.
   { label: "CN Requests", href: "/requests/cn", icon: FileText, roles: ALL_ROLES, group: "Requests" },
-  { label: "Dealer Tags", href: "/dealer-tags", icon: Tags, roles: ALL_ROLES, group: "Requests" },
+  { label: "Dealer Tags", labelKey: "dealer_tags.nav.sidebar", href: "/dealer-tags", icon: Tags, roles: ALL_ROLES, group: "Requests" },
   { label: "My Account", href: "/account", icon: Users, roles: ALL_ROLES, group: "Insights" },
   { label: "Reports", href: "/reports", icon: BarChart3, roles: ALL_ROLES, group: "Insights" },
   // Last Payment Report — read-only; the same Last Payment Recovery Planning shows, scoped server-side per role.

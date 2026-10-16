@@ -1,6 +1,6 @@
-import { alertLabels, notifyAutoTaskCreated, type AutoTaskSection } from "@/features/notifications/task-alerts.server";
+import { alertLabels, notifyAutoTaskCreated, notifyReminderAssigned, type AutoTaskSection } from "@/features/notifications/task-alerts.server";
 import "server-only";
-import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { isAdministrativeRole, hasAdminPermission } from "@/features/accounts/permissions";
 
 import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
@@ -151,16 +151,20 @@ export type CalendarEntryKind = (typeof CALENDAR_ENTRY_KINDS)[number];
 
 export interface CalendarEntryTaskDto {
   section: string; dealerId: string | null; dealerName: string | null; amount: number | null; paymentMode: string | null;
+  /** The stored sales / recovery classification (REGULAR | SCHEME) and, for a Scheme task, the scheme's name. Always a MANUAL task: it was created deliberately (by its owner or an Admin). */
+  entryType: string | null; schemeName: string | null;
   typedDealerName: string | null; marketName: string | null; dealerVisits: number | null; newPartyVisits: number | null;
 }
 export interface CalendarEntryDto {
   id: string; dateKey: string; kind: CalendarEntryKind; text: string | null;
   ownerId: string; ownerName: string; ownerRole: string; ownerRoleLabel: string; ownerState: string | null;
+  /** The ACTUAL creator when it differs from the owner (Admin assigning work to a Sales Officer); null when the owner created it. */
+  assignedBy: { id: string; name: string; roleLabel: string } | null;
   task: CalendarEntryTaskDto | null;
   materialized: boolean; // a TASK already became a Daily Work row
   canEdit: boolean; canDelete: boolean; createdAt: string;
 }
-export interface CalendarOfficerOption { id: string; name: string; role: string; roleLabel: string; groupId: string | null }
+export interface CalendarOfficerOption { id: string; name: string; role: string; roleLabel: string; groupId: string | null; territory: string | null; state: string | null }
 export interface CalendarStateOption { id: string; name: string }
 
 const ROLE_LABELS: Record<string, string> = { SALES_OFFICER: "Sales Officer", REGIONAL_MANAGER: "Regional Manager", SUPER_ADMIN: "Admin", CUSTOM_ADMIN: "Admin" };
@@ -172,13 +176,20 @@ type EntryRow = {
   id: string; ownerId: string; date: Date; kind: string; text: string | null; taskSection: string | null; dealerId: string | null;
   amount: unknown; paymentMode: string | null; typedDealerName: string | null; marketName: string | null;
   dealerVisits: number | null; newPartyVisits: number | null; materializedAt: Date | null; createdAt: Date;
+  entryType?: string | null; schemeId?: string | null; createdById?: string | null;
   owner: { name: string; role: string; group: { id: string; name: string } | null };
+  createdBy?: { name: string; role: string } | null;
 };
 const ENTRY_SELECT = {
   id: true, ownerId: true, date: true, kind: true, text: true, taskSection: true, dealerId: true, amount: true, paymentMode: true,
   typedDealerName: true, marketName: true, dealerVisits: true, newPartyVisits: true, materializedAt: true, createdAt: true,
+  entryType: true, schemeId: true, createdById: true,
   owner: { select: { name: true, role: true, group: { select: { id: true, name: true } } } },
+  createdBy: { select: { name: true, role: true } },
 } as const;
+
+/** WHO may change an entry: its creator (the owner for every entry made by its owner, the Admin for assigned work). Assigned work is not removable by its recipient. */
+const creatorOf = (r: { ownerId: string; createdById?: string | null }) => r.createdById ?? r.ownerId;
 
 async function toEntryDtos(ctx: AuthContext, rows: EntryRow[]): Promise<CalendarEntryDto[]> {
   const dealerIds = [...new Set(rows.map((r) => r.dealerId).filter((id): id is string => !!id))];
@@ -190,17 +201,22 @@ async function toEntryDtos(ctx: AuthContext, rows: EntryRow[]): Promise<Calendar
     ]);
     for (const d of dealers) names.set(d.id, aliases.get(d.id) ?? d.name); // DISPLAY-only alias-preferred name
   }
+  const schemeIds = [...new Set(rows.map((r) => r.schemeId).filter((id): id is string => !!id))];
+  const schemeNames = new Map<string, string>();
+  if (schemeIds.length > 0) for (const sc of (await prisma.scheme.findMany({ where: { id: { in: schemeIds } }, select: { id: true, schemeName: true } })) as { id: string; schemeName: string }[]) schemeNames.set(sc.id, sc.schemeName);
   return rows.map((r) => ({
     id: r.id, dateKey: dateKey(r.date)!, kind: r.kind as CalendarEntryKind, text: r.text,
     ownerId: r.ownerId, ownerName: r.owner.name, ownerRole: r.owner.role, ownerRoleLabel: roleLabel(r.owner.role), ownerState: r.owner.group?.name ?? null,
+    assignedBy: r.createdById && r.createdById !== r.ownerId && r.createdBy ? { id: r.createdById, name: r.createdBy.name, roleLabel: roleLabel(r.createdBy.role) } : null,
     task: r.kind === "TASK" ? {
       section: r.taskSection ?? "", dealerId: r.dealerId, dealerName: r.dealerId ? (names.get(r.dealerId) ?? null) : null,
       amount: r.amount == null ? null : asNum(r.amount), paymentMode: r.paymentMode, typedDealerName: r.typedDealerName, marketName: r.marketName,
       dealerVisits: r.dealerVisits, newPartyVisits: r.newPartyVisits,
+      entryType: r.entryType ?? null, schemeName: r.schemeId ? (schemeNames.get(r.schemeId) ?? null) : null,
     } : null,
     materialized: r.materializedAt != null,
-    canEdit: r.ownerId === ctx.userId && r.kind !== "TASK",
-    canDelete: r.ownerId === ctx.userId && r.materializedAt == null,
+    canEdit: creatorOf(r) === ctx.userId && r.kind !== "TASK",
+    canDelete: creatorOf(r) === ctx.userId && r.materializedAt == null,
     createdAt: r.createdAt.toISOString(),
   }));
 }
@@ -221,6 +237,10 @@ export interface CalendarPayload {
   view: CalendarView; canTeamView: boolean; taskSections: string[]; paymentModes: string[];
   /** The caller's OWN assigned dealers (for the Daily Task form's Sales / Recovery dealer choice). [] when they cannot add tasks. */
   myDealers: { id: string; name: string }[];
+  /** Profile facts of every employee that owns a visible item (from the user's actual Territory and State / group) — for the accordion headers and the totals. */
+  people: Record<string, { role: string; territory: string | null; state: string | null }>;
+  /** Administrative callers only: whether they may assign tasks / reminders to a Sales Officer. */
+  canAssign: boolean;
 }
 
 /**
@@ -249,13 +269,27 @@ export async function calendarMonth(ctx: AuthContext, opts: { year: number; mont
   const options = canFilterOfficers ? await officerOptions(ctx) : [];
   const states = [...new Map(options.filter((o) => o.group).map((o) => [o.group!.id, { id: o.group!.id, name: o.group!.name }])).values()].sort((a, b) => a.name.localeCompare(b.name));
   const myDealers = canOwnDailyTask(ctx.role) ? await loadMyDealers(ctx.userId) : [];
+  const peopleIds = [...new Set([
+    ...events.map((e) => e.salesOfficerId), ...partyEvents.map((e) => e.salesOfficerId), ...billingTasks.map((t) => t.ownerId), ...entries.map((e) => e.ownerId), ...notes.map((n) => n.ownerId),
+  ])];
+  const people = await loadPeople(peopleIds);
   return {
-    myDealers,
+    myDealers, people, canAssign: canAssignWork(ctx),
     events, partyEvents, notes, entries, billingTasks, canFilterOfficers,
-    officers: options.map((o) => ({ id: o.id, name: o.name, role: o.role, roleLabel: roleLabel(o.role), groupId: o.group?.id ?? null })),
+    officers: options.map((o) => ({ id: o.id, name: o.name, role: o.role, roleLabel: roleLabel(o.role), groupId: o.group?.id ?? null, territory: o.territory?.trim() || null, state: o.group?.name ?? null })),
     states, view: effectiveView, canTeamView: isRm, taskSections: [...MANDATORY_SECTIONS], paymentModes: [...RECOVERY_PAYMENT_MODES],
   };
 }
+
+/** Territory + State (the user's group) + role of the employees whose items are shown. Only ids already visible to the caller are looked up. */
+async function loadPeople(ids: string[]): Promise<CalendarPayload["people"]> {
+  if (ids.length === 0) return {};
+  const users = (await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, role: true, territory: true, group: { select: { name: true } } } })) as unknown as { id: string; role: string; territory: string | null; group: { name: string } | null }[];
+  return Object.fromEntries(users.map((u) => [u.id, { role: u.role, territory: u.territory?.trim() || null, state: u.group?.name ?? null }]));
+}
+
+/** Admin assignment of tasks / reminders: an administrative account, and (Custom Admin) the Calendar create grant — a Sales Officer / Regional Manager never gets this as a side effect. */
+const canAssignWork = (ctx: AuthContext): boolean => isAdministrativeRole(ctx.role) && (ctx.role === Role.SUPER_ADMIN || hasAdminPermission(ctx, "calendar", "create"));
 
 /** The caller's own current dealers (alias-preferred display names), name-sorted. */
 async function loadMyDealers(userId: string): Promise<{ id: string; name: string }[]> {
@@ -269,12 +303,12 @@ async function loadMyDealers(userId: string): Promise<{ id: string; name: string
 }
 
 /** Filter options — Sales Officers AND Regional Managers inside the caller's scope (RM: self + their group; Admin: everyone). */
-async function officerOptions(ctx: AuthContext): Promise<{ id: string; name: string; role: string; group: { id: string; name: string } | null }[]> {
+async function officerOptions(ctx: AuthContext): Promise<{ id: string; name: string; role: string; territory: string | null; group: { id: string; name: string } | null }[]> {
   const scope = await getOfficerScope(ctx);
   const where = scope.all
     ? { role: { in: [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] }, isActive: true, deletedAt: null }
     : { id: { in: scope.ids }, role: { in: [Role.SALES_OFFICER, Role.REGIONAL_MANAGER] }, isActive: true, deletedAt: null };
-  return (await prisma.user.findMany({ where, select: { id: true, name: true, role: true, group: { select: { id: true, name: true } } }, orderBy: { name: "asc" } })) as unknown as { id: string; name: string; role: string; group: { id: string; name: string } | null }[];
+  return (await prisma.user.findMany({ where, select: { id: true, name: true, role: true, territory: true, group: { select: { id: true, name: true } } }, orderBy: [{ name: "asc" }, { id: "asc" }] })) as unknown as { id: string; name: string; role: string; territory: string | null; group: { id: string; name: string } | null }[];
 }
 
 export interface UpcomingItem {
@@ -363,10 +397,12 @@ export async function deleteCalendarNote(ctx: AuthContext, id: string): Promise<
 
 const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "A valid date is required");
 const detailText = z.string().trim().min(1, "Details are required").max(2000);
+/** `ownerId` = the RECIPIENT. Absent / the caller → the caller's own entry; another user → an Admin assignment (checked on the server, see createCalendarEntry). */
+const recipient = z.string().min(1).optional();
 const entryInput = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("REMINDER"), date: dateStr, text: detailText }),
+  z.object({ kind: z.literal("REMINDER"), date: dateStr, text: detailText, ownerId: recipient }),
   z.object({
-    kind: z.literal("TASK"), date: dateStr,
+    kind: z.literal("TASK"), date: dateStr, ownerId: recipient,
     // The task sections are exactly the ACTIVE Daily Work sections (MANDATORY_SECTIONS) — a disabled one is rejected below.
     section: z.string(),
     dealerId: z.string().min(1).optional(),
@@ -388,10 +424,11 @@ async function dailyWorkDayFinalized(ownerId: string, workDate: string): Promise
 }
 
 /**
- * Create a Calendar entry owned by the CALLER (creator = owner; nobody creates on someone else's behalf). A TASK is validated
- * with the Daily Work rules it will be materialized under: an active section, the officer's own assigned dealer, a positive
- * amount, a today-or-future date, and — for today — a Daily Work that is not already finalized (a finalized day is never
- * mutated). Meetings / Reminders / Other are calendar-only and never become Daily Work.
+ * Create a Calendar entry. By default it is the CALLER's own (creator = owner). An ADMINISTRATIVE caller may name a Sales Officer or Regional Manager as the recipient (`ownerId`): the entry is
+ * then OWNED by that officer — it shows in their Calendar and, for a Manual Task, enters their Daily Work through the one existing mechanism — while `createdById` keeps the
+ * Admin as its real creator. The recipient must be an active Sales Officer or Regional Manager inside the caller's scope; nobody else gets this ability. A TASK is validated with the Daily Work
+ * rules it will be materialized under, applied to the RECIPIENT: an active section, one of THEIR assigned dealers, a positive amount, a today-or-future date, and — for today —
+ * a Daily Work that is not already finalized. Reminders / Meetings / Other are calendar-only and never become Daily Work.
  */
 export async function createCalendarEntry(ctx: AuthContext, raw: unknown): Promise<CalendarEntryDto> {
   await assertCalendarEnabled();
@@ -399,20 +436,31 @@ export async function createCalendarEntry(ctx: AuthContext, raw: unknown): Promi
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? "Invalid calendar entry");
   const data = parsed.data;
   const date = new Date(`${data.date}T00:00:00.000Z`);
+  const L = await alertLabels(); // Edit Labels text for the new messages and the alerts
   let create: Record<string, unknown>;
 
+  let ownerId = ctx.userId;
+  const assigning = !!data.ownerId && data.ownerId !== ctx.userId;
+  if (assigning) {
+    if (!canAssignWork(ctx)) throw new ApiError(403, L["calendar.error.assign_forbidden"]);
+    const recipientUser = (await prisma.user.findUnique({ where: { id: data.ownerId! }, select: { id: true, role: true, isActive: true, deletedAt: true } })) as { id: string; role: string; isActive: boolean; deletedAt: Date | null } | null;
+    if (!recipientUser || !recipientUser.isActive || recipientUser.deletedAt || !canOwnDailyTask(recipientUser.role as Role)) throw new ApiError(422, L["calendar.error.recipient_invalid"]);
+    await assertOfficerInScope(ctx, recipientUser.id);
+    ownerId = recipientUser.id;
+  }
+
   if (data.kind === "TASK") {
-    if (!canOwnDailyTask(ctx.role)) throw new ApiError(403, "Only a Sales Officer or Regional Manager can add a Daily Task");
+    if (!assigning && !canOwnDailyTask(ctx.role)) throw new ApiError(isAdministrativeRole(ctx.role) ? 422 : 403, isAdministrativeRole(ctx.role) ? L["calendar.error.select_recipient"] : "Only a Sales Officer or Regional Manager can add a Daily Task");
     const section = data.section;
     if (!(MANDATORY_SECTIONS as readonly string[]).includes(section)) throw new ApiError(422, "This task type is not available in Daily Work");
     const today = currentBusinessDate();
     if (data.date < today) throw new ApiError(422, "A Daily Task can only be added for today or a future date");
-    if (data.date === today && (await dailyWorkDayFinalized(ctx.userId, today))) throw new ApiError(409, "Today's Daily Work has already been finalized");
+    if (data.date === today && (await dailyWorkDayFinalized(ownerId, today))) throw new ApiError(409, "Today's Daily Work has already been finalized");
     create = { kind: "TASK", taskSection: section };
     if (section === "SALES" || section === "RECOVERY") {
       if (!data.dealerId) throw new ApiError(422, "Select a dealer");
       if (data.amount == null) throw new ApiError(422, "Enter an amount greater than 0");
-      if (!(await getCurrentDealerIds(ctx.userId)).includes(data.dealerId)) throw new ApiError(403, "This dealer is not assigned to you");
+      if (!(await getCurrentDealerIds(ownerId)).includes(data.dealerId)) throw new ApiError(403, assigning ? L["calendar.error.dealer_not_recipient"] : "This dealer is not assigned to you");
       Object.assign(create, { dealerId: data.dealerId, amount: data.amount, entryType: "REGULAR", ...(section === "RECOVERY" ? { paymentMode: data.paymentMode ?? null } : {}) });
     } else if (section === "APPOINTMENT") {
       if (!data.dealerName?.trim()) throw new ApiError(422, "Enter the dealer name");
@@ -429,28 +477,41 @@ export async function createCalendarEntry(ctx: AuthContext, raw: unknown): Promi
     create = { kind: data.kind, text: data.text };
   }
 
-  // A new Daily Task is an automatic-task source: its alert is written in the SAME transaction as the entry (future dates included). Meetings / reminders / others never alert,
-  // and opening the Calendar or materializing the task into Daily Work never creates an entry, so neither can alert again.
-  const labels = data.kind === "TASK" ? await alertLabels() : null;
+  // A new Manual Task alerts in the SAME transaction as the entry (future dates included); an ASSIGNED reminder alerts its recipient the same way. A personal reminder, a read of
+  // the Calendar and the materialization into Daily Work never create an entry, so none of them can alert again.
   const row = (await prisma.$transaction(async (tx) => {
-    const created = await tx.calendarEntry.create({ data: { ownerId: ctx.userId, date, ...create } as never, select: ENTRY_SELECT });
-    if (labels && data.kind === "TASK") {
+    const created = await tx.calendarEntry.create({ data: { ownerId, createdById: ctx.userId, date, ...create } as never, select: ENTRY_SELECT });
+    if (data.kind === "TASK") {
       const typed = (create.typedDealerName as string | undefined) ?? null;
-      await notifyAutoTaskCreated(tx, labels, {
-        source: "CALENDAR", section: data.section as AutoTaskSection, ownerId: ctx.userId, dealerId: (create.dealerId as string | undefined) ?? null,
+      await notifyAutoTaskCreated(tx, L, {
+        source: "CALENDAR", section: data.section as AutoTaskSection, ownerId, dealerId: (create.dealerId as string | undefined) ?? null,
         ...(typed ? { dealerName: typed, marketName: (create.marketName as string | null | undefined) ?? null } : data.section === "OTHERS" ? { dealerName: null } : {}),
         date: data.date, amount: create.amount != null ? Number(create.amount) : null, entityType: "CalendarEntry", entityId: (created as { id: string }).id,
       });
+    } else if (assigning && data.kind === "REMINDER") {
+      await notifyReminderAssigned(tx, L, { ownerId, creatorId: ctx.userId, date: data.date, text: data.text, entityId: (created as { id: string }).id });
     }
     return created;
   })) as unknown as EntryRow;
   return (await toEntryDtos(ctx, [row]))[0]!;
 }
 
+/** The dealers an ADMIN may choose when assigning a Sales / Recovery task to `ownerId` — that employee's own current dealers, never the Admin's. */
+export async function recipientDealers(ctx: AuthContext, ownerId: string): Promise<{ id: string; name: string }[]> {
+  await assertCalendarEnabled();
+  const L = await alertLabels();
+  if (!canAssignWork(ctx)) throw new ApiError(403, L["calendar.error.assign_forbidden"]);
+  const user = (await prisma.user.findUnique({ where: { id: ownerId }, select: { id: true, role: true, isActive: true, deletedAt: true } })) as { id: string; role: string; isActive: boolean; deletedAt: Date | null } | null;
+  if (!user || !user.isActive || user.deletedAt || !canOwnDailyTask(user.role as Role)) throw new ApiError(422, L["calendar.error.recipient_invalid"]);
+  await assertOfficerInScope(ctx, user.id);
+  return loadMyDealers(user.id);
+}
+
 async function assertOwnEntry(ctx: AuthContext, id: string): Promise<{ kind: string; materializedAt: Date | null }> {
-  const existing = (await prisma.calendarEntry.findUnique({ where: { id }, select: { ownerId: true, kind: true, materializedAt: true } })) as { ownerId: string; kind: string; materializedAt: Date | null } | null;
+  const existing = (await prisma.calendarEntry.findUnique({ where: { id }, select: { ownerId: true, createdById: true, kind: true, materializedAt: true } })) as { ownerId: string; createdById?: string | null; kind: string; materializedAt: Date | null } | null;
   if (!existing) throw new ApiError(404, "Calendar entry not found");
-  if (existing.ownerId !== ctx.userId) throw new ApiError(403, "You can only change your own calendar entries");
+  // Only the CREATOR changes an entry: the owner for their own, the Admin for work they assigned (its recipient cannot remove an assignment).
+  if (creatorOf(existing) !== ctx.userId) throw new ApiError(403, "You can only change your own calendar entries");
   return existing;
 }
 

@@ -31,6 +31,7 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
   if (p === "labels") return ["labels", "update"];
   if (p.startsWith("settings/")) return [p.includes("recovery") ? "recoveryConfig" : "planningConfig", read ? "read" : "update"];
   if (p.startsWith("announcements")) return ["announcements", "read"];
+  if (p.startsWith("tasks/") && read) return ["performance", "read"]; // Performance → Tasks (read-only analysis and history)
   if (p.startsWith("daily-work")) {
     if (p.endsWith("attendance")) return ["performance", read ? "read" : "attendance"];
     if (/performance(\/detail)?$/.test(p)) return ["performance", "read"];

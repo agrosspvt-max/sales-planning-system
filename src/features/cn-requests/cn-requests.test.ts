@@ -413,6 +413,8 @@ const localRequire = createRequire(import.meta.url);
 
 /** Every new-task alert the CN service asked for (source, owner, date, amount, event id). */
 const cnTaskAlerts: Array<Record<string, unknown>> = [];
+/** Every reschedule-history row the CN service asked for (source, task, owner, previous → new date). */
+const cnReschedules: Array<Record<string, unknown>> = [];
 function loadService(
   prisma: object,
   audits: Array<{ summary?: string | null }> = [],
@@ -437,6 +439,7 @@ function loadService(
       reverseMaterializedDailyWorkContribution: async (_tx: unknown, input: { entryId: string; contribution: number }) => { reversals.push(input); },
     },
     "@/features/labels/service.server": { getResolvedLabels: async () => ({ ...DEFAULT_LABELS, ...labelOverrides }) },
+    "@/features/tasks/task-history.server": { recordTaskReschedule: async (_tx: unknown, _ctx: unknown, move: Record<string, unknown>) => { cnReschedules.push(move); return true; } }, // own suites: tasks/task-analysis-ui.test.tsx + billing-task.integration.ts
     "@/features/notifications/task-alerts.server": { notifyAutoTaskCreated: async (_tx: unknown, _labels: unknown, alert: Record<string, unknown>) => { cnTaskAlerts.push(alert); } }, // own suite: notifications/task-alerts.test.ts
     "@/lib/cn-request": {
       CN_PAYMENT_STATUSES,

@@ -1,3 +1,4 @@
+import { getTaskActivity } from "@/features/tasks/task-analysis.server";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { hasAdminPermission } from "@/features/accounts/permissions";
@@ -824,7 +825,9 @@ export async function getDailyAppointment(ctx: AuthContext, rawDate?: string, ta
   const workDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate ?? "") ? rawDate! : currentBusinessDate();
   const apptOfficerId = await resolveReadOfficer(ctx, targetOfficerId);
   await materializeCalendarForRead(ctx, apptOfficerId, workDate, parseDailyWorkMode(rawMode));
-  const entries = await loadDailyRows(apptOfficerId, "APPOINTMENT", workDate, parseDailyWorkMode(rawMode));
+  const entries = (await loadDailyRows(apptOfficerId, "APPOINTMENT", workDate, parseDailyWorkMode(rawMode)))
+    // Old submitted placeholders carry no appointment and must never manufacture a required result.
+    .filter((r) => parseDailyWorkMode(rawMode) !== "REPORT" || r.monthlyPlanId || (r.typedDealerName ?? "").trim() || (r.marketName ?? "").trim());
   const partyPlanningEnabled = await getAppointmentPartyPlanningEnabled();
   const eligibleMarkets = partyPlanningEnabled ? await eligibleMonthlyMarkets(apptOfficerId, workDate) : [];
   const linkedIds = [...new Set(entries.map((r) => r.monthlyPlanId).filter((id): id is string => !!id))];
@@ -839,7 +842,7 @@ export async function getDailyAppointment(ctx: AuthContext, rawDate?: string, ta
     marketId: r.marketId ?? null,
     marketName: r.marketName ?? "",
     dealerName: r.typedDealerName ?? "",
-    legacy: !r.monthlyPlanId,
+    legacy: !r.monthlyPlanId && (!partyPlanningEnabled || !!((r.typedDealerName ?? "").trim() || (r.marketName ?? "").trim())),
     monthlyStatus: r.monthlyPlanId ? monthlyStatus.get(r.monthlyPlanId) ?? null : null,
     resultEventId: r.resultEventId ?? null,
     reportedDealerName: r.resultStatus === "APPOINTED" ? r.reportedDealerName ?? "" : "",
@@ -885,11 +888,11 @@ export async function saveDailyAppointment(ctx: AuthContext, raw: unknown): Prom
     const legacyExisting = new Map(existing.filter((e) => !e.monthlyPlanId).map((e) => [e.rowKey, e]));
     for (const r of legacyRows) {
       const was = legacyExisting.get(r.rowId);
+      if (existing.some((e) => e.rowKey === r.rowId && e.monthlyPlanId)) throw new ApiError(409, L["daily_work.validation.appointment_mode_changed"]);
       if (partyPlanningEnabled) {
-        if (!was || (was.typedDealerName ?? "") !== r.dealerName || (was.marketName ?? "") !== r.marketName) throw new ApiError(422, L["daily_work.validation.appointment_market_required"]);
-      } else {
-        if (!r.dealerName) throw new ApiError(422, L["daily_work.validation.appointment_dealer_required"]);
-        if (existing.some((e) => e.rowKey === r.rowId && e.monthlyPlanId)) throw new ApiError(409, L["daily_work.validation.appointment_mode_changed"]);
+        // An explicitly added, unselected market may be saved as an empty draft placeholder. It is
+        // editable as a selector on reload and can never pass submit. Typed legacy data stays unchanged.
+        if (was ? (was.typedDealerName ?? "") !== r.dealerName || (was.marketName ?? "") !== r.marketName : !!(r.dealerName || r.marketName)) throw new ApiError(422, L["daily_work.validation.appointment_market_required"]);
       }
     }
     if (!partyPlanningEnabled) {
@@ -913,8 +916,8 @@ export async function saveDailyAppointment(ctx: AuthContext, raw: unknown): Prom
           DO UPDATE SET "marketName" = EXCLUDED."marketName", "marketId" = EXCLUDED."marketId", "monthlyPlanId" = EXCLUDED."monthlyPlanId", "updatedAt" = NOW()`);
       }
     }
-    if (!partyPlanningEnabled) {
-      for (const r of legacyRows) {
+    for (const r of legacyRows) {
+      if (!partyPlanningEnabled || (!r.dealerName && !r.marketName)) {
         await tx.$executeRaw(Prisma.sql`
           INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","typedDealerName","marketName","status","createdAt","updatedAt")
           VALUES (${randomUUID()}, ${officerId}, NULL, ${r.rowId}, ${workDate}::date, ${day.currentBatchId}, 'APPOINTMENT', ${r.dealerName}, ${r.marketName || null}, 'DRAFT', NOW(), NOW())
@@ -1310,9 +1313,9 @@ export async function submitDailySummary(ctx: AuthContext, raw: unknown): Promis
 
 /**
  * Whether each MANDATORY section has REAL user data for the day — computed straight from persisted rows, so
- * placeholders/defaults never count:
+ * Appointment drafts count as present once explicitly added, but must also pass completeness checks before submission:
  *   SALES / RECOVERY   → ≥1 saved dealer row for that section
- *   APPOINTMENT        → ≥1 row with a non-empty typed dealer name
+ *   APPOINTMENT        → ≥1 saved row (dealer + market, or an approved monthly link, required to submit)
  *   SCHEME_CONVERSION  → ≥1 (dealer, scheme) row
  *   VISITS             → the SUMMARY visit columns are set (an explicit 0 counts; untouched/NULL does not)
  */
@@ -1324,11 +1327,12 @@ async function sectionDataPresence(officerId: string, workDate: string, batchId:
  * Data presence of every mandatory section AND the persisted No-Plan set in ONE statement (they all read the same batch of DailyWorkEntry rows). This is what the submit
  * transaction and the status read use: three round trips became one, which matters because every statement of an interactive transaction costs a network round trip.
  */
-async function sectionFacts(officerId: string, workDate: string, batchId: string, db: DbClient = prisma): Promise<{ presence: SectionDataPresence; noPlanSet: Set<MandatorySection> }> {
-  const rows = await db.$queryRaw<{ sales: bigint; recovery: bigint; appointment: bigint; conversion: bigint; visits: boolean | null; others: boolean | null; noPlanSections: string | null }[]>(Prisma.sql`
+async function sectionFacts(officerId: string, workDate: string, batchId: string, db: DbClient = prisma): Promise<{ presence: SectionDataPresence; noPlanSet: Set<MandatorySection>; invalidAppointments: boolean }> {
+  const rows = await db.$queryRaw<{ sales: bigint; recovery: bigint; appointment: bigint; invalidAppointments: bigint; conversion: bigint; visits: boolean | null; others: boolean | null; noPlanSections: string | null }[]>(Prisma.sql`
     SELECT COUNT(*) FILTER (WHERE "section" = 'SALES')::bigint AS "sales",
            COUNT(*) FILTER (WHERE "section" = 'RECOVERY')::bigint AS "recovery",
-           COUNT(*) FILTER (WHERE "section" = 'APPOINTMENT' AND ("monthlyPlanId" IS NOT NULL OR COALESCE(TRIM("typedDealerName"), '') <> ''))::bigint AS "appointment",
+           COUNT(*) FILTER (WHERE "section" = 'APPOINTMENT')::bigint AS "appointment",
+           COUNT(*) FILTER (WHERE "section" = 'APPOINTMENT' AND "monthlyPlanId" IS NULL AND (COALESCE(TRIM("typedDealerName"), '') = '' OR COALESCE(TRIM("marketName"), '') = ''))::bigint AS "invalidAppointments",
            COUNT(*) FILTER (WHERE "section" = 'SCHEME_CONVERSION')::bigint AS "conversion",
            BOOL_OR("section" = 'SUMMARY' AND "rowKey" = ${SUMMARY_ROWKEY} AND ("dealerVisits" IS NOT NULL OR "newPartyVisits" IS NOT NULL)) AS "visits",
            BOOL_OR("section" = 'SUMMARY' AND "rowKey" = ${SUMMARY_ROWKEY} AND COALESCE(TRIM("others"), '') <> '') AS "others",
@@ -1339,6 +1343,7 @@ async function sectionFacts(officerId: string, workDate: string, batchId: string
   return {
     presence: { SALES: Number(r?.sales ?? 0) > 0, RECOVERY: Number(r?.recovery ?? 0) > 0, APPOINTMENT: Number(r?.appointment ?? 0) > 0, SCHEME_CONVERSION: Number(r?.conversion ?? 0) > 0, VISITS: r?.visits ?? false, OTHERS: r?.others ?? false },
     noPlanSet: parseNoPlanSet(r?.noPlanSections),
+    invalidAppointments: Number(r?.invalidAppointments ?? 0) > 0,
   };
 }
 
@@ -1423,7 +1428,8 @@ async function reportCompletion(db: DbClient, officerId: string, workDate: strin
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date
       AND "batchId" <> ${currentBatchId} AND "status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
-      AND (${SCHEME_CONVERSION_ENABLED}::boolean OR "section" <> 'SCHEME_CONVERSION')`);
+      AND (${SCHEME_CONVERSION_ENABLED}::boolean OR "section" <> 'SCHEME_CONVERSION')
+      AND ("section" <> 'APPOINTMENT' OR "monthlyPlanId" IS NOT NULL OR COALESCE(TRIM("typedDealerName"), '') <> '' OR COALESCE(TRIM("marketName"), '') <> '')`);
   let paymentModeMissing = false;
   const required = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, false]));
   const complete = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, true]));
@@ -1456,7 +1462,7 @@ async function reportCompletion(db: DbClient, officerId: string, workDate: strin
 /**
  * The ONE authoritative status read: derived data presence + persisted No-Plan → each mandatory section's
  * status, the counts for the progress bar, and whether the whole day can be submitted (no REMAINING section).
- * Data present ⇒ FILLED, so a stale No-Plan flag never coexists with data (it is simply ignored here).
+ * Data present overrides a stale No-Plan flag; incomplete appointment drafts remain REMAINING.
  */
 export async function getDailyStatus(ctx: AuthContext, rawDate?: string, targetOfficerId?: string): Promise<DailyStatusPayload> {
   await assertReadRole(ctx, targetOfficerId);
@@ -1465,7 +1471,7 @@ export async function getDailyStatus(ctx: AuthContext, rawDate?: string, targetO
   await materializeCalendarForRead(ctx, officerId, workDate, "PLAN"); // the status (progress bar) must see Calendar tasks too
   const { day } = await readBatchContext(officerId, workDate);
   const now = dailyWorkClock.now();
-  const [{ presence: data, noPlanSet }, report, autoTasksEnabled, previous] = await Promise.all([
+  const [{ presence: data, noPlanSet, invalidAppointments }, report, autoTasksEnabled, previous] = await Promise.all([
     sectionFacts(officerId, workDate, day.currentBatchId),
     reportCompletion(prisma, officerId, workDate, day.currentBatchId),
     getAutoTasksEnabled(),
@@ -1473,6 +1479,7 @@ export async function getDailyStatus(ctx: AuthContext, rawDate?: string, targetO
   ]);
   const reportDeadlinePassed = isReportDeadlinePassed(workDate, now);
   const statuses = computeSectionStatuses(data, noPlanSet);
+  if (invalidAppointments) statuses.APPOINTMENT = SectionStatus.REMAINING;
   return {
     workDate,
     sections: MANDATORY_SECTIONS.map((s) => ({ section: s, status: statuses[s], hasData: data[s] })),
@@ -1555,7 +1562,8 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
       // Billing Exception tasks need no confirmation: a due task is in the plan once, and submitting it is the officer's confirmation.
       if (unconfirmed > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
     }
-    const { presence: data, noPlanSet } = await sectionFacts(officerId, workDate, day.currentBatchId, tx);
+    const { presence: data, noPlanSet, invalidAppointments } = await sectionFacts(officerId, workDate, day.currentBatchId, tx);
+    if (invalidAppointments) throw new ApiError(422, L["daily_work.validation.appointment_details_required"]);
     const statuses = computeSectionStatuses(data, noPlanSet);
     if (!canSubmitDailyWork(statuses)) {
       const remaining = MANDATORY_SECTIONS.filter((s) => statuses[s] === SectionStatus.REMAINING);
@@ -2074,6 +2082,8 @@ export interface PerformanceRow {
   selfRating: number | null;
   rmRating: number | null;
   submitted: boolean; // plan submitted that day → detail is openable
+  /** Compact Task Activity of this employee / date (see getTaskActivity); null only when it could not be computed — the rest of the row is unaffected. */
+  taskActivity: { tasks: number; completed: number; reschedules: number } | null;
   /** Derived, never stored: plan submitted, report not finalized and the report's noon deadline has passed → shown as "Missed". */
   reportMissed: boolean;
 }
@@ -2198,6 +2208,22 @@ async function resolvePerformanceFilters(ctx: AuthContext, raw: unknown) {
   return { L, filters, from, to, dates, population };
 }
 
+/**
+ * The caller's authorized population for Performance → Tasks (the SAME role scope, State and employee narrowing as the Performance table — anything outside it is refused),
+ * plus the State / employee options. Date ranges are not validated here: the task filters own their dates.
+ */
+export async function taskAnalysisScope(ctx: AuthContext, raw: { officerId?: string; groupId?: string } = {}) {
+  const today = currentBusinessDate();
+  const { population } = await resolvePerformanceFilters(ctx, { from: today, to: today, officerId: raw.officerId || undefined, groupId: raw.groupId || undefined });
+  const full = await performancePopulation(ctx);
+  const groupId = isAdministrativeRole(ctx.role) ? raw.groupId : undefined;
+  return {
+    population: population.map((p) => ({ id: p.id, name: p.name, role: p.role as string, groupId: p.groupId, groupName: p.groupName })),
+    officers: (groupId ? full.filter((p) => p.groupId === groupId) : full).map((p) => ({ id: p.id, name: p.name })),
+    states: isAdministrativeRole(ctx.role) ? [...new Map(full.filter((p) => p.groupId).map((p) => [p.groupId!, { id: p.groupId!, name: p.groupName ?? p.groupId! }])).values()].sort((a, b) => a.name.localeCompare(b.name)) : [],
+  };
+}
+
 export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): Promise<PerformancePayload> {
   const { filters, from, to, dates, population } = await resolvePerformanceFilters(ctx, raw);
 
@@ -2240,6 +2266,12 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   const attMap = new Map(attRows.map((r) => [cell(r.officerId, dk(r.workDate)), r.status as AttendanceStatus]));
 
   const now = dailyWorkClock.now();
+  // Task Activity: two batch queries for the WHOLE table (never one per row). A failure here must never take the existing Performance view down.
+  let activity: Awaited<ReturnType<typeof getTaskActivity>> | null = null;
+  if (ids.length > 0) {
+    try { activity = await getTaskActivity({ population: population.map((p) => ({ id: p.id, name: p.name, role: p.role as string, groupId: p.groupId, groupName: p.groupName })), officers: [], states: [] }, from, to); }
+    catch (error) { console.error("[performance] task activity unavailable", error instanceof Error ? error.name : "Unknown error"); }
+  }
   const rows: PerformanceRow[] = [];
   for (const officer of population) {
     for (const date of dates) {
@@ -2262,6 +2294,7 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
         // An RM rating does not apply to a Regional Manager: that row never carries one.
         rmRating: officer.role === Role.REGIONAL_MANAGER ? null : rmMap.get(key) ?? null,
         submitted: plan != null,
+        taskActivity: activity ? { ...(activity.get(key) ?? { tasks: 0, completed: 0, reschedules: 0 }) } : null,
         reportMissed: isReportMissed(date, plan != null, day?.status === "FINALIZED" || finalized != null, now),
       });
     }

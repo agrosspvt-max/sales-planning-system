@@ -25,7 +25,7 @@ const payloadFor = (url: string) => {
     role: Role.SUPER_ADMIN, from: "2026-09-28", to: "2026-09-28", canEditAttendance: false,
     states: [{ id: "g1", name: "MP" }, { id: "g2", name: "UP" }],
     officers: pool.map((p) => ({ id: p.id, name: p.name })),
-    rows: shown.map((p) => ({ officerId: p.id, officerName: p.name, groupId: p.state, stateName: p.state, date: "2026-09-28", attendance: "PRESENT", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: null, reportMissed: p.id === "so1", selfRating: null, rmRating: null, submitted: true })),
+    rows: shown.map((p) => ({ officerId: p.id, officerName: p.name, groupId: p.state, stateName: p.state, date: "2026-09-28", attendance: "PRESENT", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: null, reportMissed: p.id === "so1", taskActivity: p.id === "so1" ? { tasks: 5, completed: 2, reschedules: 3 } : p.id === "so3" ? { tasks: 0, completed: 0, reschedules: 0 } : null, selfRating: null, rmRating: null, submitted: true })),
     summary: { salesOfficers: shown.length, presentDays: shown.length, totalDays: shown.length, submittedPlans: shown.length, submittedReports: 0, averageSelfRating: null, averageRmRating: null, sections: Object.fromEntries(["sales", "recovery", "schemeConversion", "appointment", "visits"].map((k) => [k, { planned: 0, actual: 0 }])) },
   };
 };
@@ -39,7 +39,8 @@ const overrides: Record<string, unknown> = {
       return [hooks[i], (update: unknown) => { hooks[i] = typeof update === "function" ? (update as (v: unknown) => unknown)(hooks[i]) : update; }];
     },
   },
-  "@/features/labels/label-ui": { useLabel: (key: LabelKey) => DEFAULT_LABELS[key] },
+  "@/features/labels/label-ui": { useLabel: (key: LabelKey) => DEFAULT_LABELS[key], Th: ({ labelKey }: { labelKey: LabelKey }) => <th>{DEFAULT_LABELS[labelKey]}</th> },
+  "@/features/tasks/task-analysis-view": { TaskAnalysisView: () => null }, // own suite: tasks/task-analysis-ui.test.tsx
   "@/lib/api-client": { api: { get: async (url: string) => { urls.push(url); return payloadFor(url); } } },
   "@tanstack/react-query": {
     useQuery: ({ queryFn }: { queryFn: () => Promise<unknown> }) => {
@@ -65,6 +66,16 @@ const render = (role: Role) => { cursor = 0; headers.length = 0; selects.length 
 const lastUrl = () => urls[urls.length - 1]!;
 const lastHeader = () => headers[headers.length - 1]!;
 const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+
+// 0) Performance | Tasks switches above the filters (Performance selected by default) and the compact Task Activity column.
+{
+  const h = render(Role.SUPER_ADMIN);
+  assert.ok(/data-testid="mode-switch"[^>]*>\s*<button[^>]*aria-pressed="true"[^>]*>Performance<\/button>\s*<button[^>]*aria-pressed="false"[^>]*>Tasks<\/button>/.test(h), "Performance | Tasks, Performance selected");
+  assert.ok(h.indexOf('data-testid="mode-switch"') < h.indexOf("Date From"), "the switches sit above the date filters");
+  const act = [...h.matchAll(/data-testid="task-activity"[^>]*>([^]*?)<\/td>/g)].map((m) => m[1]!.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+  assert.deepEqual(act, ["—", "5 tasks · 2 completed ↻ 3 reschedules", "No tasks ↻ 0 reschedules"], "Task Activity: tasks · completed, ↻ reschedules; zero is stated, an unavailable cell is a dash");
+  assert.ok(h.includes("Task Activity"), "its own column heading");
+}
 
 // 1) Loads without a person filter; the header IS the filter, still labelled "Sales Officer".
 let html = render(Role.SUPER_ADMIN);

@@ -30,6 +30,7 @@ export function ColumnFilterHeader({
   selected,
   onChange,
   emptyText = "No options",
+  allLabel = "All",
   className,
 }: {
   label: string;
@@ -38,6 +39,8 @@ export function ColumnFilterHeader({
   selected: string[];
   onChange: (next: string[]) => void;
   emptyText?: string;
+  /** Text of the "All" choice (a host passes its editable label). */
+  allLabel?: string;
   className?: string;
 }) {
   const active = selected.length > 0;
@@ -62,7 +65,7 @@ export function ColumnFilterHeader({
               onChange([]);
             }}
           >
-            <input type="checkbox" readOnly checked={!active} aria-label="All" /> All
+            <input type="checkbox" readOnly checked={!active} aria-label={allLabel} /> {allLabel}
           </DropdownMenuItem>
           {options.map((o) => (
             <DropdownMenuItem

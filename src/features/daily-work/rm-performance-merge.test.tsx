@@ -35,7 +35,8 @@ assert.ok(renderToStaticMarkup(<RmBadge label="Reg. Mgr" />).includes("Reg. Mgr"
 // 4) The Performance table: the capsule is decided by the role of the row's person, for an RM viewer and an admin viewer alike.
 let payload: unknown;
 const overrides: Record<string, unknown> = {
-  "@/features/labels/label-ui": { useLabel: (key: LabelKey) => DEFAULT_LABELS[key] },
+  "@/features/labels/label-ui": { useLabel: (key: LabelKey) => DEFAULT_LABELS[key], Th: ({ labelKey }: { labelKey: LabelKey }) => <th>{DEFAULT_LABELS[labelKey]}</th> },
+  "@/features/tasks/task-analysis-view": { TaskAnalysisView: () => null }, // own suite: tasks/task-analysis-ui.test.tsx
   "@/lib/api-client": { api: { get: async () => payload } },
   "@tanstack/react-query": { useQuery: () => ({ isLoading: false, isFetching: false, data: payload }), useQueryClient: () => ({ invalidateQueries: () => {} }), useMutation: () => ({ isPending: false, mutate: () => {} }) },
   "@/components/layout/page-header": { PageHeader: ({ title, crumbs }: { title: string; crumbs: { label: string }[] }) => <h1 data-crumbs={crumbs.map((c) => c.label).join(">")}>{title}</h1> },

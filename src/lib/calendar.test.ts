@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   dateKey, monthRange, upcomingRange, isUpcoming, conversionEventStatus,
   projectConversionEvents, groupEventsByOfficer, type ConversionEventInput,
-  projectPartyAppointmentEvents, type PartyAppointmentInput, groupDayByEmployee,
+  projectPartyAppointmentEvents, type PartyAppointmentInput, groupDayByEmployee, taskSubtype, employeeHeaderText, orderedDayItems, dayTotals,
 } from "./calendar";
 
 let passed = 0;
@@ -179,6 +179,51 @@ test("one selected day is grouped by EMPLOYEE across every source, sorted by nam
   assert.deepEqual(groupDayByEmployee({ events: [], partyEvents: [], billingTasks: [], entries: [], notes: [] }), [], "an empty day has no groups");
   // regrouping never reveals anything the server did not send: only the given rows appear
   assert.equal(groups.flatMap((g) => g.notes).length, 1);
+});
+
+test("task subtype is the REAL classification: Regular | Scheme for Sales / Recovery, the generating source for Auto tasks, none elsewhere", () => {
+  assert.equal(taskSubtype("RECOVERY", "REGULAR", null), "REGULAR");
+  assert.equal(taskSubtype("RECOVERY", "SCHEME", null), "SCHEME");
+  assert.equal(taskSubtype("SALES", "SCHEME", null), "SCHEME");
+  assert.equal(taskSubtype("RECOVERY", null, null), "REGULAR", "a row without a stored classification is the regular one");
+  assert.equal(taskSubtype("RECOVERY", "REGULAR", "BILLING_EXCEPTION"), "BILLING_EXCEPTION", "the generating source wins for an Auto task");
+  assert.equal(taskSubtype("RECOVERY", null, "CN_REQUEST"), "CN_REQUEST");
+  for (const section of ["VISITS", "OTHERS", "APPOINTMENT"]) assert.equal(taskSubtype(section, "REGULAR", null), null, `${section} has no subtype (no brackets)`);
+});
+
+test("employee header: Name [Territory] State; missing parts (and their brackets) are left out, never 'undefined'", () => {
+  assert.equal(employeeHeaderText("Suresh Verma", "Raigarh", "CG"), "Suresh Verma [Raigarh] CG");
+  assert.equal(employeeHeaderText("Suresh Verma", null, "CG"), "Suresh Verma CG");
+  assert.equal(employeeHeaderText("Suresh Verma", "Raigarh", null), "Suresh Verma [Raigarh]");
+  assert.equal(employeeHeaderText("Suresh Verma", undefined, undefined), "Suresh Verma");
+  assert.equal(employeeHeaderText("Suresh Verma", "  ", ""), "Suresh Verma");
+  assert.equal(employeeHeaderText("Suresh Verma", "undefined", "null"), "Suresh Verma");
+  assert.equal(employeeHeaderText("Suresh Verma", "  Raigarh   City ", " CG "), "Suresh Verma [Raigarh City] CG");
+});
+
+test("one numbered list per employee: deterministic order, nothing merged, the same record twice is one item", () => {
+  const e = (id: string, kind: string, at: string, over: Record<string, unknown> = {}) => ({ id, kind, ownerId: "so1", ownerName: "Amit", createdAt: at, task: kind === "TASK" ? { section: "RECOVERY", dealerId: "d1", amount: 100 } : null, ...over });
+  // three tasks with the SAME dealer / section / amount are three separate tasks; arrival order must not matter
+  const entries = [e("t3", "TASK", "2026-10-01T10:00:03Z"), e("r1", "REMINDER", "2026-10-01T09:00:00Z"), e("t1", "TASK", "2026-10-01T10:00:01Z"), e("t2", "TASK", "2026-10-01T10:00:02Z")];
+  const billing = [{ id: "b1", ownerId: "so1", ownerName: "Amit" }];
+  const notes = [{ id: "n1", ownerId: "so1", ownerName: "Amit", createdAt: "2026-10-01T08:00:00Z" }];
+  const events = [{ planId: "c1", salesOfficerId: "so1", salesOfficerName: "Amit" }];
+  const order = (input: typeof entries) => orderedDayItems(groupDayByEmployee({ events, partyEvents: [], billingTasks: billing, entries: input, notes })[0]!).map((i) => `${i.type}:${i.id}`);
+  const a = order(entries), b = order([...entries].reverse());
+  assert.deepEqual(a, ["event:c1", "billing:b1", "task:t1", "task:t2", "task:t3", "entry:r1", "note:n1"]);
+  assert.deepEqual(b, a, "a different arrival order gives the same numbering");
+  const dup = groupDayByEmployee({ events: [], partyEvents: [], billingTasks: [{ id: "b1", ownerId: "so1", ownerName: "Amit" }, { id: "b1", ownerId: "so1", ownerName: "Amit" }], entries: [e("t1", "TASK", "x"), e("t1", "TASK", "x"), e("t2", "TASK", "x")], notes: [] });
+  assert.equal(dup[0]!.count, 3, "the same underlying task (twice) counts once; the genuinely separate task stays");
+  const two = groupDayByEmployee({ events: [], partyEvents: [], billingTasks: [], entries: [e("a", "TASK", "x", { ownerId: "so1", ownerName: "Same Name" }), e("b", "TASK", "x", { ownerId: "so2", ownerName: "Same Name" })], notes: [] });
+  assert.deepEqual(two.map((g) => [g.employeeId, g.count]), [["so1", 1], ["so2", 1]], "employees with identical names stay separate (stable user ids)");
+});
+
+test("day totals: distinct Sales Officers with a visible item, and all distinct items — an Admin's / RM's own reminder is not an SO", () => {
+  const role = (id: string) => ({ so1: "SALES_OFFICER", so2: "SALES_OFFICER", admin: "SUPER_ADMIN", rm1: "REGIONAL_MANAGER" } as Record<string, string>)[id];
+  assert.deepEqual(dayTotals([{ employeeId: "so1", count: 3 }, { employeeId: "so2", count: 2 }], role), { officers: 2, tasks: 5 });
+  assert.deepEqual(dayTotals([{ employeeId: "so1", count: 3 }, { employeeId: "admin", count: 1 }, { employeeId: "rm1", count: 2 }], role), { officers: 1, tasks: 6 }, "Admin / RM items add to the tasks, not to No of SO");
+  assert.deepEqual(dayTotals([], role), { officers: 0, tasks: 0 }, "an empty date is zero");
+  assert.deepEqual(dayTotals([{ employeeId: "so1", count: 0 }], role), { officers: 0, tasks: 0 });
 });
 
 console.log(`\n${passed} calendar projection tests passed`);

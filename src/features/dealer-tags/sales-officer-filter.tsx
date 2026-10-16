@@ -1,4 +1,5 @@
 "use client";
+import { useLabel } from "@/features/labels/label-ui";
 import { ColumnFilterHeader, filterHeaderLabel, toggleFilterValue } from "@/components/ui/column-filter-header";
 
 export interface SalesOfficerOption {
@@ -22,14 +23,16 @@ export function SalesOfficerFilterHeader({
   selected: string[];
   onChange: (next: string[]) => void;
 }) {
+  const L = { head: useLabel("dealer_tags.col.sales_officers"), aria: useLabel("dealer_tags.filter.aria"), empty: useLabel("dealer_tags.filter.empty"), all: useLabel("dealer_tags.filter.all") };
   return (
     <ColumnFilterHeader
-      label="Sales Officers"
-      ariaLabel="Filter by Sales Officers"
+      label={L.head}
+      ariaLabel={L.aria}
+      allLabel={L.all}
       options={options.map((o) => ({ value: o.id, label: o.name }))}
       selected={selected}
       onChange={onChange}
-      emptyText="No Sales Officers"
+      emptyText={L.empty}
     />
   );
 }

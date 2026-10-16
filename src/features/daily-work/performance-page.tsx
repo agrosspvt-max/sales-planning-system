@@ -18,9 +18,12 @@ import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useLabel } from "@/features/labels/label-ui";
+import { Th, useLabel } from "@/features/labels/label-ui";
 import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { DailyWorkReviewDialog } from "./team-performance-page";
+import { TaskAnalysisView } from "@/features/tasks/task-analysis-view";
+import { defaultTaskFilters, type DateBasis, type TaskFilterState } from "@/lib/task-analysis";
+import { cn } from "@/lib/utils";
 import { PerformanceMetricDetail, countText, rupees, type MetricRequest } from "./performance-metric-detail";
 
 type Attendance = "PRESENT" | "ABSENT" | "LEAVE" | "HOLIDAY";
@@ -29,6 +32,7 @@ interface PerfRow {
   officerId: string; officerName: string; officerRole: Role; groupId: string | null; stateName: string | null; date: string;
   attendance: Attendance; planSubmittedAt: string | null; reportSubmittedAt: string | null;
   selfRating: number | null; rmRating: number | null; submitted: boolean; reportMissed: boolean;
+  taskActivity: { tasks: number; completed: number; reschedules: number } | null;
 }
 interface SectionTotal { planned: number; actual: number }
 interface Summary {
@@ -53,6 +57,17 @@ export function PerformancePage({ role }: { role: Role }) {
   const [officerId, setOfficerId] = useState("");
   const [groupId, setGroupId] = useState("");
   const [detail, setDetail] = useState<{ officerId: string; date: string } | null>(null);
+  // Performance (the default, unchanged view) | Tasks (task analysis). Tasks opens on Auto; its filters live here so they survive switching back and forth, and so a Task Activity
+  // link in the Performance table can open it pre-filtered. Once opened, Tasks stays mounted (hidden) so its page, calendar and selection are kept.
+  const [mode, setMode] = useState<"performance" | "tasks">("performance");
+  const [tasksOpened, setTasksOpened] = useState(false);
+  const [taskFilters, setTaskFilters] = useState<TaskFilterState>(() => defaultTaskFilters(currentBusinessDate()));
+  const showMode = (next: "performance" | "tasks") => { setMode(next); if (next === "tasks") setTasksOpened(true); };
+  const openTasks = (r: PerfRow, basis: DateBasis) => {
+    // The row's employee and date: tasks ORIGINALLY scheduled on that date, or the reschedules MADE on that date (the active basis is shown on the Tasks page). All types.
+    setTaskFilters({ ...defaultTaskFilters(currentBusinessDate(), "ALL"), basis, from: r.date, to: r.date, officerId: isSO ? "" : r.officerId });
+    showMode("tasks");
+  };
   const [metric, setMetric] = useState<{ metric: string; title: string } | null>(null); // the summary card whose contribution details are open
 
   const isSO = role === Role.SALES_OFFICER;
@@ -107,6 +122,9 @@ export function PerformancePage({ role }: { role: Role }) {
     sVisitsA: useLabel("daily_work.performance.summary.visits_actual"),
     detailTitle: useLabel("daily_work.performance.detail.title"),
     openHint: useLabel("daily_work.performance.detail.open_hint"),
+    modePerformance: useLabel("tasks.mode.performance"), modeTasks: useLabel("tasks.mode.tasks"),
+    actCol: useLabel("tasks.activity.col"), actOne: useLabel("tasks.activity.tasks_one"), actMany: useLabel("tasks.activity.tasks_many"), actNone: useLabel("tasks.activity.none"),
+    movesOne: useLabel("tasks.activity.resched_one"), movesMany: useLabel("tasks.activity.resched_many"), openTasksHint: useLabel("tasks.activity.open_tasks"), openMovesHint: useLabel("tasks.activity.open_moves"),
   };
   const attendanceLabel: Record<Attendance, string> = { PRESENT: L.present, ABSENT: L.absent, LEAVE: L.leave, HOLIDAY: L.holiday };
   const title = isSO ? L.my : isRM ? L.team : L.company;
@@ -126,7 +144,7 @@ export function PerformancePage({ role }: { role: Role }) {
 
   const showOfficer = !isSO;
   const showState = isAdmin;
-  const colCount = 1 + (showOfficer ? 1 : 0) + (showState ? 1 : 0) + 6; // date + officer? + state? + attendance/plan/report/self/rm/action
+  const colCount = 1 + (showOfficer ? 1 : 0) + (showState ? 1 : 0) + 7; // date + officer? + state? + attendance/plan/report/self/rm/action
   const changeState = (value: string) => {
     setGroupId(value);
     // A State change establishes a new authoritative SO scope. Resetting is predictable and prevents a
@@ -141,6 +159,16 @@ export function PerformancePage({ role }: { role: Role }) {
     <div className="space-y-5">
       <PageHeader crumbs={[{ label: L.breadcrumb }, { label: title }]} title={title} />
 
+      <div className="inline-flex rounded-md border bg-background p-0.5 text-sm" role="group" aria-label={`${L.modePerformance} / ${L.modeTasks}`} data-testid="mode-switch">
+        {([["performance", L.modePerformance], ["tasks", L.modeTasks]] as const).map(([value, label]) => (
+          <button key={value} type="button" aria-pressed={mode === value} onClick={() => showMode(value)}
+            className={cn("rounded px-4 py-1.5 font-medium", mode === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>{label}</button>
+        ))}
+      </div>
+      {tasksOpened && <div hidden={mode !== "tasks"}><TaskAnalysisView role={role} filters={taskFilters} onFilters={setTaskFilters} /></div>}
+
+      {mode === "performance" && (
+        <>
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5"><Label>{L.dateFrom}</Label><DateInputDMY value={from} onChange={(v) => setFrom(v || currentBusinessDate())} className="w-44" aria-label={L.dateFrom} /></div>
         <div className="space-y-1.5"><Label>{L.dateTo}</Label><DateInputDMY value={to} onChange={(v) => setTo(v || currentBusinessDate())} className="w-44" aria-label={L.dateTo} /></div>
@@ -168,12 +196,12 @@ export function PerformancePage({ role }: { role: Role }) {
         <Stat label={L.sAvgSelf} value={data ? ratingText(data.summary.averageSelfRating) : "—"} />
         <Stat label={L.sAvgRm} value={data ? ratingText(data.summary.averageRmRating) : "—"} />
         {/* Planned vs Actual per section, over the same filtered officers and dates as the table (Others has no totals). */}
-        <div className="col-span-full grid gap-3 border-t pt-3 sm:grid-cols-2 lg:grid-cols-5" data-testid="section-totals">
+        <div className="col-span-full grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3 border-t pt-4" data-testid="section-totals">
           {([
             [L.sSalesP, L.sSalesA, "sales", rupees, "sales"], [L.sRecoveryP, L.sRecoveryA, "recovery", rupees, "recovery"], [L.sSchemeP, L.sSchemeA, "schemeConversion", countText, "scheme_conversion"],
             [L.sApptP, L.sApptA, "appointment", countText, "appointment"], [L.sVisitsP, L.sVisitsA, "visits", countText, "visits"],
           ] as const).map(([planned, actual, key, fmt, id]) => (
-            <div key={key} className="grid grid-cols-2 gap-3">
+            <div key={key} className="grid min-w-0 grid-cols-1 gap-4 rounded-md border bg-muted/20 p-3 min-[480px]:grid-cols-2" aria-label={`${planned} / ${actual}`}>
               <Stat label={planned} value={data ? fmt(data.summary.sections[key].planned) : "—"} hint={L.openHint} onOpen={data ? () => setMetric({ metric: `${id}_planned`, title: L.detailTitle.replace("{metric}", planned) }) : undefined} />
               <Stat label={actual} value={data ? fmt(data.summary.sections[key].actual) : "—"} hint={L.openHint} onOpen={data ? () => setMetric({ metric: `${id}_actual`, title: L.detailTitle.replace("{metric}", actual) }) : undefined} />
             </div>
@@ -201,6 +229,7 @@ export function PerformancePage({ role }: { role: Role }) {
               <TableHead>{L.colReport}</TableHead>
               <TableHead>{L.colSelf}</TableHead>
               <TableHead>{L.colRm}</TableHead>
+              <Th labelKey="tasks.activity.col" />
               <TableHead className="text-right">{L.colAction}</TableHead>
             </TableRow>
           </TableHeader>
@@ -235,6 +264,18 @@ export function PerformancePage({ role }: { role: Role }) {
                   <TableCell className="tabular-nums">{r.selfRating == null ? dash : ratingText(r.selfRating)}</TableCell>
                   {/* Decided by the role of the person this ROW represents (never by the viewer): an RM has no RM rating, so the RM capsule shows. */}
                   <TableCell className="tabular-nums">{r.officerRole === Role.REGIONAL_MANAGER ? <RmBadge label={L.rmBadge} title={L.rmNoRating} /> : r.rmRating == null ? dash : ratingText(r.rmRating)}</TableCell>
+                  <TableCell className="min-w-[9rem] text-xs" data-testid="task-activity">
+                    {r.taskActivity ? (
+                      <div className="space-y-0.5">
+                        {r.taskActivity.tasks > 0
+                          ? <button type="button" title={L.openTasksHint} className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => openTasks(r, "ORIGINAL")}>{(r.taskActivity.tasks === 1 ? L.actOne : L.actMany).replace("{n}", String(r.taskActivity.tasks)).replace("{c}", String(r.taskActivity.completed))}</button>
+                          : <div className="text-muted-foreground">{L.actNone}</div>}
+                        {r.taskActivity.reschedules > 0
+                          ? <button type="button" title={L.openMovesHint} className="block text-primary underline-offset-2 hover:underline" onClick={() => openTasks(r, "RESCHEDULED_ON")}>{(r.taskActivity.reschedules === 1 ? L.movesOne : L.movesMany).replace("{n}", String(r.taskActivity.reschedules))}</button>
+                          : <div className="text-muted-foreground">{L.movesMany.replace("{n}", "0")}</div>}
+                      </div>
+                    ) : dash}
+                  </TableCell>
                   <TableCell className="text-right">
                     {r.submitted ? (
                       <Button size="sm" variant="outline" onClick={() => setDetail({ officerId: r.officerId, date: r.date })}><Eye className="h-4 w-4" /> {L.view}</Button>
@@ -246,6 +287,9 @@ export function PerformancePage({ role }: { role: Role }) {
           </TableBody>
         </Table>
       </div>
+
+        </>
+      )}
 
       {metric && data && (
         // The drill-down uses the filters of the data the card was computed from (this page's Date From / Date To / State / officer).
@@ -268,14 +312,14 @@ export function PerformancePage({ role }: { role: Role }) {
 function Stat({ label, value, hint, onOpen }: { label: string; value: string; hint?: string; onOpen?: () => void }) {
   const body = (
     <>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-lg font-semibold tabular-nums">{value}</div>
+      <div className="text-xs leading-5 text-muted-foreground">{label}</div>
+      <div className="break-words text-lg font-semibold tabular-nums [overflow-wrap:anywhere]">{value}</div>
     </>
   );
-  if (!onOpen) return <div>{body}</div>;
+  if (!onOpen) return <div className="min-w-0">{body}</div>;
   // A clickable card: same look, plus a pointer, hover and keyboard-focus state. A real button, so Enter / Space open it.
   return (
-    <button type="button" title={hint} onClick={onOpen} className="-m-1 cursor-pointer rounded-md p-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+    <button type="button" title={hint} onClick={onOpen} className="min-w-0 cursor-pointer rounded-md p-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
       {body}
     </button>
   );

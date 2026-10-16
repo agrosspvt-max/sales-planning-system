@@ -133,7 +133,7 @@ const pageLoad = testLoader({
 const { DealerTagsPage } = pageLoad<typeof import("./dealer-tags-page")>("src/features/dealer-tags/dealer-tags-page.tsx");
 const filterModule = pageLoad<typeof import("./sales-officer-filter")>("src/features/dealer-tags/sales-officer-filter.tsx");
 const render = (role: Role, p: typeof preset = {}) => { preset = p; stateCall = 0; queries.length = 0; return renderToStaticMarkup(<DealerTagsPage role={role} />); };
-const heads = (html: string) => [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim());
+const heads = (html: string) => [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()); // column headings stack their words, so compare the words
 const rowNames = (html: string) => [...html.matchAll(/<tr[^>]*data-dealer-id="([^"]+)"/g)].map((m) => m[1]);
 
 async function page() {
@@ -185,7 +185,7 @@ async function page() {
     const src = readFileSync("src/features/dealer-tags/dealer-tags-page.tsx", "utf8");
     assert.ok(src.includes('useLabel("dealer_tags.dealer.placeholder")') && src.includes('useLabel("dealer_tags.dealer.empty")') && src.includes('useLabel("dealer_tags.dealer.search")'), "wording comes from Edit Labels");
     assert.ok(src.includes("setDealerId(value);") && src.includes("{ dealerId, tagId, operation }"), "the stable dealer id is what is submitted");
-    assert.ok(src.includes('placeholder="Search dealers…"'), "the separate table search is unchanged");
+    assert.ok(src.includes('placeholder={L.searchPlaceholder}') && src.includes('useLabel("dealer_tags.search.placeholder")'), "the separate table search is unchanged (its wording is a label)");
   }
 
   // Test 11 — assignment / revocation workflow untouched: same endpoints, and the dealer picker still uses the

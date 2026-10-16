@@ -8,6 +8,8 @@ import { usePathname } from "next/navigation";
 import { Role } from "@prisma/client";
 import { Menu, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useLabel } from "@/features/labels/label-ui";
+import type { LabelKey } from "@/features/labels/labels";
 import { navForRole } from "@/features/navigation/nav";
 import { resolveNavState } from "@/features/navigation/nav-state";
 import { ROLE_LABELS } from "@/lib/rbac";
@@ -98,7 +100,7 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
         )}
       >
         <Icon className="h-4 w-4" />
-        {item.label}
+        <NavText item={item} />
       </Link>
     );
   };
@@ -121,7 +123,7 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
             childActive ? "text-foreground" : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
           )}
         >
-          <span className="flex items-center gap-2"><Icon className="h-4 w-4" /> {item.label}</span>
+          <span className="flex items-center gap-2"><Icon className="h-4 w-4" /> <NavText item={item} /></span>
           <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", subExpanded ? "" : "-rotate-90")} />
         </button>
         {subExpanded && <div className="ml-3 space-y-1 border-l border-sidebar-border pl-2">{item.children.map(leaf)}</div>}
@@ -233,4 +235,10 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
       </div>
     </div>
   );
+}
+
+/** A sidebar item's text: its Edit Labels text when it has a `labelKey`, otherwise the fixed label. */
+function NavText({ item }: { item: { label: string; labelKey?: LabelKey } }) {
+  const text = useLabel(item.labelKey ?? "dealer_tags.nav.sidebar");
+  return <>{item.labelKey ? text : item.label}</>;
 }

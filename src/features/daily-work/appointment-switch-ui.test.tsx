@@ -16,6 +16,7 @@ const source = page.slice(page.indexOf("const taskTypeText ="), page.indexOf("/*
 type Row = { entryId: string; rowId: string; batchId: string; monthlyPlanId: string; marketName: string; dealerName: string; legacy: boolean; monthlyStatus: string | null; resultEventId: string | null; reportedDealerName: string; status: string; rowStatus: string };
 let enabled = false, renderCursor = 0;
 let states: unknown[] = [];
+let effects: (() => void)[] = [];
 const inputProps: React.InputHTMLAttributes<HTMLInputElement>[] = [];
 const selectProps: { onChange: (e: { target: { value: string } }) => void; disabled?: boolean }[] = [];
 const buttons: { children?: React.ReactNode; onClick?: () => void; disabled?: boolean }[] = [];
@@ -28,7 +29,7 @@ const mod = { exports: {} as { AppointmentSection: React.ComponentType<{ workDat
 runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
   exports: mod.exports, require: requireLocal, Date, console,
   useState: (initial: unknown) => { const i = renderCursor++; if (!(i in states)) states[i] = initial; return [states[i], (value: unknown) => { states[i] = typeof value === "function" ? value(states[i]) : value; }]; },
-  useEffect: () => {}, useRef: () => ({ current: false }), useMemo: (fn: () => unknown) => fn(),
+  useEffect: (effect: () => void) => { effects.push(effect); }, useRef: () => ({ current: false }), useMemo: (fn: () => unknown) => fn(),
   useQueryClient: () => ({ invalidateQueries: () => {} }),
   useQuery: () => ({ isLoading: false, data: { partyPlanningEnabled: enabled, rows: states[0], eligibleMarkets: [{ monthlyPlanId: "p1", marketName: "Karuaa", monthlyStatus: "NONE" }], monthlyDealerPlan: 1, pending: 1, canEnterStatus: true, calendarEntryIds: [] } }),
   useLabel: (key: LabelKey) => DEFAULT_LABELS[key],
@@ -49,7 +50,7 @@ runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.Modul
 });
 const Section = mod.exports.AppointmentSection;
 function render(view = "PLAN", locked = false) {
-  renderCursor = 0; inputProps.length = 0; selectProps.length = 0; buttons.length = 0; dropdown = undefined;
+  renderCursor = 0; effects = []; inputProps.length = 0; selectProps.length = 0; buttons.length = 0; dropdown = undefined;
   return renderToStaticMarkup(<Section workDate="2026-10-15" view={view} locked={locked} />);
 }
 function reset(on: boolean, row?: Partial<Row>) {
@@ -57,6 +58,22 @@ function reset(on: boolean, row?: Partial<Row>) {
   states = [[{ ...mod.exports.newApptRow(on), ...row }], null, null]; requests.length = 0;
 }
 async function main() {
+  for (const on of [false, true]) {
+    reset(on); states[0] = [];
+    render(); effects[0](); // Real hydration with an empty server response.
+    render();
+    assert.equal((states[0] as Row[]).length, 0, "loading an empty plan never creates a row");
+    assert.equal(inputProps.length, 0); assert.equal(dropdown, undefined);
+    buttons.at(-1)!.onClick!(); render();
+    assert.equal((states[0] as Row[]).length, 1, "Add explicitly creates a row");
+    await saveDraft();
+    assert.equal((requests[0].payload.rows as unknown[]).length, 1, "incomplete drafts are preserved for submit validation");
+    buttons[0].onClick!(); render();
+    assert.equal((states[0] as Row[]).length, 0, "deleting the last row leaves the plan empty");
+    await saveDraft();
+    assert.equal((requests[1].payload.rows as unknown[]).length, 0);
+    render("REPORT"); assert.equal(selectProps.length, 0, "empty report has no result to fill");
+  }
   reset(false);
   let html = render();
   assert.ok(html.includes('placeholder="Dealer name"') && html.includes('placeholder="Market"'));

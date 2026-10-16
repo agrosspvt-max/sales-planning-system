@@ -95,7 +95,9 @@ async function main() {
   await save([{ rowId: "rm-row", dealerName: "RM Dealer" }], false, RM);
   assert.equal(rows.find((r) => r.officerId === "rm1")?.typedDealerName, "RM Dealer");
   assert.equal(monthlyReads, 0); assert.equal(monthlyWrites, 0);
-  await fail(() => save([{ rowId: "manual1", dealerName: "   " }], false), 422);
+  await save([{ rowId: "manual1", dealerName: "   " }], false);
+  assert.equal(rows.find((r) => r.rowKey === "manual1")?.typedDealerName, "", "unfinished rows can be kept as drafts");
+  await save([manual("Edited Dealer")], false);
   await fail(() => save([{ rowId: "plan1", monthlyPlanId: "plan1" }], false));
   await fail(() => svc.recordAppointedResult(SO, { workDate: DATE, entryId: rows[0].id }));
 
@@ -104,6 +106,12 @@ async function main() {
   const before = structuredClone(rows);
   await fail(() => save([manual()], false)); assert.deepEqual(rows, before);
   await fail(() => save([{ rowId: "new", dealerName: "Forged Manual" }], true), 422);
+  await save([{ rowId: "blank-selector" }], true);
+  p = await svc.getDailyAppointment(SO, DATE);
+  assert.equal(p.rows[0].legacy, false, "an unfinished linked selection reloads as a selector");
+  await save([], true);
+  // Restore an existing manual draft to exercise mode compatibility.
+  enabled = false; await save([manual("Edited Dealer")], false); enabled = true;
   const currentManual = manual("Edited Dealer");
   await save([currentManual, { rowId: "plan1", monthlyPlanId: "plan1" }], true);
   p = await svc.getDailyAppointment(SO, DATE); assert.equal(p.monthlyDealerPlan, 1); assert.equal(p.eligibleMarkets.length, 1);
@@ -121,7 +129,11 @@ async function main() {
   // Submitted manual results are plain records, independent of the current switch. Existing linked
   // results in OFF mode likewise have no monthly side effects; ON requires the protected popup.
   for (const r of rows) if (r.officerId === SO.userId) r.status = "PLAN_SUBMITTED";
+  // A previously submitted empty placeholder must not create an appointment result requirement.
+  rows.push({ ...rows.find((r) => r.rowKey === "manual1")!, id: "historic-blank", rowKey: "historic-blank", typedDealerName: "  ", marketName: null });
   batchId = "next-batch";
+  p = await svc.getDailyAppointment(SO, DATE, undefined, "REPORT");
+  assert.equal(p.rows.some((r) => r.entryId === "historic-blank"), false);
   const manualRow = rows.find((r) => r.rowKey === "manual1")!, linkedRow = rows.find((r) => r.rowKey === "plan1")!;
   await svc.enterAppointmentStatus(SO, { workDate: DATE, entries: [{ entryId: manualRow.id, status: "APPOINTED" }] });
   assert.equal(manualRow.resultStatus, "APPOINTED");

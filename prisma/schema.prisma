@@ -35,6 +35,7 @@ model User {
   approvalActions          ApprovalAction[]
   auditLogs                AuditLog[]
   calendarEntries          CalendarEntry[]             @relation("CalendarEntryOwner")
+  calendarEntriesCreated   CalendarEntry[]             @relation("CalendarEntryCreator")
   calendarNotes            CalendarNote[]              @relation("CalendarNoteOwner")
   cnPaymentEvents          CnPaymentEvent[]            @relation("CnPaymentEventRecordedBy")
   cnRequests               CnRequest[]                 @relation("OfficerCnRequests")
@@ -756,6 +757,8 @@ model CnRequest {
   paymentVerified             Boolean          @default(false)
   legacyDailyWorkEntryId      String?
   legacyDailyWorkContribution Decimal?         @db.Decimal(14, 2)
+  /// Legacy schedule whose move history is unknown (set once, by migration).
+  rescheduleHistoryGap        Boolean          @default(false)
   legacyDailyWorkConfirmed    Boolean          @default(false)
   finalCnDocument             String?
   finalCnFileName             String?
@@ -794,6 +797,8 @@ model CnPaymentEvent {
   recordedById          String
   createdAt             DateTime        @default(now())
   taskRescheduled       Boolean         @default(false)
+  /// Moved before reschedule history was recorded (the details were not retained) — see TaskRescheduleEvent.
+  rescheduleHistoryGap  Boolean         @default(false)
   dailyWorkEntryId      String?
   dailyWorkContribution Decimal?        @db.Decimal(14, 2)
   dailyWorkConfirmed    Boolean         @default(false)
@@ -1120,11 +1125,15 @@ model CalendarEntry {
   materializedAt        DateTime?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
+  /// Who actually created the entry. NULL = the owner did (every entry before Admin assignment existed); an Admin assigning a task / reminder to a Sales Officer is recorded here while `ownerId` is the recipient.
+  createdById           String?
   owner                 User      @relation("CalendarEntryOwner", fields: [ownerId], references: [id])
+  createdBy             User?     @relation("CalendarEntryCreator", fields: [createdById], references: [id])
 
   @@index([ownerId, date])
   @@index([date])
   @@index([dailyWorkEntryId])
+  @@index([createdById])
 }
 
 /// Field-level history of Super-Admin corrections to APPROVED plans (Admin Override / Edit Mode).
@@ -2413,6 +2422,8 @@ model BillingExceptionTask {
   promisedDate          DateTime         @db.Date
   taskDate              DateTime         @db.Date
   rescheduled           Boolean          @default(false)
+  /// Moved before reschedule history was recorded (the details were not retained) — see TaskRescheduleEvent.
+  rescheduleHistoryGap  Boolean          @default(false)
   dailyWorkEntryId      String?
   dailyWorkContribution Decimal?         @db.Decimal(14, 2)
   dailyWorkConfirmed    Boolean          @default(false)
@@ -2455,4 +2466,28 @@ model LastPaymentJob {
 
   @@index([status, createdAt])
   @@index([scopeKey, createdAt])
+}
+
+/// Task rescheduling history — ONE immutable row per genuine date change of a task (previous → new, who, when, optional reason), written in the same transaction as
+/// the change (append-only trigger). `sourceType` + `sourceId` is the task's stable identity in its own source table (never a Daily Work row); `ownerId` is the employee
+/// the task belonged to when it moved. A no-op save to the same date writes nothing (CHECK previousDate <> newDate). Moves before this table existed are NOT reconstructed:
+/// the source row carries `rescheduleHistoryGap` instead.
+model TaskRescheduleEvent {
+  id           String   @id @default(cuid())
+  sourceType   String // BILLING_EXCEPTION | CN_PAYMENT | CN_LEGACY | CALENDAR_ENTRY
+  sourceId     String
+  ownerId      String
+  previousDate DateTime @db.Date
+  newDate      DateTime @db.Date
+  actorId      String
+  actorName    String
+  actorRole    String
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  @@index([sourceType, sourceId, createdAt])
+  @@index([ownerId, createdAt])
+  @@index([createdAt])
+  @@index([previousDate])
+  @@index([newDate])
 }

@@ -26,10 +26,21 @@ function makeDb(seed: { cal?: Cal[]; dw?: Dw[] }) {
     const sql = query as Prisma.Sql;
     const text = sql.sql.replace(/\s+/g, " ").trim();
     const v = sql.values as unknown[];
+    if (text.includes('"rowKey" NOT LIKE') && text.includes("EXISTS")) return []; // no historical combined draft rows here (the real-database suite covers the split)
     if (text.includes('FROM "CalendarEntry"') && text.includes("FOR UPDATE")) {
       const [owner, date] = v as string[];
       return calendar.filter((c) => c.ownerId === owner && c.kind === "TASK" && c.date === date && !c.materializedAt).sort((a, b) => a.createdAt - b.createdAt)
         .map((c) => ({ ...c, amount: c.amount == null ? null : String(c.amount) }));
+    }
+    if (text.startsWith('DELETE FROM "DailyWorkEntry"')) {
+      const [id] = v as string[];
+      const at = dw.findIndex((r) => r.id === id && r.status === "DRAFT" && r.rowKey.startsWith("t:") && !(r.todaysPlan) && !calendar.some((c) => c.dailyWorkEntryId === id));
+      if (at >= 0) dw.splice(at, 1);
+      return at >= 0 ? 1 : 0;
+    }
+    if (text.startsWith('UPDATE "DailyWorkEntry"') && text.includes('SET "todaysPlan" =')) {
+      const [amount, id] = v as [{ toString(): string }, string];
+      const r = dw.find((x) => x.id === id)!; r.todaysPlan = Number(amount.toString()); return 1;
     }
     if (text.startsWith('SELECT "id" FROM "DailyWorkEntry"')) {
       const lit = text.includes("'APPOINTMENT'") ? "APPOINTMENT" : text.includes("'SUMMARY'") ? "SUMMARY" : null;
@@ -52,10 +63,6 @@ function makeDb(seed: { cal?: Cal[]; dw?: Dw[] }) {
       const c = calendar.find((x) => x.id === id && (!guarded || !x.materializedAt));
       if (!c) return 0;
       c.dailyWorkEntryId = rowId; c.dailyWorkContribution = contribution == null ? null : Number(contribution.toString()); c.materializedAt = new Date(); return 1;
-    }
-    if (text.startsWith('UPDATE "DailyWorkEntry"') && text.includes('COALESCE("todaysPlan"')) {
-      const [amount, id] = v as [{ toString(): string }, string];
-      const r = dw.find((x) => x.id === id)!; r.todaysPlan = (r.todaysPlan ?? 0) + Number(amount.toString()); return 1;
     }
     if (text.startsWith('UPDATE "DailyWorkEntry"') && text.includes('"dealerVisits" = COALESCE')) {
       const [dv, npv, id] = v as [number, number, string];
@@ -118,13 +125,20 @@ async function main() {
     assert.equal(rows(race, "RECOVERY").length, 1); assert.equal(rows(race, "RECOVERY")[0]!.todaysPlan, 25000, "concurrent opens never double-count");
   }
 
-  // An existing manual row for the same dealer: the amount is ADDED; the row's own type/payment mode is kept; no 2nd row.
+  // The dealer's directly entered manual row is NEVER merged with the Calendar task: the task gets its own row and keeps its own amount; the manual row (amount, type, payment mode) is untouched.
   {
     const manual: Dw = { id: "m1", officerId: "so-1", dealerId: "d-1", rowKey: "d-1", workDate: "2026-10-10", batchId: "batch-current", section: "RECOVERY", status: "DRAFT", todaysPlan: 5000, paymentMode: "CASH" };
     const f = makeDb({ cal: [cal({})], dw: [manual] });
-    await run(svc, f);
-    assert.equal(rows(f, "RECOVERY").length, 1); assert.equal(rows(f, "RECOVERY")[0]!.todaysPlan, 30000); assert.equal(rows(f, "RECOVERY")[0]!.paymentMode, "CASH");
-    assert.equal(f.calendar[0]!.dailyWorkEntryId, "m1");
+    await run(svc, f); await run(svc, f);
+    assert.equal(rows(f, "RECOVERY").length, 2);
+    assert.deepEqual([manual.todaysPlan, manual.paymentMode], [5000, "CASH"], "the manual row is untouched");
+    const task = rows(f, "RECOVERY").find((r) => r.rowKey.startsWith("t:CAL:"))!;
+    assert.equal(task.todaysPlan, 25000, "the task keeps its own amount");
+    assert.equal(f.calendar[0]!.dailyWorkEntryId, task.id, "the Calendar task is linked to ITS row, not the manual one");
+    // Two Calendar tasks for the SAME dealer, date and section stay two rows.
+    const g = makeDb({ cal: [cal({ amount: 1000 }), cal({ amount: 2000 })] });
+    assert.equal((await run(svc, g)).materialized, 2);
+    assert.deepEqual(rows(g, "RECOVERY").map((r) => r.todaysPlan).sort(), [1000, 2000], "same dealer, two tasks, two rows");
   }
 
   // Sales / Appointment / Visits / Others each land in their own Daily Work shape.

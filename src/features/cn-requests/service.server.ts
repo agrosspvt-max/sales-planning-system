@@ -16,6 +16,7 @@ import { notifyAutoTaskCreated } from "@/features/notifications/task-alerts.serv
 import { recordTaskReschedule } from "@/features/tasks/task-history.server";
 import { lockDailyWorkDay } from "@/features/daily-work/day-lock.server";
 import { reverseMaterializedDailyWorkContribution } from "@/features/daily-work/auto-task-materialization.server";
+import { dropEmptyTaskRow } from "@/features/daily-work/task-rows.server";
 import {
   CN_PAYMENT_STATUS_VALUES,
   CN_ACCEPTANCE_REASON_VALUES,
@@ -1153,13 +1154,13 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
 type LegacyCnTaskRawRow = {
   id: string; dealerId: string; amount: string | null; acceptanceReason: string | null; acceptedAt: Date | null;
   cnExpiryDays: number | null; taskDate: string | null; partyName: string; cnType: string;
-  details: string | null; paymentStatus: string | null; legacyDailyWorkConfirmed: boolean | null;
+  details: string | null; paymentStatus: string | null; legacyDailyWorkConfirmed: boolean | null; legacyDailyWorkEntryId: string | null;
 };
 function toLegacyTaskDto(r: LegacyCnTaskRawRow): CnTaskDto {
   const reason = (r.acceptanceReason as CnAcceptanceReason | null) ?? null;
   const amount = r.amount == null ? null : Number(r.amount);
   return {
-    taskId: null, cnRequestId: r.id, dealerId: r.dealerId, taskType: "CN_REQUEST", planType: "RECOVERY",
+    taskId: null, cnRequestId: r.id, dealerId: r.dealerId, taskType: "CN_REQUEST", planType: "RECOVERY", entryId: r.legacyDailyWorkEntryId ?? null,
     partyName: r.partyName, cnType: canonicalCnType(r.cnType), details: r.details,
     amount, reason, kind: cnTaskKindForReason(reason), recoveryAmount: cnTaskAmount(reason, amount), taskDate: r.taskDate,
     taskRescheduled: true,
@@ -1171,7 +1172,7 @@ function toLegacyTaskDto(r: LegacyCnTaskRawRow): CnTaskDto {
 }
 const LEGACY_TASK_SELECT = Prisma.sql`
   SELECT c."id", c."dealerId", c."amount"::text AS "amount", c."acceptanceReason", c."acceptedAt", c."cnExpiryDays",
-    c."taskDate"::text AS "taskDate", c."cnType", c."details", c."paymentStatus", c."legacyDailyWorkConfirmed",
+    c."taskDate"::text AS "taskDate", c."cnType", c."details", c."paymentStatus", c."legacyDailyWorkConfirmed", c."legacyDailyWorkEntryId",
     d."name" AS "partyName"
   FROM "CnRequest" c JOIN "Dealer" d ON d."id" = c."dealerId"`;
 
@@ -1181,7 +1182,7 @@ function toNewTaskDto(event: NewTaskRow, confirmed = false): CnTaskDto {
   const request = event.cnRequest;
   const amount = Number(event.taskAmount);
   return {
-    taskId: event.id, cnRequestId: request.id, dealerId: request.dealerId, taskType: "CN_REQUEST", planType: "RECOVERY",
+    taskId: event.id, cnRequestId: request.id, dealerId: request.dealerId, taskType: "CN_REQUEST", planType: "RECOVERY", entryId: event.dailyWorkEntryId ?? null,
     partyName: request.dealer.name,
     cnType: canonicalCnType(request.cnType), details: request.details, amount, reason: "PAYMENT_PENDING",
     kind: "CN_RECOVERY", recoveryAmount: amount, taskDate: event.taskDate?.toISOString().slice(0, 10) ?? null,
@@ -1307,6 +1308,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
         },
       });
       if (updated.count === 0) throw new ApiError(409, L["cn_requests.error.task_changed"]);
+      if (event.dailyWorkEntryId) await dropEmptyTaskRow(tx, event.dailyWorkEntryId); // the task's own row leaves today's plan with it
       // A genuine date CHANGE (an already-dated task moved) appends its history row in this same transaction; first-time scheduling (no previous date) and a same-date save do not.
       const previousTaskDate = event.taskDate?.toISOString().slice(0, 10) ?? null;
       if (previousTaskDate) await recordTaskReschedule(tx, ctx, { sourceType: "CN_PAYMENT", sourceId: taskId, ownerId: event.cnRequest.officerId, previousDate: previousTaskDate, newDate: taskDate });
@@ -1346,6 +1348,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
         AND "status" = ${CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED}
         AND "legacyDailyWorkEntryId" IS NOT DISTINCT FROM ${existing.legacyDailyWorkEntryId}`);
     if (updated === 0) throw new ApiError(409, L["cn_requests.error.legacy_task_inactive"]);
+    if (existing.legacyDailyWorkEntryId) await dropEmptyTaskRow(tx, existing.legacyDailyWorkEntryId);
     if (existing.taskDate) await recordTaskReschedule(tx, ctx, { sourceType: "CN_LEGACY", sourceId: id, ownerId: existing.officerId, previousDate: String(existing.taskDate instanceof Date ? existing.taskDate.toISOString() : existing.taskDate).slice(0, 10), newDate: taskDate });
     const rows = await tx.$queryRaw<LegacyCnTaskRawRow[]>(Prisma.sql`${LEGACY_TASK_SELECT} WHERE c."id" = ${id}`);
     if (!rows[0]) throw new ApiError(409, L["cn_requests.error.legacy_task_inactive"]);

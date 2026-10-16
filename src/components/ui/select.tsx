@@ -7,6 +7,8 @@ import { taggedDealersFirst } from "@/lib/dealer-tags";
 export interface SelectOption {
   value: string;
   label: string;
+  /** Optional styling of this choice (e.g. red text for a destructive choice) where the browser honours it; the label text itself always carries the meaning. */
+  className?: string;
 }
 
 export interface NativeSelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
@@ -31,7 +33,7 @@ const NativeSelect = React.forwardRef<HTMLSelectElement, NativeSelectProps>(
       >
         {placeholder !== undefined && <option value="">{placeholder}</option>}
         {ordered.map((o) => (
-          <option key={o.value} value={o.value}>
+          <option key={o.value} value={o.value} className={o.className}>
             {o.label}
             {dealerOptions &&
               tags[o.value]

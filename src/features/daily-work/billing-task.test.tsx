@@ -30,10 +30,10 @@ assert.ok(!/cn-requests|CnPaymentEvent|CnRequest/.test(ui + server.replace(/NOT 
 assert.ok(ui.includes("/api/billing-exception-tasks/${task.taskId}/reschedule") && ui.includes("/api/billing-exception-tasks/${id}") && !ui.includes("/confirm"), "its own endpoints; no confirmation endpoint");
 const page = read("src/features/daily-work/daily-work-page.tsx");
 assert.ok(!page.includes("BillingTaskPanel") && !ui.includes("BillingTaskPanel") && !page.includes("billing-task-panel"), "the separate Billing Exception tasks section is gone");
-assert.ok(page.includes("<BillingTaskRescheduleDialog") && page.includes('data-testid="billing-reschedule-icon"') && page.includes("!(r.autoAmount > 0) &&"), "the calendar icon is on the task row; Auto rows have no delete icon");
+assert.ok(page.includes("<BillingTaskRescheduleDialog") && page.includes('data-testid="billing-reschedule-icon"') && page.includes('r.rowKind === "MANUAL" && <Button') && page.includes("(data?.billingTasks ?? []).filter((t) => t.entryId === r.entryId)"), "the calendar icon is on the task's OWN row (bound to its entry id, never to the dealer); only the manual row has a delete icon");
 assert.ok(page.includes("readOnly={r.amountLocked}") && page.includes("data-auto-locked"), "an Auto amount is read-only");
 assert.ok(!/confirmBillingTask|countUnconfirmedBillingTasks|billing-exception-tasks\/\[id\]\/confirm/.test(read("src/features/daily-work/billing-task.server.ts") + read("src/features/daily-work/service.server.ts")), "no confirmation requirement is left for Billing Exception tasks");
-assert.ok(page.includes("billingDealerIds") && page.includes('billingDealerIds.has(dealerId) ? "AUTO"'), "Task Type: a Billing Exception task is Auto");
+assert.ok(page.includes("billingEntrySet") && page.includes('billingEntrySet.has(entryId) ? "AUTO"'), "Task Type: a Billing Exception task row is Auto");
 assert.ok(!page.includes("taskTypeBilling") && page.includes("data-recovery-source") && page.includes("sourceBilling"), "its source is the (locked) Recovery Type, not the Task Type");
 const service = read("src/features/daily-work/service.server.ts");
 assert.ok(service.includes("${BILLING_CONTRIBUTION_UNION}") && service.includes("billingTasks,") && service.includes("billingEntryIds,"), "Today's Plan floor, submit gate and payload include the source");

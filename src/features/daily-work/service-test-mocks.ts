@@ -63,6 +63,20 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
       getAutoTasksEnabled: async () => false,
       getAppointmentPartyPlanningEnabled: async () => false,
     },
+    // One row per scheduled task (own suites: task-rows.test + the real-database integration); inert here.
+    "./task-rows.server": {
+      isTaskRowKey: (key: string) => key.startsWith("t:"),
+      splitCombinedDraftRows: async () => 0,
+      hasCombinedDraftRows: async () => false,
+      submittedManualDealerIds: async () => [],
+    },
+    // Task outcomes (Daily Report): own suites — daily-work/task-outcome.test.ts + billing-task.integration.ts; inert here (rows are treated as outcome-less).
+    "./task-outcome.server": {
+      commitTaskOutcomes: async () => ({ completed: 0, rescheduled: 0, abandoned: 0 }),
+      readRowUnits: async () => new Map(),
+      rescheduledEntryIds: async () => [],
+      writeOutcomeDrafts: async () => 0,
+    },
     // Performance → Task Activity (own suites: tasks/task-analysis.test.ts + the real-database integration); inert here.
     "@/features/tasks/task-analysis.server": { getTaskActivity: async () => new Map() },
     // Dealer DISPLAY-name layer — stubbed to "no aliases" so tests keep asserting the real dealer names.

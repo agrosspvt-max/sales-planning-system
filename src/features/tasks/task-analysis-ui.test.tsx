@@ -89,7 +89,7 @@ async function main() {
 
   // 4. History panel: identity, dates, totals, net movement, timeline; preview with explicit omission; partial / unavailable.
   const six = [ev(0, "2026-10-14", "2026-10-15", "Suresh Verma"), ev(1, "2026-10-15", "2026-10-16", "Suresh Verma"), ev(2, "2026-10-16", "2026-10-17", "Admin"), ev(3, "2026-10-17", "2026-10-18", "Suresh Verma"), ev(4, "2026-10-18", "2026-10-19", "Suresh Verma"), ev(5, "2026-10-19", "2026-10-20", "Admin")];
-  history = { task: row({ moves: 6 }), events: six, trail: ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20"], chainOk: true, distinctDates: [] };
+  history = { task: row({ moves: 6 }), events: six, trail: ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20"], outcomes: [], chainOk: true, distinctDates: [] };
   const panel = (r: unknown, seeds: unknown[] = []) => { queue = seeds; return renderToStaticMarkup(<TaskHistoryPanel row={r as never} onClose={() => {}} onShowOnCalendar={() => {}} />); };
   html = panel(row({ moves: 6 }));
   const p = norm(html);
@@ -99,10 +99,10 @@ async function main() {
   assert.ok(p.includes("View full history") && p.includes("Moved by Suresh Verma") && p.includes("Moved by Admin"), "who moved it");
   html = panel(row({ moves: 6 }), [true]);
   assert.ok(!html.includes('data-testid="history-omitted"') && (html.match(/data-testid="history-step"/g) ?? []).length === 6 && norm(html).includes("Dealer asked for time") && norm(html).includes("Show fewer steps"), "the full history shows every step, with the reason");
-  history = { task: row({ moves: 0, historyState: "UNAVAILABLE", originalVerified: false, daysMoved: null }), events: [], trail: [], chainOk: true, distinctDates: [] };
+  history = { task: row({ moves: 0, historyState: "UNAVAILABLE", originalVerified: false, daysMoved: null }), events: [], trail: [], outcomes: [], chainOk: true, distinctDates: [] };
   html = panel(row({ moves: 0, historyState: "UNAVAILABLE", originalVerified: false, daysMoved: null }));
   assert.ok(html.includes('data-testid="history-unavailable"') && norm(html).includes("Unknown — the original date is not verified") && !html.includes('data-testid="history-timeline"') && !html.includes("Show on calendar"), "unavailable: stated plainly, no invented timeline");
-  history = { task: row({ moves: 0, daysMoved: 0, currentDate: "2026-10-14" }), events: [], trail: [], chainOk: true, distinctDates: [] };
+  history = { task: row({ moves: 0, daysMoved: 0, currentDate: "2026-10-14" }), events: [], trail: [], outcomes: [], chainOk: true, distinctDates: [] };
   assert.ok(panel(row({ moves: 0, daysMoved: 0, currentDate: "2026-10-14" })).includes('data-testid="history-empty"'), "a verified never-moved task says so");
   ok("history panel: identity, dates, totals, net movement, timeline, preview omission, full view, unavailable");
 

@@ -61,7 +61,7 @@ export const NAV_ITEMS: NavItem[] = [
   // server-side (SO works only with their own assigned dealers).
   { label: "Daily Work", href: "/daily-work", icon: CheckSquare, roles: ALL_ROLES, group: "Planning" },
   // Performance — role-aware, date-range Daily Work performance (Phase 4). SO sees own; RM sees own + team; Admin sees
-  // company-wide. Scope/columns/filters/attendance-edit are all enforced server-side by role.
+  // company-wide. Scope/columns/filters are all enforced server-side by role.
   { label: "Performance", href: "/performance", icon: BarChart3, roles: ALL_ROLES, group: "Insights" },
   // Operational calendar over Scheme Planning conversion dates (+ personal notes). All roles; scope is
   // applied server-side (SO = own, RM = team, Admin = global).

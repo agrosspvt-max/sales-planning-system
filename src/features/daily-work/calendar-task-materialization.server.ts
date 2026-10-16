@@ -7,6 +7,7 @@ import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { lockDailyWorkDay, type DailyWorkDayState } from "./day-lock.server";
 import { autoTasksApplyToRole } from "./auto-task-materialization.server";
+import { dropEmptyTaskRow, ensureTaskRow, splitCombinedDraftRows } from "./task-rows.server";
 
 /**
  * CALENDAR DAILY TASKS → DAILY WORK.
@@ -14,7 +15,7 @@ import { autoTasksApplyToRole } from "./auto-task-materialization.server";
  * A Calendar "Add Daily Task" is stored as a CalendarEntry (kind TASK) and is the SOURCE of the Daily Work row it becomes.
  * When its date is the Daily Work business date, it is materialized — exactly once — into the owner's CURRENT editable
  * (DRAFT) batch, in the section it was created for:
- *   SALES / RECOVERY → the dealer's row (created if absent; the amount is ADDED to Today's Plan if the row already exists)
+ *   SALES / RECOVERY → the task's OWN row (rowKey t:CAL:<id>, amount = the task's amount); never merged into the dealer's manual row or another task
  *   APPOINTMENT      → a typed dealer + market row keyed `cal-<entryId>`
  *   VISITS           → the day's SUMMARY visit counts (added to any existing counts)
  *   OTHERS           → the day's SUMMARY note (appended)
@@ -40,11 +41,12 @@ export async function materializeDueCalendarTasksInTransaction(
   day: DailyWorkDayState,
 ): Promise<CalendarMaterializationResult> {
   if (day.status === "FINALIZED") return { materialized: 0 };
+  await splitCombinedDraftRows(tx, officerId, workDate, day); // historical combined draft rows → one row per task, from their own links
   const due = await tx.$queryRaw<DueEntry[]>(Prisma.sql`
     SELECT "id", "taskSection", "dealerId", "amount"::text AS "amount", "entryType", "schemeId", "paymentMode",
            "typedDealerName", "marketName", "dealerVisits", "newPartyVisits", "text"
     FROM "CalendarEntry"
-    WHERE "ownerId" = ${officerId} AND "kind" = 'TASK' AND "date" = ${workDate}::date AND "materializedAt" IS NULL
+    WHERE "ownerId" = ${officerId} AND "kind" = 'TASK' AND "date" = ${workDate}::date AND "materializedAt" IS NULL AND "abandonedAt" IS NULL
     ORDER BY "createdAt", "id"
     FOR UPDATE`);
   let materialized = 0;
@@ -57,23 +59,8 @@ export async function materializeDueCalendarTasksInTransaction(
     if (task.taskSection === "SALES" || task.taskSection === "RECOVERY") {
       if (!task.dealerId || task.amount == null) continue;
       const section = task.taskSection;
-      let rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-        SELECT "id" FROM "DailyWorkEntry"
-        WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId}
-          AND "section" = ${section} AND "rowKey" = ${task.dealerId} AND "status" = 'DRAFT'
-        FOR UPDATE`);
-      if (rows.length === 0) {
-        await tx.$executeRaw(Prisma.sql`
-          INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId","status","createdAt","updatedAt")
-          VALUES (${randomUUID()}, ${officerId}, ${task.dealerId}, ${task.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, 0, ${task.entryType ?? "REGULAR"}, ${task.entryType === "SCHEME" ? task.schemeId : null}, 'DRAFT', NOW(), NOW())
-          ON CONFLICT ("officerId","workDate","batchId","section","rowKey") DO NOTHING`);
-        rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-          SELECT "id" FROM "DailyWorkEntry"
-          WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId}
-            AND "section" = ${section} AND "rowKey" = ${task.dealerId} AND "status" = 'DRAFT'
-          FOR UPDATE`);
-      }
-      rowId = rows[0]?.id ?? null;
+      // The Calendar task owns its own Daily Work row (never merged into the dealer's other rows).
+      rowId = await ensureTaskRow(tx, { officerId, dealerId: task.dealerId, workDate, batchId: day.currentBatchId, section, kind: "CAL", sourceId: task.id, entryType: task.entryType ?? "REGULAR", schemeId: task.schemeId });
       contribution = new Prisma.Decimal(task.amount);
     } else if (task.taskSection === "APPOINTMENT") {
       if (!task.typedDealerName?.trim()) continue;
@@ -106,11 +93,11 @@ export async function materializeDueCalendarTasksInTransaction(
       UPDATE "CalendarEntry"
       SET "dailyWorkEntryId" = ${rowId}, "dailyWorkContribution" = ${contribution}, "materializedAt" = NOW(), "updatedAt" = NOW()
       WHERE "id" = ${task.id} AND "materializedAt" IS NULL`);
-    if (Number(claimed) !== 1) continue;
+    if (Number(claimed) !== 1) { if (contribution) await dropEmptyTaskRow(tx, rowId); continue; }
 
     if (contribution) {
       await tx.$executeRaw(Prisma.sql`
-        UPDATE "DailyWorkEntry" SET "todaysPlan" = COALESCE("todaysPlan", 0) + ${contribution}, "updatedAt" = NOW()
+        UPDATE "DailyWorkEntry" SET "todaysPlan" = ${contribution}, "updatedAt" = NOW()
         WHERE "id" = ${rowId} AND "status" = 'DRAFT' AND "batchId" = ${day.currentBatchId}`);
       clearNoPlan.add(task.taskSection);
     } else if (task.taskSection === "VISITS") {
@@ -154,7 +141,7 @@ export async function materializeDueCalendarTasks(ctx: AuthContext): Promise<Cal
   const workDate = currentBusinessDate();
   // A read takes the day lock only when a Calendar task is actually due (a cheap, non-locking look first), so routine reads never queue on it.
   const due = await prisma.$queryRaw<Array<{ due: boolean }>>(Prisma.sql`
-    SELECT EXISTS (SELECT 1 FROM "CalendarEntry" WHERE "ownerId" = ${ctx.userId} AND "kind" = 'TASK' AND "date" = ${workDate}::date AND "materializedAt" IS NULL) AS "due"`);
+    SELECT EXISTS (SELECT 1 FROM "CalendarEntry" WHERE "ownerId" = ${ctx.userId} AND "kind" = 'TASK' AND "date" = ${workDate}::date AND "materializedAt" IS NULL AND "abandonedAt" IS NULL) AS "due"`);
   if (!(due[0]?.due ?? true)) return { materialized: 0 };
   return prisma.$transaction(async (tx) => {
     const day = await lockDailyWorkDay(tx, ctx.userId, workDate);

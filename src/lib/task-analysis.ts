@@ -4,15 +4,16 @@
  */
 
 export type TaskTypeKind = "AUTO" | "MANUAL";
-export type TaskStatus = "COMPLETED" | "PENDING" | "OVERDUE" | "CANCELLED";
-export const TASK_STATUSES: readonly TaskStatus[] = ["COMPLETED", "PENDING", "OVERDUE", "CANCELLED"];
+export type TaskStatus = "COMPLETED" | "PENDING" | "OVERDUE" | "CANCELLED" | "ABANDONED";
+export const TASK_STATUSES: readonly TaskStatus[] = ["COMPLETED", "PENDING", "OVERDUE", "CANCELLED", "ABANDONED"];
 
 /**
- * Completed / Cancelled come ONLY from the task's own source evidence (never from "in Daily Work", materialized, confirmed or plan submitted, and never from a reschedule).
+ * Completed (a submitted Completed outcome; for a task never given one, its source's own legacy evidence) / Abandoned / Cancelled come ONLY from explicit evidence (never from "in Daily Work", materialized, confirmed or plan submitted, and never from a reschedule).
  * Everything else is open: Overdue when its CURRENT scheduled date has passed, otherwise Pending (today counts as not yet passed).
  */
-export function deriveTaskStatus(t: { completed: boolean; cancelled: boolean; currentDate: string; today: string }): TaskStatus {
+export function deriveTaskStatus(t: { completed: boolean; cancelled: boolean; abandoned?: boolean; currentDate: string; today: string }): TaskStatus {
   if (t.cancelled) return "CANCELLED";
+  if (t.abandoned) return "ABANDONED"; // an explicit, submitted Abandon outcome: its own state, never Pending / Overdue / Completed
   if (t.completed) return "COMPLETED";
   return t.currentDate < t.today ? "OVERDUE" : "PENDING";
 }
@@ -62,7 +63,7 @@ export function rescheduleCalendarCounts(tasks: readonly { key: string; dates: r
 
 export interface SummaryTask { status: TaskStatus; moves: number; historyState: HistoryState }
 export interface TaskSummary {
-  total: number; completed: number; pending: number; overdue: number; cancelled: number;
+  total: number; completed: number; pending: number; overdue: number; cancelled: number; abandoned: number;
   /** Distinct tasks with at least one RECORDED reschedule. */
   rescheduledTasks: number;
   /** Recorded reschedules across those tasks. */
@@ -77,7 +78,7 @@ export function summarizeTasks(tasks: readonly SummaryTask[]): TaskSummary {
   const count = (s: TaskStatus) => tasks.filter((t) => t.status === s).length;
   const totalReschedules = tasks.reduce((n, t) => n + t.moves, 0);
   return {
-    total, completed: count("COMPLETED"), pending: count("PENDING"), overdue: count("OVERDUE"), cancelled: count("CANCELLED"),
+    total, completed: count("COMPLETED"), pending: count("PENDING"), overdue: count("OVERDUE"), cancelled: count("CANCELLED"), abandoned: count("ABANDONED"),
     rescheduledTasks: tasks.filter((t) => t.moves > 0).length, totalReschedules,
     averageReschedules: total === 0 ? 0 : Math.round((totalReschedules / total) * 100) / 100,
     incompleteHistory: tasks.filter((t) => t.historyState !== "COMPLETE").length,
@@ -95,7 +96,7 @@ export function previewHistory<T>(events: readonly T[], full: boolean, head = 2,
   return [...all.slice(0, head), { kind: "omitted", count: events.length - head - tail }, ...all.slice(events.length - tail)];
 }
 
-export type DateBasis = "ORIGINAL" | "RESCHEDULED_ON";
+export type DateBasis = "ORIGINAL" | "RESCHEDULED_ON" | "ABANDONED_ON";
 export const isDateKey = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v;
 
 /* ------------------------------------------------ client filter state (shared by the page, the calendar and the Performance links) ------------------------------------------------ */

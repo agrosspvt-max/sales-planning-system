@@ -62,11 +62,15 @@ const input = (dealerId: string, over: Record<string, unknown> = {}) => ({ deale
 const batch = (officer: string, date: string) => `draft:${officer}:${date}`;
 /** Materialize for an officer on a date, through the real day lock — what Daily Work reads and submit gates run. */
 const materialize = (officer: string, date: string) => prisma.$transaction(async (tx) => { const d = await lock.lockDailyWorkDay(tx, officer, date); return auto.materializeDueDailyWorkTasksInTransaction(tx, officer, date, d); }, { timeout: 30_000 });
-const entry = async (officer: string, date: string, dealerId: string) => (await prisma.$queryRaw<{ id: string; todaysPlan: string | null; status: string; noPlanSections: string | null }[]>`SELECT "id","todaysPlan"::text AS "todaysPlan","status","noPlanSections" FROM "DailyWorkEntry" WHERE "officerId"=${officer} AND "workDate"=${date}::date AND "section"='RECOVERY' AND "rowKey"=${dealerId}`)[0];
+/** The dealer's RECOVERY rows of a date folded for assertions that only care about "what is planned for this dealer" (one row per task + the manual row; `rowsOf` shows them apart). */
+const entry = async (officer: string, date: string, dealerId: string) => {
+  const rows = await prisma.dailyWorkEntry.findMany({ where: { officerId: officer, workDate: new Date(date), section: "RECOVERY", dealerId }, orderBy: [{ rowKey: "asc" }] });
+  return rows.length === 0 ? undefined : { id: rows[0]!.id, todaysPlan: String(rows.reduce((n, r) => n + Number(r.todaysPlan ?? 0), 0)), status: rows[0]!.status, noPlanSections: null as string | null };
+};
 const manual = (officer: string, date: string, dealerId: string, plan: number) => prisma.$executeRaw`INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","status","createdAt","updatedAt") VALUES (${`m-${officer}-${date}-${dealerId}`},${officer},${dealerId},${dealerId},${date}::date,${batch(officer, date)},'RECOVERY',${plan},'REGULAR','DRAFT',NOW(),NOW())`;
 
 async function main() {
-  await prisma.$executeRawUnsafe(`TRUNCATE "BillingExceptionTask","BillingException","DealerPaymentReceipt","DealerLastPayment","DailyWorkEntry","DailyWorkDay","DealerAssignment","Dealer","AuditLog","Notification","TaskRescheduleEvent","User","UserGroup" CASCADE`);
+  await prisma.$executeRawUnsafe(`TRUNCATE "BillingExceptionTask","BillingException","DealerPaymentReceipt","DealerLastPayment","DailyTaskOutcome","DailyWorkEntry","DailyWorkDay","DealerAssignment","Dealer","AuditLog","Notification","TaskRescheduleEvent","User","UserGroup" CASCADE`);
   await prisma.userGroup.create({ data: { id: "g1", name: "MP" } });
   for (const [id, role] of [["admin", Role.SUPER_ADMIN], ["so1", Role.SALES_OFFICER], ["so2", Role.SALES_OFFICER], ["rm", Role.REGIONAL_MANAGER]] as const) await prisma.user.create({ data: { id, name: id.toUpperCase(), username: id, passwordHash: "x", role, groupId: id === "admin" ? null : "g1" } });
   const dealers: Record<string, string> = { A: "Alpha Traders", B: "Beta Stores", C: "Gamma Agro", D: "Delta NoOwner" };
@@ -114,13 +118,14 @@ async function main() {
   await prisma.$executeRaw`UPDATE "DailyWorkEntry" SET "todaysPlan" = "todaysPlan" + 3000 WHERE "id" = ${`m-so1-${day(2)}-B`}`; // stand-in for a CN / Calendar contribution already on the row
   const first = await materialize("so1", day(2));
   assert.equal(first.materializedTasks, 1);
-  assert.equal(Number((await entry("so1", day(2), "B"))!.todaysPlan), 28000, "manual 5,000 + other source 3,000 + Billing Exception 20,000");
+  const rowsOf = async (officer: string, date: string, dealerId: string) => (await prisma.dailyWorkEntry.findMany({ where: { officerId: officer, workDate: new Date(date), section: "RECOVERY", dealerId }, orderBy: { rowKey: "asc" } })).map((r) => [r.rowKey, Number(r.todaysPlan)]);
+  eq(await rowsOf("so1", day(2), "B"), [["B", 8000], [`t:BE:${t0.id}`, 20000]], "the manual row (5,000 + 3,000) is untouched; the Billing Exception task has its OWN row (20,000)");
   for (let i = 0; i < 3; i++) await materialize("so1", day(2));
   assert.equal(await prisma.notification.count(), alertCount, "materializing a task into Daily Work (any number of times) never alerts");
   await Promise.all([materialize("so1", day(2)), materialize("so1", day(2)), materialize("so1", day(2))]);
-  assert.equal(Number((await entry("so1", day(2), "B"))!.todaysPlan), 28000, "repeated / concurrent materialization never adds the amount again");
+  eq(await rowsOf("so1", day(2), "B"), [["B", 8000], [`t:BE:${t0.id}`, 20000]], "repeated / concurrent materialization creates no second row and never adds the amount again");
   const linked = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: t0.id } });
-  eq([linked.dailyWorkEntryId, Number(linked.dailyWorkContribution), linked.dailyWorkConfirmed], [`m-so1-${day(2)}-B`, 20000, false]);
+  eq([linked.dailyWorkEntryId === (await prisma.dailyWorkEntry.findFirstOrThrow({ where: { rowKey: `t:BE:${t0.id}` } })).id, Number(linked.dailyWorkContribution), linked.dailyWorkConfirmed], [true, 20000, false]);
   assert.equal(await prisma.dealerPaymentReceipt.count(), receiptsBefore, "a condition / task fabricates no receipt");
   assert.equal(await prisma.dealerLastPayment.count({ where: { dealerId: "B", paymentDate: new Date(day(2)) } }), 0, "…and no Last Payment");
   const actualRow = await prisma.$queryRaw<{ a: string | null; m: string | null }[]>`SELECT "todaysActual"::text a, "paymentMode" m FROM "DailyWorkEntry" WHERE "id" = ${linked.dailyWorkEntryId}`;
@@ -144,10 +149,10 @@ async function main() {
   assert.equal(await code(task.rescheduleBillingTask(so1, t0.id, day(2))), 422, "today itself is refused: the new date must be AFTER the current business date");
   assert.equal(await code(task.rescheduleBillingTask(so1, t0.id, "2026-02-31")), 422, "an impossible date is refused");
   assert.equal(await code(task.rescheduleBillingTask(so2, t0.id, day(5))), 403);
-  assert.equal(Number((await entry("so1", day(2), "B"))!.todaysPlan), 28000, "refused requests changed nothing");
+  eq(await rowsOf("so1", day(2), "B"), [["B", 8000], [`t:BE:${t0.id}`, 20000]], "refused requests changed nothing");
   await task.rescheduleBillingTask(so1, t0.id, day(5));
   await task.rescheduleBillingTask(so1, t0.id, day(5)); // a retry of the same request is a no-op
-  assert.equal(Number((await entry("so1", day(2), "B"))!.todaysPlan), 8000, "only the 20,000 left; manual + other source stay");
+  eq(await rowsOf("so1", day(2), "B"), [["B", 8000]], "only the task (its own row) left; the manual row stays");
   const moved = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: t0.id } });
   eq([moved.dailyWorkEntryId, moved.dailyWorkConfirmed, moved.rescheduled, moved.taskDate.toISOString().slice(0, 10), moved.promisedDate.toISOString().slice(0, 10)], [null, false, true, day(5), day(2)]);
   // The responsible Regional Manager may move it too (another team's RM may not); the same task row keeps moving, nothing is created.
@@ -155,7 +160,7 @@ async function main() {
   await task.rescheduleBillingTask(rm, t0.id, day(6)); await task.rescheduleBillingTask(rm, t0.id, day(5)); await task.rescheduleBillingTask(rm, t0.id, day(5));
   assert.equal(await prisma.billingExceptionTask.count({ where: { billingExceptionId: yes.id } }), 1, "still ONE task row");
   clock = day(5); await materialize("so1", day(5));
-  assert.equal(Number((await entry("so1", day(5), "B"))!.todaysPlan), 20000, "re-applied once on the new day, in a new row");
+  eq(await rowsOf("so1", day(5), "B"), [[`t:BE:${t0.id}`, 20000]], "re-applied once on the new day, in its own row");
   assert.equal((await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: t0.id } })).id, t0.id, "same task id");
 
   /* ---- overdue: a missed day keeps the task; it shows up on the next editable day with its original promised date ---- */
@@ -196,7 +201,7 @@ async function main() {
   eq((await materialize("so1", day(13))).materializedTasks, 0, "the previous owner no longer receives it");
   eq((await materialize("so2", day(13))).materializedTasks, 1, "the dealer's CURRENT officer does");
   const rerouted = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: mt.id } });
-  eq([rerouted.officerId, Number((await entry("so2", day(13), "B"))!.todaysPlan)], ["so2", 3000]);
+  eq([rerouted.officerId, await rowsOf("so2", day(13), "B")], ["so2", [[`t:BE:${mt.id}`, 3000]]]);
   assert.ok((await prisma.auditLog.count({ where: { entity: "billingExceptionTask", entityId: mt.id, summary: { contains: "re-routed" } } })) === 1, "the re-routing is audited");
   // already-submitted work keeps its owner: the earlier task (so1's frozen entry) is untouched by the reassignment
   assert.equal((await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: ft.id } })).officerId, "so1");
@@ -248,8 +253,8 @@ async function main() {
   const runCal = () => prisma.$transaction(async (tx) => { const d = await lock.lockDailyWorkDay(tx, "so1", day(45)); return calMat.materializeDueCalendarTasksInTransaction(tx, "so1", day(45), d); }, { timeout: 30_000 });
   const m1 = await runCal(), m2 = await runCal(), m3 = await Promise.all([runCal(), runCal()]);
   eq([m1.materialized, m2.materialized, m3.map((x) => x.materialized).sort()], [1, 0, [0, 0]], "enters the SO's Daily Work exactly once, however often it is opened");
-  const asgEntry = (await entry("so1", day(45), "A"))!;
-  eq([asgEntry.todaysPlan, (await prisma.calendarEntry.findUniqueOrThrow({ where: { id: asg.id } })).dailyWorkEntryId === asgEntry.id], ["9100.00", true], "one Daily Work row, plan = the amount, linked to the calendar entry");
+  const asgEntry = await prisma.dailyWorkEntry.findFirstOrThrow({ where: { officerId: "so1", workDate: new Date(day(45)), rowKey: `t:CAL:${asg.id}` } });
+  eq([Number(asgEntry.todaysPlan), (await prisma.calendarEntry.findUniqueOrThrow({ where: { id: asg.id } })).dailyWorkEntryId === asgEntry.id, await prisma.dailyWorkEntry.count({ where: { officerId: "so1", workDate: new Date(day(45)), section: "RECOVERY" } })], [9100, true, 1], "one Daily Work row (the task's own), plan = the amount, linked to the calendar entry");
   eq([await entry("admin", day(45), "A"), await entry("so2", day(45), "A")], [undefined, undefined], "nothing lands in the Admin's or another officer's Daily Work");
   assert.equal(await prisma.notification.count(), beforeAssign + 3, "no alert from the materialization");
   eq(await code(cal.deleteCalendarEntry(so1, asg.id)), 403, "the recipient cannot remove the assignment…");
@@ -329,7 +334,7 @@ async function main() {
   clock = day(13);
 
 
-  /* ---- Recovery Type = the SOURCE of an automatic task: shown, locked, and enforced on the server ---- */
+  /* ---- ONE ROW PER DISTINCT TASK; Recovery Type = the SOURCE of an automatic task (shown, locked, enforced on the server); the dealer's ONE directly entered manual task ---- */
   {
     clock = day(40);
     const ex = await be.createBillingException(admin, input("A", { paymentCondition: "YES", paymentDate: day(41), billingAmount: 900 }));
@@ -338,45 +343,66 @@ async function main() {
     await materialize("so1", day(41));
     await manual("so1", day(41), "B", 100); // a manual row of ANOTHER dealer
     const read = async () => (await svc.getDailyWork(so1, "RECOVERY", day(41), undefined, "PLAN")).dealers;
-    const bySource = (rows: Awaited<ReturnType<typeof read>>) => Object.fromEntries(rows.map((r) => [r.dealerId, [r.recoverySource ?? null, r.entryType, r.todaysPlan]]));
-    eq(bySource(await read()), { A: ["BILLING_EXCEPTION", "REGULAR", 900], B: [null, "REGULAR", 100], C: ["BILLING_EXCEPTION", "REGULAR", 450] }, "the automatic rows carries its source; the manual row has none; amounts unchanged");
-    // Draft save: a manual change of the Recovery Type of the automatic row cannot succeed; a plain re-save keeps everything.
-    assert.notEqual(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 900, entryType: "SCHEME", schemeId: "forged" }, { dealerId: "B", todaysPlan: 100, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 450, entryType: "REGULAR" }] })), 0, "a forged Recovery Type is refused");
-    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 900, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 450, entryType: "REGULAR" }] });
-    eq(bySource(await read()), { A: ["BILLING_EXCEPTION", "REGULAR", 900], B: [null, "REGULAR", 150], C: ["BILLING_EXCEPTION", "REGULAR", 450] }, "draft save/reopen keeps the source and the amounts (the manual row stays editable)");
-    assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 500, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 450, entryType: "REGULAR" }] })), 409, "the task amount floor still applies");
-    // The stored financial classification is retained separately: even when it differs from what a request says, the automatic row keeps it.
-    await prisma.$executeRaw`UPDATE "DailyWorkEntry" SET "entryType" = 'SCHEME' WHERE "officerId" = 'so1' AND "workDate" = ${day(41)}::date AND "section" = 'RECOVERY' AND "rowKey" = 'A'`;
-    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 900, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 450, entryType: "REGULAR" }] });
-    eq((await entry("so1", day(41), "A")) && (await prisma.$queryRaw<{ entryType: string }[]>`SELECT "entryType" FROM "DailyWorkEntry" WHERE "officerId" = 'so1' AND "workDate" = ${day(41)}::date AND "section" = 'RECOVERY' AND "rowKey" = 'A'`).map((r) => r.entryType), ["SCHEME"], "a request cannot change an automatic row's stored classification");
-    await prisma.$executeRaw`UPDATE "DailyWorkEntry" SET "entryType" = 'REGULAR' WHERE "officerId" = 'so1' AND "workDate" = ${day(41)}::date AND "section" = 'RECOVERY' AND "rowKey" = 'A'`;
-    // The automatic amount is locked on the server: nothing manual sits on top of it, so any other amount is refused.
-    assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 901, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 450, entryType: "REGULAR" }] })), 409, "an Auto amount cannot be edited");
-    eq((await read()).map((r) => [r.dealerId, r.amountLocked, r.autoContribution]), [["A", true, 900], ["B", false, 0], ["C", true, 450]], "the locked flag reaches the editor");
-    assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 450, entryType: "REGULAR" }] })), 409, "an Auto row cannot be removed");
-    eq((await read()).find((r) => r.dealerId === "A")?.recoverySource, "BILLING_EXCEPTION");
-    // Report view: the same source, and the row is an Auto Task row there too.
-    const report = await svc.getDailyWork(so1, "RECOVERY", day(41), undefined, "REPORT");
-    assert.ok(Array.isArray(report.autoTaskEntryIds), "report payload keeps the Auto Task id list");
-    /* ---- reschedule from the row: same task, gone from today, back on its day; no confirmation anywhere ---- */
-    const stale = [{ dealerId: "A", todaysPlan: 900, entryType: "REGULAR", autoAmount: 900 }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 450, entryType: "REGULAR", autoAmount: 450 }];
-    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: stale }); // the editor's draft, before the move
+    const shape = (rows: Awaited<ReturnType<typeof read>>) => rows.map((r) => [r.dealerId, r.rowKind, r.recoverySource ?? null, r.entryType, r.todaysPlan, r.amountLocked]);
+    eq(shape(await read()), [["A", "TASK", "BILLING_EXCEPTION", "REGULAR", 900, true], ["B", "MANUAL", null, "REGULAR", 100, false], ["C", "TASK", "BILLING_EXCEPTION", "REGULAR", 450, true]], "each automatic row carries its source and is locked; the manual row has none; amounts unchanged");
+
+    // A SECOND task of the same dealer is a SECOND row — never merged into the first.
+    const ex2 = await be.createBillingException(admin, input("A", { paymentCondition: "YES", paymentDate: day(41), billingAmount: 1100 }));
+    const bt2 = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { billingExceptionId: ex2.id } });
+    await materialize("so1", day(41)); await Promise.all([materialize("so1", day(41)), materialize("so1", day(41))]);
+    eq((await read()).filter((r) => r.dealerId === "A").map((r) => [r.rowKind, r.todaysPlan]), [["TASK", 900], ["TASK", 1100]], "two same-dealer tasks → two rows with their original amounts; repeated / concurrent materialization adds nothing");
+    eq(await rowsOf("so1", day(41), "A"), [[`t:BE:${bt.id}`, 900], [`t:BE:${bt2.id}`, 1100]]);
+    const dto = (await read()).filter((r) => r.dealerId === "A");
+    eq(dto.map((r) => r.autoContribution), [900, 1100], "each row's automatic part is its OWN task amount");
+    eq((await svc.getDailyWork(so1, "RECOVERY", day(41), undefined, "PLAN")).availableDealers.some((d) => d.id === "A"), true, "the dealer stays in Add Dealer while it only has scheduled tasks");
+
+    // The dealer's ONE directly entered manual task, next to its two scheduled tasks (and independently in Sales).
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+    eq(shape(await read()).map((r) => [r[0], r[1], r[4]]), [["A", "TASK", 900], ["A", "TASK", 1100], ["A", "MANUAL", 5000], ["B", "MANUAL", 150], ["C", "TASK", 450]], "tasks 900 + 1,100 and the manual 5,000 are three rows; saving never touches the scheduled tasks");
+    const sum = (await read()).reduce((n, r) => n + (r.todaysPlan ?? 0), 0);
+    eq([(await read()).filter((r) => r.dealerId === "A").length, new Set((await read()).map((r) => r.dealerId)).size, sum], [3, 3, 7600], "3 rows / 1 dealer for A; Today's Plan is the sum of the individual tasks");
+    assert.notEqual(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "SCHEME", schemeId: "forged" }] })), 0, "a forged scheme is refused");
+    assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }, { dealerId: "A", todaysPlan: 2, entryType: "REGULAR" }] })), 422, "two directly entered rows for one dealer in one request are refused");
+    await Promise.all(Array.from({ length: 4 }, () => svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] })));
+    eq((await rowsOf("so1", day(41), "A")).length, 3, "concurrent saves of the same row never create a second manual row");
+    assert.equal(await code(svc.saveDailyWork(so2, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }] })), 403, "dealer ownership / assignment is still enforced");
+    // Sales and Recovery limits are independent.
+    await svc.saveDailyWork(so1, { section: "SALES", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 700, entryType: "REGULAR" }] });
+    eq((await svc.getDailyWork(so1, "SALES", day(41), undefined, "PLAN")).dealers.map((r) => [r.dealerId, r.rowKind, r.todaysPlan]), [["A", "MANUAL", 700]], "the same dealer has its own manual task in Sales");
+    // Deleting the editable manual row makes the dealer selectable again and leaves the scheduled tasks alone.
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+    eq((await read()).filter((r) => r.dealerId === "A").map((r) => [r.rowKind, r.todaysPlan]), [["TASK", 900], ["TASK", 1100]], "removing the manual draft row removes only that row");
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+
+    // Each row acts on ITS task only: rescheduling the 900 task leaves the 1,100 task and the manual 5,000 untouched.
     await task.rescheduleBillingTask(rm, bt.id, day(44)); // the authorized RM moves it
-    eq(bySource(await read()), { B: [null, "REGULAR", 150], C: ["BILLING_EXCEPTION", "REGULAR", 450] }, "the task left today's plan: no row for it, manual row untouched");
-    assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: stale })), 409, "a stale draft can not bring the amount back");
-    eq(bySource(await read()), { B: [null, "REGULAR", 150], C: ["BILLING_EXCEPTION", "REGULAR", 450] }, "…and nothing was re-created");
+    eq((await read()).filter((r) => r.dealerId === "A").map((r) => [r.rowKind, r.todaysPlan]), [["TASK", 1100], ["MANUAL", 5000]], "the task left today's plan; its sibling task and the manual row are untouched");
     await task.rescheduleBillingTask(rm, bt.id, day(44)); // a retried request
     const moved2 = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: bt.id } });
     eq([moved2.dailyWorkEntryId, moved2.taskDate.toISOString().slice(0, 10), moved2.promisedDate.toISOString().slice(0, 10), moved2.rescheduled, Number(moved2.amount), moved2.officerId], [null, day(44), day(41), true, 900, "so1"], "same task: schedule kept apart from the promised date; amount and owner unchanged");
+    const sibling = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: bt2.id } });
+    eq([sibling.rescheduled, sibling.taskDate.toISOString().slice(0, 10), !!sibling.dailyWorkEntryId], [false, day(41), true], "the sibling task is unchanged");
+    // A stale editor can neither bring the moved task back nor remove a scheduled task: the save only ever carries the manual row.
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+    eq((await rowsOf("so1", day(41), "A")).map((r) => r[1]), [5000, 1100], "…and nothing was re-created or lost");
     assert.equal((await prisma.billingException.findUniqueOrThrow({ where: { id: ex.id } })).paymentDate?.toISOString().slice(0, 10), day(41), "the exception's own promised payment date is not rewritten");
     assert.ok((await prisma.auditLog.findMany({ where: { entity: "billingExceptionTask", entityId: bt.id } })).some((a) => a.summary?.includes(`${day(41)} → ${day(44)}`) && a.userId === "rm"), "who / previous date / new date are audited");
-    // The moved task no longer blocks today's submission.
-    for (const section of ["SALES", "APPOINTMENT", "VISITS", "OTHERS"]) await svc.setDailyNoPlan(so1, { workDate: day(41), section, noPlan: true });
+    // Report view: the same source, and the row is an Auto Task row there too.
+    const report = await svc.getDailyWork(so1, "RECOVERY", day(41), undefined, "REPORT");
+    assert.ok(Array.isArray(report.autoTaskEntryIds), "report payload keeps the Auto Task id list");
+
+    // The moved task no longer blocks today's submission. After the plan is SUBMITTED the limit still holds in the next planning batch.
+    for (const section of ["APPOINTMENT", "VISITS", "OTHERS"]) await svc.setDailyNoPlan(so1, { workDate: day(41), section, noPlan: true });
     await svc.submitDailyWorkDay(so1, { workDate: day(41) });
-    // Its scheduled date arrives: the same task enters that day's plan exactly once.
+    const afterSubmit = await svc.getDailyWork(so1, "RECOVERY", day(41), undefined, "PLAN");
+    eq([afterSubmit.manualDealerIds.sort(), afterSubmit.availableDealers.some((d) => d.id === "A")], [["A", "B"], false], "a submitted manual task keeps the dealer out of Add Dealer for that date and section");
+    const results = await Promise.all(Array.from({ length: 4 }, () => code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 9, entryType: "REGULAR" }] }))));
+    eq(results, [409, 409, 409, 409], "a second directly entered task for the same dealer / date / section is rejected — also for concurrent requests, and across planning batches");
+    eq(await prisma.dailyWorkEntry.count({ where: { officerId: "so1", workDate: new Date(day(41)), section: "RECOVERY", dealerId: "A", rowKey: "A" } }), 1, "exactly one directly entered row exists for the dealer");
+    // Its scheduled date arrives: the same task enters that day's plan exactly once, in its own row.
     clock = day(44); await materialize("so1", day(44)); await materialize("so1", day(44));
     const back = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: bt.id } });
-    eq([back.dailyWorkEntryId !== null, Number((await entry("so1", day(44), "A"))!.todaysPlan)], [true, 900], "back in Today's Plan on its date, once");
+    eq([back.dailyWorkEntryId !== null, await rowsOf("so1", day(44), "A")], [true, [[`t:BE:${bt.id}`, 900]]], "back in Today's Plan on its date, once, in its own row");
     clock = day(13);
   }
   /* ---- atomic: a failing audit rolls the exception AND its task back ---- */
@@ -462,14 +488,14 @@ async function main() {
     eq([hist.events.map((e: { previousDate: string; newDate: string; actorName: string }) => [e.previousDate, e.newDate, e.actorName]), hist.trail, hist.chainOk, hist.distinctDates], [[[day(2), day(5), "SO1"], [day(5), day(6), "RM"], [day(6), day(5), "RM"]], [day(2), day(5), day(6), day(5)], true, [day(2), day(5), day(6)]], "chronological, with the revisit kept in the trail");
     assert.equal(await code(ana.getTaskHistory(scopeOf(["so2"]), "BILLING_EXCEPTION", t0.id)), 404, "another employee's task looks missing");
     eq(plain(await ana.getTaskAnalysis(scopeOf(["so2"]), base)).rows.some((r: { ownerId: string }) => r.ownerId === "so1"), false, "an SO's list never includes a colleague's tasks");
-    eq(plain(await ana.getTaskAnalysis(scopeOf([]), base)).summary, { total: 0, completed: 0, pending: 0, overdue: 0, cancelled: 0, rescheduledTasks: 0, totalReschedules: 0, averageReschedules: 0, incompleteHistory: 0 }, "an empty population: zeros, no division error");
+    eq(plain(await ana.getTaskAnalysis(scopeOf([]), base)).summary, { total: 0, completed: 0, pending: 0, overdue: 0, cancelled: 0, abandoned: 0, rescheduledTasks: 0, totalReschedules: 0, averageReschedules: 0, incompleteHistory: 0 }, "an empty population: zeros, no division error");
 
     // Rescheduled On: the business (IST) day each change was MADE — the events above were made today (real clock), not on any scheduled date.
     const madeOn = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
     const byMade = plain(await ana.getTaskAnalysis(everyone, { ...base, basis: "RESCHEDULED_ON", from: madeOn, to: madeOn }));
     const t0Made = byMade.rows.find((r: { taskId: string }) => r.taskId === t0.id)!;
     eq([t0Made.periodMoves, byMade.rows.every((r: { moves: number }) => r.moves > 0)], [3, true], "tasks with a change made on that day, with the changes made that day");
-    eq(plain(await ana.getTaskAnalysis(everyone, { ...base, basis: "RESCHEDULED_ON", from: day(2), to: day(2) })).rows.length, 0, "a scheduled date is not an action date: nothing was MADE on it");
+    eq(plain(await ana.getTaskAnalysis(everyone, { ...base, basis: "RESCHEDULED_ON", from: day(-10), to: day(-10) })).rows.length, 0, "a scheduled date is not an action date: nothing was MADE on it");
     // Performance Task Activity: tasks originally scheduled for the row's date + reschedules made on it, in two batch queries.
     const act = await ana.getTaskActivity(everyone, day(2), day(2));
     const expectedTasks = plain(await ana.getTaskAnalysis(everyone, { ...base, from: day(2), to: day(2) })).rows.filter((r: { ownerId: string }) => r.ownerId === "so1").length;

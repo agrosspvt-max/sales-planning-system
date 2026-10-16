@@ -44,9 +44,9 @@ const overrides: Record<string, unknown> = {
 };
 const { PerformancePage } = testLoader(overrides)("src/features/daily-work/performance-page.tsx") as { PerformancePage: React.ComponentType<{ role: Role }> };
 const sections = Object.fromEntries(["sales", "recovery", "schemeConversion", "appointment", "visits"].map((k) => [k, { planned: 0, actual: 0 }]));
-const row = (id: string, name: string, officerRole: Role, rmRating: number | null) => ({ officerId: id, officerName: name, officerRole, groupId: "g1", stateName: "MP", date: "2026-09-28", attendance: "PRESENT", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: "2026-09-28T18:00:00.000Z", reportMissed: false, selfRating: 8, rmRating, submitted: true });
+const row = (id: string, name: string, officerRole: Role, rmRating: number | null) => ({ officerId: id, officerName: name, officerRole, groupId: "g1", stateName: "MP", date: "2026-09-28", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: "2026-09-28T18:00:00.000Z", reportMissed: false, selfRating: 8, rmRating, submitted: true });
 const rows = [row("rm1", "RM One", Role.REGIONAL_MANAGER, null), row("so1", "Rahul", Role.SALES_OFFICER, 7), row("so2", "Amit", Role.SALES_OFFICER, null)];
-payload = { role: Role.REGIONAL_MANAGER, from: "2026-09-28", to: "2026-09-28", canEditAttendance: false, states: [], officers: [], rows, summary: { salesOfficers: 2, presentDays: 3, totalDays: 3, submittedPlans: 3, submittedReports: 3, averageSelfRating: 8, averageRmRating: 7, sections } };
+payload = { role: Role.REGIONAL_MANAGER, from: "2026-09-28", to: "2026-09-28", states: [], officers: [], rows, summary: { salesOfficers: 2, employeeDays: 3, submittedPlans: 3, submittedReports: 3, averageSelfRating: 8, averageRmRating: 7, sections } };
 const cellsOf = (html: string, name: string) => [...((html.match(new RegExp(`<tr\\b[^>]*>(?:(?!</tr>).)*${name}(?:(?!</tr>).)*</tr>`)) ?? [""])[0].matchAll(/<td\b[^>]*>(.*?)<\/td>/g))].map((m) => m[1]);
 for (const viewer of [Role.REGIONAL_MANAGER, Role.SUPER_ADMIN]) {
   const html = renderToStaticMarkup(<PerformancePage role={viewer} />);

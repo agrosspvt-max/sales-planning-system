@@ -22,11 +22,11 @@ const payloadFor = (url: string) => {
   const pool = PEOPLE.filter((p) => !state || p.state === state);
   const shown = pool.filter((p) => !person || p.id === person);
   return {
-    role: Role.SUPER_ADMIN, from: "2026-09-28", to: "2026-09-28", canEditAttendance: false,
+    role: Role.SUPER_ADMIN, from: "2026-09-28", to: "2026-09-28",
     states: [{ id: "g1", name: "MP" }, { id: "g2", name: "UP" }],
     officers: pool.map((p) => ({ id: p.id, name: p.name })),
-    rows: shown.map((p) => ({ officerId: p.id, officerName: p.name, groupId: p.state, stateName: p.state, date: "2026-09-28", attendance: "PRESENT", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: null, reportMissed: p.id === "so1", taskActivity: p.id === "so1" ? { tasks: 5, completed: 2, reschedules: 3 } : p.id === "so3" ? { tasks: 0, completed: 0, reschedules: 0 } : null, selfRating: null, rmRating: null, submitted: true })),
-    summary: { salesOfficers: shown.length, presentDays: shown.length, totalDays: shown.length, submittedPlans: shown.length, submittedReports: 0, averageSelfRating: null, averageRmRating: null, sections: Object.fromEntries(["sales", "recovery", "schemeConversion", "appointment", "visits"].map((k) => [k, { planned: 0, actual: 0 }])) },
+    rows: shown.map((p) => ({ officerId: p.id, officerName: p.name, groupId: p.state, stateName: p.state, date: "2026-09-28", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: null, reportMissed: p.id === "so1", taskActivity: p.id === "so1" ? { tasks: 9, completed: 4, reschedules: 3, abandoned: 0, sections: { SALES: 3, RECOVERY: 2, APPOINTMENT: 2, VISITS: 2 } } : p.id === "so3" ? { tasks: 0, completed: 0, reschedules: 0, abandoned: 0, sections: {} } : null, selfRating: null, rmRating: null, submitted: true })),
+    summary: { salesOfficers: shown.length, employeeDays: shown.length, submittedPlans: shown.length, submittedReports: 0, averageSelfRating: null, averageRmRating: null, sections: Object.fromEntries(["sales", "recovery", "schemeConversion", "appointment", "visits"].map((k) => [k, { planned: 0, actual: 0 }])) },
   };
 };
 
@@ -73,8 +73,15 @@ const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
   assert.ok(/data-testid="mode-switch"[^>]*>\s*<button[^>]*aria-pressed="true"[^>]*>Performance<\/button>\s*<button[^>]*aria-pressed="false"[^>]*>Tasks<\/button>/.test(h), "Performance | Tasks, Performance selected");
   assert.ok(h.indexOf('data-testid="mode-switch"') < h.indexOf("Date From"), "the switches sit above the date filters");
   const act = [...h.matchAll(/data-testid="task-activity"[^>]*>([^]*?)<\/td>/g)].map((m) => m[1]!.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
-  assert.deepEqual(act, ["—", "5 tasks · 2 completed ↻ 3 reschedules", "No tasks ↻ 0 reschedules"], "Task Activity: tasks · completed, ↻ reschedules; zero is stated, an unavailable cell is a dash");
+  assert.deepEqual(act, ["Unavailable", "9 tasks · 4 completed Sales 3 · Recovery 2 · Dealer Appointment 2 · Visits 2 ↻ 3 reschedules", "No tasks ↻ 0 reschedules"], "Task Activity: tasks · completed, ↻ reschedules; zero is stated, an unavailable cell is a dash");
   assert.ok(h.includes("Task Activity"), "its own column heading");
+  assert.ok(h.includes('data-testid="activity-unavailable"') && !/>\s*No tasks[^<]*<\/div>\s*<\/td>\s*<td[^>]*>\s*<\/td>/.test(h), "task data that could not be loaded is Unavailable — never presented as 'No tasks'");
+  assert.ok(/title="Open the tasks originally scheduled for this date\. By section: Sales 3 · Recovery 2 · Dealer Appointment 2 · Visits 2\./.test(h), "the count's tooltip explains the total by section");
+  // Attendance is retired from the page: no summary figure, no column, no editing control or badge, no request.
+  assert.ok(!/attendance|Present<|Absent<|Holiday<|Leave<|\d+ \/ \d+/i.test(h), "no Attendance anywhere on the Performance view");
+  const headCells = [...h.matchAll(/<th[^>]*>([^]*?)<\/th>/g)].length;
+  const bodyCells = [...h.matchAll(/<tr[^>]*>((?:(?!<\/tr>)[^])*?<td[^]*?)<\/tr>/g)][0]![1]!.match(/<td/g)!.length;
+  assert.equal(bodyCells, headCells, "the table body has exactly one cell per header after the column was removed");
 }
 
 // 1) Loads without a person filter; the header IS the filter, still labelled "Sales Officer".

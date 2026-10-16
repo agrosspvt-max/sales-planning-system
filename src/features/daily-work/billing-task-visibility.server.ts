@@ -51,7 +51,7 @@ export async function canViewBillingTask(ctx: AuthContext, ownerId: string): Pro
 export async function loadCalendarBillingTasks(ctx: AuthContext, gte: Date, lt: Date, ownerIds: string[] | null): Promise<CalendarBillingTaskDto[]> {
   if (isAdministrativeRole(ctx.role) && !hasAdminPermission(ctx, "lastPaymentReport", "read")) return [];
   const rows = await prisma.billingExceptionTask.findMany({
-    where: { taskDate: { gte, lt } },
+    where: { taskDate: { gte, lt }, abandonedAt: null }, // an abandoned task is no longer scheduled
     select: { id: true, billingExceptionId: true, dealerId: true, officerId: true, amount: true, promisedDate: true, taskDate: true, rescheduled: true, dailyWorkEntryId: true, dailyWorkConfirmed: true },
     orderBy: [{ taskDate: "asc" }, { createdAt: "asc" }],
   });

@@ -7,6 +7,7 @@ import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { lockDailyWorkDay, type DailyWorkDayState } from "./day-lock.server";
 import { materializeDueBillingTasksInTransaction } from "./billing-task.server";
+import { dropEmptyTaskRow, ensureTaskRow, splitCombinedDraftRows } from "./task-rows.server";
 
 type DueTask = {
   sourceKind: "PAYMENT_EVENT" | "LEGACY_REQUEST";
@@ -61,6 +62,7 @@ async function materializeDueCnTasksInTransaction(
   day: DailyWorkDayState,
 ): Promise<MaterializationResult> {
   if (day.status === "FINALIZED") return { materializedTasks: 0, affectedDealers: 0, finalized: true };
+  await splitCombinedDraftRows(tx, officerId, workDate, day); // historical combined draft rows → one row per task, from their own links
 
   const paymentTasks = await tx.$queryRaw<Array<Omit<DueTask, "sourceKind">>>(Prisma.sql`
     SELECT e."id" AS "sourceId", c."dealerId", e."taskAmount"::text AS "amount"
@@ -86,7 +88,7 @@ async function materializeDueCnTasksInTransaction(
       AND c."acceptanceReason" = 'PAYMENT_PENDING'
       AND c."taskDate" IS NOT NULL AND c."taskDate" <= ${workDate}::date
       AND c."amount" IS NOT NULL AND c."amount" > 0
-      AND c."legacyDailyWorkEntryId" IS NULL
+      AND c."legacyDailyWorkEntryId" IS NULL AND c."legacyTaskAbandonedAt" IS NULL
     ORDER BY c."taskDate", c."acceptedAt" NULLS LAST, c."id"
     FOR UPDATE OF c`);
 
@@ -96,65 +98,30 @@ async function materializeDueCnTasksInTransaction(
   ];
   if (tasks.length === 0) return { materializedTasks: 0, affectedDealers: 0, finalized: false };
 
-  const byDealer = new Map<string, DueTask[]>();
-  for (const task of tasks) {
-    const list = byDealer.get(task.dealerId) ?? [];
-    list.push(task);
-    byDealer.set(task.dealerId, list);
-  }
-
+  // ONE Recovery row per CN task (never one combined row per dealer): each task keeps its own amount, link and outcome.
   let materializedTasks = 0;
-  let affectedDealers = 0;
-  for (const [dealerId, dealerTasks] of byDealer) {
-    let entries = await tx.$queryRaw<RecoveryEntry[]>(Prisma.sql`
-      SELECT "id" FROM "DailyWorkEntry"
-      WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date
-        AND "batchId" = ${day.currentBatchId} AND "section" = 'RECOVERY' AND "rowKey" = ${dealerId}
-        AND "status" = 'DRAFT'
-      FOR UPDATE`);
-    if (entries.length === 0) {
-      const entryId = randomUUID();
-      await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","status","createdAt","updatedAt")
-        VALUES (${entryId}, ${officerId}, ${dealerId}, ${dealerId}, ${workDate}::date, ${day.currentBatchId}, 'RECOVERY', 0, 'REGULAR', 'DRAFT', NOW(), NOW())
-        ON CONFLICT ("officerId","workDate","batchId","section","rowKey") DO NOTHING`);
-      entries = await tx.$queryRaw<RecoveryEntry[]>(Prisma.sql`
-        SELECT "id" FROM "DailyWorkEntry"
-        WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date
-          AND "batchId" = ${day.currentBatchId} AND "section" = 'RECOVERY' AND "rowKey" = ${dealerId}
-          AND "status" = 'DRAFT'
-        FOR UPDATE`);
-    }
-    const entry = entries[0];
-    if (!entry) throw new ApiError(409, "The current Recovery plan changed while Auto Tasks were being added.");
-
-    let added = new Prisma.Decimal(0);
-    for (const task of dealerTasks) {
-      const contribution = new Prisma.Decimal(task.amount);
-      if (!contribution.isPositive()) continue;
-      const linked = task.sourceKind === "PAYMENT_EVENT"
-        ? await tx.$executeRaw(Prisma.sql`
-            UPDATE "CnPaymentEvent"
-            SET "dailyWorkEntryId" = ${entry.id}, "dailyWorkContribution" = ${contribution}
-            WHERE "id" = ${task.sourceId} AND "dailyWorkEntryId" IS NULL AND "taskStatus" = 'SCHEDULED'`)
-        : await tx.$executeRaw(Prisma.sql`
-            UPDATE "CnRequest"
-            SET "legacyDailyWorkEntryId" = ${entry.id}, "legacyDailyWorkContribution" = ${contribution}, "updatedAt" = NOW()
-            WHERE "id" = ${task.sourceId} AND "legacyDailyWorkEntryId" IS NULL
-              AND "paymentTrackingMode" IS NULL AND "status" = 'ACCEPTED_NOT_POSTED'`);
-      if (Number(linked) === 1) {
-        added = added.add(contribution);
-        materializedTasks++;
-      }
-    }
-    if (added.isPositive()) {
-      await tx.$executeRaw(Prisma.sql`
-        UPDATE "DailyWorkEntry"
-        SET "todaysPlan" = COALESCE("todaysPlan", 0) + ${added}, "updatedAt" = NOW()
-        WHERE "id" = ${entry.id} AND "status" = 'DRAFT' AND "batchId" = ${day.currentBatchId}`);
-      affectedDealers++;
-    }
+  const touchedDealers = new Set<string>();
+  for (const task of tasks) {
+    const contribution = new Prisma.Decimal(task.amount);
+    if (!contribution.isPositive()) continue;
+    const entryId = await ensureTaskRow(tx, { officerId, dealerId: task.dealerId, workDate, batchId: day.currentBatchId, section: "RECOVERY", kind: task.sourceKind === "PAYMENT_EVENT" ? "CNP" : "CNL", sourceId: task.sourceId });
+    if (!entryId) throw new ApiError(409, "The current Recovery plan changed while Auto Tasks were being added.");
+    const linked = task.sourceKind === "PAYMENT_EVENT"
+      ? await tx.$executeRaw(Prisma.sql`
+          UPDATE "CnPaymentEvent"
+          SET "dailyWorkEntryId" = ${entryId}, "dailyWorkContribution" = ${contribution}
+          WHERE "id" = ${task.sourceId} AND "dailyWorkEntryId" IS NULL AND "taskStatus" = 'SCHEDULED'`)
+      : await tx.$executeRaw(Prisma.sql`
+          UPDATE "CnRequest"
+          SET "legacyDailyWorkEntryId" = ${entryId}, "legacyDailyWorkContribution" = ${contribution}, "updatedAt" = NOW()
+          WHERE "id" = ${task.sourceId} AND "legacyDailyWorkEntryId" IS NULL
+            AND "paymentTrackingMode" IS NULL AND "status" = 'ACCEPTED_NOT_POSTED'`);
+    if (Number(linked) !== 1) { await dropEmptyTaskRow(tx, entryId); continue; }
+    await tx.$executeRaw(Prisma.sql`UPDATE "DailyWorkEntry" SET "todaysPlan" = ${contribution}, "updatedAt" = NOW() WHERE "id" = ${entryId} AND "status" = 'DRAFT' AND "batchId" = ${day.currentBatchId}`);
+    touchedDealers.add(task.dealerId);
+    materializedTasks++;
   }
+  const affectedDealers = touchedDealers.size;
 
   if (materializedTasks > 0) {
     // Real Recovery data is authoritative over a previously selected No Plan flag.
@@ -169,7 +136,7 @@ async function materializeDueCnTasksInTransaction(
       action: "UPDATE",
       entity: "dailyWork",
       entityId: `AUTO_TASKS:${workDate}:${day.currentBatchId}`,
-      summary: `Materialized ${materializedTasks} CN Auto Task(s) into ${affectedDealers} Recovery row(s)`,
+      summary: `Materialized ${materializedTasks} CN Auto Task(s) as ${materializedTasks} Recovery row(s) for ${affectedDealers} dealer(s)`,
     }, tx);
   }
   return { materializedTasks, affectedDealers, finalized: false };
@@ -184,9 +151,9 @@ export async function hasDueAutoTasks(officerId: string, workDate: string): Prom
     SELECT (
       EXISTS (SELECT 1 FROM "CnPaymentEvent" e JOIN "CnRequest" c ON c."id" = e."cnRequestId"
               WHERE c."officerId" = ${officerId} AND c."paymentTrackingMode" = 'PAYMENT_V1' AND e."taskStatus" = 'SCHEDULED' AND e."taskDate" IS NOT NULL AND e."taskDate" <= ${workDate}::date AND e."dailyWorkEntryId" IS NULL)
-      OR EXISTS (SELECT 1 FROM "CnRequest" c WHERE c."officerId" = ${officerId} AND c."paymentTrackingMode" IS NULL AND c."status" = 'ACCEPTED_NOT_POSTED' AND c."taskDate" IS NOT NULL AND c."taskDate" <= ${workDate}::date AND c."legacyDailyWorkEntryId" IS NULL)
+      OR EXISTS (SELECT 1 FROM "CnRequest" c WHERE c."officerId" = ${officerId} AND c."paymentTrackingMode" IS NULL AND c."status" = 'ACCEPTED_NOT_POSTED' AND c."taskDate" IS NOT NULL AND c."taskDate" <= ${workDate}::date AND c."legacyDailyWorkEntryId" IS NULL AND c."legacyTaskAbandonedAt" IS NULL)
       OR EXISTS (SELECT 1 FROM "BillingExceptionTask" t JOIN "DealerAssignment" da ON da."dealerId" = t."dealerId" AND da."officerId" = ${officerId} AND da."effectiveTo" IS NULL
-                 WHERE t."taskDate" <= ${workDate}::date AND t."dailyWorkEntryId" IS NULL)
+                 WHERE t."taskDate" <= ${workDate}::date AND t."dailyWorkEntryId" IS NULL AND t."abandonedAt" IS NULL)
     ) AS "due"`);
   return rows[0]?.due ?? true; // when in doubt, take the lock and let the authoritative path decide
 }

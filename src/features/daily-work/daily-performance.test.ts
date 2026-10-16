@@ -1,6 +1,6 @@
 /**
- * Phase 4 — role-aware, date-range performance + attendance. Loads the real service with a DB-free fake and
- * mocked group-based scope. Proves: role scoping, date-range windowing, attendance default/override/persistence
+ * Phase 4 — role-aware, date-range performance. Loads the real service with a DB-free fake and
+ * mocked group-based scope. Proves: role scoping, date-range windowing, no attendance (retired)
  * and write-authorization, plan/report timestamp sources, ratings/averages (missing ≠ 0), filters, detail
  * authorization, and that the range report uses a FIXED number of batched queries (no N+1).
  */
@@ -39,7 +39,6 @@ interface Store {
   plans: Map<string, Date>;      // oid|date → earliest planSubmittedAt
   days: Map<string, { finalizedAt: Date | null; selfRating: number | null }>;
   reviews: Map<string, number>;  // oid|date → rm rating
-  attendance: Map<string, string>;
   entries: Entry[];              // DailyWorkEntry rows (the section-total query)
   rawCount: number;              // # of $queryRaw calls (to assert N+1 boundedness)
 }
@@ -47,7 +46,7 @@ interface Store {
 function makeFake(init: Partial<Store> = {}) {
   const store: Store = {
     plans: init.plans ?? new Map(), days: init.days ?? new Map(),
-    reviews: init.reviews ?? new Map(), attendance: init.attendance ?? new Map(), entries: init.entries ?? [], rawCount: 0,
+    reviews: init.reviews ?? new Map(), entries: init.entries ?? [], rawCount: 0,
   };
   const norm = (a: unknown, rest: unknown[]): Prisma.Sql => (Array.isArray(a) ? Prisma.sql(a as unknown as TemplateStringsArray, ...rest) : (a as Prisma.Sql));
   const inRange = (key: string, ids: string[], from: string, to: string) => {
@@ -62,9 +61,7 @@ function makeFake(init: Partial<Store> = {}) {
     const v = sql.values as unknown[];
     if (text.startsWith('SELECT e."dealerId", SUM(t."contribution")')) return [];
     if (isQuery) store.rawCount += 1;
-    if (text.startsWith('INSERT INTO "DailyWorkAttendance"')) {
-      store.attendance.set(`${v[1]}|${v[2]}`, v[3] as string); return 1;
-    }
+    if (text.includes('DailyWorkAttendance')) throw new Error('attendance must never be read or written');
     // Section totals: values = [...ids, from, to, summaryRowKey]. Emulates the query's WHERE (submitted rows only) and its day join.
     if (text.includes('FROM "DailyWorkEntry" e LEFT JOIN')) {
       const rowKey = v[v.length - 1] as string, to_ = v[v.length - 2] as string, from_ = v[v.length - 3] as string, ids_ = v.slice(0, v.length - 3) as string[];
@@ -91,9 +88,6 @@ function makeFake(init: Partial<Store> = {}) {
     }
     if (text.includes('FROM "DailyWorkReview"')) {
       return rowsFrom(store.reviews, ids, from, to, (oid, date, rating) => ({ officerId: oid, workDate: D(date), rating }));
-    }
-    if (text.includes('FROM "DailyWorkAttendance"')) {
-      return rowsFrom(store.attendance, ids, from, to, (oid, date, status) => ({ officerId: oid, workDate: D(date), status }));
     }
     if (text.startsWith('SELECT t."entryId", SUM(t."contribution")')) return []; // automatic (CN / Billing Exception) contribution lookup: none in this fake
     throw new Error("Unhandled SQL: " + text);
@@ -204,7 +198,7 @@ async function main() {
     assert.equal(p.role, Role.SALES_OFFICER);
     assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))], ["so1"], "SO sees only own");
     assert.equal(p.rows.length, 3, "3 days");
-    assert.equal(p.canEditAttendance, false);
+    assert.ok(!("canEditAttendance" in p), "no attendance edit right in the payload");
   }
 
   // 2) RM sees themself and only their team (g1: so1, so2), never another team's SO (or another RM).
@@ -237,7 +231,7 @@ async function main() {
     assert.equal(p.summary.averageRmRating, 7, "the RM-rating average comes from Sales Officers only");
     assert.equal(p.summary.averageSelfRating, 8.5, "self-rating average keeps the existing rule (each person/date once)");
     assert.equal(p.summary.salesOfficers, 2, "Sales Officers count excludes the RM");
-    assert.equal(p.summary.totalDays, 9); assert.equal(p.summary.submittedPlans, 2); assert.equal(p.summary.submittedReports, 2);
+    assert.equal(p.summary.employeeDays, 9); assert.equal(p.summary.submittedPlans, 2); assert.equal(p.summary.submittedReports, 2);
     // The RM-scoped officer filter can narrow to the RM's own rows or to one officer; an unrelated person is still refused.
     const mine = await svc.getDailyPerformance(RM1, { ...RANGE, officerId: "rm1" });
     assert.deepEqual(flat0([...new Set(mine.rows.map((r) => r.officerId))]), ["rm1"]);
@@ -260,14 +254,14 @@ async function main() {
     await expectStatus(() => svc.getDailyPerformance(RM1, { ...RANGE, officerId: "so3" }), 403, "RM cannot access other team");
   }
 
-  // 3) Admin sees all SOs across groups; N+1 GUARD: exactly 5 batched range queries regardless of officers×days.
+  // 3) Admin sees all SOs across groups; N+1 GUARD: exactly 4 batched range queries regardless of officers×days.
   {
     const f = makeFake();
     const svc = loadService(f.prisma);
     const p = await svc.getDailyPerformance(ADMIN, RANGE);
     assert.deepEqual([...new Set(p.rows.map((r) => r.officerId))].sort(), ["rm1", "rm2", "so1", "so2", "so3", "so4", "so5"], "Admin sees every Daily Work owner: Sales Officers AND Regional Managers");
     assert.equal(p.rows.length, 21, "7 performers × 3 days");
-    assert.equal(f.store.rawCount, 5, "fixed 5 batched range queries (incl. the one section-totals query) — no N+1");
+    assert.equal(f.store.rawCount, 4, "fixed 4 batched range queries (incl. the one section-totals query) — no N+1");
   }
 
   // 4) Date range windowing: records outside the range are excluded; single-day works.
@@ -283,29 +277,21 @@ async function main() {
     assert.equal(single.rows.length, 1);
   }
 
-  // 5) Attendance default Present; Not Submitted does NOT become Absent.
+  // 5) Attendance is retired: no row field, no summary figure; employee-days stay as the Not-Submitted denominator.
   {
     const svc = loadService(makeFake().prisma);
     const p = await svc.getDailyPerformance(SO1, RANGE);
-    assert.ok(p.rows.every((r) => r.attendance === "PRESENT"), "default Present");
+    assert.ok(p.rows.every((r) => !("attendance" in r)), "rows carry no attendance");
     assert.ok(p.rows.every((r) => r.submitted === false), "no submission");
-    assert.equal(p.summary.presentDays, 3);
+    assert.ok(!("presentDays" in p.summary) && p.summary.employeeDays === 3, "no attendance ratio; eligible employee-days remain");
   }
 
-  // 6) Admin sets attendance (Present→Absent/Leave/Holiday); persists across reads. SO/RM cannot set.
+  // 6) The attendance feature is gone from the service (no setter, no read/write — the fake throws on any attendance SQL).
   {
-    const f = makeFake();
-    const svc = loadService(f.prisma);
-    for (const status of ["ABSENT", "LEAVE", "HOLIDAY"] as const) {
-      await svc.setDailyWorkAttendance(ADMIN, { officerId: "so1", workDate: "2026-09-28", status });
-      const p = await svc.getDailyPerformance(ADMIN, { ...RANGE, officerId: "so1" });
-      assert.equal(p.rows.find((r) => r.date === "2026-09-28")?.attendance, status, `persisted ${status}`);
-    }
-    // present days now 2 of 3 (28th is HOLIDAY)
-    const after = await svc.getDailyPerformance(ADMIN, { ...RANGE, officerId: "so1" });
-    assert.equal(after.summary.presentDays, 2);
-    await expectStatus(() => svc.setDailyWorkAttendance(SO1, { officerId: "so1", workDate: "2026-09-28", status: "ABSENT" }), 403, "SO cannot set attendance");
-    await expectStatus(() => svc.setDailyWorkAttendance(RM1, { officerId: "so1", workDate: "2026-09-28", status: "ABSENT" }), 403, "RM cannot set attendance");
+    const svc = loadService(makeFake().prisma);
+    assert.equal((svc as Record<string, unknown>).setDailyWorkAttendance, undefined, "no attendance setter");
+    assert.equal((svc as Record<string, unknown>).ATTENDANCE_VALUES, undefined);
+    await svc.getDailyPerformance(ADMIN, { ...RANGE, officerId: "so1" });
   }
 
   // 7) Plan/report timestamps come from their independent sources; missing → null.
@@ -430,7 +416,6 @@ async function main() {
     const f = makeFake({
       plans: new Map([["rm2|2026-09-28", plan], ["so3|2026-09-28", plan], ["rm2|2026-10-09", plan]]),
       days: new Map([["rm2|2026-09-28", { finalizedAt: report, selfRating: 9 }]]),
-      attendance: new Map([["rm2|2026-09-29", "LEAVE"]]),
     });
     const svc = loadService(f.prisma);
     const all = await svc.getDailyPerformance(ADMIN, RANGE);
@@ -438,8 +423,6 @@ async function main() {
     assert.deepEqual([rm("2026-09-28").planSubmittedAt, rm("2026-09-28").reportSubmittedAt, rm("2026-09-28").submitted], [plan.toISOString(), report.toISOString(), true], "RM plan + report submission");
     assert.equal(rm("2026-09-28").selfRating, 9, "RM self rating");
     assert.equal(rm("2026-09-28").stateName, "UP", "RM state is its group");
-    assert.equal(rm("2026-09-29").attendance, "LEAVE", "RM attendance override");
-    assert.equal(rm("2026-09-27").attendance, "PRESENT", "RM attendance defaults to Present");
     assert.ok(!all.rows.some((r) => r.officerId === "rm2" && r.date === "2026-10-09"), "RM record outside the date range is excluded");
     const keys = all.rows.map((r) => `${r.officerId}|${r.date}`);
     assert.equal(new Set(keys).size, keys.length, "no performer-day is counted twice");
@@ -464,11 +447,6 @@ async function main() {
     await expectStatus(() => svc.getDailyPerformance(RM2, { ...RANGE, officerId: "rm1" }), 403, "another RM is not exposed through the filter");
     assert.deepEqual([...new Set((await svc.getDailyPerformance(SO1, RANGE)).rows.map((r) => r.officerId))], ["so1"]);
 
-    // Attendance of an RM can be set by Admin (like an SO) and persists; other roles still cannot.
-    await svc.setDailyWorkAttendance(ADMIN, { officerId: "rm2", workDate: "2026-09-27", status: "ABSENT" });
-    assert.equal((await svc.getDailyPerformance(ADMIN, { ...RANGE, officerId: "rm2" })).rows.find((r) => r.date === "2026-09-27")?.attendance, "ABSENT");
-    await expectStatus(() => svc.setDailyWorkAttendance(RM1, { officerId: "rm1", workDate: "2026-09-27", status: "ABSENT" }), 403, "an RM cannot set attendance");
-    await expectStatus(() => svc.setDailyWorkAttendance(ADMIN, { officerId: "admin", workDate: "2026-09-27", status: "ABSENT" }), 422, "non Daily-Work users are still refused");
   }
 
   // 9d) "Missed" is DERIVED: plan submitted + report not finalized + noon deadline passed. Nothing is stored or faked.
@@ -582,10 +560,10 @@ async function main() {
     assert.equal((await run(SO1, { officerId: "so2" })).p.summary.sections.sales.planned, 3500, "an SO's totals are their own even when another officer is requested");
     await expectStatus(() => run(RM1, { officerId: "so3" }), 403, "RM cannot total another team's officer");
     assert.deepEqual(flat((await run(RM2, { from: "2026-09-26", to: "2026-09-26" })).p.summary.sections.sales), { planned: 0, actual: 0 });
-    assert.equal(all.f.store.rawCount, 5, "one totals query regardless of officers/days");
+    assert.equal(all.f.store.rawCount, 4, "one totals query regardless of officers/days");
 
     // Existing summary metrics are unchanged by the new section totals.
-    assert.equal(all.p.summary.salesOfficers, 5, "Sales Officers only (the 2 RMs are performers, not Sales Officers)"); assert.equal(all.p.summary.totalDays, 21);
+    assert.equal(all.p.summary.salesOfficers, 5, "Sales Officers only (the 2 RMs are performers, not Sales Officers)"); assert.equal(all.p.summary.employeeDays, 21);
   }
 
   // 12) The page: ten new cards (no Others), money vs count formats, existing cards kept.
@@ -594,7 +572,7 @@ async function main() {
     for (const k of ["sales", "recovery", "scheme_conversion", "appointment", "visits"]) for (const w of ["planned", "actual"]) assert.ok(page.includes(`daily_work.performance.summary.${k}_${w}`), `${k} ${w} card`);
     assert.ok(!/others_(planned|actual)/.test(page) && !page.includes("sections.others"), "no totals for Others");
     assert.ok(page.includes('[L.sSalesP, L.sSalesA, "sales", rupees, "sales"]') && page.includes('[L.sRecoveryP, L.sRecoveryA, "recovery", rupees, "recovery"]') && page.includes('"schemeConversion", countText') && page.includes('"appointment", countText') && page.includes('"visits", countText'), "Sales/Recovery in rupees; the others as counts/units");
-    for (const old of ["sOfficers", "sAttendance", "sPlans", "sReports", "sAvgSelf", "sAvgRm"]) assert.ok(page.includes(`label={L.${old}}`), `existing card ${old} kept`);
+    for (const old of ["sOfficers", "sPlans", "sReports", "sAvgSelf", "sAvgRm"]) assert.ok(page.includes(`label={L.${old}}`), `existing card ${old} kept`);
     assert.ok(page.includes('queryKey: ["performance", role, from, to, officerId, groupId]'), "cards refetch whenever Date From / Date To / State change");
     const svc = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
     assert.ok(svc.includes(`e."planSubmittedAt" IS NOT NULL AND e."status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')`) && svc.includes('e."officerId" IN (${Prisma.join(ids)}) AND e."workDate" BETWEEN ${from}::date AND ${to}::date'), "totals query: submitted rows of the filtered officers and dates only");

@@ -27,7 +27,7 @@ export function TaskHistoryPanel({ row, onClose, onShowOnCalendar }: { row: Task
     title: useLabel("tasks.panel.title"), close: useLabel("tasks.panel.close"), originally: useLabel("tasks.panel.originally_due"), movedBy: useLabel("tasks.panel.moved_by"), current: useLabel("tasks.panel.current_date"),
     total: useLabel("tasks.panel.total"), net: useLabel("tasks.panel.net"), noMoves: useLabel("tasks.panel.no_moves"), viewFull: useLabel("tasks.panel.view_full"), less: useLabel("tasks.panel.show_less"), omitted: useLabel("tasks.panel.omitted"),
     partial: useLabel("tasks.panel.partial"), unavailable: useLabel("tasks.panel.unavailable"), chain: useLabel("tasks.panel.chain_note"), reason: useLabel("tasks.panel.reason"), readOnly: useLabel("tasks.panel.read_only"),
-    show: useLabel("tasks.show_on_calendar"), error: useLabel("tasks.error"), loading: useLabel("tasks.loading"), colOriginal: useLabel("tasks.col.original"), colCurrent: useLabel("tasks.col.current"),
+    show: useLabel("tasks.show_on_calendar"), abandonedBy: useLabel("tasks.panel.abandoned"), abandonReason: useLabel("tasks.panel.abandon_reason"), completedBy: useLabel("tasks.panel.completed"), completedAmount: useLabel("tasks.panel.completed_amount"), error: useLabel("tasks.error"), loading: useLabel("tasks.loading"), colOriginal: useLabel("tasks.col.original"), colCurrent: useLabel("tasks.col.current"),
   };
   const [full, setFull] = useState(false);
   const { data, isLoading, error } = useQuery<TaskHistoryPayload>({ queryKey: ["tasks", "history", row.sourceType, row.taskId], queryFn: () => api.get<TaskHistoryPayload>(`/api/tasks/history/${row.sourceType}/${encodeURIComponent(row.taskId)}`) });
@@ -83,6 +83,15 @@ export function TaskHistoryPanel({ row, onClose, onShowOnCalendar }: { row: Task
               ))}
             </ol>
           )}
+          {/* How the task ENDED (a submitted Daily Report outcome): Completed with its Actual, or Abandoned — in red, with who, when and the reason. */}
+          {data && data.outcomes.filter((o) => o.outcome !== "RESCHEDULED").map((o, i) => (
+            <div key={i} className={cn("mt-3 rounded-md border p-3 text-sm", o.outcome === "ABANDONED" ? "border-destructive/50 bg-destructive/5" : "border-success/50 bg-success/5")} data-testid={o.outcome === "ABANDONED" ? "history-abandoned" : "history-completed"}>
+              <div className={cn("font-semibold", o.outcome === "ABANDONED" && "text-destructive")}>{T.status(o.outcome === "ABANDONED" ? "ABANDONED" : "COMPLETED")}</div>
+              <div className="text-xs text-muted-foreground">{(o.outcome === "ABANDONED" ? L.abandonedBy : L.completedBy).replace("{name}", o.committedByName ?? "—").replace("{when}", formatDateTimeDMY(o.committedAt))}</div>
+              {o.outcome === "ABANDONED" && o.reason && <p className="mt-1 whitespace-pre-wrap" data-testid="history-abandon-reason">{L.abandonReason.replace("{text}", o.reason)}</p>}
+              {o.outcome === "COMPLETED" && o.actualAmount != null && <p className="mt-1">{L.completedAmount.replace("{amount}", formatCurrency(o.actualAmount))}</p>}
+            </div>
+          ))}
           {data && long && <Button size="sm" variant="outline" className="mt-3" onClick={() => setFull((v) => !v)}>{full ? L.less : L.viewFull}</Button>}
         </div>
         {data && data.events.length > 0 && <Button size="sm" className="mt-4" onClick={() => onShowOnCalendar(data)}>{L.show}</Button>}

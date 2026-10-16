@@ -27,7 +27,6 @@ async function main() {
   deny(() => assertApiAccess(viewer, "/api/cn-requests/1/act", "POST"));
   deny(() => assertApiAccess(viewer, "/api/cn-requests/1/verify", "POST"));
   deny(() => assertApiAccess(custom({ dailyWork: ["read"] }), "/api/daily-work/review", "POST"));
-  deny(() => assertApiAccess(custom({ performance: ["read"] }), "/api/daily-work/attendance", "POST"));
   assertApiAccess(custom({ reports: ["read"] }), "/api/seasons", "GET");
   deny(() => assertApiAccess(custom({ reports: ["read"] }), "/api/seasons", "POST"));
   deny(() => assertApiAccess(custom({ reports: ["read"] }), "/api/seasons/fixture/months", "GET"));

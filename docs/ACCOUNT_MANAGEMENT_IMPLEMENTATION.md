@@ -49,7 +49,7 @@ The authoritative catalogue is src/features/accounts/permissions.ts. `read` mean
 | Planning | Payments (`payments`) | read, payment |
 | Requests | CN Requests (`cnRequests`) | read, approve, reject, post, verifyPayment |
 | Requests | Dealer Tags (`dealerTags`) | read, assign, revoke, approve, reject |
-| Insights | Performance (`performance`) | read, attendance |
+| Insights | Performance (`performance`) | read |
 | Insights | Reports (`reports`) | read, export |
 | Insights | Announcements (`announcements`) | read |
 | Insights | Audit Logs (`audit`) | read |

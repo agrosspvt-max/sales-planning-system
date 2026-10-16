@@ -37,7 +37,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
     employee: useLabel("tasks.filter.employee"), allEmployees: useLabel("tasks.filter.all_employees"), section: useLabel("tasks.filter.section"), allSections: useLabel("tasks.filter.all_sections"),
     source: useLabel("tasks.filter.source"), allSources: useLabel("tasks.filter.all_sources"), status: useLabel("tasks.filter.status"), allStatuses: useLabel("tasks.filter.all_statuses"),
     noteOriginal: useLabel("tasks.basis.note_original"), noteMoved: useLabel("tasks.basis.note_rescheduled"), range: useLabel("tasks.error.range"),
-    sTotal: useLabel("tasks.summary.total"), sDone: useLabel("tasks.summary.completed"), sPending: useLabel("tasks.summary.pending"), sOverdue: useLabel("tasks.summary.overdue"), sCancelled: useLabel("tasks.summary.cancelled"),
+    sTotal: useLabel("tasks.summary.total"), sDone: useLabel("tasks.summary.completed"), sPending: useLabel("tasks.summary.pending"), sOverdue: useLabel("tasks.summary.overdue"), sCancelled: useLabel("tasks.summary.cancelled"), sAbandoned: useLabel("tasks.summary.abandoned"), bAbandoned: useLabel("tasks.basis.abandoned_on"), noteAbandoned: useLabel("tasks.basis.note_abandoned"), stAbandoned: useLabel("tasks.status.abandoned"),
     sMovedTasks: useLabel("tasks.summary.rescheduled_tasks"), sMoves: useLabel("tasks.summary.total_reschedules"), sAvg: useLabel("tasks.summary.average"), historyNote: useLabel("tasks.summary.history_note"),
     secSALES: useLabel("daily_work.section.sales"), secRECOVERY: useLabel("daily_work.section.recovery"), secAPPOINTMENT: useLabel("daily_work.section.appointment"), secVISITS: useLabel("daily_work.section.visits"), secOTHERS: useLabel("daily_work.section.others"),
     subREGULAR: useLabel("calendar.subtype.regular"), subSCHEME: useLabel("calendar.subtype.scheme"), subBILLING: useLabel("calendar.subtype.billing_exception"), subCN: useLabel("calendar.subtype.cn_request"),
@@ -70,9 +70,9 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
 
   const sectionOptions = [["SALES", L.secSALES], ["RECOVERY", L.secRECOVERY], ["APPOINTMENT", L.secAPPOINTMENT], ["VISITS", L.secVISITS], ["OTHERS", L.secOTHERS]] as const;
   const sourceOptions = [["REGULAR", L.subREGULAR], ["SCHEME", L.subSCHEME], ["BILLING_EXCEPTION", L.subBILLING], ["CN_REQUEST", L.subCN]] as const;
-  const statusOptions = [["COMPLETED", L.stCompleted], ["PENDING", L.stPending], ["OVERDUE", L.stOverdue], ["CANCELLED", L.stCancelled]] as const;
-  const basisLabel = filters.basis === "ORIGINAL" ? L.bOriginal : L.bMoved;
-  const note = (filters.basis === "ORIGINAL" ? L.noteOriginal : L.noteMoved).replace("{from}", formatDMY(filters.from)).replace("{to}", formatDMY(filters.to));
+  const statusOptions = [["COMPLETED", L.stCompleted], ["PENDING", L.stPending], ["OVERDUE", L.stOverdue], ["ABANDONED", L.stAbandoned], ["CANCELLED", L.stCancelled]] as const;
+  const basisLabel = filters.basis === "ORIGINAL" ? L.bOriginal : filters.basis === "ABANDONED_ON" ? L.bAbandoned : L.bMoved;
+  const note = (filters.basis === "ORIGINAL" ? L.noteOriginal : filters.basis === "ABANDONED_ON" ? L.noteAbandoned : L.noteMoved).replace("{from}", formatDMY(filters.from)).replace("{to}", formatDMY(filters.to));
   const stat = (label: string, value: string, id: string) => (<div key={id} data-testid={`stat-${id}`}><div className="text-xs text-muted-foreground">{label}</div><div className="text-lg font-semibold tabular-nums">{value}</div></div>);
   const colCount = 11;
 
@@ -88,7 +88,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
 
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5"><Label>{L.basis}</Label>
-          <NativeSelect className="w-48" aria-label={L.basis} value={filters.basis} onChange={(e) => set({ basis: e.target.value as TaskFilterState["basis"], focusDate: null })} options={[{ value: "ORIGINAL", label: L.bOriginal }, { value: "RESCHEDULED_ON", label: L.bMoved }]} />
+          <NativeSelect className="w-48" aria-label={L.basis} value={filters.basis} onChange={(e) => set({ basis: e.target.value as TaskFilterState["basis"], focusDate: null })} options={[{ value: "ORIGINAL", label: L.bOriginal }, { value: "RESCHEDULED_ON", label: L.bMoved }, { value: "ABANDONED_ON", label: L.bAbandoned }]} />
         </div>
         <div className="space-y-1.5"><Label>{L.from} · {basisLabel}</Label><DateInputDMY value={filters.from} onChange={(v) => v && set({ from: v, focusDate: null })} className="w-44" aria-label={`${L.from} (${basisLabel})`} /></div>
         <div className="space-y-1.5"><Label>{L.to} · {basisLabel}</Label><DateInputDMY value={filters.to} onChange={(v) => v && set({ to: v, focusDate: null })} className="w-44" aria-label={`${L.to} (${basisLabel})`} /></div>
@@ -113,6 +113,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
         {stat(L.sDone, summary ? String(summary.completed) : "—", "completed")}
         {stat(L.sPending, summary ? String(summary.pending) : "—", "pending")}
         {stat(L.sOverdue, summary ? String(summary.overdue) : "—", "overdue")}
+        {stat(L.sAbandoned, summary ? String(summary.abandoned) : "—", "abandoned")}
         {summary && summary.cancelled > 0 && stat(L.sCancelled, String(summary.cancelled), "cancelled")}
         {stat(L.sMovedTasks, summary ? String(summary.rescheduledTasks) : "—", "rescheduled-tasks")}
         {stat(L.sMoves, summary ? String(summary.totalReschedules) : "—", "total-reschedules")}

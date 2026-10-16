@@ -175,6 +175,8 @@ export function recoveryPending(totalRecoveryPlan: number, actualTotalRecovery: 
 
 /** A dealer row as it feeds the combined summary (works for both Sales and Recovery). */
 export interface DailyWorkDealerRow {
+  /** When given, rows of the SAME dealer are separate tasks: dealer-level figures (monthly plan, actual, pending, dealer count) count that dealer once. */
+  dealerId?: string;
   monthlyPlan: number; // Monthly Sales Plan / Monthly Recovery Plan
   actual: number; // current-month Actual Sales / Actual Total Recovery (the value used for Pending)
   pending: number;
@@ -184,8 +186,10 @@ export interface DailyWorkDealerRow {
 }
 
 export interface DailyWorkCombined {
-  dealerCount: number;
+  dealerCount: number; // DISTINCT dealers
   dealerLabel: string; // "1 Dealer" / "2 Dealers"
+  taskCount: number; // distinct tasks (one per row)
+  taskLabel: string; // "1 Task" / "3 Tasks"
   monthlyPlan: number;
   actual: number; // Σ current-month actual sales / actual recovery
   pending: number;
@@ -198,6 +202,8 @@ export interface DailyWorkCombined {
 export interface DailyWorkCountLabels {
   dealer: string;
   dealers: string;
+  task?: string;
+  tasks?: string;
   market: string;
   markets: string;
 }
@@ -213,9 +219,12 @@ export function dealerCountLabel(count: number, labels: Pick<DailyWorkCountLabel
  * The COMBINED SUMMARY row — always derived from the dealer rows, so it can never drift from them.
  * Amounts sum; Type collapses to the shared value or "MIXED".
  */
-export function combineDailyWorkRows(rows: DailyWorkDealerRow[], labels?: Pick<DailyWorkCountLabels, "dealer" | "dealers">): DailyWorkCombined {
-  const dealerCount = rows.length;
+export function combineDailyWorkRows(rows: DailyWorkDealerRow[], labels?: Pick<DailyWorkCountLabels, "dealer" | "dealers" | "task" | "tasks">): DailyWorkCombined {
+  // Amounts of TASKS (Today's Plan / Actual) add up row by row; figures that belong to the DEALER (monthly plan, actual, pending) are counted once per dealer.
+  const firstOfDealer = rows.filter((r, i) => r.dealerId === undefined || rows.findIndex((x) => x.dealerId === r.dealerId) === i);
+  const dealerCount = firstOfDealer.length;
   const sum = (pick: (r: DailyWorkDealerRow) => number) => round2(rows.reduce((s, r) => s + pick(r), 0));
+  const sumDealers = (pick: (r: DailyWorkDealerRow) => number) => round2(firstOfDealer.reduce((s, r) => s + pick(r), 0));
 
   let type: DailyWorkType | "MIXED" | null = null;
   const types = rows.map((r) => r.type).filter((t): t is DailyWorkType => t != null);
@@ -224,9 +233,11 @@ export function combineDailyWorkRows(rows: DailyWorkDealerRow[], labels?: Pick<D
   return {
     dealerCount,
     dealerLabel: dealerCountLabel(dealerCount, labels),
-    monthlyPlan: sum((r) => r.monthlyPlan),
-    actual: sum((r) => r.actual),
-    pending: sum((r) => r.pending),
+    taskCount: rows.length,
+    taskLabel: `${rows.length} ${rows.length === 1 ? labels?.task ?? "Task" : labels?.tasks ?? "Tasks"}`,
+    monthlyPlan: sumDealers((r) => r.monthlyPlan),
+    actual: sumDealers((r) => r.actual),
+    pending: sumDealers((r) => r.pending),
     todaysPlan: sum((r) => r.todaysPlan),
     todaysActual: sum((r) => r.todaysActual),
     type,

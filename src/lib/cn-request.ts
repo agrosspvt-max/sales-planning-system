@@ -113,6 +113,7 @@ export interface CnTaskDto {
   dealerId: string;
   taskType: "CN_REQUEST"; // authoritative task origin for Today's Auto Tasks
   planType: "RECOVERY"; // authoritative Daily Work destination for CN follow-up tasks
+  entryId?: string | null; // the Daily Work row this task OWNS once materialized (one row per task)
   partyName: string;
   cnType: string;
   details: string | null;

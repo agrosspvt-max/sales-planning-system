@@ -26,6 +26,9 @@ let rows = [
     schemeId: "",
     paymentMode: null as RecoveryPaymentMode | null,
     status: "DRAFT",
+    tasks: [] as unknown[],
+    rowKind: "MANUAL",
+    legacyOutcome: false,
   },
 ];
 let queryOverride: Record<string, unknown> = {};
@@ -195,7 +198,8 @@ const headings = (html: string) => [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)]
   match[1].replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim());
 const paymentHtml = (html: string) => html.match(/<select[^>]*aria-label="Payment Mode"[^>]*>/)?.[0] ?? "";
 const reportRow = (todaysActual: string, paymentMode: RecoveryPaymentMode | null = null) => {
-  rows = [{ ...rows[0], status: "PLAN_SUBMITTED", todaysActual, paymentMode }];
+  const unit = { unitType: "MANUAL_ROW", unitId: "entry-1", type: "MANUAL", source: null, plannedAmount: 500, outcome: todaysActual === "" ? "" : "COMPLETED", actualAmount: todaysActual, nextDate: "", reason: "", state: "DRAFT", rescheduledFrom: null, dateRule: null };
+  rows = [{ ...rows[0], status: "PLAN_SUBMITTED", todaysActual, paymentMode, tasks: [unit] }];
 };
 const actualInput = () => inputs[inputs.length - 1]!;
 
@@ -246,7 +250,7 @@ async function main() {
     assert.ok(html.includes(`<option value="${mode}" selected="">`), `${mode} selected`);
     assert.ok(draftKey.includes(`"paymentMode":"${mode}"`), "the autosave dirty key changes with the mode");
     await saveDraft();
-    assert.deepEqual(requests.pop(), { url: "/api/daily-work/actual", payload: { section: "RECOVERY", workDate: "2026-10-05", entries: [{ entryId: "entry-1", todaysActual: 20000, paymentMode: mode }] } });
+    assert.deepEqual(requests.pop(), { url: "/api/daily-work/actual", payload: { section: "RECOVERY", workDate: "2026-10-05", entries: [{ entryId: "entry-1", units: [{ unitType: "MANUAL_ROW", unitId: "entry-1", outcome: "COMPLETED", actualAmount: 20000 }], paymentMode: mode }] } });
   }
   // UPI -> Cash change persists the new value.
   selects.length = 0; reportRow("20000", "UPI");
@@ -262,14 +266,14 @@ async function main() {
     render("RECOVERY", "REPORT", false);
     actualInput().onChange!({ target: { value: cleared } });
     html = render("RECOVERY", "REPORT", false);
-    assert.equal(rows[0].paymentMode, null, `recovery ${cleared} cleared the stored mode`);
+    assert.ok(!html.includes('<option value="UPI" selected="">'), `recovery ${cleared} no longer shows the stored mode`);
     assert.ok(/disabled=""/.test(paymentHtml(html)), "and disabled the control");
     await saveDraft();
     assert.equal((requests.pop() as { payload: { entries: { paymentMode: unknown }[] } }).payload.entries[0].paymentMode, null, "cleared mode is persisted as null");
     actualInput().onChange!({ target: { value: "5000" } });
     html = render("RECOVERY", "REPORT", false);
     assert.ok(!/disabled=""/.test(paymentHtml(html)), "positive again re-enables it");
-    assert.equal(rows[0].paymentMode, null, "…starting blank (never guessed)");
+    assert.ok(!html.includes('<option value="UPI" selected="">'), "…starting blank (never guessed)");
   }
 
   // Finalized day: the control stays visible but read-only like every other Report field.
@@ -309,11 +313,11 @@ async function main() {
 
   // ---- Task Type vs Recovery Type (a Billing Exception task is Auto; its source is the locked Recovery Type) ----
   {
-    const billingRow = { ...rows[0], entryId: "entry-b", dealerId: "dealer-b", dealerName: "test_dealer5", todaysPlan: "12000", status: "DRAFT", recoverySource: "BILLING_EXCEPTION", autoAmount: 12000, amountLocked: true };
+    const billingRow = { ...rows[0], entryId: "entry-b", dealerId: "dealer-b", dealerName: "test_dealer5", todaysPlan: "12000", status: "DRAFT", recoverySource: "BILLING_EXCEPTION", autoAmount: 12000, amountLocked: true, rowKind: "TASK" };
     const manualRow = { ...rows[0], entryId: "entry-m", dealerId: "dealer-m", dealerName: "Manual Dealer", todaysPlan: "300", status: "DRAFT", recoverySource: null, autoAmount: 0, amountLocked: false };
     const saved = rows;
     rows = [billingRow, manualRow] as typeof rows;
-    queryOverride = { dealers: rows, billingEntryIds: ["entry-b"], billingTasks: [{ taskId: "t1", dealerId: "dealer-b", dealerName: "test_dealer5", amount: 12000, taskDate: "2026-10-14", promisedDate: "2026-10-14" }] };
+    queryOverride = { dealers: rows, billingEntryIds: ["entry-b"], billingTasks: [{ taskId: "t1", entryId: "entry-b", dealerId: "dealer-b", dealerName: "test_dealer5", amount: 12000, taskDate: "2026-10-14", promisedDate: "2026-10-14" }] };
     selects.length = 0;
     const html = render("RECOVERY", "PLAN", false);
     const rowOf = (id: string) => (html.match(new RegExp(`<tr[^>]*data-dealer-id="${id}"[^>]*>.*?</tr>`)) ?? [""])[0];
@@ -326,6 +330,39 @@ async function main() {
     assert.ok(m.includes("lucide-trash2") && !/<input[^>]*readonly/i.test(m) && !m.includes("lucide-calendar-clock"), "a manual row keeps its delete icon and editable amount");
     assert.ok(!html.includes("Billing Exception tasks") && !html.includes("billing-task-panel") && !html.includes(">Confirm<"), "no separate automatic-task section, no Confirm");
     assert.ok(/data-task-type="true">Manual<\/td>/.test(m) && !m.includes("data-recovery-source") && m.includes('<option value="REGULAR" selected="">Regular</option>') && !/<select[^>]*disabled/.test(m), "a manual task: Manual, Recovery Type editable as before");
+    // ONE ROW PER DISTINCT TASK: two Billing Exception tasks of the same dealer plus its directly entered manual task are three rows, each with its own amount, Task Type and action.
+    {
+      const t1 = { ...billingRow, entryId: "e-1", dealerId: "same", dealerName: "test_dealer5", todaysPlan: "12444", autoAmount: 12444 };
+      const t2 = { ...billingRow, entryId: "e-2", dealerId: "same", dealerName: "test_dealer5", todaysPlan: "11111", autoAmount: 11111 };
+      const man = { ...manualRow, entryId: "e-3", dealerId: "same", dealerName: "test_dealer5", todaysPlan: "5000" };
+      rows = [t1, t2, man] as typeof rows;
+      queryOverride = { dealers: rows, billingEntryIds: ["e-1", "e-2"], billingTasks: [
+        { taskId: "bt1", entryId: "e-1", dealerId: "same", dealerName: "test_dealer5", amount: 12444, taskDate: "2026-10-14", promisedDate: "2026-10-14" },
+        { taskId: "bt2", entryId: "e-2", dealerId: "same", dealerName: "test_dealer5", amount: 11111, taskDate: "2026-10-14", promisedDate: "2026-10-14" },
+      ], rescheduledEntryIds: ["e-1", "e-2"] };
+      selects.length = 0;
+      const h = render("RECOVERY", "PLAN", false);
+      const trs = [...h.matchAll(/<tr[^>]*data-entry-id="([^"]+)"[^>]*>(.*?)<\/tr>/g)];
+      assert.deepEqual(trs.map((t) => t[1]), ["e-1", "e-2", "e-3"], "three separate rows for one dealer, in a stable order");
+      assert.deepEqual(trs.map((t) => (t[2]!.match(/value="(\d+)"/) ?? [])[1]), ["12444", "11111", "5000"], "each row keeps its own amount");
+      assert.deepEqual(trs.map((t) => (t[2]!.match(/lucide-calendar-clock/g) ?? []).length), [1, 1, 0], "each task row has its OWN reschedule button; the manual row has none");
+      assert.deepEqual(trs.map((t) => t[2]!.includes("lucide-trash2")), [false, false, true], "only the manual row can be removed");
+      assert.deepEqual(trs.map((t) => (t[2]!.match(/rescheduled-row-badge/g) ?? []).length), [1, 1, 0], "the Rescheduled badge is per task row");
+      assert.deepEqual(trs.map((t) => /data-task-type="true">(\w+)</.exec(t[2]!)?.[1]), ["Auto", "Auto", "Manual"]);
+      // Summary: ONE dealer, THREE tasks, Today's Plan 28,555 — dealer-level figures are not multiplied.
+      const counts = (h.match(/data-testid="combined-counts">([^<]*)</) ?? [])[1];
+      assert.equal(counts, "1 Dealer · 3 Tasks");
+      assert.ok(h.includes("₹28,555"), "Today's Plan totals the individual tasks");
+      // Only the manual row is sent by autosave; scheduled tasks are never part of the payload.
+      await saveDraft();
+      assert.deepEqual((requests.pop() as { payload: { rows: unknown[] } }).payload.rows, [{ dealerId: "same", todaysPlan: 5000, entryType: "REGULAR", schemeId: null }], "autosave carries only the directly entered manual row");
+      // The dealer stays selectable for Add Dealer while it only has scheduled tasks…
+      queryOverride = { dealers: [t1, t2], availableDealers: [{ id: "same", name: "test_dealer5", monthlyPlan: 0, actual: 0, pending: 0 }], manualDealerIds: [] };
+      rows = [t1, t2] as typeof rows;
+      assert.ok(render("RECOVERY", "PLAN", false).includes("Add Dealer"));
+    }
+    rows = [billingRow, manualRow] as typeof rows;
+    queryOverride = { dealers: rows, billingEntryIds: ["entry-b"] };
     // Wording comes from Edit Labels; the stored identifiers are not the labels.
     assert.equal((DEFAULT_LABELS as Record<string, string>)["daily_work.task_type.auto"], "Auto");
     assert.equal((DEFAULT_LABELS as Record<string, string>)["daily_work.task_type.manual"], "Manual");

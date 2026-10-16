@@ -33,7 +33,6 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
   if (p.startsWith("announcements")) return ["announcements", "read"];
   if (p.startsWith("tasks/") && read) return ["performance", "read"]; // Performance → Tasks (read-only analysis and history)
   if (p.startsWith("daily-work")) {
-    if (p.endsWith("attendance")) return ["performance", read ? "read" : "attendance"];
     if (/performance(\/detail)?$/.test(p)) return ["performance", "read"];
     if (p.endsWith("admin-view") || p.endsWith("review")) return read ? ["dailyWork", "read"] : null;
     return null; // Existing employee plan/actual/submit/rating flows are not administrative actions.

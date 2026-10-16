@@ -12,6 +12,7 @@ import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { effectiveBillingTaskOwners, canViewBillingTask } from "./billing-task-visibility.server";
 import { lockDailyWorkDay, type DailyWorkDayState } from "./day-lock.server";
 import { reverseMaterializedDailyWorkContribution } from "./auto-task-materialization.server";
+import { dropEmptyTaskRow, ensureTaskRow, splitCombinedDraftRows } from "./task-rows.server";
 
 /**
  * BILLING EXCEPTION → DAILY WORK → RECOVERY. A genuine, separate task source (table BillingExceptionTask): never a CN request / payment event, never a Calendar entry,
@@ -27,7 +28,7 @@ import { reverseMaterializedDailyWorkContribution } from "./auto-task-materializ
  */
 
 export interface BillingTaskDto {
-  taskId: string; billingExceptionId: string; dealerId: string; dealerName: string;
+  taskId: string; billingExceptionId: string; dealerId: string; dealerName: string; entryId: string | null;
   taskType: "BILLING_EXCEPTION"; planType: "RECOVERY";
   amount: number; promisedDate: string; taskDate: string; rescheduled: boolean; confirmed: boolean; overdue: boolean;
   billNo: string | null; authPerson: string | null;
@@ -45,84 +46,61 @@ export async function materializeDueBillingTasksInTransaction(
   day: DailyWorkDayState,
 ): Promise<{ materialized: number; affectedDealers: number }> {
   if (day.status === "FINALIZED") return { materialized: 0, affectedDealers: 0 };
+  await splitCombinedDraftRows(tx, officerId, workDate, day); // historical combined draft rows → one row per task, from their own links
   // Candidates: unlinked, due (own or overdue date), dealer currently assigned to THIS officer. FOR UPDATE serializes with reschedule / confirm / other readers.
   const candidates = await tx.$queryRaw<Array<{ id: string; dealerId: string; amount: string; officerId: string }>>(Prisma.sql`
     SELECT t."id", t."dealerId", t."amount"::text AS "amount", t."officerId"
     FROM "BillingExceptionTask" t
     JOIN "DealerAssignment" da ON da."dealerId" = t."dealerId" AND da."officerId" = ${officerId} AND da."effectiveTo" IS NULL
-    WHERE t."taskDate" <= ${workDate}::date AND t."dailyWorkEntryId" IS NULL
+    WHERE t."taskDate" <= ${workDate}::date AND t."dailyWorkEntryId" IS NULL AND t."abandonedAt" IS NULL
     ORDER BY t."taskDate", t."createdAt", t."id"
     FOR UPDATE OF t`);
   if (candidates.length === 0) return { materialized: 0, affectedDealers: 0 };
   // The authoritative owner (most recent open assignment) must be this officer — a stale second assignment must not capture another officer's task.
   const owners = await getCurrentOwnerByDealer([...new Set(candidates.map((c) => c.dealerId))], tx);
   const tasks = candidates.filter((c) => owners.get(c.dealerId) === officerId);
-  const byDealer = new Map<string, typeof tasks>();
-  for (const task of tasks) byDealer.set(task.dealerId, [...(byDealer.get(task.dealerId) ?? []), task]);
-
-  let materialized = 0, affectedDealers = 0;
-  for (const [dealerId, dealerTasks] of byDealer) {
-    let entries = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      SELECT "id" FROM "DailyWorkEntry"
-      WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId}
-        AND "section" = 'RECOVERY' AND "rowKey" = ${dealerId} AND "status" = 'DRAFT'
-      FOR UPDATE`);
-    if (entries.length === 0) {
-      await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","status","createdAt","updatedAt")
-        VALUES (${randomUUID()}, ${officerId}, ${dealerId}, ${dealerId}, ${workDate}::date, ${day.currentBatchId}, 'RECOVERY', 0, 'REGULAR', 'DRAFT', NOW(), NOW())
-        ON CONFLICT ("officerId","workDate","batchId","section","rowKey") DO NOTHING`);
-      entries = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-        SELECT "id" FROM "DailyWorkEntry"
-        WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId}
-          AND "section" = 'RECOVERY' AND "rowKey" = ${dealerId} AND "status" = 'DRAFT'
-        FOR UPDATE`);
+  // ONE Recovery row per task: two tasks of the same dealer are never added into one combined row.
+  let materialized = 0;
+  const touchedDealers = new Set<string>();
+  for (const task of tasks) {
+    const contribution = new Prisma.Decimal(task.amount);
+    if (!contribution.isPositive()) continue;
+    const entryId = await ensureTaskRow(tx, { officerId, dealerId: task.dealerId, workDate, batchId: day.currentBatchId, section: "RECOVERY", kind: "BE", sourceId: task.id });
+    if (!entryId) throw new ApiError(409, "The current Recovery plan changed while Billing Exception tasks were being added.");
+    // Claim FIRST (atomic, idempotent): only the winner sets the amount. The owner is (re)written here, i.e. BEFORE the task enters Daily Work.
+    const claimed = await tx.$executeRaw(Prisma.sql`
+      UPDATE "BillingExceptionTask"
+      SET "officerId" = ${officerId}, "dailyWorkEntryId" = ${entryId}, "dailyWorkContribution" = ${contribution}, "dailyWorkConfirmed" = false, "materializedAt" = NOW(), "updatedAt" = NOW()
+      WHERE "id" = ${task.id} AND "dailyWorkEntryId" IS NULL`);
+    if (Number(claimed) !== 1) { await dropEmptyTaskRow(tx, entryId); continue; }
+    if (task.officerId !== officerId) {
+      await writeAudit({ userId: officerId, action: "UPDATE", entity: "billingExceptionTask", entityId: task.id, summary: `Billing Exception task re-routed to the dealer's current Sales Officer (was ${task.officerId})` }, tx);
     }
-    const entry = entries[0];
-    if (!entry) throw new ApiError(409, "The current Recovery plan changed while Billing Exception tasks were being added.");
-    let added = new Prisma.Decimal(0);
-    for (const task of dealerTasks) {
-      const contribution = new Prisma.Decimal(task.amount);
-      if (!contribution.isPositive()) continue;
-      // Claim FIRST (atomic, idempotent): only the winner adds the amount. The owner is (re)written here, i.e. BEFORE the task enters Daily Work.
-      const claimed = await tx.$executeRaw(Prisma.sql`
-        UPDATE "BillingExceptionTask"
-        SET "officerId" = ${officerId}, "dailyWorkEntryId" = ${entry.id}, "dailyWorkContribution" = ${contribution}, "dailyWorkConfirmed" = false, "materializedAt" = NOW(), "updatedAt" = NOW()
-        WHERE "id" = ${task.id} AND "dailyWorkEntryId" IS NULL`);
-      if (Number(claimed) !== 1) continue;
-      if (task.officerId !== officerId) {
-        await writeAudit({ userId: officerId, action: "UPDATE", entity: "billingExceptionTask", entityId: task.id, summary: `Billing Exception task re-routed to the dealer's current Sales Officer (was ${task.officerId})` }, tx);
-      }
-      added = added.add(contribution);
-      materialized++;
-    }
-    if (added.isPositive()) {
-      await tx.$executeRaw(Prisma.sql`
-        UPDATE "DailyWorkEntry" SET "todaysPlan" = COALESCE("todaysPlan", 0) + ${added}, "updatedAt" = NOW()
-        WHERE "id" = ${entry.id} AND "status" = 'DRAFT' AND "batchId" = ${day.currentBatchId}`);
-      affectedDealers++;
-    }
+    await tx.$executeRaw(Prisma.sql`UPDATE "DailyWorkEntry" SET "todaysPlan" = ${contribution}, "updatedAt" = NOW() WHERE "id" = ${entryId} AND "status" = 'DRAFT' AND "batchId" = ${day.currentBatchId}`);
+    touchedDealers.add(task.dealerId);
+    materialized++;
   }
+  const affectedDealers = touchedDealers.size;
   if (materialized > 0) {
     // Real Recovery data is authoritative over a previously selected No Plan (same rule as CN / Calendar tasks).
     await tx.$executeRaw(Prisma.sql`
       UPDATE "DailyWorkEntry"
       SET "noPlanSections" = NULLIF(array_to_string(array_remove(string_to_array(COALESCE("noPlanSections", ''), ','), 'RECOVERY'), ','), ''), "updatedAt" = NOW()
       WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "section" = 'SUMMARY' AND "rowKey" = '__SUMMARY__'`);
-    await writeAudit({ userId: officerId, action: "UPDATE", entity: "dailyWork", entityId: `BILLING_TASKS:${workDate}:${day.currentBatchId}`, summary: `Materialized ${materialized} Billing Exception task(s) into ${affectedDealers} Recovery row(s)` }, tx);
+    await writeAudit({ userId: officerId, action: "UPDATE", entity: "dailyWork", entityId: `BILLING_TASKS:${workDate}:${day.currentBatchId}`, summary: `Materialized ${materialized} Billing Exception task(s) as ${materialized} Recovery row(s) for ${affectedDealers} dealer(s)` }, tx);
   }
   return { materialized, affectedDealers };
 }
 
 /* ------------------------------------------------ reads (DTOs, labels, gates) ------------------------------------------------ */
 
-type TaskRow = { id: string; billingExceptionId: string; dealerId: string; amount: Prisma.Decimal; promisedDate: Date; taskDate: Date; rescheduled: boolean; dailyWorkConfirmed: boolean; billNo: string | null; authPerson: string | null };
+type TaskRow = { id: string; dailyWorkEntryId: string | null; billingExceptionId: string; dealerId: string; amount: Prisma.Decimal; promisedDate: Date; taskDate: Date; rescheduled: boolean; dailyWorkConfirmed: boolean; billNo: string | null; authPerson: string | null };
 
 /** The officer's Billing Exception tasks that are inside the given Daily Work rows (confirm / reschedule / details act on these). */
 export async function billingTasksForEntries(officerId: string, entryIds: string[], workDate: string): Promise<BillingTaskDto[]> {
   if (entryIds.length === 0) return [];
   const rows = await prisma.$queryRaw<TaskRow[]>(Prisma.sql`
-    SELECT t."id", t."billingExceptionId", t."dealerId", t."amount", t."promisedDate", t."taskDate", t."rescheduled", t."dailyWorkConfirmed", e."billNo", e."authPerson"
+    SELECT t."id", t."dailyWorkEntryId", t."billingExceptionId", t."dealerId", t."amount", t."promisedDate", t."taskDate", t."rescheduled", t."dailyWorkConfirmed", e."billNo", e."authPerson"
     FROM "BillingExceptionTask" t JOIN "BillingException" e ON e."id" = t."billingExceptionId"
     WHERE t."dailyWorkEntryId" IN (${Prisma.join(entryIds)}) AND t."officerId" = ${officerId}
     ORDER BY t."taskDate", t."createdAt"`);
@@ -130,7 +108,7 @@ export async function billingTasksForEntries(officerId: string, entryIds: string
   const dealers = rows.length ? await prisma.dealer.findMany({ where: { id: { in: rows.map((r) => r.dealerId) } }, select: { id: true, name: true } }) : [];
   const plain = new Map(dealers.map((d) => [d.id, d.name]));
   return rows.map((r) => ({
-    taskId: r.id, billingExceptionId: r.billingExceptionId, dealerId: r.dealerId, dealerName: names.get(r.dealerId) ?? plain.get(r.dealerId) ?? "—",
+    taskId: r.id, billingExceptionId: r.billingExceptionId, dealerId: r.dealerId, dealerName: names.get(r.dealerId) ?? plain.get(r.dealerId) ?? "—", entryId: r.dailyWorkEntryId,
     taskType: "BILLING_EXCEPTION", planType: "RECOVERY", amount: asNum(r.amount), promisedDate: iso(r.promisedDate), taskDate: iso(r.taskDate),
     rescheduled: r.rescheduled, confirmed: r.dailyWorkConfirmed, overdue: iso(r.taskDate) < workDate, billNo: r.billNo, authPerson: r.authPerson,
   }));
@@ -185,6 +163,7 @@ export async function rescheduleBillingTask(ctx: AuthContext, id: string, rawDat
     const day = peek.dailyWorkEntryId ? await lockDailyWorkDay(tx, peek.officerId, workDate) : null;
     const task = await loadLocked(tx, id);
     if ((task.dailyWorkEntryId ?? null) !== (peek.dailyWorkEntryId ?? null)) throw new ApiError(409, L["daily_work.billing_tasks.error.changed"]);
+    if ((task as { abandonedAt?: Date | null }).abandonedAt) throw new ApiError(409, L["daily_work.outcome.error.task_changed"]); // an abandoned task is never scheduled again
     const previous = iso(task.taskDate);
     if (!task.dailyWorkEntryId && previous === taskDate) return { taskId: id, taskDate }; // a retry of a request that already succeeded
     if (task.dailyWorkEntryId && day) {
@@ -229,7 +208,7 @@ export async function getBillingTaskDetail(ctx: AuthContext, id: string): Promis
   const today = currentBusinessDate();
   const name = (await loadDealerAliasNameMap([task.dealerId])).get(task.dealerId) ?? (await prisma.dealer.findUnique({ where: { id: task.dealerId }, select: { name: true } }))?.name ?? "—";
   return {
-    taskId: task.id, billingExceptionId: task.billingExceptionId, dealerId: task.dealerId, dealerName: name, taskType: "BILLING_EXCEPTION", planType: "RECOVERY",
+    taskId: task.id, billingExceptionId: task.billingExceptionId, dealerId: task.dealerId, dealerName: name, entryId: task.dailyWorkEntryId, taskType: "BILLING_EXCEPTION", planType: "RECOVERY",
     amount: Number(task.amount), promisedDate: iso(task.promisedDate), taskDate: iso(task.taskDate), rescheduled: task.rescheduled, confirmed: task.dailyWorkConfirmed,
     overdue: !task.dailyWorkEntryId && iso(task.taskDate) < today, billNo: task.billingException.billNo, authPerson: task.billingException.authPerson,
     billingDate: iso(task.billingException.billingDate), createdByName: task.billingException.createdBy.name, officerName: ownerName, exceptionStatus: task.billingException.status,

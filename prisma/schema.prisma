@@ -759,6 +759,7 @@ model CnRequest {
   legacyDailyWorkContribution Decimal?         @db.Decimal(14, 2)
   /// Legacy schedule whose move history is unknown (set once, by migration).
   rescheduleHistoryGap        Boolean          @default(false)
+  legacyTaskAbandonedAt       DateTime?
   legacyDailyWorkConfirmed    Boolean          @default(false)
   finalCnDocument             String?
   finalCnFileName             String?
@@ -854,19 +855,19 @@ model PartyPlan {
 /// Post-submit fields (Today's Sales/Recovery `todaysActual`; Appointment/Achievability `resultStatus`) are
 /// entered only on the exact frozen entry. `workDate` is a pure business date (@db.Date) — no timezone shift.
 model DailyWorkEntry {
-  id                   String            @id @default(cuid())
+  id                   String             @id @default(cuid())
   officerId            String
   dealerId             String?
-  workDate             DateTime          @db.Date
+  workDate             DateTime           @db.Date
   section              String
-  todaysPlan           Decimal?          @db.Decimal(14, 2)
-  todaysActual         Decimal?          @db.Decimal(14, 2)
-  entryType            String            @default("REGULAR")
+  todaysPlan           Decimal?           @db.Decimal(14, 2)
+  todaysActual         Decimal?           @db.Decimal(14, 2)
+  entryType            String             @default("REGULAR")
   schemeId             String?
-  status               String            @default("DRAFT")
-  createdAt            DateTime          @default(now())
-  updatedAt            DateTime          @updatedAt
-  rowKey               String            @default("")
+  status               String             @default("DRAFT")
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  rowKey               String             @default("")
   typedDealerName      String?
   marketName           String?
   resultStatus         String?
@@ -875,7 +876,7 @@ model DailyWorkEntry {
   others               String?
   noPlanSections       String?
   selfRating           Int?
-  batchId              String            @default("")
+  batchId              String             @default("")
   actualDealerVisits   Int?
   actualNewPartyVisits Int?
   planSubmittedAt      DateTime?
@@ -887,12 +888,13 @@ model DailyWorkEntry {
   resultEventId        String?
   /// Daily Report only: the dealer name the officer reported for an Appointed result (null for Not Appointed / no result). Report information — not a Dealer record.
   reportedDealerName   String?
-  monthlyPlan          PartyMonthlyPlan? @relation("DailyWorkAppointmentPlan", fields: [monthlyPlanId], references: [id], onDelete: SetNull)
-  cnPaymentTasks       CnPaymentEvent[]  @relation("CnPaymentEventDailyWorkEntry")
-  legacyCnTasks        CnRequest[]       @relation("LegacyCnTaskDailyWorkEntry")
-  dealer               Dealer?           @relation(fields: [dealerId], references: [id], onDelete: Restrict)
-  officer              User              @relation("DailyWorkOfficer", fields: [officerId], references: [id])
-  scheme               Scheme?           @relation(fields: [schemeId], references: [id])
+  monthlyPlan          PartyMonthlyPlan?  @relation("DailyWorkAppointmentPlan", fields: [monthlyPlanId], references: [id], onDelete: SetNull)
+  cnPaymentTasks       CnPaymentEvent[]   @relation("CnPaymentEventDailyWorkEntry")
+  taskOutcomes         DailyTaskOutcome[]
+  legacyCnTasks        CnRequest[]        @relation("LegacyCnTaskDailyWorkEntry")
+  dealer               Dealer?            @relation(fields: [dealerId], references: [id], onDelete: Restrict)
+  officer              User               @relation("DailyWorkOfficer", fields: [officerId], references: [id])
+  scheme               Scheme?            @relation(fields: [schemeId], references: [id])
 
   @@unique([officerId, workDate, batchId, section, rowKey])
   @@index([officerId])
@@ -944,6 +946,7 @@ model DailyWorkReview {
   @@index([workDate])
 }
 
+/// RETIRED — kept only so historical rows are not lost; the application no longer reads or writes it.
 /// Performance attendance for one Sales Officer on one business date (Phase 4). Attendance is INDEPENDENT of
 /// Daily Work submission (Present + Not Submitted is valid). The absence of a row means Present (the default), so
 /// historical dates need no back-fill and only explicit Admin overrides are persisted. Only a Super Admin writes.
@@ -1127,6 +1130,8 @@ model CalendarEntry {
   updatedAt             DateTime  @updatedAt
   /// Who actually created the entry. NULL = the owner did (every entry before Admin assignment existed); an Admin assigning a task / reminder to a Sales Officer is recorded here while `ownerId` is the recipient.
   createdById           String?
+  /// Set when the owner abandoned this task in a submitted Daily Report (it is never materialized again).
+  abandonedAt           DateTime?
   owner                 User      @relation("CalendarEntryOwner", fields: [ownerId], references: [id])
   createdBy             User?     @relation("CalendarEntryCreator", fields: [createdById], references: [id])
 
@@ -2424,6 +2429,8 @@ model BillingExceptionTask {
   rescheduled           Boolean          @default(false)
   /// Moved before reschedule history was recorded (the details were not retained) — see TaskRescheduleEvent.
   rescheduleHistoryGap  Boolean          @default(false)
+  /// Set when the officer abandoned this task in a submitted Daily Report: it is never scheduled again (nothing is paid, resolved or written off).
+  abandonedAt           DateTime?
   dailyWorkEntryId      String?
   dailyWorkContribution Decimal?         @db.Decimal(14, 2)
   dailyWorkConfirmed    Boolean          @default(false)
@@ -2490,4 +2497,38 @@ model TaskRescheduleEvent {
   @@index([createdAt])
   @@index([previousDate])
   @@index([newDate])
+}
+
+/// Daily Report → Sales / Recovery task outcome. One row per identifiable TASK inside a reported Daily Work row (`unitType` + `unitId` = the source task's own id, or the
+/// Daily Work row for the manual part). DRAFT while the report is being filled (nothing else is touched); COMMITTED — and immutable — when the report is submitted, in the
+/// same transaction that reschedules / abandons the source task. `actualAmount` > 0 only for COMPLETED; the row's own `todaysActual` stays the sum of those, so amount
+/// achievement (Planned vs Actual) remains measurable separately from the outcome.
+model DailyTaskOutcome {
+  id              String         @id @default(cuid())
+  entryId         String
+  unitType        String // BILLING_EXCEPTION | CN_PAYMENT | CN_LEGACY | CALENDAR_ENTRY | MANUAL_ROW
+  unitId          String
+  officerId       String
+  workDate        DateTime       @db.Date
+  section         String
+  plannedAmount   Decimal        @db.Decimal(14, 2)
+  outcome         String? // COMPLETED | RESCHEDULED | ABANDONED (null = not chosen yet)
+  actualAmount    Decimal?       @db.Decimal(14, 2)
+  nextDate        DateTime?      @db.Date
+  reason          String?
+  state           String         @default("DRAFT")
+  committedAt     DateTime?
+  committedById   String?
+  committedByName String?
+  /// A manual Daily Work task has no source row of its own: when it is rescheduled it continues as this Calendar task (its stable identity from then on).
+  continuedAsType String?
+  continuedAsId   String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @default(now()) @updatedAt
+  entry           DailyWorkEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
+
+  @@unique([entryId, unitType, unitId])
+  @@index([unitType, unitId])
+  @@index([officerId, workDate])
+  @@index([committedAt])
 }

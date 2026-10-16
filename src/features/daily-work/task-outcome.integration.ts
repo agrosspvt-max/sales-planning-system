@@ -1,0 +1,210 @@
+/**
+ * Daily Report task outcomes (Completed / Not Completed — Reschedule / Abandon) against a REAL, disposable PostgreSQL database.
+ *
+ *   createdb billing_task_test && DATABASE_URL=postgresql://localhost:5432/billing_task_test DIRECT_URL=$DATABASE_URL npx prisma migrate deploy
+ *   BILLING_TASK_TEST_URL=postgresql://localhost:5432/billing_task_test npm run test:task-outcomes:db
+ *
+ * Only a LOCAL database named `billing_task_test` is permitted — the script TRUNCATEs the tables it uses.
+ */
+import assert from "node:assert/strict";
+import { PrismaClient, Role, type Prisma } from "@prisma/client";
+import * as realDailyWork from "@/lib/daily-work";
+import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
+import type { AuthContext } from "@/lib/http";
+import { acceptReceipts } from "@/lib/dealer-last-payment";
+import * as realLabels from "@/features/labels/labels";
+
+const url = process.env.BILLING_TASK_TEST_URL;
+if (!url || !["localhost", "127.0.0.1"].includes(new URL(url).hostname) || new URL(url).pathname !== "/billing_task_test")
+  throw new Error("Only a local database named billing_task_test is permitted (set BILLING_TASK_TEST_URL).");
+const prisma = new PrismaClient({ datasources: { db: { url } } });
+const BASE = "2026-10-14"; // day(n) = BASE + n, fixed
+let clock = BASE; // the Daily Work business date the services see (advanced as the scenarios move through time)
+const load = testLoader({
+  "@/lib/prisma": { prisma },
+  "@/lib/http": { ApiError: TestApiError },
+  "@/lib/audit": { writeAudit: async (data: Prisma.AuditLogUncheckedCreateInput, tx: Prisma.TransactionClient = prisma) => tx.auditLog.create({ data }) },
+  "@/lib/daily-work": { ...realDailyWork, currentBusinessDate: (d?: Date) => (d ? realDailyWork.currentBusinessDate(d) : clock) },
+  "@/features/cn-requests/service.server": { latestCnRequestStatusByDealer: async () => new Map() },
+  "@/lib/recovery-config": { getCalendarEnabled: async () => true },
+});
+
+// The real Daily Work service on the same disposable database (everything outside this feature stubbed to its neutral value).
+const DEFAULT_LABELS = realLabels.DEFAULT_LABELS as Record<string, string>;
+const dw = testLoader({
+  "@/lib/prisma": { prisma }, "@/lib/http": { ApiError: TestApiError }, "@/lib/audit": { writeAudit: async () => ({}) },
+  "@/lib/daily-work": { ...realDailyWork, currentBusinessDate: (d?: Date) => (d ? realDailyWork.currentBusinessDate(d) : clock) },
+  "@/lib/scope": { getCurrentDealerIds: async (id: string) => (await prisma.dealerAssignment.findMany({ where: { officerId: id } })).map((a) => a.dealerId), getOfficerScope: async (c: AuthContext) => ({ all: false, ids: [c.userId] }), assertOfficerInScope: async () => undefined },
+  "@/features/labels/service.server": { getResolvedLabels: async () => DEFAULT_LABELS },
+  "@/features/schemes/scheme-planning.server": { runningSchemes: async () => [] },
+  "@/features/planning/monthly.server": { getMonthly: async () => ({ monthlyMode: "PACK_SIZE", months: [], dealers: [] }) },
+  "@/features/planning/monthly-plan.server": { resolveAddableSeasonalPlanId: async () => null },
+  "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], countUnconfirmedMaterializedTasks: async () => 0, latestCnRequestStatusByDealer: async () => new Map() },
+  "@/lib/recovery-config": { getAutoTasksEnabled: async () => false, getCalendarEnabled: async () => true },
+  "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (r: unknown[]) => r, dealerDisplayName: (n: string) => n },
+  "./auto-task-materialization.server": { materializeDueDailyWorkTasks: async () => ({}), materializeDueDailyWorkTasksInTransaction: async () => ({}), autoTasksApplyToRole: () => true },
+});
+const svc = dw<typeof import("./service.server")>("src/features/daily-work/service.server.ts");
+const lock = load<typeof import("./day-lock.server")>("src/features/daily-work/day-lock.server.ts");
+
+const eq = (actual: unknown, expected: unknown, message?: string) => assert.equal(JSON.stringify(actual), JSON.stringify(expected), message);
+const code = (p: Promise<unknown>) => p.then(() => 0, (e: { status?: number }) => e.status ?? -1);
+const ctx = (userId: string, role: Role, groupId: string | null = "g1", permissions?: Record<string, string[]>): AuthContext => ({ userId, username: userId, role, groupId, permissions }) as AuthContext;
+const admin = ctx("admin", Role.SUPER_ADMIN, null), so1 = ctx("so1", Role.SALES_OFFICER), so2 = ctx("so2", Role.SALES_OFFICER), rm = ctx("rm", Role.REGIONAL_MANAGER);
+const day = (n: number) => new Date(Date.parse(`${BASE}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+const batch = (officer: string, date: string) => `draft:${officer}:${date}`;
+
+const dateOf = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
+const setClock = (d: string) => { clock = d; realDailyWork.dailyWorkClock.now = () => new Date(`${d}T05:00:00Z`); }; // 10:30 IST: inside every report window
+const noPlan = async (c: AuthContext, date: string, sections: string[]) => { for (const section of sections) await svc.setDailyNoPlan(c, { workDate: date, section, noPlan: true }); };
+const rowOf = async (c: AuthContext, section: "SALES" | "RECOVERY", date: string, dealerId: string) => (await svc.getDailyWork(c, section, date, undefined, "REPORT")).dealers.find((d) => d.dealerId === dealerId)!;
+const unitOf = (r: { tasks?: { unitType: string; unitId: string }[] }) => r.tasks![0]!;
+const post = (c: AuthContext, section: "SALES" | "RECOVERY", date: string, r: { entryId: string; tasks?: { unitType: string; unitId: string }[] }, f: Record<string, unknown>) =>
+  svc.enterTaskOutcomes(c, { section, workDate: date, entries: [{ entryId: r.entryId, units: [{ unitType: unitOf(r).unitType, unitId: unitOf(r).unitId, ...f }] }] });
+const counts = async () => ({
+  outcomes: await prisma.dailyTaskOutcome.count(), committed: await prisma.dailyTaskOutcome.count({ where: { state: "COMMITTED" } }), calendar: await prisma.calendarEntry.count(),
+  events: await prisma.taskRescheduleEvent.count(), receipts: await prisma.dealerPaymentReceipt.count(), exceptions: await prisma.billingException.count(), tasks: await prisma.billingExceptionTask.count(),
+});
+
+async function main() {
+  await prisma.$executeRawUnsafe(`TRUNCATE "CalendarEntry","BillingExceptionTask","BillingException","DealerPaymentReceipt","DealerLastPayment","DailyTaskOutcome","DailyWorkEntry","DailyWorkDay","DealerAssignment","Dealer","AuditLog","Notification","TaskRescheduleEvent","User","UserGroup" CASCADE`);
+  await prisma.userGroup.create({ data: { id: "g1", name: "MP" } });
+  for (const [id, role] of [["admin", Role.SUPER_ADMIN], ["so1", Role.SALES_OFFICER], ["so2", Role.SALES_OFFICER], ["rm", Role.REGIONAL_MANAGER]] as const) await prisma.user.create({ data: { id, name: id.toUpperCase(), username: id, passwordHash: "x", role, groupId: id === "admin" ? null : "g1" } as never });
+  for (const [id, name] of [["A", "Alpha Traders"], ["B", "Beta Stores"], ["C", "Gamma Agro"]] as const) {
+    await prisma.dealer.create({ data: { id, name } });
+    await prisma.dealerAssignment.create({ data: { dealerId: id, officerId: "so1", effectiveFrom: new Date("2024-01-01") } });
+  }
+  const D = day(0);
+  setClock(D);
+  await svc.saveDailyWork(so1, { section: "SALES", workDate: D, rows: [{ dealerId: "A", todaysPlan: 1000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 2000, entryType: "REGULAR" }] });
+  await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ dealerId: "C", todaysPlan: 500, entryType: "REGULAR" }] });
+  await noPlan(so1, D, ["APPOINTMENT", "VISITS", "OTHERS"]);
+  await svc.submitDailyWorkDay(so1, { workDate: D });
+
+  /* ---- a new report starts unselected; the row has no Actual and one identifiable task ---- */
+  const A = await rowOf(so1, "SALES", D, "A"), B = await rowOf(so1, "SALES", D, "B"), C = await rowOf(so1, "RECOVERY", D, "C");
+  for (const r of [A, B, C]) eq([r.tasks!.length, r.tasks![0]!.outcome, r.tasks![0]!.state, r.legacyOutcome], [1, null, "DRAFT", false], "starts at Select outcome");
+  eq((await svc.getDailyWork(so1, "SALES", D, undefined, "REPORT")).rescheduledEntryIds, [], "nothing rescheduled yet");
+  const baseline = await counts();
+
+  /* ---- validation: nothing invalid is stored; a forged unit / another employee is refused ---- */
+  assert.equal(await code(post(so1, "SALES", D, A, { outcome: "COMPLETED", actualAmount: 0 })), 422, "Completed with 0 is refused");
+  assert.equal(await code(post(so1, "SALES", D, A, { outcome: "COMPLETED", actualAmount: -1 })), 422, "Completed with a negative is refused");
+  assert.equal(await code(post(so1, "SALES", D, A, { outcome: "RESCHEDULED", nextDate: "2026-02-30" })), 422, "an impossible date is refused");
+  assert.equal(await code(svc.enterTaskOutcomes(so1, { section: "SALES", workDate: D, entries: [{ entryId: A.entryId, units: [{ unitType: "MANUAL_ROW", unitId: "forged", outcome: "COMPLETED", actualAmount: 5 }] }] })), 409, "a task that is not in this row is refused");
+  const forged = await code(svc.enterTaskOutcomes(so2, { section: "SALES", workDate: D, entries: [{ entryId: A.entryId, units: [{ unitType: "MANUAL_ROW", unitId: unitOf(A).unitId, outcome: "ABANDONED", reason: "Trying to abandon someone else's task here" }] }] }));
+  assert.notEqual(forged, 0, "another employee cannot write outcomes to this row");
+  eq(await counts(), baseline, "refused requests wrote nothing");
+
+  /* ---- drafts: choices are saved, but nothing happens (no calendar task, no abandon, no finance) ---- */
+  await post(so1, "SALES", D, A, { outcome: "COMPLETED", actualAmount: 800 });
+  await post(so1, "SALES", D, B, { outcome: "RESCHEDULED", nextDate: day(1) });
+  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reason: "Dealer shut the shop for the season and asked us to stop visiting" });
+  const draft = await counts();
+  eq([draft.calendar, draft.events, draft.committed, draft.receipts], [0, 0, 0, 0], "drafts have no effect");
+  assert.equal((await rowOf(so1, "SALES", D, "A")).tasks![0]!.actualAmount, 800);
+  // changing the choice clears the other fields, and a draft can be changed freely
+  await post(so1, "SALES", D, B, { outcome: "COMPLETED", actualAmount: 5, nextDate: day(2), reason: "stale stale stale stale stale" });
+  const sw = (await rowOf(so1, "SALES", D, "B")).tasks![0]!;
+  eq([sw.outcome, sw.actualAmount, sw.nextDate, sw.reason], ["COMPLETED", 5, null, null], "switching clears the other outcomes' fields");
+  await post(so1, "SALES", D, B, { outcome: "RESCHEDULED", nextDate: day(1) });
+  eq((await counts()).calendar, 0, "still nothing created");
+
+  /* ---- final submission needs every applicable task to have a valid outcome ---- */
+  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reason: "too short" });
+  assert.equal(await code(svc.submitDailyReport(so1, { workDate: D, selfRating: 7 })), 422, "an invalid Abandon reason blocks the report");
+  eq([(await counts()).committed, (await counts()).calendar], [0, 0], "…and nothing was committed");
+  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reason: "Dealer shut the shop for the season and asked us to stop visiting" });
+  await post(so1, "SALES", D, A, { outcome: null });
+  assert.equal(await code(svc.submitDailyReport(so1, { workDate: D, selfRating: 7 })), 422, "an unselected task blocks the report");
+  eq((await counts()).committed, 0);
+  await post(so1, "SALES", D, A, { outcome: "COMPLETED", actualAmount: 800 });
+
+  /* ---- successful submission: committed once, atomically ---- */
+  assert.equal((await svc.submitDailyReport(so1, { workDate: D, selfRating: 7 })).ok, true);
+  const after = await counts();
+  eq([after.committed, after.calendar, after.events, after.receipts, after.exceptions, after.tasks], [3, 1, 1, 0, 0, 0], "3 outcomes committed; ONE continuing task; one history event; no finance records");
+  const cont = await prisma.calendarEntry.findFirstOrThrow();
+  eq([dateOf(cont.date), cont.taskSection, cont.dealerId, Number(cont.amount), cont.ownerId, cont.kind, cont.entryType], [day(1), "SALES", "B", 2000, "so1", "TASK", "REGULAR"], "same section, planned amount, dealer, owner on the next date");
+  const rowA = (await prisma.dailyWorkEntry.findFirstOrThrow({ where: { section: "SALES", dealerId: "A", workDate: new Date(`${D}T00:00:00Z`) } }));
+  eq([Number(rowA.todaysActual), rowA.status], [800, "FINALIZED"]);
+  const rowB = await prisma.dailyWorkEntry.findFirstOrThrow({ where: { section: "SALES", dealerId: "B" } });
+  eq([Number(rowB.todaysActual), Number(rowB.todaysPlan)], [0, 2000], "a rescheduled row reports 0 completed and keeps its planned amount");
+  const oc = await prisma.dailyTaskOutcome.findMany({ orderBy: { section: "asc" } });
+  const byD = Object.fromEntries(oc.map((o) => [o.entryId, o]));
+  eq([byD[rowB.id]!.outcome, dateOf(byD[rowB.id]!.nextDate), byD[rowB.id]!.state, byD[rowB.id]!.continuedAsId], ["RESCHEDULED", day(1), "COMMITTED", cont.id]);
+  const ab = oc.find((o) => o.outcome === "ABANDONED")!;
+  eq([ab.state, ab.committedById, ab.reason, Number(ab.plannedAmount)], ["COMMITTED", "so1", "Dealer shut the shop for the season and asked us to stop visiting", 500], "abandon keeps reason, actor and the planned amount");
+  const ev = await prisma.taskRescheduleEvent.findFirstOrThrow();
+  eq([ev.sourceType, ev.sourceId, dateOf(ev.previousDate), dateOf(ev.newDate), ev.actorId], ["CALENDAR_ENTRY", cont.id, D, day(1), "so1"]);
+
+  /* ---- retries / double clicks / refreshes produce nothing more ---- */
+  assert.notEqual(await code(svc.submitDailyReport(so1, { workDate: D, selfRating: 7 })), 0, "a second submit is refused");
+  assert.notEqual(await code(post(so1, "SALES", D, B, { outcome: "ABANDONED", reason: "A later attempt to change a closed report" })), 0, "a submitted report accepts no outcome");
+  eq(await counts(), after, "retries changed nothing");
+  await assert.rejects(prisma.dailyTaskOutcome.update({ where: { id: ab.id }, data: { reason: "rewritten history of the abandonment" } }), "a committed outcome is immutable");
+  await assert.rejects(prisma.dailyTaskOutcome.delete({ where: { id: ab.id } }), "…and cannot be deleted");
+  eq(await counts(), after);
+  eq((await svc.getDailyWork(so1, "SALES", D, undefined, "REPORT")).dealers.map((d) => d.tasks![0]!.state), ["COMMITTED", "COMMITTED"], "the finished report shows its committed outcomes");
+
+  /* ---- the next day: the rescheduled task is there (once, badged, fresh outcome), and is rescheduled AGAIN, then abandoned ---- */
+  const D1 = day(1);
+  setClock(D1);
+  await noPlan(so1, D1, ["APPOINTMENT", "VISITS", "OTHERS", "RECOVERY"]);
+  const day1 = await svc.getDailyWork(so1, "SALES", D1, undefined, "PLAN");
+  eq(day1.dealers.map((d) => [d.dealerId, d.todaysPlan]), [["B", 2000]], "the rescheduled task is in the same section's plan on its date, once, with its planned amount");
+  await svc.getDailyWork(so1, "SALES", D1, undefined, "PLAN"); // a refresh never duplicates it
+  eq(await prisma.dailyWorkEntry.count({ where: { workDate: new Date(`${D1}T00:00:00Z`), section: "SALES" } }), 1);
+  await svc.submitDailyWorkDay(so1, { workDate: D1 });
+  const b1 = await rowOf(so1, "SALES", D1, "B");
+  eq([b1.tasks!.length, b1.tasks![0]!.outcome, b1.tasks![0]!.unitType, b1.tasks![0]!.unitId, b1.tasks![0]!.rescheduledFrom], [1, null, "CALENDAR_ENTRY", cont.id, D], "a fresh outcome is required; same task identity; Rescheduled-from badge data");
+  assert.ok((await svc.getDailyWork(so1, "SALES", D1, undefined, "REPORT")).rescheduledEntryIds.includes(b1.entryId), "the row carries the Rescheduled badge");
+
+  // reschedule again (from the calendar task itself), twice over
+  await post(so1, "SALES", D1, b1, { outcome: "RESCHEDULED", nextDate: day(3) });
+  assert.equal((await svc.submitDailyReport(so1, { workDate: D1, selfRating: 7 })).ok, true);
+  const moved = await prisma.calendarEntry.findUniqueOrThrow({ where: { id: cont.id } });
+  eq([dateOf(moved.date), Number(moved.amount), moved.taskSection, await prisma.calendarEntry.count()], [day(3), 2000, "SALES", 1], "the SAME task moved again — no second copy");
+  const D3 = day(3);
+  setClock(D3);
+  await noPlan(so1, D3, ["APPOINTMENT", "VISITS", "OTHERS", "RECOVERY"]);
+  await svc.getDailyWork(so1, "SALES", D3, undefined, "PLAN");
+  await svc.submitDailyWorkDay(so1, { workDate: D3 });
+  const b3 = await rowOf(so1, "SALES", D3, "B");
+  eq([b3.tasks![0]!.unitId, b3.tasks![0]!.rescheduledFrom], [cont.id, D1]);
+  // Abandon on the final day: reason required, then the task never comes back
+  await post(so1, "SALES", D3, b3, { outcome: "ABANDONED", reason: "...................................." }); // a draft may hold an incomplete choice
+  assert.equal(await code(svc.submitDailyReport(so1, { workDate: D3, selfRating: 7 })), 422, "a meaningless reason blocks the report");
+  assert.equal((await prisma.calendarEntry.findUniqueOrThrow({ where: { id: cont.id } })).abandonedAt, null, "…and nothing was abandoned");
+  await post(so1, "SALES", D3, b3, { outcome: "ABANDONED", reason: "Dealer closed the account and moved to another distributor" });
+  assert.equal((await svc.submitDailyReport(so1, { workDate: D3, selfRating: 7 })).ok, true);
+  const ended = await prisma.calendarEntry.findUniqueOrThrow({ where: { id: cont.id } });
+  assert.ok(ended.abandonedAt, "the task is marked abandoned");
+  for (const n of [4, 5]) {
+    setClock(day(n));
+    await svc.getDailyWork(so1, "SALES", day(n), undefined, "PLAN");
+    eq(await prisma.dailyWorkEntry.count({ where: { workDate: new Date(`${day(n)}T00:00:00Z`), section: "SALES" } }), 0, "an abandoned task is never scheduled again");
+  }
+  eq((await prisma.taskRescheduleEvent.findMany({ where: { sourceId: cont.id }, orderBy: { createdAt: "asc" } })).map((e) => [dateOf(e.previousDate), dateOf(e.newDate)]), [[D, day(1)], [day(1), day(3)]], "every reschedule is kept: previous / next date");
+  const fin = await counts();
+  eq([fin.receipts, fin.exceptions, fin.tasks], [0, 0, 0], "no finance record was created by any outcome");
+  /* ---- Performance → Tasks agrees: one task (deduplicated), Abandoned as its own status, full timeline ---- */
+  const ana = load<typeof import("@/features/tasks/task-analysis.server")>("src/features/tasks/task-analysis.server.ts");
+  const person = (id: string) => ({ id, name: id.toUpperCase(), role: "SALES_OFFICER", groupId: "g1", groupName: "MP" });
+  const scope = { population: [person("so1")], officers: [], states: [] };
+  const base = { from: day(-5), to: day(10), basis: "ORIGINAL" as const, type: "ALL" as const, section: "", source: "", status: "", focusDate: null, page: 1, pageSize: 100 };
+  const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+  const all = plain(await ana.getTaskAnalysis(scope as never, base));
+  const abandonedRows = plain(await ana.getTaskAnalysis(scope as never, { ...base, status: "ABANDONED" })).rows;
+  eq(abandonedRows.map((r: { section: string }) => r.section).sort(), ["RECOVERY", "SALES"], "the Abandoned status filter finds exactly the two abandoned tasks (Recovery row C, Sales task B)");
+  eq([abandonedRows.every((r: { status: string }) => r.status === "ABANDONED"), all.summary.abandoned], [true, 2], "Abandoned is its own status and summary figure");
+  eq(all.rows.filter((r: { taskId: string }) => r.taskId === cont.id).length, 1, "the repeatedly rescheduled task is ONE row, not one per occurrence");
+  const hist = plain(await ana.getTaskHistory(scope as never, "CALENDAR_ENTRY", cont.id));
+  eq([hist.events.length, hist.outcomes.map((o: { outcome: string }) => o.outcome)], [2, ["RESCHEDULED", "RESCHEDULED", "ABANDONED"]], "history: both reschedules, then the abandonment (reason, actor, time kept)");
+  assert.equal(hist.outcomes[2].reason, "Dealer closed the account and moved to another distributor");
+  const madeOn = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // outcomes were committed "now" in real time
+  const act = await ana.getTaskActivity(scope as never, madeOn, madeOn);
+  eq([act.get(`so1|${madeOn}`)?.abandoned, act.get(`so1|${madeOn}`)?.reschedules], [2, 2], "Task Activity counts abandonments and reschedules on the business date they were made");
+  console.log("task-outcome.integration.ts — all scenarios passed");
+}
+main().then(async () => { await prisma.$disconnect(); }, async (e) => { console.error(e); await prisma.$disconnect(); process.exit(1); });

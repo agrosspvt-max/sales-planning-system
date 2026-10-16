@@ -26,23 +26,22 @@ import { defaultTaskFilters, type DateBasis, type TaskFilterState } from "@/lib/
 import { cn } from "@/lib/utils";
 import { PerformanceMetricDetail, countText, rupees, type MetricRequest } from "./performance-metric-detail";
 
-type Attendance = "PRESENT" | "ABSENT" | "LEAVE" | "HOLIDAY";
 interface Option { id: string; name: string }
 interface PerfRow {
   officerId: string; officerName: string; officerRole: Role; groupId: string | null; stateName: string | null; date: string;
-  attendance: Attendance; planSubmittedAt: string | null; reportSubmittedAt: string | null;
+  planSubmittedAt: string | null; reportSubmittedAt: string | null;
   selfRating: number | null; rmRating: number | null; submitted: boolean; reportMissed: boolean;
-  taskActivity: { tasks: number; completed: number; reschedules: number } | null;
+  taskActivity: { tasks: number; completed: number; reschedules: number; abandoned: number; sections: Record<string, number> } | null;
 }
 interface SectionTotal { planned: number; actual: number }
 interface Summary {
-  salesOfficers: number; presentDays: number; totalDays: number; submittedPlans: number; submittedReports: number;
+  salesOfficers: number; employeeDays: number; submittedPlans: number; submittedReports: number;
   averageSelfRating: number | null; averageRmRating: number | null;
   sections: { sales: SectionTotal; recovery: SectionTotal; schemeConversion: SectionTotal; appointment: SectionTotal; visits: SectionTotal };
 }
 interface Payload {
   role: Role; from: string; to: string; rows: PerfRow[]; summary: Summary;
-  officers: Option[]; states: Option[]; canEditAttendance: boolean;
+  officers: Option[]; states: Option[];
 }
 
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
@@ -84,7 +83,6 @@ export function PerformancePage({ role }: { role: Role }) {
     colDate: useLabel("daily_work.performance.col.date"),
     colOfficer: useLabel("daily_work.team.col.sales_officer"),
     colState: useLabel("daily_work.performance.col.state"),
-    colAttendance: useLabel("daily_work.performance.col.attendance"),
     colPlan: useLabel("daily_work.performance.col.plan_submission"),
     colReport: useLabel("daily_work.performance.col.report_submission"),
     reportMissed: useLabel("daily_work.performance.report_missed"),
@@ -96,12 +94,6 @@ export function PerformancePage({ role }: { role: Role }) {
     fState: useLabel("daily_work.performance.col.state"),
     allStates: useLabel("daily_work.performance.filter.all_states"),
     officerLabel: useLabel("daily_work.team.col.sales_officer"),
-    present: useLabel("daily_work.performance.attendance.present"),
-    absent: useLabel("daily_work.performance.attendance.absent"),
-    leave: useLabel("daily_work.performance.attendance.leave"),
-    holiday: useLabel("daily_work.performance.attendance.holiday"),
-    sMyAttendance: useLabel("daily_work.performance.summary.my_attendance"),
-    sAttendance: useLabel("daily_work.performance.summary.attendance"),
     sOfficers: useLabel("daily_work.team.summary.sales_officers"),
     sNotSubmitted: useLabel("daily_work.team.summary.not_submitted"),
     rmBadge: useLabel("daily_work.performance.rm_badge"),
@@ -124,10 +116,15 @@ export function PerformancePage({ role }: { role: Role }) {
     openHint: useLabel("daily_work.performance.detail.open_hint"),
     modePerformance: useLabel("tasks.mode.performance"), modeTasks: useLabel("tasks.mode.tasks"),
     actCol: useLabel("tasks.activity.col"), actOne: useLabel("tasks.activity.tasks_one"), actMany: useLabel("tasks.activity.tasks_many"), actNone: useLabel("tasks.activity.none"),
+    abandonedOne: useLabel("tasks.activity.abandoned_one"), abandonedMany: useLabel("tasks.activity.abandoned_many"), openAbandonedHint: useLabel("tasks.activity.open_abandoned"), activityTip: useLabel("tasks.activity.tip"),
+    unavailable: useLabel("tasks.activity.unavailable"), unavailableTip: useLabel("tasks.activity.unavailable_tip"), bySection: useLabel("tasks.activity.by_section"),
+    secSALES: useLabel("daily_work.section.sales"), secRECOVERY: useLabel("daily_work.section.recovery"), secAPPOINTMENT: useLabel("daily_work.section.appointment"), secSCHEME_CONVERSION: useLabel("daily_work.section.scheme_conversion"), secVISITS: useLabel("daily_work.section.visits"), secOTHERS: useLabel("daily_work.section.others"),
     movesOne: useLabel("tasks.activity.resched_one"), movesMany: useLabel("tasks.activity.resched_many"), openTasksHint: useLabel("tasks.activity.open_tasks"), openMovesHint: useLabel("tasks.activity.open_moves"),
   };
-  const attendanceLabel: Record<Attendance, string> = { PRESENT: L.present, ABSENT: L.absent, LEAVE: L.leave, HOLIDAY: L.holiday };
   const title = isSO ? L.my : isRM ? L.team : L.company;
+  /** "Sales 3 · Recovery 2 · …" — how the row's task total is made up, in Daily Work order (sections with no task are left out). */
+  const sectionBreakdown = (sections: Record<string, number>): string =>
+    (["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", "VISITS", "OTHERS"] as const).filter((k) => (sections[k] ?? 0) > 0).map((k) => `${L[`sec${k}` as const]} ${sections[k]}`).join(" · ");
 
   const query = new URLSearchParams({ from, to });
   if (!isSO && officerId) query.set("officerId", officerId);
@@ -137,14 +134,9 @@ export function PerformancePage({ role }: { role: Role }) {
     queryFn: () => api.get<Payload>(`/api/daily-work/performance?${query.toString()}`),
   });
 
-  const attendanceMut = useMutation({
-    mutationFn: (v: { officerId: string; workDate: string; status: Attendance }) => api.post("/api/daily-work/attendance", v),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["performance", role, from, to, officerId, groupId] }); },
-  });
-
   const showOfficer = !isSO;
   const showState = isAdmin;
-  const colCount = 1 + (showOfficer ? 1 : 0) + (showState ? 1 : 0) + 7; // date + officer? + state? + attendance/plan/report/self/rm/action
+  const colCount = 1 + (showOfficer ? 1 : 0) + (showState ? 1 : 0) + 6; // date + officer? + state? + plan/report/self/rm/task activity/action
   const changeState = (value: string) => {
     setGroupId(value);
     // A State change establishes a new authoritative SO scope. Resetting is predictable and prevents a
@@ -182,17 +174,10 @@ export function PerformancePage({ role }: { role: Role }) {
 
       {/* Summary cards for the selected range. */}
       <div className="grid gap-3 rounded-lg border bg-background p-4 sm:grid-cols-3 lg:grid-cols-5">
-        {isSO ? (
-          <Stat label={L.sMyAttendance} value={data ? `${data.summary.presentDays} / ${data.summary.totalDays}` : "—"} />
-        ) : (
-          <>
-            <Stat label={L.sOfficers} value={data ? String(data.summary.salesOfficers) : "—"} />
-            <Stat label={L.sAttendance} value={data ? `${data.summary.presentDays} / ${data.summary.totalDays}` : "—"} />
-          </>
-        )}
+        {!isSO && <Stat label={L.sOfficers} value={data ? String(data.summary.salesOfficers) : "—"} />}
         <Stat label={L.sPlans} value={data ? String(data.summary.submittedPlans) : "—"} />
         <Stat label={L.sReports} value={data ? String(data.summary.submittedReports) : "—"} />
-        {isRM && <Stat label={L.sNotSubmitted} value={data ? String(data.summary.totalDays - data.summary.submittedReports) : "—"} />}
+        {isRM && <Stat label={L.sNotSubmitted} value={data ? String(data.summary.employeeDays - data.summary.submittedReports) : "—"} />}
         <Stat label={L.sAvgSelf} value={data ? ratingText(data.summary.averageSelfRating) : "—"} />
         <Stat label={L.sAvgRm} value={data ? ratingText(data.summary.averageRmRating) : "—"} />
         {/* Planned vs Actual per section, over the same filtered officers and dates as the table (Others has no totals). */}
@@ -224,7 +209,6 @@ export function PerformancePage({ role }: { role: Role }) {
                 />
               )}
               {showState && <TableHead>{L.colState}</TableHead>}
-              <TableHead>{L.colAttendance}</TableHead>
               <TableHead>{L.colPlan}</TableHead>
               <TableHead>{L.colReport}</TableHead>
               <TableHead>{L.colSelf}</TableHead>
@@ -244,19 +228,6 @@ export function PerformancePage({ role }: { role: Role }) {
                   <TableCell className="whitespace-nowrap">{dateText(r.date)}</TableCell>
                   {showOfficer && <TableCell className="font-medium">{r.officerName}</TableCell>}
                   {showState && <TableCell>{r.stateName ?? dash}</TableCell>}
-                  <TableCell>
-                    {data!.canEditAttendance ? (
-                      <NativeSelect
-                        className="h-8 w-32"
-                        value={r.attendance}
-                        disabled={attendanceMut.isPending}
-                        onChange={(e) => attendanceMut.mutate({ officerId: r.officerId, workDate: r.date, status: e.target.value as Attendance })}
-                        options={(["PRESENT", "ABSENT", "LEAVE", "HOLIDAY"] as Attendance[]).map((s) => ({ value: s, label: attendanceLabel[s] }))}
-                      />
-                    ) : (
-                      <Badge variant={r.attendance === "PRESENT" ? "success" : "muted"}>{attendanceLabel[r.attendance]}</Badge>
-                    )}
-                  </TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">{timeText(r.planSubmittedAt)}</TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">
                     {r.reportSubmittedAt ? timeText(r.reportSubmittedAt) : r.reportMissed ? <Badge variant="destructive">{L.reportMissed}</Badge> : timeText(null)}
@@ -268,13 +239,20 @@ export function PerformancePage({ role }: { role: Role }) {
                     {r.taskActivity ? (
                       <div className="space-y-0.5">
                         {r.taskActivity.tasks > 0
-                          ? <button type="button" title={L.openTasksHint} className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => openTasks(r, "ORIGINAL")}>{(r.taskActivity.tasks === 1 ? L.actOne : L.actMany).replace("{n}", String(r.taskActivity.tasks)).replace("{c}", String(r.taskActivity.completed))}</button>
+                          ? <button type="button" title={`${L.openTasksHint}. ${L.bySection.replace("{list}", sectionBreakdown(r.taskActivity.sections))}. ${L.activityTip}`} className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => openTasks(r, "ORIGINAL")}>{(r.taskActivity.tasks === 1 ? L.actOne : L.actMany).replace("{n}", String(r.taskActivity.tasks)).replace("{c}", String(r.taskActivity.completed))}</button>
                           : <div className="text-muted-foreground">{L.actNone}</div>}
-                        {r.taskActivity.reschedules > 0
-                          ? <button type="button" title={L.openMovesHint} className="block text-primary underline-offset-2 hover:underline" onClick={() => openTasks(r, "RESCHEDULED_ON")}>{(r.taskActivity.reschedules === 1 ? L.movesOne : L.movesMany).replace("{n}", String(r.taskActivity.reschedules))}</button>
-                          : <div className="text-muted-foreground">{L.movesMany.replace("{n}", "0")}</div>}
+                        {r.taskActivity.tasks > 0 && <div className="text-[11px] leading-tight text-muted-foreground" data-testid="activity-sections">{sectionBreakdown(r.taskActivity.sections)}</div>}
+                        <div className="flex flex-wrap gap-x-1" data-testid="activity-moves">
+                          {r.taskActivity.reschedules > 0
+                            ? <button type="button" title={`${L.openMovesHint}. ${L.activityTip}`} className="text-primary underline-offset-2 hover:underline" onClick={() => openTasks(r, "RESCHEDULED_ON")}>{(r.taskActivity.reschedules === 1 ? L.movesOne : L.movesMany).replace("{n}", String(r.taskActivity.reschedules))}</button>
+                            : <span className="text-muted-foreground" title={L.activityTip}>{L.movesMany.replace("{n}", "0")}</span>}
+                          {r.taskActivity.abandoned > 0 && <>
+                            <span aria-hidden>·</span>
+                            <button type="button" title={`${L.openAbandonedHint}. ${L.activityTip}`} className="font-medium text-destructive underline-offset-2 hover:underline" data-testid="activity-abandoned" onClick={() => openTasks(r, "ABANDONED_ON")}>{(r.taskActivity.abandoned === 1 ? L.abandonedOne : L.abandonedMany).replace("{n}", String(r.taskActivity.abandoned))}</button>
+                          </>}
+                        </div>
                       </div>
-                    ) : dash}
+                    ) : <span className="text-muted-foreground" title={L.unavailableTip} data-testid="activity-unavailable">{L.unavailable}</span>}
                   </TableCell>
                   <TableCell className="text-right">
                     {r.submitted ? (

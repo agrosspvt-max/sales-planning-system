@@ -31,7 +31,7 @@ const DEFAULT_LABELS = realLabels.DEFAULT_LABELS as Record<string, string>;
 const dw = testLoader({
   "@/lib/prisma": { prisma }, "@/lib/http": { ApiError: TestApiError }, "@/lib/audit": { writeAudit: async () => ({}) },
   "@/lib/daily-work": { ...realDailyWork, currentBusinessDate: (d?: Date) => (d ? realDailyWork.currentBusinessDate(d) : clock) },
-  "@/lib/scope": { getCurrentDealerIds: async (id: string) => (await prisma.dealerAssignment.findMany({ where: { officerId: id } })).map((a) => a.dealerId), getOfficerScope: async (c: AuthContext) => ({ all: false, ids: [c.userId] }), assertOfficerInScope: async () => undefined },
+  "@/lib/scope": { getCurrentOwnerByDealer: async (ids: string[]) => { const rows = await prisma.dealerAssignment.findMany({ where: { dealerId: { in: ids }, effectiveTo: null }, orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }] }); return new Map(rows.map((r) => [r.dealerId, r.officerId])); }, getCurrentDealerIds: async (id: string) => (await prisma.dealerAssignment.findMany({ where: { officerId: id } })).map((a) => a.dealerId), getOfficerScope: async (c: AuthContext) => ({ all: false, ids: [c.userId] }), assertOfficerInScope: async () => undefined },
   "@/features/labels/service.server": { getResolvedLabels: async () => DEFAULT_LABELS },
   "@/features/schemes/scheme-planning.server": { runningSchemes: async () => [] },
   "@/features/planning/monthly.server": { getMonthly: async () => ({ monthlyMode: "PACK_SIZE", months: [], dealers: [] }) },
@@ -138,7 +138,7 @@ async function main() {
   await svc.enterTaskOutcomes(so1, { section: "RECOVERY", workDate: D, entries: [
     { entryId: A1.entryId, paymentMode: "UPI", units: [unit(A1, { outcome: "COMPLETED", actualAmount: 12444 })] },
     { entryId: A2.entryId, units: [unit(A2, { outcome: "RESCHEDULED", nextDate: day(1) })] },
-    { entryId: AM.entryId, units: [unit(AM, { outcome: "ABANDONED", reason: "Dealer closed the account for the season" })] },
+    { entryId: AM.entryId, units: [unit(AM, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Dealer closed the account for the season" })] },
     ...repRec.filter((r) => r.dealerId !== "A").map((r) => ({ entryId: r.entryId, paymentMode: "UPI", units: [unit(r, { outcome: "COMPLETED", actualAmount: r.todaysPlan })] })),
   ] });
   await svc.enterTaskOutcomes(so1, { section: "SALES", workDate: D, entries: [
@@ -152,7 +152,7 @@ async function main() {
   eq([await actualOf(A1.entryId), await actualOf(A2.entryId), await actualOf(AM.entryId)], [12444, 0, 0], "each row's Actual is derived from its OWN task only");
   // A forged unit of ANOTHER row inside this row's entry is refused: outcomes bind to the row's own task identity.
   assert.equal(await code(svc.enterTaskOutcomes(so1, { section: "RECOVERY", workDate: D, entries: [{ entryId: A1.entryId, units: [unit(A2, { outcome: "COMPLETED", actualAmount: 5 })] }] })), 409, "a sibling task's identity cannot be used on this row");
-  assert.notEqual(await code(svc.enterTaskOutcomes(so2, { section: "RECOVERY", workDate: D, entries: [{ entryId: A1.entryId, units: [unit(A1, { outcome: "ABANDONED", reason: "Someone else abandoning this task now" })] }] })), 0, "another employee cannot change it");
+  assert.notEqual(await code(svc.enterTaskOutcomes(so2, { section: "RECOVERY", workDate: D, entries: [{ entryId: A1.entryId, units: [unit(A1, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Someone else abandoning this task now" })] }] })), 0, "another employee cannot change it");
 
   /* ---- 4. Submit the report: ONLY the rescheduled row's task moves; the others (same dealer) stay ---- */
   assert.equal((await svc.submitDailyReport(so1, { workDate: D, selfRating: 8 })).ok, true);

@@ -13,6 +13,7 @@ import {
   type AppointmentRow, type ConversionRow, type DailyWorkDealerRow, type DailyWorkType, type RecoveryPaymentMode,
 } from "@/lib/daily-work";
 import { useLabel } from "@/features/labels/label-ui";
+import { useAbandonText } from "./abandon-text";
 import { PageHeader } from "@/components/layout/page-header";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,6 +32,8 @@ interface DealerRow {
   entryId: string; dealerId: string; dealerName: string; monthlyPlan: number; pending: number;
   todaysPlan: number | null; todaysActual: number | null; entryType: DailyWorkType;
   paymentMode?: RecoveryPaymentMode | null; recoverySource?: "BILLING_EXCEPTION" | "CN_REQUEST" | null;
+  /** Submitted report: each task's committed outcome (an abandonment shows its saved reason). */
+  tasks?: { outcome: string | null; state: string; reasonCode: string | null; reason: string | null }[];
 }
 interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds: string[] }
 interface AppointmentPayload {
@@ -172,6 +175,7 @@ function AdminReportSection({ section, report, noSection, noPlan }: { section: S
 }
 
 function AdminDealerReport({ section, data }: { section: "SALES" | "RECOVERY"; data: DealerPayload }) {
+  const abandon = useAbandonText();
   const L = {
     dealer: useLabel("col.dealer"), dealers: useLabel("daily_work.count.dealers"), taskNoun: useLabel("daily_work.count.task"), tasksNoun: useLabel("daily_work.count.tasks"), task: useLabel("daily_work.col.task_type"),
     auto: useLabel("daily_work.task_type.auto"), manual: useLabel("daily_work.task_type.manual"), none: useLabel("daily_work.combined.none"),
@@ -191,7 +195,7 @@ function AdminDealerReport({ section, data }: { section: "SALES" | "RECOVERY"; d
     <TableHead className="w-60">{L.dealer}</TableHead><TableHead className="w-32">{L.task}</TableHead><TableHead className="w-44 text-right">{section === "RECOVERY" ? <MonthlyRecoveryPlanHeader label={L.plan} /> : L.plan}</TableHead><TableHead className="w-32 text-right">{L.pending}</TableHead><TableHead className="w-36 text-right">{L.today}</TableHead>{section === "RECOVERY" && <TableHead className="w-36">{L.paymentMode}</TableHead>}<TableHead className="w-44">{L.type}</TableHead><TableHead className="w-36 text-right">{L.actual}</TableHead>
   </TableRow></TableHeader><TableBody>
     <TableRow className="border-b-2 bg-muted/40 font-semibold"><TableCell data-testid="combined-counts">{combined.dealerLabel}{combined.taskCount !== combined.dealerCount && ` · ${combined.taskLabel}`}</TableCell><TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.pending)}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysPlan)}</TableCell>{section === "RECOVERY" && <TableCell>{L.none}</TableCell>}<TableCell>{L.none}</TableCell><TableCell className="text-right tabular-nums">{money(combined.todaysActual)}</TableCell></TableRow>
-    {data.dealers.map((row) => <TableRow data-dealer-id={row.dealerId} key={row.entryId}><TableCell className="font-medium"><DealerName id={row.dealerId} name={row.dealerName} /></TableCell><TableCell>{task(row)}</TableCell><TableCell className="text-right tabular-nums">{money(row.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(row.pending)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan == null ? dash : money(row.todaysPlan)}</TableCell>{section === "RECOVERY" && <TableCell><RecoveryPaymentModeField value={row.paymentMode ?? null} /></TableCell>}<TableCell>{type(row.entryType, row.recoverySource)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysActual == null ? dash : money(row.todaysActual)}</TableCell></TableRow>)}
+    {data.dealers.map((row) => <TableRow data-dealer-id={row.dealerId} key={row.entryId}><TableCell className="font-medium"><DealerName id={row.dealerId} name={row.dealerName} />{(row.tasks ?? []).filter((t) => t.outcome === "ABANDONED" && t.state === "COMMITTED").map((t, i) => <div key={i} className="mt-0.5 text-xs font-normal text-destructive" data-testid="review-abandoned">{abandon.summary(t.reasonCode, t.reason)}</div>)}</TableCell><TableCell>{task(row)}</TableCell><TableCell className="text-right tabular-nums">{money(row.monthlyPlan)}</TableCell><TableCell className="text-right tabular-nums">{money(row.pending)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysPlan == null ? dash : money(row.todaysPlan)}</TableCell>{section === "RECOVERY" && <TableCell><RecoveryPaymentModeField value={row.paymentMode ?? null} /></TableCell>}<TableCell>{type(row.entryType, row.recoverySource)}</TableCell><TableCell className="text-right tabular-nums">{row.todaysActual == null ? dash : money(row.todaysActual)}</TableCell></TableRow>)}
   </TableBody></Table></div>;
 }
 

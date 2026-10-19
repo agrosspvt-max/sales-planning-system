@@ -12,9 +12,20 @@ export const MAX_ACTUAL_AMOUNT = 1e12; // the existing Daily Work amount ceiling
 export const MIN_REASON_CHARS = 20; // non-whitespace characters
 export const MAX_REASON_LENGTH = 500;
 
-/** The fields the officer filled in for one task. Only the fields of the CHOSEN outcome are kept (see sanitizeOutcomeFields). */
-export interface OutcomeFields { outcome: TaskOutcome | null; actualAmount: number | null; nextDate: string | null; reason: string | null }
-export type OutcomeError = "outcome_required" | "amount_required" | "amount_invalid" | "date_required" | "date_invalid" | "date_not_future" | "reason_required" | "reason_short" | "reason_meaningless" | "reason_long";
+/**
+ * Why a task was abandoned. A stable CODE is stored separately from the optional "Other" explanation; the permitted codes depend on the task's section (a Sales code is never valid for
+ * Recovery, or vice versa). A predefined reason is complete on its own; only OTHER needs an explanation (the existing free-text validation). Records made before codes existed keep
+ * their free text with no code — they are shown as written, never mapped to a category.
+ */
+export const ABANDON_REASON_CODES = ["PRODUCT_UNAVAILABLE", "DEALER_REFUSED", "NO_DUES", "OTHER"] as const;
+export type AbandonReasonCode = (typeof ABANDON_REASON_CODES)[number];
+export const ABANDON_REASONS_BY_SECTION: Record<"SALES" | "RECOVERY", readonly AbandonReasonCode[]> = { SALES: ["PRODUCT_UNAVAILABLE", "DEALER_REFUSED", "OTHER"], RECOVERY: ["NO_DUES", "OTHER"] };
+export const abandonReasonsFor = (section: string): readonly AbandonReasonCode[] => (section === "SALES" || section === "RECOVERY" ? ABANDON_REASONS_BY_SECTION[section] : []);
+export const isAbandonReasonAllowed = (section: string, code: unknown): code is AbandonReasonCode => typeof code === "string" && (abandonReasonsFor(section) as readonly string[]).includes(code);
+
+/** The fields the officer filled in for one task. Only the fields of the CHOSEN outcome are kept (see sanitizeOutcomeFields). `reason` = the explanation (Other / legacy), `reasonCode` = the category. */
+export interface OutcomeFields { outcome: TaskOutcome | null; actualAmount: number | null; nextDate: string | null; reason: string | null; reasonCode?: AbandonReasonCode | null }
+export type OutcomeError = "outcome_required" | "amount_required" | "amount_invalid" | "date_required" | "date_invalid" | "date_not_future" | "reason_required" | "reason_short" | "reason_meaningless" | "reason_long" | "reason_code_required" | "reason_code_invalid";
 
 const isDateKey = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v;
 /** Amounts are stored with the existing 2-decimal precision. */
@@ -55,21 +66,24 @@ export function checkReason(raw: unknown): "ok" | "reason_required" | "reason_sh
  * Keeps ONLY the fields that belong to the chosen outcome — switching the dropdown can never leave a stale amount, date or reason that later triggers an effect.
  * (Used for drafts too: a draft keeps the chosen outcome's possibly-incomplete fields, nothing else.)
  */
-export function sanitizeOutcomeFields(i: { outcome?: unknown; actualAmount?: unknown; nextDate?: unknown; reason?: unknown }): { ok: true; value: OutcomeFields } | { ok: false; error: OutcomeError } {
-  if (i.outcome === null || i.outcome === undefined || i.outcome === "") return { ok: true, value: { outcome: null, actualAmount: null, nextDate: null, reason: null } };
+export function sanitizeOutcomeFields(i: { outcome?: unknown; actualAmount?: unknown; nextDate?: unknown; reason?: unknown; reasonCode?: unknown }, section?: string): { ok: true; value: OutcomeFields } | { ok: false; error: OutcomeError } {
+  if (i.outcome === null || i.outcome === undefined || i.outcome === "") return { ok: true, value: { outcome: null, actualAmount: null, nextDate: null, reason: null, reasonCode: null } };
   if (!isTaskOutcome(i.outcome)) return { ok: false, error: "outcome_required" };
   if (i.outcome === "COMPLETED") {
     const a = parseActualAmount(i.actualAmount);
-    return a.ok ? { ok: true, value: { outcome: "COMPLETED", actualAmount: a.value, nextDate: null, reason: null } } : { ok: false, error: a.error };
+    return a.ok ? { ok: true, value: { outcome: "COMPLETED", actualAmount: a.value, nextDate: null, reason: null, reasonCode: null } } : { ok: false, error: a.error };
   }
   if (i.outcome === "RESCHEDULED") {
     const d = i.nextDate === null || i.nextDate === undefined || i.nextDate === "" ? null : i.nextDate;
     if (d !== null && !isDateKey(d)) return { ok: false, error: "date_invalid" };
-    return { ok: true, value: { outcome: "RESCHEDULED", actualAmount: null, nextDate: d as string | null, reason: null } };
+    return { ok: true, value: { outcome: "RESCHEDULED", actualAmount: null, nextDate: d as string | null, reason: null, reasonCode: null } };
   }
-  const reason = cleanReason(i.reason);
+  // ABANDONED: the category (permitted for this section) and — only for OTHER — its explanation. Details of any other category are dropped, never kept.
+  const code = i.reasonCode === null || i.reasonCode === undefined || i.reasonCode === "" ? null : i.reasonCode;
+  if (code !== null && !(section !== undefined ? isAbandonReasonAllowed(section, code) : (ABANDON_REASON_CODES as readonly unknown[]).includes(code))) return { ok: false, error: "reason_code_invalid" };
+  const reason = code === "OTHER" ? cleanReason(i.reason) : "";
   if (reason.length > MAX_REASON_LENGTH) return { ok: false, error: "reason_long" };
-  return { ok: true, value: { outcome: "ABANDONED", actualAmount: null, nextDate: null, reason: reason === "" ? null : reason } };
+  return { ok: true, value: { outcome: "ABANDONED", actualAmount: null, nextDate: null, reason: reason === "" ? null : reason, reasonCode: code as AbandonReasonCode | null } };
 }
 
 /**
@@ -80,6 +94,8 @@ export function validateOutcome(f: OutcomeFields, today: string): OutcomeError |
   if (f.outcome === null) return "outcome_required";
   if (f.outcome === "COMPLETED") return f.actualAmount === null ? "amount_required" : f.actualAmount > 0 ? null : "amount_invalid";
   if (f.outcome === "RESCHEDULED") return f.nextDate === null ? "date_required" : !isDateKey(f.nextDate) ? "date_invalid" : f.nextDate > today ? null : "date_not_future";
+  if (!f.reasonCode) return "reason_code_required"; // a category is always required (older records predate this and are never re-validated)
+  if (f.reasonCode !== "OTHER") return null; // a predefined reason is valid on its own — no minimum text
   const r = checkReason(f.reason);
   return r === "ok" ? null : r;
 }

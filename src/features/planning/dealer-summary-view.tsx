@@ -1,18 +1,19 @@
 "use client";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
-import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 
 import { useMemo } from "react";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { amount as calcAmount, nbv as calcNbv, achievement } from "@/lib/calc";
 import {
   Table,
+  TableBody,
   TableCell,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
 import { Th } from "@/features/labels/label-ui";
 import { usePlanEdit } from "./plan-edit-context";
+import { useSeasonalDealerOrder } from "./use-seasonal-dealer-order";
 import { SeasonalMonthlyView } from "./seasonal-monthly-view";
 
 interface DealerRow {
@@ -33,9 +34,10 @@ interface DealerRow {
  */
 export function DealerSummaryView() {
   const { detail, lineFig } = usePlanEdit();
+  const orderedDealers = useSeasonalDealerOrder(detail.dealers);
 
   const rows = useMemo<DealerRow[]>(() => {
-    return detail.dealers.map((d) => {
+    return orderedDealers.map((d) => {
       let salesPlan = 0, salesPlanNbv = 0, liveMonthPlan = 0, liveMonthNbv = 0, actualSales = 0, actualNbv = 0;
       for (const l of d.lines) {
         const fig = lineFig(d.dealerId, l);
@@ -50,8 +52,8 @@ export function DealerSummaryView() {
         actualNbv += calcNbv(aAmt, l.nbvPercent);
       }
       return { dealerId: d.dealerId, name: d.dealerName, salesPlan, salesPlanNbv, liveMonthPlan, liveMonthNbv, actualSales, actualNbv };
-    }).sort((a, b) => b.salesPlan - a.salesPlan);
-  }, [detail, lineFig]);
+    });
+  }, [orderedDealers, lineFig]);
 
   const totals = useMemo(() => {
     const t = { salesPlan: 0, salesPlanNbv: 0, liveMonthPlan: 0, liveMonthNbv: 0, actualSales: 0, actualNbv: 0 };

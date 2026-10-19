@@ -72,6 +72,7 @@ export interface PlanDealerDetail {
 }
 
 export interface PlanDetail {
+  dealerTags?: import("@/lib/dealer-tags").DealerMarkerMap;
   id: string;
   seasonId: string;
   seasonName: string;

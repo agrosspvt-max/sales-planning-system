@@ -15,7 +15,7 @@ import { buildDistrictCatalog } from "@/lib/district-master";
 import { listDealersForAlias } from "@/features/sales-upload/alias.server";
 import { cleanRequestText, STATUS_REQUEST_NOTES_MAX, validateStatusRequest, type DealerStatusReason, type DealerStatusRequestState } from "@/lib/dealer-status-request";
 import {
-  POTENTIALS, buildImportPlan, classifyMatch, cleanMarketName, MARKET_NAME_MAX, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
+  POTENTIALS, territoryText, buildImportPlan, classifyMatch, cleanMarketName, MARKET_NAME_MAX, isPotential, marketNameKey, parseTerritorySheet, summarizeImportPlan, validateMarketRequest,
   type ImportCandidate, type ImportDistrictOutcome, type ImportPlanRow, type ImportSummary, type MarketRequestStatus, type Potential,
 } from "@/lib/territory-mapping";
 
@@ -459,14 +459,14 @@ export async function commitTerritoryImport(ctx: AuthContext, buffer: Buffer, sh
 
 export interface MarketRequestDto {
   id: string; marketName: string; potential: Potential; numberOfParties: number; status: MarketRequestStatus;
-  requesterId: string; requesterName: string; createdAt: string;
+  requesterId: string; requesterName: string; /** The requester's own territory (User.territory); null when none is recorded. */ requesterTerritory: string | null; createdAt: string;
   rmDecision: string | null; rmDecidedByName: string | null; rmDecidedAt: string | null;
   adminDecision: string | null; adminDecidedByName: string | null; adminDecidedAt: string | null;
   rejectionStage: string | null; rejectionReason: string | null; marketId: string | null;
   /** The District Master entry the request is for; null / null on requests made before the field existed (shown as "—"). */
   districtId: string | null; districtName: string | null;
 }
-const REQUEST_INCLUDE = { requester: { select: { name: true } }, district: { select: { name: true } } } as const;
+const REQUEST_INCLUDE = { requester: { select: { name: true, territory: true } }, district: { select: { name: true } } } as const;
 type RequestRow = Prisma.MarketRequestGetPayload<{ include: typeof REQUEST_INCLUDE }>;
 
 async function toRequestDtos(rows: RequestRow[]): Promise<MarketRequestDto[]> {
@@ -475,7 +475,7 @@ async function toRequestDtos(rows: RequestRow[]): Promise<MarketRequestDto[]> {
   const name = new Map(users.map((u) => [u.id, u.name]));
   return rows.map((r) => ({
     id: r.id, marketName: r.marketName, potential: r.potential as Potential, numberOfParties: r.numberOfParties, status: r.status as MarketRequestStatus,
-    requesterId: r.requesterId, requesterName: r.requester.name, createdAt: r.createdAt.toISOString(),
+    requesterId: r.requesterId, requesterName: r.requester.name, requesterTerritory: territoryText(r.requester.territory), createdAt: r.createdAt.toISOString(),
     rmDecision: r.rmDecision, rmDecidedByName: r.rmDecidedById ? name.get(r.rmDecidedById) ?? null : null, rmDecidedAt: r.rmDecidedAt?.toISOString() ?? null,
     adminDecision: r.adminDecision, adminDecidedByName: r.adminDecidedById ? name.get(r.adminDecidedById) ?? null : null, adminDecidedAt: r.adminDecidedAt?.toISOString() ?? null,
     rejectionStage: r.rejectionStage, rejectionReason: r.rejectionReason, marketId: r.marketId,
@@ -553,23 +553,80 @@ export type MarketRequestView = "mine" | "review" | "history";
  * review  → what the caller must act on now: RM → PENDING_RM of requesters in their group; Admin → PENDING_ADMIN.
  * history → decided requests (APPROVED / REJECTED, or past the caller's step) within the caller's scope (RM: group, Admin: all).
  */
-export async function listMarketRequests(ctx: AuthContext, view: MarketRequestView): Promise<MarketRequestDto[]> {
+async function requestScopeWhere(ctx: AuthContext, view: MarketRequestView): Promise<Prisma.MarketRequestWhereInput> {
   assertTerritoryUser(ctx);
-  const include = REQUEST_INCLUDE;
   const scope = await getOfficerScope(ctx);
   const inScope: Prisma.MarketRequestWhereInput = scope.all ? {} : { requesterId: { in: scope.ids } };
-  let where: Prisma.MarketRequestWhereInput;
-  if (view === "mine") where = { requesterId: ctx.userId };
-  else if (view === "review") {
-    if (ctx.role === Role.REGIONAL_MANAGER) where = { status: "PENDING_RM", ...inScope, requesterId: { in: scope.ids.filter((id) => id !== ctx.userId) } };
-    else if (isAdministrativeRole(ctx.role)) where = { status: "PENDING_ADMIN" };
-    else where = { id: "__none__" }; // a Sales Officer reviews nothing
-  } else {
-    if (ctx.role === Role.SALES_OFFICER) where = { requesterId: ctx.userId, status: { in: ["APPROVED", "REJECTED"] } };
-    else where = { ...inScope, OR: [{ status: { in: ["APPROVED", "REJECTED"] } }, ...(ctx.role === Role.REGIONAL_MANAGER ? [{ status: "PENDING_ADMIN" }] : [])] };
+  if (view === "mine") return { requesterId: ctx.userId };
+  if (view === "review") {
+    if (ctx.role === Role.REGIONAL_MANAGER) return { status: "PENDING_RM", ...inScope, requesterId: { in: scope.ids.filter((id) => id !== ctx.userId) } };
+    if (isAdministrativeRole(ctx.role)) return { status: "PENDING_ADMIN" };
+    return { id: "__none__" }; // a Sales Officer reviews nothing
   }
-  const rows = await prisma.marketRequest.findMany({ where, include, orderBy: { createdAt: "desc" }, take: 500 });
+  if (ctx.role === Role.SALES_OFFICER) return { requesterId: ctx.userId, status: { in: ["APPROVED", "REJECTED"] } };
+  return { ...inScope, OR: [{ status: { in: ["APPROVED", "REJECTED"] } }, ...(ctx.role === Role.REGIONAL_MANAGER ? [{ status: "PENDING_ADMIN" }] : [])] };
+}
+
+export async function listMarketRequests(ctx: AuthContext, view: MarketRequestView): Promise<MarketRequestDto[]> {
+  const where = await requestScopeWhere(ctx, view);
+  const rows = await prisma.marketRequest.findMany({ where, include: REQUEST_INCLUDE, orderBy: { createdAt: "desc" }, take: 500 });
   return toRequestDtos(rows);
+}
+
+/* ---- State / District / Requested By filters (Vacant Market requests) ---- */
+
+export interface MarketRequestFilterInput { stateId?: string; districtIds?: string[]; requesterIds?: string[] }
+export interface FilterChoice { id: string; name: string }
+export interface RequesterChoice { id: string; name: string; territory: string | null }
+export interface MarketRequestList {
+  items: MarketRequestDto[];
+  /** Choices, all derived from the caller's authorized rows of THIS view: States → Districts of the chosen State → Requesters with a request in the chosen State. */
+  states: FilterChoice[]; districts: FilterChoice[]; requesters: RequesterChoice[];
+  /** The filters actually applied after validation (an id outside the choices is dropped, never trusted). */
+  applied: { stateId: string; districtIds: string[]; requesterIds: string[] };
+}
+const sortByName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || 0;
+const idList = (v: unknown): string[] => (Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === "string" && x.length > 0 && x.length <= 64))] : []);
+
+/**
+ * The caller's rows for a view, narrowed by State AND District AND Requested By (OR within a column). The State of a request is its DISTRICT's State (District → UserGroup),
+ * never the requester's current assignment; a legacy request without a district has no State and is only visible under All States. Authorization (view + role scope) is the base
+ * query; filters only ever narrow it. Options come from ONE query over the base rows (no per-district / per-employee queries).
+ */
+export async function listMarketRequestsFiltered(ctx: AuthContext, view: MarketRequestView, raw: MarketRequestFilterInput = {}): Promise<MarketRequestList> {
+  const base = await requestScopeWhere(ctx, view);
+  const facts = await prisma.marketRequest.findMany({
+    where: base,
+    select: { districtId: true, requesterId: true, district: { select: { id: true, name: true, groupId: true, group: { select: { id: true, name: true } } } }, requester: { select: { id: true, name: true, territory: true } } },
+  });
+  const states = new Map<string, FilterChoice>();
+  for (const f of facts) if (f.district) states.set(f.district.group.id, { id: f.district.group.id, name: f.district.group.name });
+  const stateId = typeof raw.stateId === "string" && states.has(raw.stateId) ? raw.stateId : "";
+  const inState = facts.filter((f) => !stateId || f.district?.groupId === stateId);
+  const districts = new Map<string, FilterChoice>();
+  const requesters = new Map<string, { id: string; name: string; territory: string | null }>();
+  for (const f of inState) {
+    if (f.district) districts.set(f.district.id, { id: f.district.id, name: f.district.name });
+    requesters.set(f.requester.id, f.requester);
+  }
+  const districtIds = idList(raw.districtIds).filter((id) => districts.has(id));
+  const requesterIds = idList(raw.requesterIds).filter((id) => requesters.has(id));
+  // Alphabetical by territory (those without one last), then by requester name; the identity is always the user id, so two requesters of one territory stay two options.
+  const requesterChoices: RequesterChoice[] = [...requesters.values()].map((r) => ({ id: r.id, name: r.name, territory: territoryText(r.territory) })).sort((a, b) => {
+    if ((a.territory === null) !== (b.territory === null)) return a.territory === null ? 1 : -1;
+    return (a.territory ?? "").localeCompare(b.territory ?? "", undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id);
+  });
+
+  const and: Prisma.MarketRequestWhereInput[] = [base];
+  if (stateId) and.push({ district: { is: { groupId: stateId } } });
+  if (districtIds.length) and.push({ districtId: { in: districtIds } });
+  if (requesterIds.length) and.push({ requesterId: { in: requesterIds } });
+  const rows = await prisma.marketRequest.findMany({ where: { AND: and }, include: REQUEST_INCLUDE, orderBy: { createdAt: "desc" }, take: 500 });
+  return {
+    items: await toRequestDtos(rows),
+    states: [...states.values()].sort(sortByName), districts: [...districts.values()].sort(sortByName), requesters: requesterChoices,
+    applied: { stateId, districtIds, requesterIds },
+  };
 }
 
 const actInput = z.object({ action: z.enum(["approve", "reject"]), reason: z.string().optional() });

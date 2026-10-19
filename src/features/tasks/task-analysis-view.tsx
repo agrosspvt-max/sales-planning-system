@@ -22,6 +22,7 @@ import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { RescheduleCalendar, type SelectedTask } from "./reschedule-calendar";
 import { TaskHistoryPanel } from "./task-history-panel";
 import { useTaskText } from "./task-text";
+import { useAbandonText } from "@/features/daily-work/abandon-text";
 import type { TaskAnalysisPayload, TaskHistoryPayload, TaskRow } from "./task-analysis.server";
 
 const CALENDAR_PREF = "performance.tasks.rescheduleCalendar"; // the app's existing preference pattern: a guarded localStorage value (never required for the page to work)
@@ -31,6 +32,7 @@ const writePref = (open: boolean) => { try { window.localStorage.setItem(CALENDA
 /** Performance → Tasks. All state that must survive switching back to Performance lives in the parent (`filters`); the calendar's open / closed choice is a remembered preference. */
 export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; filters: TaskFilterState; onFilters: (next: TaskFilterState) => void }) {
   const T = useTaskText();
+  const abandon = useAbandonText();
   const L = {
     auto: useLabel("tasks.type.auto"), manual: useLabel("tasks.type.manual"), all: useLabel("tasks.type.all"), basis: useLabel("tasks.filter.basis"), bOriginal: useLabel("tasks.basis.original"), bMoved: useLabel("tasks.basis.rescheduled_on"),
     from: useLabel("tasks.filter.from"), to: useLabel("tasks.filter.to"), allStates: useLabel("daily_work.performance.filter.all_states"), state: useLabel("daily_work.performance.col.state"),
@@ -160,7 +162,10 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
                     {r.historyState !== "COMPLETE" && <Badge variant="warning" className="ml-1">{r.historyState === "PARTIAL" ? T.partialBadge : T.unavailableBadge}</Badge>}
                   </TableCell>
                   <TableCell className="whitespace-nowrap">{T.daysMoved(r.daysMoved)}</TableCell>
-                  <TableCell><Badge variant={T.statusVariant(r.status)} data-testid="status-badge">{T.status(r.status)}</Badge></TableCell>
+                  <TableCell>
+                    <Badge variant={T.statusVariant(r.status)} data-testid="status-badge">{T.status(r.status)}</Badge>
+                    {r.status === "ABANDONED" && (r.abandonReasonCode || r.abandonReason) && <div className="mt-1 max-w-[16rem] whitespace-normal text-xs text-destructive" data-testid="abandon-summary" title={abandon.summary(r.abandonReasonCode, r.abandonReason)}>{abandon.summary(r.abandonReasonCode, r.abandonReason)}</div>}
+                  </TableCell>
                   <TableCell className="whitespace-nowrap">
                     <Button size="sm" variant="outline" onClick={() => setPanel(r)}>{L.history}</Button>
                     {r.moves > 0 && <Button size="sm" variant="ghost" onClick={() => void showTrail(r)}>{L.showOnCal}</Button>}

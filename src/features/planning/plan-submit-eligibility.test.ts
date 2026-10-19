@@ -130,6 +130,7 @@ function loadMonthly(rows: Row[], captured: { where?: Record<string, unknown> })
     "./monthly.server": { buildMonthlyDealers: (planDealers: { dealerId: string; dealer: { name: string }; _planned: boolean }[]) => planDealers.map((pd) => ({ dealerId: pd.dealerId, dealerName: pd.dealer.name, products: [{ monthly: { [MONTH]: { plan: pd._planned ? 1 : 0 } } }] })) },
     "@/features/products/merge.server": { loadEffectiveProduct: async () => null },
     "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map() },
+    "@/lib/dealer-tags.server": { loadDealerMarkerMap: async () => ({}) },
     "./lifecycle.server": lifecycleStub,
   };
   return run(transpile("src/features/planning", "monthly-plan.server.ts"), resolve("src/features/planning", "monthly-plan.server.ts"), mocks) as {
@@ -167,6 +168,7 @@ function loadSeasonal(rows: Row[], captured: { where?: Record<string, unknown> }
     "@/features/users/catalogue.server": { planningProductsForOfficer: async () => [], clearanceMapForGroup: async () => new Map() },
     "@/features/products/merge.server": { loadEffectiveProduct: async () => null },
     "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map() },
+    "@/lib/dealer-tags.server": { loadDealerMarkerMap: async () => ({}) },
     "@/lib/validations/planning": { saveLinesSchema: {}, remarksSchema: {}, revisionRequestSchema: {} },
     "@/features/seasons/service.server": { findOrCreateSeason: async () => ({}) },
     "@/lib/audit": { writeAudit: async () => {} },

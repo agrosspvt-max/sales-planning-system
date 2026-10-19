@@ -19,6 +19,7 @@ interface DealerNameCtx {
   tags: DealerMarkerMap;
 }
 const Ctx = createContext<DealerNameCtx | null>(null);
+const MarkerScope = createContext<DealerMarkerMap | null>(null);
 const EMPTY_NAMES: Record<string, string> = {};
 const EMPTY_TAGS: DealerMarkerMap = {};
 
@@ -39,6 +40,7 @@ export function DealerNameProvider({ children }: { children: ReactNode }) {
     if (!data) return;
     void queryClient.invalidateQueries({ queryKey: ["resource", "dealers"] });
     void queryClient.invalidateQueries({ queryKey: ["report"] });
+    void queryClient.invalidateQueries({ queryKey: ["plan"] });
   }, [data, queryClient]);
   const overrides = data?.overrides ?? EMPTY_NAMES;
   const tags = data?.tags ?? EMPTY_TAGS;
@@ -108,7 +110,14 @@ export function DealerName({
 }
 
 export function useDealerMarkers(): DealerMarkerMap {
-  return useContext(Ctx)?.tags ?? EMPTY_TAGS;
+  const scoped = useContext(MarkerScope);
+  const global = useContext(Ctx);
+  return scoped ?? global?.tags ?? EMPTY_TAGS;
+}
+
+/** An authorized plan carries its own approved tags, so late/failed global metadata cannot hide them. */
+export function DealerMarkerScope({ tags, children }: { tags?: DealerMarkerMap; children: ReactNode }) {
+  return <MarkerScope.Provider value={tags ?? null}>{children}</MarkerScope.Provider>;
 }
 
 /** Native option elements accept text only; the same markers follow the same resolved name. */

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -21,6 +21,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { useLabel } from "@/features/labels/label-ui";
 import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { fill, fillNodes, useLabels } from "./party-labels";
 import { StatusRequestCell, StatusRequestsTab } from "./dealer-status-requests";
 import type { DealerStatusReason } from "@/lib/dealer-status-request";
@@ -38,9 +39,15 @@ interface DistrictOption { id: string; name: string }
 interface DealerPage { items: DealerRow[]; total: number; page: number; pageSize: number; totalPages: number; mapped: number; unmapped: number }
 interface MarketRequest {
   id: string; marketName: string; potential: Potential; numberOfParties: number; status: "PENDING_RM" | "PENDING_ADMIN" | "APPROVED" | "REJECTED";
-  requesterName: string; createdAt: string; rmDecidedByName: string | null; rmDecidedAt: string | null; adminDecidedByName: string | null; adminDecidedAt: string | null;
+  requesterName: string; requesterTerritory: string | null; createdAt: string; rmDecidedByName: string | null; rmDecidedAt: string | null; adminDecidedByName: string | null; adminDecidedAt: string | null;
   rejectionStage: string | null; rejectionReason: string | null;
   districtId: string | null; districtName: string | null; // null on requests made before District was captured (shown as "—")
+}
+interface RequestFilterChoice { id: string; name: string }
+interface RequesterChoice { id: string; name: string; territory: string | null }
+interface MarketRequestList {
+  items: MarketRequest[]; states: RequestFilterChoice[]; districts: RequestFilterChoice[]; requesters: RequesterChoice[];
+  applied: { stateId: string; districtIds: string[]; requesterIds: string[] };
 }
 interface ImportPreview { sheetNames: string[]; sheet: string | null; needsSheet: boolean; error: string | null; plan: ImportPlanRow[]; summary: ImportSummary | null }
 interface ImportResult { applied: number; noChange: number; skippedUnmatched: number; skippedAmbiguous: number; rejectedInvalid: number; duplicates: number; marketsCreated: number; skippedUnknownDistrict: number }
@@ -48,6 +55,12 @@ interface ImportResult { applied: number; noChange: number; skippedUnmatched: nu
 const REQUEST_VARIANT: Record<MarketRequest["status"], "secondary" | "success" | "destructive"> = { PENDING_RM: "secondary", PENDING_ADMIN: "secondary", APPROVED: "success", REJECTED: "destructive" };
 const dateText = (iso: string | null) => (iso ? formatDMY(iso) : "—");
 const dash = <span className="text-muted-foreground">—</span>;
+
+/** Display only: full territory names remain available to filtering and on hover. */
+function requesterTerritoryPreview(territory: string): string {
+  const words = territory.trim().split(/\s+/);
+  return words.length > 4 ? words.slice(0, 4).join(" ").replace(/[,;]+$/, "") + "…" : territory;
+}
 
 /* ===================================================== Page ===================================================== */
 
@@ -518,6 +531,8 @@ export function AddMarket({ role }: { role: Role }) {
   };
   const T = useLabels({ sent: "party_planning.territory.msg.request_sent", review: "party_planning.territory.view.review", mine: "party_planning.territory.view.mine", history: "party_planning.territory.view.history", requestedBy: "party_planning.common.requested_by",
     date: "party_planning.territory.col.date", status: "party_planning.territory.col.status", decision: "party_planning.common.decision", action: "party_planning.territory.col.action", empty: "party_planning.territory.empty_requests", select: "party_planning.territory.placeholder.select", selectDistrict: "party_planning.territory.placeholder.select_district", noDistrictResults: "party_planning.territory.msg.no_district_results",
+    noTerritory: "party_planning.territory.requester.no_territory", stateLabel: "party_planning.territory.filter.state", allStates: "party_planning.territory.filter.all_states", searchState: "party_planning.territory.filter.search_state", noStateResults: "party_planning.territory.filter.no_state_results",
+    searchHere: "party_planning.territory.filter.search", noMatchChoice: "party_planning.territory.filter.no_match_choice", allChoices: "party_planning.territory.filter.all", clear: "party_planning.territory.filter.clear", noMatching: "party_planning.territory.filter.no_matching_markets", count: "party_planning.territory.filter.count",
     selectDistrictFirst: "party_planning.territory.msg.select_district", noState: "party_planning.territory.msg.no_state", noDistricts: "party_planning.territory.msg.no_districts",
     addMarket: "party_planning.action.add_market", approve: "party_planning.action.approve", reject: "party_planning.action.reject", cancel: "party_planning.common.cancel", decidedRm: "party_planning.common.decided_rm", decidedAdmin: "party_planning.common.decided_admin", rejectedBy: "party_planning.common.rejected_by",
     PENDING_RM: "party_planning.status.awaiting_rm", PENDING_ADMIN: "party_planning.status.awaiting_admin", APPROVED: "party_planning.status.approved", REJECTED: "party_planning.status.rejected" });
@@ -541,7 +556,28 @@ export function AddMarket({ role }: { role: Role }) {
   });
   const districts = districtData?.districts ?? [];
   const districtBlocked = !districtsLoading && districts.length === 0; // no State / no active districts: say so and block submission
-  const { data: requests, isLoading } = useQuery<MarketRequest[]>({ queryKey: ["market-requests", view], queryFn: () => api.get<MarketRequest[]>(`/api/territory-mapping/market-requests?view=${view}`) });
+  // Filters: State is the parent; District and Requested By are searchable multi-select columns (OR within a column, AND between filters). The server validates every id against the
+  // caller's authorized rows and returns the choices for the current State / view, so options never leak across States, views or permissions.
+  const [stateId, setStateId] = useState("");
+  const [districtIds, setDistrictIds] = useState<string[]>([]);
+  const [requesterIds, setRequesterIds] = useState<string[]>([]);
+  const query = new URLSearchParams({ view });
+  if (stateId) query.set("stateId", stateId);
+  districtIds.forEach((id) => query.append("districtId", id));
+  requesterIds.forEach((id) => query.append("requesterId", id));
+  const { data: list, isLoading } = useQuery<MarketRequestList>({
+    queryKey: ["market-requests", view, stateId, districtIds, requesterIds], queryFn: () => api.get<MarketRequestList>(`/api/territory-mapping/market-requests?${query.toString()}`), placeholderData: keepPreviousData,
+  });
+  const requests = list?.items;
+  // A selection that is no longer a valid choice (State or tab changed) is dropped; valid ones are kept — nothing invisible can hide every row.
+  useEffect(() => {
+    if (!list) return;
+    if (list.applied.stateId !== stateId) setStateId(list.applied.stateId);
+    if (list.applied.districtIds.length !== districtIds.length) setDistrictIds(list.applied.districtIds);
+    if (list.applied.requesterIds.length !== requesterIds.length) setRequesterIds(list.applied.requesterIds);
+  }, [list]); // eslint-disable-line react-hooks/exhaustive-deps
+  const filtered = stateId !== "" || districtIds.length > 0 || requesterIds.length > 0;
+  const clearFilters = () => { setStateId(""); setDistrictIds([]); setRequesterIds([]); };
   const act = useMutation({
     mutationFn: (v: { id: string; action: "approve" | "reject"; reason?: string }) => api.post(`/api/territory-mapping/market-requests/${v.id}/act`, { action: v.action, reason: v.reason }),
     onSuccess: () => { setRejecting(null); qc.invalidateQueries({ queryKey: ["market-requests"] }); qc.invalidateQueries({ queryKey: ["territory-markets"] }); },
@@ -563,22 +599,34 @@ export function AddMarket({ role }: { role: Role }) {
             <button key={v.key} onClick={() => setView(v.key)} className={`rounded px-3 py-1.5 font-medium ${view === v.key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}>{v.label}</button>
           ))}
         </div>
+        <div className="flex flex-wrap items-end gap-3" data-testid="market-filters">
+          <div className="w-full space-y-1 sm:w-64">
+            <Label>{T.stateLabel}</Label>
+            <SearchableSelect ariaLabel={T.stateLabel} options={[{ value: "", label: T.allStates }, ...(list?.states ?? []).map((st) => ({ value: st.id, label: st.name }))]} value={stateId} onChange={(v) => setStateId(v)} placeholder={T.allStates} emptyText={T.noStateResults} />
+          </div>
+          {filtered && <Button variant="outline" size="sm" onClick={clearFilters} data-testid="clear-filters">{T.clear}</Button>}
+          {list && <p className="pb-2 text-sm text-muted-foreground" data-testid="result-count">{fill(T.count, { n: list.items.length })}</p>}
+        </div>
         {(!canRequest || !adding) && error && <p className="text-sm text-destructive">{error}</p>}
         {notice && !adding && <p className="text-sm text-success">{notice}</p>}
         <div className="w-max min-w-full rounded-lg border bg-background">
           <Table stickyHeader externalScroll>
             <TableHeader><TableRow>
-              <TableHead className="w-14">{L.serial}</TableHead><TableHead>{L.district}</TableHead><TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><TableHead>{T.requestedBy}</TableHead><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
+              <TableHead className="w-14">{L.serial}</TableHead><ColumnFilterHeader label={L.district} ariaLabel={L.district} options={(list?.districts ?? []).map((d) => ({ value: d.id, label: d.name }))} selected={districtIds} onChange={setDistrictIds} searchable searchPlaceholder={T.searchHere} noMatchText={T.noMatchChoice} allLabel={T.allChoices} /><TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><ColumnFilterHeader label={T.requestedBy} ariaLabel={T.requestedBy} options={(list?.requesters ?? []).map((r) => {
+                const label = r.territory ?? T.noTerritory;
+                const preview = requesterTerritoryPreview(label);
+                return { value: r.id, label, displayLabel: preview === label ? undefined : preview, secondary: r.name };
+              })} selected={requesterIds} onChange={setRequesterIds} searchable searchPlaceholder={T.searchHere} noMatchText={T.noMatchChoice} allLabel={T.allChoices} /><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
               {view === "review" && <TableHead className="text-right">{T.action}</TableHead>}
             </TableRow></TableHeader>
             <TableBody>
               {isLoading ? <TableRow><TableCell colSpan={view === "review" ? 10 : 9}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-                : (requests?.length ?? 0) === 0 ? <TableRow><TableCell colSpan={view === "review" ? 10 : 9} className="py-8 text-center text-muted-foreground">{T.empty}</TableCell></TableRow>
+                : (requests?.length ?? 0) === 0 ? <TableRow><TableCell colSpan={view === "review" ? 10 : 9} className="py-8 text-center text-muted-foreground" data-testid="empty-requests">{filtered ? T.noMatching : T.empty}</TableCell></TableRow>
                   : requests!.map((r, i) => (
                     <TableRow key={r.id}>
                       <TableCell className="tabular-nums text-muted-foreground">{i + 1}</TableCell>
                       <TableCell>{r.districtName ?? dash}</TableCell><TableCell className="font-medium">{r.marketName}</TableCell><TableCell>{r.potential}</TableCell><TableCell>{r.numberOfParties}</TableCell>
-                      <TableCell>{r.requesterName}</TableCell><TableCell className="whitespace-nowrap">{dateText(r.createdAt)}</TableCell>
+                      <TableCell data-testid="requested-by"><div className="font-medium leading-tight"><span className="block max-w-72 truncate" title={r.requesterTerritory ?? T.noTerritory} aria-label={r.requesterTerritory ?? T.noTerritory}>{requesterTerritoryPreview(r.requesterTerritory ?? T.noTerritory)}</span></div><div className="text-xs leading-tight text-muted-foreground">{r.requesterName}</div></TableCell><TableCell className="whitespace-nowrap">{dateText(r.createdAt)}</TableCell>
                       <TableCell><Badge variant={REQUEST_VARIANT[r.status]}>{T[r.status]}</Badge></TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {r.rmDecidedByName && <div>{fill(T.decidedRm, { name: r.rmDecidedByName, date: dateText(r.rmDecidedAt) })}</div>}

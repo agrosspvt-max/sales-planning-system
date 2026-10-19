@@ -2515,7 +2515,9 @@ model DailyTaskOutcome {
   outcome         String? // COMPLETED | RESCHEDULED | ABANDONED (null = not chosen yet)
   actualAmount    Decimal?       @db.Decimal(14, 2)
   nextDate        DateTime?      @db.Date
-  reason          String?
+  reason          String? // the "Other" explanation (or a legacy free-text reason with no code)
+  /// PRODUCT_UNAVAILABLE | DEALER_REFUSED | NO_DUES | OTHER — the abandonment category (null on drafts not chosen yet and on records made before codes existed).
+  reasonCode      String?
   state           String         @default("DRAFT")
   committedAt     DateTime?
   committedById   String?

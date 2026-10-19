@@ -22,17 +22,18 @@ const overrides = {
   react: { ...React, useState: (initial: unknown) => { const i = cursor++; if (!(i in hooks)) hooks[i] = typeof initial === "function" ? (initial as () => unknown)() : initial; return [hooks[i], (u: unknown) => { hooks[i] = typeof u === "function" ? (u as (v: unknown) => unknown)(hooks[i]) : u; }]; } },
   "@/features/labels/label-ui": { L: ({ k }: { k: string }) => <>{k}</>, useLabel: (k: string) => (DEFAULT_LABELS as Record<string, string>)[k] ?? k },
   "./party-planning-page": { PartyPlanModeLinks: () => null },
+  "@/components/ui/column-filter-header": { ColumnFilterHeader: ({ label }: { label: string }) => <th>{label}</th> }, // its own behaviour: market-request-filters-ui.test.tsx
   "@/components/layout/page-header": { PageHeader: () => null },
   "@tanstack/react-query": {
     keepPreviousData: undefined,
-    useQuery: (o: { queryKey: unknown[] }) => ({ data: o.queryKey[0] === "market-request-districts" ? districtData : requests, isLoading: false }),
+    useQuery: (o: { queryKey: unknown[] }) => ({ data: o.queryKey[0] === "market-request-districts" ? districtData : { items: requests, states: [], districts: [], requesters: [], applied: { stateId: "", districtIds: [], requesterIds: [] } }, isLoading: false }),
     useQueryClient: () => ({ invalidateQueries: () => { invalidations += 1; } }),
     useMutation: (o: { mutationFn: (v?: unknown) => Promise<unknown>; onSuccess?: (r: unknown) => void; onError?: (e: unknown) => void }) => ({ isPending: false, mutate: (v?: unknown) => { void o.mutationFn(v).then((r) => o.onSuccess?.(r), (e) => o.onError?.(e)); } }),
   },
   "@/lib/api-client": { api: { get: async () => [], post: async (url: string, body: unknown) => { if (failNext) { const m = failNext; failNext = null; throw new Error(m); } posts.push({ url, body }); return {}; } } },
   "@/components/ui/button": { Button: (p: { children?: React.ReactNode; onClick?: () => void; disabled?: boolean }) => { buttons.push(p); return <button>{p.children}</button>; } },
   "@/components/ui/input": { Input: (p: (typeof inputs)[number]) => { inputs.push(p); return <input type={p.type} defaultValue={p.value} />; } },
-  "@/components/ui/searchable-select": { SearchableSelect: (p: (typeof searchables)[number]) => { searchables.push(p); return <div data-searchable aria-label={p.ariaLabel} />; } },
+  "@/components/ui/searchable-select": { SearchableSelect: (p: (typeof searchables)[number]) => { if (p.ariaLabel === "District") searchables.push(p); /* the State filter has its own suite */ return <div data-searchable aria-label={p.ariaLabel} />; } },
   "@/components/ui/select": { NativeSelect: (p: (typeof selects)[number]) => { selects.push(p); return <select />; } },
   "@/components/ui/dialog": {
     Dialog: ({ children }: { children: React.ReactNode }) => <div data-dialog>{children}</div>, DialogContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,

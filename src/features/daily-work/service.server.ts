@@ -9,7 +9,7 @@ import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { getCurrentDealerIds, getOfficerScope, assertOfficerInScope } from "@/lib/scope";
+import { getCurrentDealerIds, getCurrentOwnerByDealer, getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { runningSchemes } from "@/features/schemes/scheme-planning.server";
 import { billFinancialScope } from "@/lib/scheme-financial-scope";
@@ -82,6 +82,8 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     schemeId: z.string().min(1, L["daily_work.placeholder.select_scheme"]).optional().nullable(),
     /** Recovery: the automatic amount the editor was showing for this row — a stale draft (a task was rescheduled meanwhile) is refused. */
     autoAmount: z.coerce.number().min(0).max(1e12).optional(),
+    /** A Regional Manager adding a Sales Officer's dealer: that officer's id. Never trusted — it must be the dealer's CURRENT owner and inside the RM's scope (the task stays the RM's own). */
+    ownerId: z.string().min(1).max(64).optional(),
   });
   /** The dealer name reported with an Appointed result: trimmed, blank = none. */
   const reportedName = z.string().trim().max(200, L["daily_work.validation.dealer_name_length"]);
@@ -115,7 +117,7 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     outcomes: z.object({ section: z.enum(SECTIONS, invalidOption), workDate: dateStr, entries: maxRows(z.object({
       entryId: z.string().min(1, L["daily_work.validation.invalid_option"]),
       paymentMode: z.enum(RECOVERY_PAYMENT_MODES, invalidOption).nullable().optional(),
-      units: z.array(z.object({ unitType: z.string().min(1), unitId: z.string().min(1), outcome: z.unknown().optional(), actualAmount: z.unknown().optional(), nextDate: z.unknown().optional(), reason: z.unknown().optional() })).max(200),
+      units: z.array(z.object({ unitType: z.string().min(1), unitId: z.string().min(1), outcome: z.unknown().optional(), actualAmount: z.unknown().optional(), nextDate: z.unknown().optional(), reason: z.unknown().optional(), reasonCode: z.unknown().optional() })).max(200),
     })) }),
     appointmentSave: z.object({ workDate: dateStr, partyPlanningEnabled: z.boolean().optional(), rows: maxRows(appointmentRowSchema) }),
     appointedResult: z.object({ workDate: dateStr, entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), sent: z.unknown().optional(), dealerName: reportedName.optional() }),
@@ -204,6 +206,8 @@ export interface DailyWorkPayload {
   availableDealers: DailyWorkAvailableDealer[]; // scoped dealers that may still get their ONE directly entered manual task
   /** Dealers whose directly entered manual task already sits in an earlier SUBMITTED planning batch of this date and section (the limit spans batches). */
   manualDealerIds: string[];
+  /** Regional Manager planning their OWN day: the Add Dealer dialog offers the Sales Officer filter (My Dealers by default). */
+  canPickDealerOwner: boolean;
   applicableSchemes: DailyWorkSchemeOption[]; // Sales: OPEN schemes for the officer's group (shared by all dealers)
   applicableSchemesByDealer: Record<string, DailyWorkSchemeOption[]>; // Recovery: enrolled/verified dealer schemes
   cnTasks: CnTaskDto[]; // Recovery: CN follow-up tasks (Accepted, Not Posted) the SO scheduled on this date
@@ -332,6 +336,52 @@ async function assertDealersInScope(officerId: string, dealerIds: string[], reso
     throw new ApiError(403, L["daily_work.validation.dealer_not_assigned"]);
   }
   return allowed;
+}
+
+/**
+ * Who a dealer may be planned FOR. A Sales Officer: their own current dealers. A Regional Manager: their own current dealers PLUS the current dealers of the active Sales Officers of
+ * their OWN group (getOfficerScope — the group hierarchy, never the legacy RM assignment). Ownership is the dealer's CURRENT owner (the most recent open assignment). The task
+ * still belongs to the caller's own Daily Plan / Report: nothing here reassigns a dealer or touches another officer's report.
+ */
+async function dealerOwnerScope(ctx: AuthContext, db?: Parameters<typeof getOfficerScope>[1]): Promise<string[]> {
+  return (await getOfficerScope(ctx, db)).ids; // SO → [self]; RM → [self, active SOs of the RM's group]
+}
+/** The Sales Officers an RM may pick in Add Dealer: active, in the RM's group, alphabetical (My Dealers is the caller's own and is not listed here). */
+async function dealerOwnerChoices(ctx: AuthContext): Promise<{ id: string; name: string }[]> {
+  if (ctx.role !== Role.REGIONAL_MANAGER) return [];
+  const ids = (await dealerOwnerScope(ctx)).filter((id) => id !== ctx.userId);
+  if (ids.length === 0) return [];
+  const users = await prisma.user.findMany({ where: { id: { in: ids }, role: Role.SALES_OFFICER, isActive: true, deletedAt: null }, select: { id: true, name: true } });
+  return users.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
+}
+/**
+ * Dealers (of these) in the Daily Work of `officerId` whose CURRENT owner is another officer of the SAME group, when `officerId` is a Regional Manager: owner → dealer ids. One batched
+ * query. A Sales Officer's day never has such dealers. Used for the sourced figures of those dealers (and any viewer authorized to read the RM's day sees the same figures).
+ */
+async function peerOwnedDealers(ctx: AuthContext, officerId: string, dealerIds: readonly string[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (dealerIds.length === 0) return out;
+  let rm: { userId: string; role: Role; groupId: string | null } | null = null;
+  if (officerId === ctx.userId) rm = ctx.role === Role.REGIONAL_MANAGER ? { userId: ctx.userId, role: ctx.role, groupId: ctx.groupId ?? null } : null;
+  else if (isAdministrativeRole(ctx.role)) { const u = await prisma.user.findUnique({ where: { id: officerId }, select: { role: true, groupId: true } }); if (u?.role === Role.REGIONAL_MANAGER) rm = { userId: officerId, role: u.role, groupId: u.groupId }; }
+  if (!rm) return out;
+  const [scope, owners] = await Promise.all([getOfficerScope(rm as unknown as AuthContext), getCurrentOwnerByDealer(dealerIds)]);
+  for (const [dealerId, owner] of owners) if (owner !== officerId && scope.ids.includes(owner)) out.set(owner, [...(out.get(owner) ?? []), dealerId]);
+  return out;
+}
+/**
+ * Manual-entry eligibility, server side: a dealer that already has a row in the current batch keeps it; a NEW one must currently belong to the caller or (RM) to an authorized Sales
+ * Officer, and a supplied owner id must be exactly that current owner. Browser-supplied ids are never trusted.
+ */
+async function assertDealersEligible(ctx: AuthContext, officerId: string, rows: readonly { dealerId: string; ownerId?: string }[], existing: ReadonlySet<string>, L: ResolvedLabels, db?: Parameters<typeof getOfficerScope>[1]): Promise<void> {
+  const fresh = rows.filter((r) => !existing.has(r.dealerId));
+  if (fresh.length === 0) return;
+  const [scope, owners] = await Promise.all([dealerOwnerScope(ctx, db), getCurrentOwnerByDealer(fresh.map((r) => r.dealerId), db)]);
+  for (const r of fresh) {
+    const owner = owners.get(r.dealerId);
+    if (!owner || !scope.includes(owner) || (r.ownerId !== undefined && (r.ownerId !== owner || !scope.includes(r.ownerId)))) throw new ApiError(403, L["daily_work.validation.dealer_not_assigned"]);
+  }
+  void officerId;
 }
 
 /* --------------------------------- Sourced figures --------------------------------- */
@@ -574,6 +624,16 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     section === "RECOVERY" ? cnTasksForOfficerDate(officerId, workDate) : Promise.resolve([] as CnTaskDto[]),
   ]);
 
+  // A Regional Manager's rows may include dealers of their Sales Officers: their sourced figures (and Recovery schemes) come from THAT dealer's current owner — the existing
+  // authoritative per-owner sources — one batched pass per owner, never one per dealer. Everything else is unchanged.
+  const peers = await peerOwnedDealers(ctx, officerId, dailyRows.map((row) => row.dealerId).filter((id): id is string => !!id));
+  await Promise.all([...peers].map(async ([owner, ids]) => {
+    const [theirs, theirSchemes] = await Promise.all([sourcedFigures(ctx, owner, section, workDate), section === "RECOVERY" ? recoverySchemesByDealer(owner) : Promise.resolve(new Map<string, DailyWorkSchemeOption[]>())]);
+    for (const id of ids) {
+      const f = theirs.map.get(id); if (f) figures.set(id, f);
+      const sc = theirSchemes.get(id); if (sc) recoverySchemes.set(id, sc);
+    }
+  }));
   // Names for every dealer we may show (assigned + any already-saved row). DISPLAY-only: prefer the dealer's
   // alias name when one exists (identity stays the dealer id everywhere below).
   const dealerIds = [...new Set([...assignedIds, ...dailyRows.map((row) => row.dealerId).filter((id): id is string => !!id)])];
@@ -667,6 +727,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     canEnterActual: mode === "REPORT" && dealers.some((d) => d.status !== "DRAFT"),
     availableDealers,
     manualDealerIds,
+    canPickDealerOwner: ctx.role === Role.REGIONAL_MANAGER && officerId === ctx.userId && mode === "PLAN",
     applicableSchemes: (schemes as { id: string; schemeName: string }[]).map((s) => ({ id: s.id, name: s.schemeName })),
     applicableSchemesByDealer: Object.fromEntries(recoverySchemes),
     cnTasks,
@@ -678,6 +739,50 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     rescheduledEntryIds: reschedIds,
     dealers,
   };
+}
+
+/* --------------------------------- Add Dealer choices (Sales / Recovery) --------------------------------- */
+
+export interface DealerChoicesPayload {
+  section: DailyWorkSection;
+  /** Regional Manager only: the active Sales Officers of the RM's own group (alphabetical). "My Dealers" is the caller's own and is selected by default. Empty for everyone else. */
+  owners: { id: string; name: string }[];
+  /** The owner whose dealers are listed: the caller (My Dealers) or an authorized Sales Officer. */
+  ownerId: string;
+  /** That owner's CURRENT dealers (deduplicated by id) that can still get the caller's ONE directly entered manual task for today in this section, with their sourced figures. */
+  dealers: DailyWorkAvailableDealer[];
+}
+
+/**
+ * The Add Dealer list for ONE owner at a time (never everyone's dealers combined). A forged owner id — anyone but the caller or an active Sales Officer of the caller's group — is
+ * refused; the dealers are the owner's CURRENT ones (most recent open assignment) and their figures come from that owner's own authoritative sources. The Sales Officer choice only
+ * filters this list: the task added later belongs to the caller's own Daily Plan.
+ */
+export async function getDealerChoices(ctx: AuthContext, rawSection: string, rawOwnerId?: string | null): Promise<DealerChoicesPayload> {
+  const L = await getResolvedLabels();
+  await assertOwnerRole(ctx, L);
+  const section = (rawSection === "RECOVERY" ? "RECOVERY" : "SALES") as DailyWorkSection;
+  const workDate = currentBusinessDate();
+  const owners = await dealerOwnerChoices(ctx);
+  const requested = (rawOwnerId ?? "").trim();
+  const ownerIdChosen = requested === "" ? ctx.userId : requested;
+  if (ownerIdChosen !== ctx.userId && !owners.some((o) => o.id === ownerIdChosen)) throw new ApiError(403, L["daily_work.validation.dealer_not_assigned"]);
+  const { day } = await readBatchContext(ctx.userId, workDate);
+  const [assigned, taken, mine, fig] = await Promise.all([
+    getCurrentDealerIds(ownerIdChosen),
+    submittedManualDealerIds(prisma, ctx.userId, section, workDate, day.currentBatchId),
+    prisma.dailyWorkEntry.findMany({ where: { officerId: ctx.userId, workDate: new Date(`${workDate}T00:00:00.000Z`), batchId: day.currentBatchId, section, dealerId: { not: null }, NOT: { rowKey: { startsWith: "t:" } } }, select: { dealerId: true } }),
+    sourcedFigures(ctx, ownerIdChosen, section, workDate),
+  ]);
+  const used = new Set([...taken, ...mine.map((r) => r.dealerId!)]);
+  const ids = [...new Set(assigned)].filter((id) => !used.has(id));
+  const [rows, alias] = await Promise.all([ids.length ? prisma.dealer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : Promise.resolve([]), loadDealerAliasNameMap(ids)]);
+  const dealers = rows.map((d) => {
+    const f = fig.map.get(d.id) ?? { plan: 0, actual: 0 };
+    const pending = section === "SALES" ? salesPending(f.plan, f.actual) : recoveryPending(f.plan, f.actual);
+    return { id: d.id, name: alias.get(d.id) ?? d.name, monthlyPlan: f.plan, actual: f.actual, pending };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+  return { section, owners, ownerId: ownerIdChosen, dealers };
 }
 
 /* --------------------------------- Save Draft --------------------------------- */
@@ -692,8 +797,6 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
   await assertOwnerRole(ctx, L);
   const { section, workDate, rows } = dailyWorkSchemas(L).save.parse(raw);
   const officerId = ownerId(ctx);
-  await assertDealersInScope(officerId, rows.map((r) => r.dealerId), L);
-
   // No duplicate dealer rows within the payload.
   const seen = new Set<string>();
   for (const r of rows) { if (seen.has(r.dealerId)) throw new ApiError(422, L["daily_work.validation.duplicate_dealer"]); seen.add(r.dealerId); }
@@ -703,6 +806,11 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
   if (schemeRows.length > 0) {
     const salesApplicable = section === "SALES" ? new Set((await runningSchemes(ctx)).map((s) => s.id)) : null;
     const recoveryApplicable = section === "RECOVERY" ? await recoverySchemesByDealer(officerId) : null;
+    // A Sales Officer's dealer added by their RM: its Recovery schemes come from that dealer's owner (batched per owner).
+    if (recoveryApplicable) for (const [owner, ids] of await peerOwnedDealers(ctx, officerId, schemeRows.map((r) => r.dealerId))) {
+      const theirs = await recoverySchemesByDealer(owner);
+      for (const id of ids) { const sc = theirs.get(id); if (sc) recoveryApplicable.set(id, sc); }
+    }
     for (const r of schemeRows) {
       if (!r.schemeId) throw new ApiError(422, L["daily_work.validation.select_sales_scheme"]);
       const applicable = salesApplicable?.has(r.schemeId)
@@ -719,6 +827,10 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
     // The payload carries ONLY the dealer's directly entered manual rows. Scheduled tasks (Billing Exception, CN, Calendar) own their rows: they are neither written nor removed
     // here, so saving or deleting the manual row can never touch a scheduled task — and a stale editor can never bring a rescheduled task's amount back.
     await splitCombinedDraftRows(tx, officerId, workDate, day);
+    // Eligibility (a NEW dealer must currently belong to the caller or — RM — to an authorized Sales Officer of their group; a supplied owner id must be that owner). Dealers
+    // already in this batch keep their row. The row itself always belongs to the caller's own Daily Plan.
+    const inBatch = new Set((await tx.$queryRaw<Array<{ dealerId: string }>>(Prisma.sql`SELECT "dealerId" FROM "DailyWorkEntry" WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "section" = ${section} AND "rowKey" NOT LIKE 't:%' AND "dealerId" IS NOT NULL`)).map((r) => r.dealerId));
+    await assertDealersEligible(ctx, officerId, rows, inBatch, L, tx);
     // ONE directly entered manual task per dealer / date / section — across every planning batch of the date (the day lock serializes concurrent requests).
     const taken = new Set(await submittedManualDealerIds(tx, officerId, section, workDate, day.currentBatchId));
     for (const r of rows) if (taken.has(r.dealerId)) throw new ApiError(409, L["daily_work.validation.manual_task_exists"]);

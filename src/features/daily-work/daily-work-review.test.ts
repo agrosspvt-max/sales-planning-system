@@ -168,7 +168,7 @@ function loadService(prisma: object, labelOverrides: Record<string, string> = {}
     "server-only": {}, "@/lib/prisma": { prisma },
     "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], countUnconfirmedMaterializedTasks: async () => 0 },
     "@/lib/http": { ApiError: TestApiError },
-    "@/lib/scope": { getCurrentDealerIds: async () => [], getOfficerScope, assertOfficerInScope },
+    "@/lib/scope": { getCurrentDealerIds: async () => [], getCurrentOwnerByDealer: async () => new Map(), getOfficerScope, assertOfficerInScope },
     "@/lib/audit": { writeAudit: async () => ({}) },
     "@/features/labels/service.server": { getResolvedLabels: async () => ({ ...localRequire(resolve("src/features/labels", "labels.ts")).DEFAULT_LABELS, ...labelOverrides }) },
     "@/features/schemes/scheme-planning.server": { runningSchemes: async () => [] },

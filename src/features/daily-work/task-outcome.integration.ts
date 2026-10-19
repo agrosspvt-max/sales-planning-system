@@ -34,7 +34,7 @@ const DEFAULT_LABELS = realLabels.DEFAULT_LABELS as Record<string, string>;
 const serviceMocks = {
   "@/lib/prisma": { prisma }, "@/lib/http": { ApiError: TestApiError }, "@/lib/audit": { writeAudit: async () => ({}) },
   "@/lib/daily-work": { ...realDailyWork, currentBusinessDate: (d?: Date) => (d ? realDailyWork.currentBusinessDate(d) : clock) },
-  "@/lib/scope": { getCurrentDealerIds: async (id: string) => (await prisma.dealerAssignment.findMany({ where: { officerId: id } })).map((a) => a.dealerId), getOfficerScope: async (c: AuthContext) => ({ all: false, ids: [c.userId] }), assertOfficerInScope: async () => undefined },
+  "@/lib/scope": { getCurrentOwnerByDealer: async (ids: string[]) => { const rows = await prisma.dealerAssignment.findMany({ where: { dealerId: { in: ids }, effectiveTo: null }, orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }] }); return new Map(rows.map((r) => [r.dealerId, r.officerId])); }, getCurrentDealerIds: async (id: string) => (await prisma.dealerAssignment.findMany({ where: { officerId: id } })).map((a) => a.dealerId), getOfficerScope: async (c: AuthContext) => ({ all: false, ids: [c.userId] }), assertOfficerInScope: async () => undefined },
   "@/features/labels/service.server": { getResolvedLabels: async () => DEFAULT_LABELS },
   "@/features/schemes/scheme-planning.server": { runningSchemes: async () => [] },
   "@/features/planning/monthly.server": { getMonthly: async () => ({ monthlyMode: "PACK_SIZE", months: [], dealers: [] }) },
@@ -199,14 +199,14 @@ async function main() {
   assert.equal(await code(post(so1, "SALES", D, A, { outcome: "COMPLETED", actualAmount: -1 })), 422, "Completed with a negative is refused");
   assert.equal(await code(post(so1, "SALES", D, A, { outcome: "RESCHEDULED", nextDate: "2026-02-30" })), 422, "an impossible date is refused");
   assert.equal(await code(svc.enterTaskOutcomes(so1, { section: "SALES", workDate: D, entries: [{ entryId: A.entryId, units: [{ unitType: "MANUAL_ROW", unitId: "forged", outcome: "COMPLETED", actualAmount: 5 }] }] })), 409, "a task that is not in this row is refused");
-  const forged = await code(svc.enterTaskOutcomes(so2, { section: "SALES", workDate: D, entries: [{ entryId: A.entryId, units: [{ unitType: "MANUAL_ROW", unitId: unitOf(A).unitId, outcome: "ABANDONED", reason: "Trying to abandon someone else's task here" }] }] }));
+  const forged = await code(svc.enterTaskOutcomes(so2, { section: "SALES", workDate: D, entries: [{ entryId: A.entryId, units: [{ unitType: "MANUAL_ROW", unitId: unitOf(A).unitId, outcome: "ABANDONED", reasonCode: "OTHER", reason: "Trying to abandon someone else's task here" }] }] }));
   assert.notEqual(forged, 0, "another employee cannot write outcomes to this row");
   eq(await counts(), baseline, "refused requests wrote nothing");
 
   /* ---- drafts: choices are saved, but nothing happens (no calendar task, no abandon, no finance) ---- */
   await post(so1, "SALES", D, A, { outcome: "COMPLETED", actualAmount: 800 });
   await post(so1, "SALES", D, B, { outcome: "RESCHEDULED", nextDate: day(1) });
-  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reason: "Dealer shut the shop for the season and asked us to stop visiting" });
+  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Dealer shut the shop for the season and asked us to stop visiting" });
   const draft = await counts();
   eq([draft.calendar, draft.events, draft.committed, draft.receipts], [0, 0, 0, 0], "drafts have no effect");
   assert.equal((await rowOf(so1, "SALES", D, "A")).tasks![0]!.actualAmount, 800);
@@ -218,10 +218,10 @@ async function main() {
   eq((await counts()).calendar, 0, "still nothing created");
 
   /* ---- final submission needs every applicable task to have a valid outcome ---- */
-  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reason: "too short" });
+  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "too short" });
   assert.equal(await code(svc.submitDailyReport(so1, { workDate: D, selfRating: 7 })), 422, "an invalid Abandon reason blocks the report");
   eq([(await counts()).committed, (await counts()).calendar], [0, 0], "…and nothing was committed");
-  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reason: "Dealer shut the shop for the season and asked us to stop visiting" });
+  await post(so1, "RECOVERY", D, C, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Dealer shut the shop for the season and asked us to stop visiting" });
   await post(so1, "SALES", D, A, { outcome: null });
   assert.equal(await code(svc.submitDailyReport(so1, { workDate: D, selfRating: 7 })), 422, "an unselected task blocks the report");
   eq((await counts()).committed, 0);
@@ -247,7 +247,7 @@ async function main() {
 
   /* ---- retries / double clicks / refreshes produce nothing more ---- */
   assert.notEqual(await code(svc.submitDailyReport(so1, { workDate: D, selfRating: 7 })), 0, "a second submit is refused");
-  assert.notEqual(await code(post(so1, "SALES", D, B, { outcome: "ABANDONED", reason: "A later attempt to change a closed report" })), 0, "a submitted report accepts no outcome");
+  assert.notEqual(await code(post(so1, "SALES", D, B, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "A later attempt to change a closed report" })), 0, "a submitted report accepts no outcome");
   eq(await counts(), after, "retries changed nothing");
   await assert.rejects(prisma.dailyTaskOutcome.update({ where: { id: ab.id }, data: { reason: "rewritten history of the abandonment" } }), "a committed outcome is immutable");
   await assert.rejects(prisma.dailyTaskOutcome.delete({ where: { id: ab.id } }), "…and cannot be deleted");
@@ -280,10 +280,10 @@ async function main() {
   const b3 = await rowOf(so1, "SALES", D3, "B");
   eq([b3.tasks![0]!.unitId, b3.tasks![0]!.rescheduledFrom], [cont.id, D1]);
   // Abandon on the final day: reason required, then the task never comes back
-  await post(so1, "SALES", D3, b3, { outcome: "ABANDONED", reason: "...................................." }); // a draft may hold an incomplete choice
+  await post(so1, "SALES", D3, b3, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "...................................." }); // a draft may hold an incomplete choice
   assert.equal(await code(svc.submitDailyReport(so1, { workDate: D3, selfRating: 7 })), 422, "a meaningless reason blocks the report");
   assert.equal((await prisma.calendarEntry.findUniqueOrThrow({ where: { id: cont.id } })).abandonedAt, null, "…and nothing was abandoned");
-  await post(so1, "SALES", D3, b3, { outcome: "ABANDONED", reason: "Dealer closed the account and moved to another distributor" });
+  await post(so1, "SALES", D3, b3, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Dealer closed the account and moved to another distributor" });
   assert.equal((await svc.submitDailyReport(so1, { workDate: D3, selfRating: 7 })).ok, true);
   const ended = await prisma.calendarEntry.findUniqueOrThrow({ where: { id: cont.id } });
   assert.ok(ended.abandonedAt, "the task is marked abandoned");
@@ -313,6 +313,72 @@ async function main() {
   const act = await ana.getTaskActivity(scope as never, madeOn, madeOn);
   eq([act.get(`so1|${madeOn}`)?.abandoned, act.get(`so1|${madeOn}`)?.reschedules], [2, 2], "Task Activity counts abandonments and reschedules on the business date they were made");
   await batchDraftRegression();
+  /* ---- structured abandonment reasons: category per section, text only for Other, persisted, shown, no finance effect ---- */
+  {
+    const same = (a: unknown, b: unknown, m?: string) => assert.equal(JSON.stringify(a), JSON.stringify(b), m);
+    const R = day(8);
+    setClock(R);
+    await prisma.dailyWorkEntry.deleteMany({ where: { workDate: new Date(`${R}T00:00:00Z`) } });
+    await svc.saveDailyWork(so1, { section: "SALES", workDate: R, rows: [{ dealerId: "A", todaysPlan: 400, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 500, entryType: "REGULAR" }, { dealerId: "C", todaysPlan: 600, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: R, rows: [{ dealerId: "A", todaysPlan: 700, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 800, entryType: "REGULAR" }] });
+    await noPlan(so1, R, ["APPOINTMENT", "VISITS", "OTHERS"]);
+    await svc.submitDailyWorkDay(so1, { workDate: R });
+    const sa = await rowOf(so1, "SALES", R, "A"), sb = await rowOf(so1, "SALES", R, "B"), sc = await rowOf(so1, "SALES", R, "C"), ra = await rowOf(so1, "RECOVERY", R, "A"), rb = await rowOf(so1, "RECOVERY", R, "B");
+    const receipts = await prisma.dealerPaymentReceipt.count();
+    // Section rules: a Recovery code is refused for Sales and vice versa; an unknown code is refused.
+    assert.equal(await code(post(so1, "SALES", R, sa, { outcome: "ABANDONED", reasonCode: "NO_DUES" })), 422, "Sales refuses a Recovery reason");
+    assert.equal(await code(post(so1, "RECOVERY", R, ra, { outcome: "ABANDONED", reasonCode: "DEALER_REFUSED" })), 422, "Recovery refuses a Sales reason");
+    assert.equal(await code(post(so1, "RECOVERY", R, ra, { outcome: "ABANDONED", reasonCode: "PRODUCT_UNAVAILABLE" })), 422);
+    assert.equal(await code(post(so1, "SALES", R, sa, { outcome: "ABANDONED", reasonCode: "made-up" })), 422);
+    // Drafts: every category is saved and reloads; text is kept only for Other.
+    await post(so1, "SALES", R, sa, { outcome: "ABANDONED", reasonCode: "PRODUCT_UNAVAILABLE", reason: "stale text that must not be kept" });
+    await post(so1, "SALES", R, sb, { outcome: "ABANDONED", reasonCode: "DEALER_REFUSED" });
+    await post(so1, "SALES", R, sc, { outcome: "ABANDONED", reasonCode: "OTHER" }); // incomplete (no explanation yet) — a draft may be saved
+    await post(so1, "RECOVERY", R, ra, { outcome: "ABANDONED", reasonCode: "NO_DUES" });
+    await post(so1, "RECOVERY", R, rb, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "   " });
+    const draft = async (section: "SALES" | "RECOVERY", dealerId: string) => { const t = (await rowOf(so1, section, R, dealerId)).tasks![0]!; return [t.outcome, t.reasonCode, t.reason, t.state]; };
+    same(await draft("SALES", "A"), ["ABANDONED", "PRODUCT_UNAVAILABLE", null, "DRAFT"], "details of a predefined reason are cleared");
+    same(await draft("SALES", "C"), ["ABANDONED", "OTHER", null, "DRAFT"]);
+    // Final submission needs a category and, for Other, a meaningful explanation (the existing free-text rules).
+    assert.equal(await code(svc.submitDailyReport(so1, { workDate: R, selfRating: 7 })), 422, "Other without an explanation blocks the report");
+    await post(so1, "SALES", R, sc, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "short" });
+    assert.equal(await code(svc.submitDailyReport(so1, { workDate: R, selfRating: 7 })), 422, "…and a too-short one");
+    await post(so1, "SALES", R, sc, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Dealer has stopped trading in this product line" });
+    await post(so1, "RECOVERY", R, rb, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Dealer disputes the invoice and asked us to wait" });
+    // Switching the outcome or the category clears what no longer applies.
+    await post(so1, "SALES", R, sa, { outcome: "COMPLETED", actualAmount: 100, reasonCode: "OTHER", reason: "leftover" });
+    same(await draft("SALES", "A"), ["COMPLETED", null, null, "DRAFT"], "leaving Abandon clears the abandonment fields");
+    await post(so1, "SALES", R, sa, { outcome: "ABANDONED", reasonCode: "PRODUCT_UNAVAILABLE" });
+    // An Other explanation is replaced by a predefined category without leftovers (database check would refuse them).
+    await post(so1, "SALES", R, sc, { outcome: "ABANDONED", reasonCode: "DEALER_REFUSED", reason: "Dealer has stopped trading in this product line" });
+    same(await draft("SALES", "C"), ["ABANDONED", "DEALER_REFUSED", null, "DRAFT"], "changing away from Other clears the details");
+    await post(so1, "SALES", R, sc, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "Dealer has stopped trading in this product line" });
+    const unchanged = await counts();
+    assert.equal((await svc.submitDailyReport(so1, { workDate: R, selfRating: 7 })).ok, true);
+    const done = await prisma.dailyTaskOutcome.findMany({ where: { workDate: new Date(`${R}T00:00:00Z`), state: "COMMITTED" }, orderBy: [{ section: "asc" }, { plannedAmount: "asc" }] });
+    same(done.map((o) => [o.section, o.reasonCode, o.reason]), [["RECOVERY", "NO_DUES", null], ["RECOVERY", "OTHER", "Dealer disputes the invoice and asked us to wait"], ["SALES", "PRODUCT_UNAVAILABLE", null], ["SALES", "DEALER_REFUSED", null], ["SALES", "OTHER", "Dealer has stopped trading in this product line"]], "the chosen category and the optional explanation are persisted");
+    assert.equal(await prisma.dealerPaymentReceipt.count(), receipts, "No Dues records the reason only: no payment, write-off or resolution");
+    same([(await counts()).exceptions, (await counts()).tasks], [unchanged.exceptions, unchanged.tasks]);
+    // The database refuses a code that does not belong to the section, and a committed predefined reason with text.
+    await assert.rejects(prisma.$executeRawUnsafe(`INSERT INTO "DailyTaskOutcome" ("id","entryId","unitType","unitId","officerId","workDate","section","plannedAmount","outcome","reasonCode","state","committedAt","updatedAt") SELECT 'x1', "entryId", 'MANUAL_ROW', 'x1', "officerId", "workDate", 'SALES', 1, 'ABANDONED', 'NO_DUES', 'COMMITTED', NOW(), NOW() FROM "DailyTaskOutcome" LIMIT 1`), "NO_DUES is not a Sales reason (database check)");
+    // Performance → Tasks shows the category; a historical free-text abandonment stays readable with no category.
+    const ana = load<typeof import("@/features/tasks/task-analysis.server")>("src/features/tasks/task-analysis.server.ts");
+    const person = { id: "so1", name: "SO1", role: "SALES_OFFICER", groupId: "g1", groupName: "MP" };
+    const scope = { population: [person], officers: [], states: [] } as never;
+    const old = day(9);
+    const oldRow = await prisma.dailyWorkEntry.create({ data: { officerId: "so1", dealerId: "A", rowKey: "A", workDate: new Date(`${old}T00:00:00Z`), batchId: "legacy", section: "SALES", todaysPlan: 50, todaysActual: 0, status: "FINALIZED", planSubmittedAt: new Date() } });
+    await prisma.dailyTaskOutcome.create({ data: { entryId: oldRow.id, unitType: "MANUAL_ROW", unitId: oldRow.id, officerId: "so1", workDate: new Date(`${old}T00:00:00Z`), section: "SALES", plannedAmount: 50, outcome: "ABANDONED", reason: "Written before categories existed, kept as typed", state: "COMMITTED", committedAt: new Date(), committedById: "so1", committedByName: "SO1" } as never });
+    await prisma.dailyWorkDay.create({ data: { officerId: "so1", workDate: new Date(`${old}T00:00:00Z`), currentBatchId: "legacy-next", status: "FINALIZED", finalizedAt: new Date() } });
+    const f = { from: R, to: old, basis: "ORIGINAL" as const, type: "ALL" as const, section: "", source: "", status: "ABANDONED", focusDate: null, page: 1, pageSize: 100 };
+    const listed = JSON.parse(JSON.stringify(await ana.getTaskAnalysis(scope, f))) as { summary: { abandoned: number }; rows: { section: string; status: string; abandonReasonCode: string | null; abandonReason: string | null; key: string; sourceType: string; taskId: string }[] };
+    same(listed.rows.map((r) => [r.section, r.abandonReasonCode, r.abandonReason]).sort(), [["RECOVERY", "NO_DUES", null], ["RECOVERY", "OTHER", "Dealer disputes the invoice and asked us to wait"], ["SALES", "DEALER_REFUSED", null], ["SALES", "OTHER", "Dealer has stopped trading in this product line"], ["SALES", "PRODUCT_UNAVAILABLE", null], ["SALES", null, "Written before categories existed, kept as typed"]].sort(), "the Tasks list carries the saved category / explanation; the historical record has only its text");
+    assert.equal(listed.summary.abandoned, 6, "abandoned counts unchanged (counted only after the successful submission)");
+    const legacyTask = listed.rows.find((r) => r.abandonReasonCode === null)!;
+    const hist = JSON.parse(JSON.stringify(await ana.getTaskHistory(scope, legacyTask.sourceType, legacyTask.taskId))) as { outcomes: { outcome: string; reasonCode: string | null; reason: string | null; committedByName: string | null }[] };
+    same(hist.outcomes.map((o) => [o.outcome, o.reasonCode, o.reason, o.committedByName]), [["ABANDONED", null, "Written before categories existed, kept as typed", "SO1"]], "history keeps the legacy text, the actor and the time");
+    const cat = listed.rows.find((r) => r.abandonReasonCode === "PRODUCT_UNAVAILABLE")!;
+    same(JSON.parse(JSON.stringify((await ana.getTaskHistory(scope, cat.sourceType, cat.taskId)).outcomes.map((o) => [o.outcome, o.reasonCode, o.reason, o.committedByName]))), [["ABANDONED", "PRODUCT_UNAVAILABLE", null, "SO1"]]);
+  }
   console.log("task-outcome.integration.ts — all scenarios passed");
 }
 main().then(async () => { await prisma.$disconnect(); }, async (e) => { console.error(e); await prisma.$disconnect(); process.exit(1); });

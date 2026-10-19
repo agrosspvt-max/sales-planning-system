@@ -6,7 +6,8 @@ import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
-import { DealerName } from "@/features/dealers/dealer-name-ui";
+import { DealerName, useDealerMarkers } from "@/features/dealers/dealer-name-ui";
+import { taggedDealersFirst } from "@/lib/dealer-tags";
 import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -67,7 +68,7 @@ interface CnTask {
 }
 interface Payload {
   section: "SALES" | "RECOVERY"; workDate: string; monthName: string | null; canEnterActual: boolean;
-  availableDealers: AvailableDealer[]; manualDealerIds?: string[]; applicableSchemes: SchemeOption[];
+  availableDealers: AvailableDealer[]; manualDealerIds?: string[]; canPickDealerOwner?: boolean; applicableSchemes: SchemeOption[];
   applicableSchemesByDealer: Record<string, SchemeOption[]>; cnTasks?: CnTask[]; materializedCnTasks?: CnTask[]; dealers: DealerDto[];
   /** Daily Work entry ids that came from a Calendar Daily Task (Task Type "Calendar"). */
   calendarEntryIds?: string[];
@@ -89,6 +90,8 @@ interface EditRow {
   autoAmount: number; amountLocked: boolean;
   paymentMode: RecoveryPaymentMode | null;
   tasks: UnitEdit[]; legacyOutcome: boolean;
+  /** A Regional Manager's newly added dealer that belongs to one of their Sales Officers: that officer (re-validated by the server; the task stays the RM's own). */
+  ownerId?: string;
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
 }
 
@@ -694,7 +697,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.taskTypeNone, calendar: L.taskTypeCalendar };
 
   const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", section, workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
-  const payloadRows = () => rows.filter((r) => r.rowKind === "MANUAL").map((r) => ({ dealerId: r.dealerId, todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null }));
+  const payloadRows = () => rows.filter((r) => r.rowKind === "MANUAL").map((r) => ({ dealerId: r.dealerId, ...(r.ownerId ? { ownerId: r.ownerId } : {}), todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null }));
 
   // AUTOSAVE — persist the current Daily Plan draft through the existing section save endpoint (current editable
   // batch, same authorization). Status is refreshed so the progress bar tracks saved data; section rows are NOT
@@ -750,10 +753,10 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     return { ...r, tasks, paymentMode: v != null && v > 0 ? r.paymentMode : null };
   }));
   const removeRow = (entryId: string) => setRows((rs) => rs.filter((r) => !(r.entryId === entryId && r.rowKind === "MANUAL"))); // only the directly entered row can be removed
-  const addDealer = (dealerId: string) => {
-    const d = available.find((x) => x.id === dealerId);
+  const addDealer = (dealerId: string, picked?: { dealer: AvailableDealer; ownerId?: string }) => {
+    const d = picked?.dealer ?? available.find((x) => x.id === dealerId);
     if (!d) return;
-    setRows((rs) => [...rs, { entryId: `new-${d.id}`, batchId: "", rowKind: "MANUAL", dealerId: d.id, dealerName: d.name, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending, todaysPlan: "", entryType: "REGULAR", schemeId: "", recoverySource: null, autoAmount: 0, amountLocked: false, paymentMode: null, todaysActual: "", tasks: [], legacyOutcome: false, status: "NEW" }]);
+    setRows((rs) => [...rs, { entryId: `new-${d.id}`, batchId: "", rowKind: "MANUAL", dealerId: d.id, dealerName: d.name, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending, todaysPlan: "", entryType: "REGULAR", schemeId: "", recoverySource: null, autoAmount: 0, amountLocked: false, paymentMode: null, todaysActual: "", tasks: [], legacyOutcome: false, status: "NEW", ...(picked?.ownerId ? { ownerId: picked.ownerId } : {}) }]);
   };
 
   const showPaymentMode = !isSales && showResults;
@@ -883,7 +886,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                         // Reported before outcomes were collected: the recorded Actual (possibly zero) is shown read-only — no outcome or reason is invented.
                         <div className="py-1 text-right" data-testid="legacy-actual"><div className="tabular-nums">{money(numOr0(r.todaysActual))}</div><div className="text-[11px] text-muted-foreground">{L.legacyOutcome}</div></div>
                       ) : (
-                        <TaskOutcomeCell units={r.tasks} rowLabel={r.dealerName} today={today} disabled={busy || locked} onChange={(unitId, patch) => updateUnit(r.entryId, unitId, patch)} />
+                        <TaskOutcomeCell units={r.tasks} section={section} rowLabel={r.dealerName} today={today} disabled={busy || locked} onChange={(unitId, patch) => updateUnit(r.entryId, unitId, patch)} />
                       )}
                     </TableCell>}
                     {/* Payment Mode — HOW the actual recovery was received. Only selectable while Today's Recovery > 0; cleared otherwise. */}
@@ -953,8 +956,9 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
       {addOpen && (
         <AddDealerDialog
           available={available}
+          owner={data?.canPickDealerOwner ? { section, taken: new Set(rows.filter((r) => r.rowKind === "MANUAL").map((r) => r.dealerId)) } : undefined}
           labels={{ title: L.addDealer, choose: L.chooseDealer, select: L.selectDealer, noMore: L.noMoreDealers, cancel: L.cancel, add: L.addDealer }}
-          onAdd={(id) => { addDealer(id); setAddOpen(false); }}
+          onAdd={(id, picked) => { addDealer(id, picked); setAddOpen(false); }}
           onClose={() => setAddOpen(false)}
         />
       )}
@@ -1051,31 +1055,59 @@ function MaterializedTaskRescheduleDialog({ tasks, onChanged, onClose }: { tasks
  * not on the page; dealers are added one at a time and the caller keeps the button available for the next one.
  * Options are the section's existing `available` dealers (scoped, already-added excluded) — no new data source.
  */
-function AddDealerDialog({ available, labels, onAdd, onClose }: {
+interface DealerChoicesResponse { section: "SALES" | "RECOVERY"; owners: { id: string; name: string }[]; ownerId: string; dealers: AvailableDealer[] }
+export function AddDealerDialog({ available, labels, onAdd, onClose, owner }: {
   available: { id: string; name: string }[];
   labels: { title: string; choose: string; select: string; noMore: string; cancel: string; add: string };
-  onAdd: (dealerId: string) => void;
+  onAdd: (dealerId: string, picked?: { dealer: AvailableDealer; ownerId?: string }) => void;
   onClose: () => void;
+  /** Sales / Recovery for a Regional Manager only: the Sales Officer filter. `taken` = dealers whose one manual row this editor already holds. */
+  owner?: { section: "SALES" | "RECOVERY"; taken: ReadonlySet<string> };
 }) {
   const [dealerId, setDealerId] = useState("");
-  const chosen = available.find((d) => d.id === dealerId);
+  const [ownerId, setOwnerId] = useState(""); // "" = My Dealers
+  const tags = useDealerMarkers();
+  const L = {
+    owner: useLabel("daily_work.add_dealer.owner"), mine: useLabel("daily_work.add_dealer.my_dealers"), search: useLabel("daily_work.add_dealer.search"), searchLabel: useLabel("daily_work.add_dealer.search_label"),
+    noMatch: useLabel("daily_work.add_dealer.no_match"), loading: useLabel("daily_work.add_dealer.loading"), failed: useLabel("daily_work.add_dealer.failed"),
+  };
+  // One request per owner (the key carries the owner): a late answer for a previously chosen officer can never replace the current list.
+  const choices = useQuery<DealerChoicesResponse>({
+    queryKey: ["dealer-choices", owner?.section, ownerId], enabled: !!owner,
+    queryFn: () => api.get<DealerChoicesResponse>(`/api/daily-work/dealer-choices?section=${owner!.section}${ownerId ? `&ownerId=${encodeURIComponent(ownerId)}` : ""}`),
+    gcTime: 0, retry: false,
+  });
+  const ready = !owner || (!choices.isFetching && !choices.isError && choices.data !== undefined && choices.data.ownerId === (ownerId || choices.data.ownerId));
+  const pool: AvailableDealer[] = owner
+    ? (ready ? (choices.data?.dealers ?? []).filter((d) => !owner.taken.has(d.id)) : [])
+    : available.map((d) => ({ id: d.id, name: d.name, monthlyPlan: 0, actual: 0, pending: 0 }));
+  const ordered = taggedDealersFirst(pool, (d) => d.id, tags); // existing rule: tagged dealers first, then the server's alphabetical order
+  const options = ordered.map((d) => ({ value: d.id, label: `${d.name}${(tags[d.id] ?? []).map((t) => (t.markerType === "TEXT" ? ` [${t.marker}]` : ` ${t.marker}`)).join("")}` }));
+  const chosen = ready ? pool.find((d) => d.id === dealerId) : undefined; // only an existing, currently offered dealer id can ever be added
+  const ownerOptions = [{ value: "", label: L.mine }, ...(choices.data?.owners ?? []).map((o) => ({ value: o.id, label: o.name }))];
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader><DialogTitle>{labels.title}</DialogTitle></DialogHeader>
-        <div className="space-y-2">
-          <Label>{labels.choose}</Label>
-          <NativeSelect
-            placeholder={available.length === 0 ? labels.noMore : labels.select}
-            disabled={available.length === 0}
-            value={dealerId}
-            onChange={(e) => setDealerId(e.target.value)}
-            dealerOptions options={available.map((d) => ({ value: d.id, label: d.name }))}
-          />
+        <div className="space-y-3">
+          {owner && (
+            <div className="space-y-2">
+              <Label>{L.owner}</Label>
+              <NativeSelect aria-label={L.owner} data-testid="dealer-owner" value={ownerId} options={ownerOptions} onChange={(e) => { setOwnerId(e.target.value); setDealerId(""); }} />
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>{labels.choose}</Label>
+            <SearchableDropdown
+              ariaLabel={labels.choose} searchLabel={L.searchLabel} searchPlaceholder={L.search} placeholder={owner && !ready && !choices.isError ? L.loading : labels.select}
+              emptyText={labels.noMore} noMatchText={L.noMatch} options={options} value={ready ? dealerId : ""} onChange={setDealerId} disabled={!ready}
+            />
+            {owner && choices.isError && <p role="alert" className="text-xs text-destructive" data-testid="dealer-choices-error">{L.failed}</p>}
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{labels.cancel}</Button>
-          <Button disabled={!chosen} onClick={() => chosen && onAdd(chosen.id)}>{labels.add}</Button>
+          <Button disabled={!chosen} onClick={() => chosen && onAdd(chosen.id, owner ? { dealer: chosen, ownerId: ownerId || undefined } : undefined)}>{labels.add}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -1,6 +1,5 @@
 "use client";
 
-import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 import { DealerOptionName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -31,6 +30,7 @@ import {
 import { SectionColgroup } from "@/components/ui/table-group";
 import { Th, LabelSectionHeaderRow, type LabelSection } from "@/features/labels/label-ui";
 import { usePlanEdit } from "./plan-edit-context";
+import { useSeasonalDealerOrder } from "./use-seasonal-dealer-order";
 import {
   DealerProgressBar,
   NoPlanDialog,
@@ -52,6 +52,7 @@ export function PlanGrid() {
     canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave } =
     usePlanEdit();
   const qc = useQueryClient();
+  const orderedDealers = useSeasonalDealerOrder(detail.dealers);
   const categories = useCategories();
   const inputsEditable = editable || adminMode;
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -186,14 +187,14 @@ export function PlanGrid() {
             value={dealerId}
             onChange={(e) => setDealerId(e.target.value)}
           >
-            <DealerOrder><option value="">Choose Dealer…</option>
-            {detail.dealers.map((d) => (
+            <option value="">Choose Dealer…</option>
+            {orderedDealers.map((d) => (
               <option data-dealer-id={d.dealerId} key={d.dealerId} value={d.dealerId} style={{ color: OPTION_COLOR[statusByDealer.get(d.dealerId) ?? DealerPlanningStatus.REMAINING] }}>
                 <DealerOptionName id={d.dealerId} name={d.dealerName} />
                 {statusByDealer.get(d.dealerId) === DealerPlanningStatus.COMPLETED ? " ✓" : statusByDealer.get(d.dealerId) === DealerPlanningStatus.NO_PLAN ? " ⦸" : ""}
               </option>
             ))}
-          </DealerOrder></select>
+          </select>
           {!monthId && editable && dealer && selectedStatus !== DealerPlanningStatus.NO_PLAN && (
             <Button variant="outline" size="sm" onClick={() => setNoPlanOpen(true)} className="text-noplan">
               <Ban className="h-4 w-4" /> No Plan

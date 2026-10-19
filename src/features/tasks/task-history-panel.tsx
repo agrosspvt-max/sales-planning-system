@@ -15,6 +15,7 @@ import { useLabel } from "@/features/labels/label-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import type { TaskHistoryPayload, TaskRow } from "./task-analysis.server";
 import { useTaskText } from "./task-text";
+import { useAbandonText } from "@/features/daily-work/abandon-text";
 
 /**
  * One task and its full, READ-ONLY rescheduling history: identity, original / current date, total reschedules, net movement and a chronological timeline. A long history shows a
@@ -23,6 +24,7 @@ import { useTaskText } from "./task-text";
  */
 export function TaskHistoryPanel({ row, onClose, onShowOnCalendar }: { row: TaskRow; onClose: () => void; onShowOnCalendar: (history: TaskHistoryPayload) => void }) {
   const T = useTaskText();
+  const abandon = useAbandonText();
   const L = {
     title: useLabel("tasks.panel.title"), close: useLabel("tasks.panel.close"), originally: useLabel("tasks.panel.originally_due"), movedBy: useLabel("tasks.panel.moved_by"), current: useLabel("tasks.panel.current_date"),
     total: useLabel("tasks.panel.total"), net: useLabel("tasks.panel.net"), noMoves: useLabel("tasks.panel.no_moves"), viewFull: useLabel("tasks.panel.view_full"), less: useLabel("tasks.panel.show_less"), omitted: useLabel("tasks.panel.omitted"),
@@ -88,7 +90,7 @@ export function TaskHistoryPanel({ row, onClose, onShowOnCalendar }: { row: Task
             <div key={i} className={cn("mt-3 rounded-md border p-3 text-sm", o.outcome === "ABANDONED" ? "border-destructive/50 bg-destructive/5" : "border-success/50 bg-success/5")} data-testid={o.outcome === "ABANDONED" ? "history-abandoned" : "history-completed"}>
               <div className={cn("font-semibold", o.outcome === "ABANDONED" && "text-destructive")}>{T.status(o.outcome === "ABANDONED" ? "ABANDONED" : "COMPLETED")}</div>
               <div className="text-xs text-muted-foreground">{(o.outcome === "ABANDONED" ? L.abandonedBy : L.completedBy).replace("{name}", o.committedByName ?? "—").replace("{when}", formatDateTimeDMY(o.committedAt))}</div>
-              {o.outcome === "ABANDONED" && o.reason && <p className="mt-1 whitespace-pre-wrap" data-testid="history-abandon-reason">{L.abandonReason.replace("{text}", o.reason)}</p>}
+              {o.outcome === "ABANDONED" && (o.reasonCode || o.reason) && <p className="mt-1 whitespace-pre-wrap" data-testid="history-abandon-reason">{abandon.summary(o.reasonCode, o.reason)}</p>}
               {o.outcome === "COMPLETED" && o.actualAmount != null && <p className="mt-1">{L.completedAmount.replace("{amount}", formatCurrency(o.actualAmount))}</p>}
             </div>
           ))}

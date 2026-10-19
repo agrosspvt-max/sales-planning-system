@@ -44,6 +44,8 @@ export interface TaskRow {
   originalDate: string; originalVerified: boolean; currentDate: string; moves: number; daysMoved: number | null; status: TaskStatus; historyState: HistoryState; periodMoves: number | null;
   /** Visit tasks only: which category, and the target (planned visits) of that one task. */
   category: VisitCategory | null; target: number | null;
+  /** ABANDONED tasks: the saved category (null for a record made before codes existed) and the explanation (Other, or the legacy free text). */
+  abandonReasonCode: string | null; abandonReason: string | null;
 }
 
 interface RawTask {
@@ -231,6 +233,15 @@ async function hydrate(raw: RawTask[], scope: TaskScope, today: string, periodMo
   if (ownerIds.length) for (const u of (await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, territory: true } })) as { id: string; territory: string | null }[]) territory.set(u.id, u.territory?.trim() || null);
   const dealerIds = [...new Set(raw.map((r) => r.dealerId).filter((x): x is string => !!x))];
   const alias = dealerIds.length ? await loadDealerAliasNameMap(dealerIds) : new Map<string, string>(); // DISPLAY-only alias-preferred names
+  // The abandonment reasons of the abandoned tasks, in ONE query for the whole page of results (never one per task).
+  const abandonedIds = [...new Set(raw.filter((r) => r.abandoned && r.sourceType !== "DAILY_WORK_VISIT").map((r) => r.taskId))];
+  const reasons = new Map<string, { code: string | null; reason: string | null }>();
+  if (abandonedIds.length) {
+    const found = await prisma.$queryRaw<{ unitType: string; unitId: string; reasonCode: string | null; reason: string | null }[]>(Prisma.sql`
+      SELECT u."unitType", u."unitId", u."reasonCode", u."reason" FROM "DailyTaskOutcome" u
+      WHERE u."state" = 'COMMITTED' AND u."outcome" = 'ABANDONED' AND u."unitId" IN (${Prisma.join(abandonedIds)}) ORDER BY u."committedAt", u."id"`);
+    for (const f of found) reasons.set(`${f.unitType === "MANUAL_ROW" ? "DAILY_WORK_ROW" : f.unitType}:${f.unitId}`, { code: f.reasonCode, reason: f.reason });
+  }
   return raw.map((r): TaskRow => {
     const key = `${r.sourceType}:${r.taskId}`;
     const person = people.get(r.ownerId);
@@ -242,6 +253,7 @@ async function hydrate(raw: RawTask[], scope: TaskScope, today: string, periodMo
       amount: r.amount == null ? null : Number(r.amount), originalDate: r.originalDate, originalVerified: r.originalVerified, currentDate: r.currentDate, moves: r.moves,
       daysMoved: daysMoved(r.originalDate, r.currentDate, r.originalVerified), status, historyState: deriveHistoryState({ gap: r.gap, moves: r.moves }), periodMoves: periodMoves ? (periodMoves.get(key) ?? 0) : null,
       category: r.category, target: r.target == null ? null : Number(r.target),
+      abandonReasonCode: status === "ABANDONED" ? reasons.get(key)?.code ?? null : null, abandonReason: status === "ABANDONED" ? reasons.get(key)?.reason ?? null : null,
     };
   });
 }
@@ -366,7 +378,7 @@ export async function getRescheduleCalendar(scope: TaskScope, f: TaskFilters, mo
 
 export interface TaskHistoryEvent { id: string; previousDate: string; newDate: string; actorName: string; actorRole: string; reason: string | null; createdAt: string }
 /** A SUBMITTED Daily Report outcome of this task: how it ended (or was moved), with who / when and, for an abandonment, the reason. */
-export interface TaskOutcomeEvent { outcome: "COMPLETED" | "RESCHEDULED" | "ABANDONED"; workDate: string; actualAmount: number | null; nextDate: string | null; reason: string | null; committedAt: string; committedByName: string | null }
+export interface TaskOutcomeEvent { outcome: "COMPLETED" | "RESCHEDULED" | "ABANDONED"; workDate: string; actualAmount: number | null; nextDate: string | null; reason: string | null; reasonCode: string | null; committedAt: string; committedByName: string | null }
 export interface TaskHistoryPayload { task: TaskRow; events: TaskHistoryEvent[]; outcomes: TaskOutcomeEvent[]; trail: string[]; chainOk: boolean; distinctDates: string[] }
 
 /** Read-only. The task must belong to an employee inside the caller's authorized population (anything else looks missing). */
@@ -382,8 +394,8 @@ export async function getTaskHistory(scope: TaskScope, sourceType: string, taskI
     FROM "TaskRescheduleEvent" e WHERE e."sourceType" = ${sourceType} AND e."sourceId" = ${taskId} ORDER BY e."createdAt", e."id"`)).map((e) => ({ ...e, createdAt: e.createdAt.toISOString() }));
   const { trail, chainOk } = dateTrail(events);
   const unitType = sourceType === "DAILY_WORK_ROW" ? "MANUAL_ROW" : sourceType;
-  const outcomes = (await prisma.$queryRaw<{ outcome: TaskOutcomeEvent["outcome"]; workDate: string; actualAmount: string | null; nextDate: string | null; reason: string | null; committedAt: Date; committedByName: string | null }[]>(Prisma.sql`
-    SELECT u."outcome", u."workDate"::text AS "workDate", u."actualAmount"::text AS "actualAmount", u."nextDate"::text AS "nextDate", u."reason", u."committedAt", u."committedByName"
+  const outcomes = (await prisma.$queryRaw<{ outcome: TaskOutcomeEvent["outcome"]; workDate: string; actualAmount: string | null; nextDate: string | null; reason: string | null; reasonCode: string | null; committedAt: Date; committedByName: string | null }[]>(Prisma.sql`
+    SELECT u."outcome", u."workDate"::text AS "workDate", u."actualAmount"::text AS "actualAmount", u."nextDate"::text AS "nextDate", u."reason", u."reasonCode", u."committedAt", u."committedByName"
     FROM "DailyTaskOutcome" u WHERE u."state" = 'COMMITTED' AND ((u."unitType" = ${unitType} AND u."unitId" = ${taskId}) OR (u."continuedAsType" = ${sourceType} AND u."continuedAsId" = ${taskId}))
     ORDER BY u."committedAt", u."id"`)).map((o) => ({ ...o, actualAmount: o.actualAmount == null ? null : Number(o.actualAmount), committedAt: o.committedAt.toISOString() }));
   return { task, events, outcomes, trail, chainOk, distinctDates: distinctTrailDates(trail) };

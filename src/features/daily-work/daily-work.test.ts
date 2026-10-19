@@ -109,6 +109,11 @@ function makeFake(opts: FakeOpts) {
       for (const r of store) if (r.id === entryId && r.officerId === officerId && r.section === section && r.workDate === workDate && r.batchId !== currentBatchId && r.status === "PLAN_SUBMITTED") { r.todaysActual = String(actual); if (mode !== undefined) r.paymentMode = mode; n++; }
       return n;
     }
+    // The dealers that already hold a directly entered row in this batch (manual-entry eligibility).
+    if (text.startsWith('SELECT "dealerId" FROM "DailyWorkEntry"') && text.includes('"rowKey" NOT LIKE')) {
+      const [officerId, workDate, batchId, section] = v as string[];
+      return store.filter((r) => r.officerId === officerId && r.workDate === workDate && r.batchId === batchId && r.section === section && r.dealerId && !String((r as { rowKey?: string }).rowKey ?? "").startsWith("t:")).map((r) => ({ dealerId: r.dealerId }));
+    }
     // Automatic (CN / Billing Exception) contribution lookups: this fake has none.
     if (text.startsWith('SELECT t."entryId", SUM(t."contribution")') || text.startsWith('SELECT e."dealerId", SUM(t."contribution")::text AS "contribution" FROM (')) return [];
     throw new Error("Unhandled raw SQL: " + text);
@@ -193,7 +198,7 @@ function loadService(fake: { prisma: object; getMonthly: () => Promise<unknown>;
     "server-only": {}, "@/lib/prisma": { prisma: fake.prisma },
     "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], countUnconfirmedMaterializedTasks: async () => 0 },
     "@/lib/http": { ApiError: class extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } } },
-    "@/lib/scope": { getCurrentDealerIds: async () => over.assignedDealerIds },
+    "@/lib/scope": { getCurrentDealerIds: async () => over.assignedDealerIds, getOfficerScope: async (c: { userId: string }) => ({ all: false, ids: [c.userId] }), getCurrentOwnerByDealer: async (ids: string[]) => new Map(ids.filter((id) => over.assignedDealerIds.includes(id)).map((id) => [id, "so1"] as const)) },
     "@/lib/audit": { writeAudit: async () => ({}) },
     "@/features/labels/service.server": { getResolvedLabels: async () => localRequire(resolve("src/features/labels", "labels.ts")).DEFAULT_LABELS },
     "@/features/schemes/scheme-planning.server": { runningSchemes: async () => over.schemes ?? [] },

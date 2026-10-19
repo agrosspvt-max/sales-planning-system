@@ -8,7 +8,8 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useLabel } from "@/features/labels/label-ui";
-import { MAX_REASON_LENGTH, checkReason, isTaskOutcome, parseActualAmount, rowActualFromOutcomes, validateOutcome, type OutcomeFields, type TaskOutcome } from "@/lib/task-outcome";
+import { useAbandonText } from "./abandon-text";
+import { MAX_REASON_LENGTH, abandonReasonsFor, checkReason, isAbandonReasonAllowed, isTaskOutcome, parseActualAmount, rowActualFromOutcomes, validateOutcome, type AbandonReasonCode, type OutcomeFields, type TaskOutcome } from "@/lib/task-outcome";
 import type { TaskUnitDto } from "./task-outcome.server";
 
 /**
@@ -18,12 +19,12 @@ import type { TaskUnitDto } from "./task-outcome.server";
  */
 export interface UnitEdit {
   unitType: TaskUnitDto["unitType"]; unitId: string; type: "MANUAL" | "AUTO"; source: TaskUnitDto["source"]; plannedAmount: number;
-  outcome: "" | TaskOutcome; actualAmount: string; nextDate: string; reason: string; state: "DRAFT" | "COMMITTED";
+  outcome: "" | TaskOutcome; actualAmount: string; nextDate: string; reason: string; reasonCode: "" | AbandonReasonCode; state: "DRAFT" | "COMMITTED";
   rescheduledFrom: string | null; dateRule: TaskUnitDto["dateRule"];
 }
 export const unitsFromDto = (tasks: readonly TaskUnitDto[]): UnitEdit[] => tasks.map((t) => ({
   unitType: t.unitType, unitId: t.unitId, type: t.type, source: t.source, plannedAmount: t.plannedAmount, outcome: t.outcome ?? "", actualAmount: t.actualAmount == null ? "" : String(t.actualAmount),
-  nextDate: t.nextDate ?? "", reason: t.reason ?? "", state: t.state, rescheduledFrom: t.rescheduledFrom, dateRule: t.dateRule,
+  nextDate: t.nextDate ?? "", reason: t.reason ?? "", reasonCode: t.reasonCode ?? "", state: t.state, rescheduledFrom: t.rescheduledFrom, dateRule: t.dateRule,
 }));
 
 /** The day after `today` (the earliest allowed next date). */
@@ -33,7 +34,7 @@ export const dayAfter = (today: string): string => { const d = new Date(`${today
 export function unitFields(u: UnitEdit): OutcomeFields {
   if (u.outcome === "COMPLETED") { const a = parseActualAmount(u.actualAmount); return { outcome: "COMPLETED", actualAmount: a.ok ? a.value : null, nextDate: null, reason: null }; }
   if (u.outcome === "RESCHEDULED") return { outcome: "RESCHEDULED", actualAmount: null, nextDate: u.nextDate || null, reason: null };
-  if (u.outcome === "ABANDONED") return { outcome: "ABANDONED", actualAmount: null, nextDate: null, reason: u.reason.replace(/\s+/g, " ").trim() || null };
+  if (u.outcome === "ABANDONED") return { outcome: "ABANDONED", actualAmount: null, nextDate: null, reasonCode: u.reasonCode || null, reason: u.reasonCode === "OTHER" ? u.reason.replace(/\s+/g, " ").trim() || null : null };
   return { outcome: null, actualAmount: null, nextDate: null, reason: null };
 }
 /** The row's reported total from its tasks (null until every task has a valid outcome) — the same rule the server applies. */
@@ -45,17 +46,18 @@ export function outcomeUnitsPayload(units: readonly UnitEdit[], today: string) {
     const base = { unitType: u.unitType, unitId: u.unitId, outcome: u.outcome === "" ? null : u.outcome };
     if (u.outcome === "COMPLETED") { const a = parseActualAmount(u.actualAmount); return a.ok && a.value !== null ? { ...base, actualAmount: a.value } : base; }
     if (u.outcome === "RESCHEDULED") return u.nextDate > today ? { ...base, nextDate: u.nextDate } : base;
-    if (u.outcome === "ABANDONED") return u.reason.trim() !== "" ? { ...base, reason: u.reason.slice(0, MAX_REASON_LENGTH) } : base;
+    if (u.outcome === "ABANDONED") return { ...base, ...(u.reasonCode ? { reasonCode: u.reasonCode } : {}), ...(u.reasonCode === "OTHER" && u.reason.trim() !== "" ? { reason: u.reason.slice(0, MAX_REASON_LENGTH) } : {}) };
     return base;
   });
 }
 
-export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: {
-  units: UnitEdit[]; rowLabel: string; today: string; disabled: boolean; onChange: (unitId: string, patch: Partial<UnitEdit>) => void;
+export function TaskOutcomeCell({ units, section, rowLabel, today, disabled, onChange }: {
+  units: UnitEdit[]; section: "SALES" | "RECOVERY"; rowLabel: string; today: string; disabled: boolean; onChange: (unitId: string, patch: Partial<UnitEdit>) => void;
 }) {
   const L = {
     select: useLabel("daily_work.outcome.select"), completed: useLabel("daily_work.outcome.completed"), rescheduled: useLabel("daily_work.outcome.rescheduled"), abandon: useLabel("daily_work.outcome.abandon"),
     aria: useLabel("daily_work.outcome.aria"), amount: useLabel("daily_work.outcome.actual_amount"), amountPlaceholder: useLabel("daily_work.outcome.amount_placeholder"), nextDate: useLabel("daily_work.outcome.next_date"), reason: useLabel("daily_work.outcome.reason"),
+    reasonSelect: useLabel("daily_work.outcome.reason_select"), reasonCategoryAria: useLabel("daily_work.outcome.reason_category_aria"), reasonOther: useLabel("daily_work.outcome.reason_other_label"), noDuesHelp: useLabel("daily_work.outcome.reason_no_dues_help"), errCode: useLabel("daily_work.outcome.error.reason_code_required"),
     reasonPlaceholder: useLabel("daily_work.outcome.reason_placeholder"), reasonHelp: useLabel("daily_work.outcome.reason_help"), dateHelp: useLabel("daily_work.outcome.date_help"), dateCnHelp: useLabel("daily_work.outcome.date_cn_help"),
     manual: useLabel("daily_work.outcome.type_manual"), auto: useLabel("daily_work.outcome.type_auto"), planned: useLabel("daily_work.outcome.task_planned"), tasksTitle: useLabel("daily_work.outcome.tasks_title"),
     badgeFrom: useLabel("daily_work.outcome.badge_rescheduled_from"), resRescheduled: useLabel("daily_work.outcome.result_rescheduled"), resAbandoned: useLabel("daily_work.outcome.result_abandoned"), resCompleted: useLabel("daily_work.outcome.result_completed"),
@@ -63,6 +65,7 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
     sourceBilling: useLabel("daily_work.recovery_source.billing_exception"), sourceCn: useLabel("daily_work.recovery_source.cn_request"),
     errAmount: useLabel("daily_work.outcome.error.amount_invalid"), errShort: useLabel("daily_work.outcome.error.reason_short"), errMeaningless: useLabel("daily_work.outcome.error.reason_meaningless"),
   };
+  const abandonText = useAbandonText();
   const many = units.length > 1;
   return (
     <div className="space-y-3" data-testid="task-outcomes">
@@ -93,8 +96,8 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
                 options={[{ value: "COMPLETED", label: L.completed }, { value: "RESCHEDULED", label: L.rescheduled }, { value: "ABANDONED", label: L.abandon, className: "text-destructive" }]}
                 onChange={(e) => {
                   const outcome = isTaskOutcome(e.target.value) ? e.target.value : "";
-                  // Leaving Completed clears the amount (it is never kept, sent or replaced by 0).
-                  onChange(u.unitId, outcome === "COMPLETED" ? { outcome } : { outcome, actualAmount: "" });
+                  // Leaving Completed clears the amount (never kept, sent or replaced by 0); leaving Abandon clears the abandonment-only fields.
+                  onChange(u.unitId, { outcome, ...(outcome === "COMPLETED" ? {} : { actualAmount: "" }), ...(outcome === "ABANDONED" ? {} : { reasonCode: "" as const, reason: "" }) });
                 }}
               />
               <div className="w-full min-w-[160px] sm:w-44 sm:shrink-0" data-testid="outcome-amount">
@@ -109,7 +112,7 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
               <p className={cn("text-sm", u.outcome === "ABANDONED" && "font-medium text-destructive")} data-testid="outcome-result">
                 {u.outcome === "COMPLETED" ? L.resCompleted.replace("{amount}", formatCurrency(Number(u.actualAmount)))
                   : u.outcome === "RESCHEDULED" ? L.resRescheduled.replace("{date}", formatDMY(u.nextDate))
-                    : L.resAbandoned.replace("{reason}", u.reason)}
+                    : abandonText.summary(u.reasonCode || null, u.reason)}
               </p>
             ) : (
               <>
@@ -120,12 +123,24 @@ export function TaskOutcomeCell({ units, rowLabel, today, disabled, onChange }: 
                   </div>
                 )}
                 {u.outcome === "ABANDONED" && (
-                  <div className="w-full" data-testid="outcome-reason">
-                    <Textarea rows={3} maxLength={MAX_REASON_LENGTH} className={cn("text-sm", (reasonCheck === "reason_short" || reasonCheck === "reason_meaningless") && "border-destructive")} aria-label={`${L.reason} — ${taskName}`} placeholder={L.reasonPlaceholder}
-                      value={u.reason} disabled={disabled} onChange={(e) => onChange(u.unitId, { reason: e.target.value })} />
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">{L.reasonHelp}</p>
-                    {reasonCheck === "reason_short" && <p className="text-[11px] text-destructive">{L.errShort}</p>}
-                    {reasonCheck === "reason_meaningless" && <p className="text-[11px] text-destructive">{L.errMeaningless}</p>}
+                  <div className="w-full space-y-1.5" data-testid="outcome-reason">
+                    {/* Required category first; the explanation box exists only for Other. */}
+                    <NativeSelect
+                      className={cn("h-8 w-full sm:w-56", u.reasonCode === "" && "border-destructive/60")} aria-label={`${L.reasonCategoryAria} — ${taskName}`} data-testid="abandon-reason-code" disabled={disabled}
+                      value={u.reasonCode} placeholder={L.reasonSelect}
+                      options={abandonReasonsFor(section).map((c) => ({ value: c, label: abandonText.reasonName(c) }))}
+                      onChange={(e) => { const code = isAbandonReasonAllowed(section, e.target.value) ? e.target.value : ""; onChange(u.unitId, { reasonCode: code, ...(code === "OTHER" ? {} : { reason: "" }) }); }}
+                    />
+                    {u.reasonCode === "NO_DUES" && <p className="text-[11px] text-muted-foreground">{L.noDuesHelp}</p>}
+                    {u.reasonCode === "OTHER" && (
+                      <>
+                        <Textarea rows={3} maxLength={MAX_REASON_LENGTH} className={cn("text-sm", (reasonCheck === "reason_short" || reasonCheck === "reason_meaningless") && "border-destructive")} aria-label={`${L.reasonOther} — ${taskName}`} placeholder={L.reasonPlaceholder}
+                          value={u.reason} disabled={disabled} onChange={(e) => onChange(u.unitId, { reason: e.target.value })} />
+                        <p className="text-[11px] text-muted-foreground">{L.reasonHelp}</p>
+                        {reasonCheck === "reason_short" && <p className="text-[11px] text-destructive">{L.errShort}</p>}
+                        {reasonCheck === "reason_meaningless" && <p className="text-[11px] text-destructive">{L.errMeaningless}</p>}
+                      </>
+                    )}
                   </div>
                 )}
               </>

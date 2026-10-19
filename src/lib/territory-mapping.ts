@@ -220,3 +220,18 @@ export function summarizeImportPlan(plan: readonly ImportPlanRow[]): ImportSumma
 
 /** Display position of a row in a paginated list: numbering continues across pages (page 2 of 25 starts at 26). Not a stored ID. */
 export const serialNumber = (page: number, pageSize: number, rowIndex: number): number => (page - 1) * pageSize + rowIndex + 1;
+
+/**
+ * The territory name(s) of a requesting user, from their existing User.territory field (never from a market or district). Several territories may be recorded in the one field
+ * separated by commas / semicolons: they are listed once each (case-insensitive), in the order written. Empty / missing → [].
+ */
+export function territoryNames(raw: string | null | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of (raw ?? "").split(/[,;]/)) {
+    const name = part.replace(/\s+/g, " ").trim();
+    if (name && !seen.has(name.toLowerCase())) { seen.add(name.toLowerCase()); out.push(name); }
+  }
+  return out;
+}
+export const territoryText = (raw: string | null | undefined): string | null => territoryNames(raw).join(", ") || null;

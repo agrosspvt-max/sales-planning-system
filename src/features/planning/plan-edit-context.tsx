@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { DealerMarkerScope } from "@/features/dealers/dealer-name-ui";
 import { api } from "@/lib/api-client";
 import { figuresForMode, isQuantityMode, type FlexFigures, type PlanningMode } from "@/lib/calc";
 import { useAutosaveMap } from "./use-autosave-map";
@@ -277,7 +278,7 @@ export function PlanEditProvider({ detail, children }: { detail: PlanDetail; chi
     [detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, flush, cellAt, cellInput, lineFig, dealerCompleted, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave],
   );
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={value}><DealerMarkerScope tags={detail.dealerTags}>{children}</DealerMarkerScope></Ctx.Provider>;
 }
 
 export function usePlanEdit(): PlanEditContextValue {

@@ -17,6 +17,7 @@ import {
 import { planningProductsForOfficer, clearanceMapForGroup } from "@/features/users/catalogue.server";
 import { loadEffectiveProduct } from "@/features/products/merge.server";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+import { loadDealerMarkerMap } from "@/lib/dealer-tags.server";
 import { saveLinesSchema, remarksSchema, revisionRequestSchema } from "@/lib/validations/planning";
 import { NotificationType } from "@prisma/client";
 import { findOrCreateSeason, listSeasons } from "@/features/seasons/service.server";
@@ -406,7 +407,11 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
   // identity so a merged source (e.g. TAANDAB) rolls up under the survivor (TANDAB) with no double counting.
   const eff = await loadEffectiveProduct();
   // DISPLAY-only: alias-preferred dealer names for the Seasonal plan grid (identity stays the dealer id).
-  const seasonalAliasNames = await loadDealerAliasNameMap(plan.dealers.map((pd) => pd.dealerId));
+  const dealerIds = plan.dealers.map((pd) => pd.dealerId);
+  const [seasonalAliasNames, dealerTags] = await Promise.all([
+    loadDealerAliasNameMap(dealerIds),
+    loadDealerMarkerMap(dealerIds),
+  ]);
 
   const isOwner = isPlanOwner(ctx, plan.officerId);
   const canEdit = isOwner && EDITABLE.includes(plan.status) && plan.season.status === SeasonStatus.OPEN;
@@ -440,6 +445,8 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
     seasonalMode: plan.season.seasonalMode as PlanningMode,
     // Columns: canonical planning packs + any pack with stored data in this plan (workbook order).
     packSizes: columnPacks.map((ps) => ({ id: ps.id, name: ps.name })),
+    // Approved markers travel with the authorized plan, not a separate client metadata request.
+    dealerTags,
     dealers: plan.dealers
       .sort((a, b) => a.dealer.name.localeCompare(b.dealer.name))
       .map((pd) => ({

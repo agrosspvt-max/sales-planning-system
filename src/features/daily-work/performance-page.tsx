@@ -1,5 +1,6 @@
 "use client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
 import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 
 
@@ -24,6 +25,7 @@ import { DailyWorkReviewDialog } from "./team-performance-page";
 import { TaskAnalysisView } from "@/features/tasks/task-analysis-view";
 import { defaultTaskFilters, type DateBasis, type TaskFilterState } from "@/lib/task-analysis";
 import { cn } from "@/lib/utils";
+import { LateRequestsView } from "./late-requests-view";
 import { PerformanceMetricDetail, countText, rupees, type MetricRequest } from "./performance-metric-detail";
 
 interface Option { id: string; name: string }
@@ -31,6 +33,7 @@ interface PerfRow {
   officerId: string; officerName: string; officerRole: Role; groupId: string | null; stateName: string | null; date: string;
   planSubmittedAt: string | null; reportSubmittedAt: string | null;
   selfRating: number | null; rmRating: number | null; submitted: boolean; reportMissed: boolean;
+  planMissed?: boolean; lateReport?: { open: "PENDING" | "APPROVED" | null; late: boolean };
   taskActivity: { tasks: number; completed: number; reschedules: number; abandoned: number; sections: Record<string, number> } | null;
 }
 interface SectionTotal { planned: number; actual: number }
@@ -58,10 +61,11 @@ export function PerformancePage({ role }: { role: Role }) {
   const [detail, setDetail] = useState<{ officerId: string; date: string } | null>(null);
   // Performance (the default, unchanged view) | Tasks (task analysis). Tasks opens on Auto; its filters live here so they survive switching back and forth, and so a Task Activity
   // link in the Performance table can open it pre-filtered. Once opened, Tasks stays mounted (hidden) so its page, calendar and selection are kept.
-  const [mode, setMode] = useState<"performance" | "tasks">("performance");
+  const [mode, setMode] = useState<"performance" | "tasks" | "requests">("performance");
+  const [requestsOpened, setRequestsOpened] = useState(false); // Requests are fetched only once that view is opened
   const [tasksOpened, setTasksOpened] = useState(false);
   const [taskFilters, setTaskFilters] = useState<TaskFilterState>(() => defaultTaskFilters(currentBusinessDate()));
-  const showMode = (next: "performance" | "tasks") => { setMode(next); if (next === "tasks") setTasksOpened(true); };
+  const showMode = (next: "performance" | "tasks" | "requests") => { setMode(next); if (next === "tasks") setTasksOpened(true); if (next === "requests") setRequestsOpened(true); };
   const openTasks = (r: PerfRow, basis: DateBasis) => {
     // The row's employee and date: tasks ORIGINALLY scheduled on that date, or the reschedules MADE on that date (the active basis is shown on the Tasks page). All types.
     setTaskFilters({ ...defaultTaskFilters(currentBusinessDate(), "ALL"), basis, from: r.date, to: r.date, officerId: isSO ? "" : r.officerId });
@@ -72,6 +76,8 @@ export function PerformancePage({ role }: { role: Role }) {
   const isSO = role === Role.SALES_OFFICER;
   const isRM = role === Role.REGIONAL_MANAGER;
   const isAdmin = isAdministrativeRole(role);
+  const canReadRequests = useAdminPermission("performance");
+  const canReviewRequests = (role === Role.REGIONAL_MANAGER || isAdmin) && canReadRequests; // the server still decides what each reviewer may see and decide
 
   const L = {
     my: useLabel("daily_work.performance.my_title"),
@@ -114,7 +120,7 @@ export function PerformancePage({ role }: { role: Role }) {
     sVisitsA: useLabel("daily_work.performance.summary.visits_actual"),
     detailTitle: useLabel("daily_work.performance.detail.title"),
     openHint: useLabel("daily_work.performance.detail.open_hint"),
-    modePerformance: useLabel("tasks.mode.performance"), modeTasks: useLabel("tasks.mode.tasks"),
+    modePerformance: useLabel("tasks.mode.performance"), modeTasks: useLabel("tasks.mode.tasks"), modeRequests: useLabel("daily_work.requests.mode"), late: useLabel("daily_work.performance.late"), pendingApproval: useLabel("daily_work.performance.pending_approval"), reopened: useLabel("daily_work.performance.reopened"),
     actCol: useLabel("tasks.activity.col"), actOne: useLabel("tasks.activity.tasks_one"), actMany: useLabel("tasks.activity.tasks_many"), actNone: useLabel("tasks.activity.none"),
     abandonedOne: useLabel("tasks.activity.abandoned_one"), abandonedMany: useLabel("tasks.activity.abandoned_many"), openAbandonedHint: useLabel("tasks.activity.open_abandoned"), activityTip: useLabel("tasks.activity.tip"),
     unavailable: useLabel("tasks.activity.unavailable"), unavailableTip: useLabel("tasks.activity.unavailable_tip"), bySection: useLabel("tasks.activity.by_section"),
@@ -151,12 +157,13 @@ export function PerformancePage({ role }: { role: Role }) {
     <div className="space-y-5">
       <PageHeader crumbs={[{ label: L.breadcrumb }, { label: title }]} title={title} />
 
-      <div className="inline-flex rounded-md border bg-background p-0.5 text-sm" role="group" aria-label={`${L.modePerformance} / ${L.modeTasks}`} data-testid="mode-switch">
-        {([["performance", L.modePerformance], ["tasks", L.modeTasks]] as const).map(([value, label]) => (
+      <div className="inline-flex rounded-md border bg-background p-0.5 text-sm" role="group" aria-label={`${L.modePerformance} / ${L.modeTasks}${canReviewRequests ? ` / ${L.modeRequests}` : ""}`} data-testid="mode-switch">
+        {([["performance", L.modePerformance], ["tasks", L.modeTasks], ...(canReviewRequests ? [["requests", L.modeRequests] as const] : [])] as const).map(([value, label]) => (
           <button key={value} type="button" aria-pressed={mode === value} onClick={() => showMode(value)}
             className={cn("rounded px-4 py-1.5 font-medium", mode === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>{label}</button>
         ))}
       </div>
+      {requestsOpened && canReviewRequests && <div hidden={mode !== "requests"}><LateRequestsView active={mode === "requests"} /></div>}
       {tasksOpened && <div hidden={mode !== "tasks"}><TaskAnalysisView role={role} filters={taskFilters} onFilters={setTaskFilters} /></div>}
 
       {mode === "performance" && (
@@ -228,9 +235,12 @@ export function PerformancePage({ role }: { role: Role }) {
                   <TableCell className="whitespace-nowrap">{dateText(r.date)}</TableCell>
                   {showOfficer && <TableCell className="font-medium">{r.officerName}</TableCell>}
                   {showState && <TableCell>{r.stateName ?? dash}</TableCell>}
-                  <TableCell className="whitespace-nowrap tabular-nums">{timeText(r.planSubmittedAt)}</TableCell>
+                  <TableCell className="whitespace-nowrap tabular-nums">{r.planSubmittedAt ? timeText(r.planSubmittedAt) : r.planMissed ? <Badge variant="destructive" data-testid="plan-missed">{L.reportMissed}</Badge> : timeText(null)}</TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">
-                    {r.reportSubmittedAt ? timeText(r.reportSubmittedAt) : r.reportMissed ? <Badge variant="destructive">{L.reportMissed}</Badge> : timeText(null)}
+                    {r.reportSubmittedAt ? <>{timeText(r.reportSubmittedAt)}{r.lateReport?.late && <div className="text-[11px] leading-tight text-muted-foreground" data-testid="late-label">{L.late}</div>}</> : r.reportMissed ? <>
+                      <Badge variant="destructive">{L.reportMissed}</Badge>
+                      {r.lateReport?.open && <div className="text-[11px] leading-tight text-muted-foreground" data-testid="late-open">{r.lateReport.open === "PENDING" ? L.pendingApproval : L.reopened}</div>}
+                    </> : timeText(null)}
                   </TableCell>
                   <TableCell className="tabular-nums">{r.selfRating == null ? dash : ratingText(r.selfRating)}</TableCell>
                   {/* Decided by the role of the person this ROW represents (never by the viewer): an RM has no RM rating, so the RM capsule shows. */}

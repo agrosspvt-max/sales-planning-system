@@ -13,6 +13,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { CalendarClock, Eye, FileText, MoreVertical, Plus, Trash2, Save, Send, Check, Ban } from "lucide-react";
 import { api } from "@/lib/api-client";
+import { formatDateTimeDMY } from "@/lib/date-format";
 import { formatSchemeCurrency as formatCurrency } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { NativeSelect } from "@/components/ui/select";
+import { OutstandingReportPanel, type OutstandingReportView } from "./late-report";
+import { useLateApprovalSync } from "./use-late-approval-sync";
 import { SearchableDropdown } from "@/components/ui/searchable-dropdown";
 import { StatusDialog } from "@/features/party-planning/monthly-planning-page";
 import type { MonthlyPlanDto } from "@/features/party-planning/monthly.server";
@@ -147,8 +150,11 @@ interface StatusPayload {
   reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
   autoTasksEnabled: boolean;
   previousReport?: { date: string; state: "NOT_APPLICABLE" | "SUBMITTED" | "PENDING" | "MISSED"; deadline: string };
+  reportDeadline?: string;
   reportDeadlinePassed?: boolean;
   reportMissed?: boolean;
+  reportApproved?: boolean;
+  outstandingReport?: OutstandingReportView | null;
 }
 /** Shared status query — every section save/No-Plan invalidates this key so the bar updates immediately. */
 const STATUS_KEY = (workDate: string) => ["daily-work-status", workDate] as const;
@@ -199,8 +205,13 @@ function OwnerDailyWorkPage() {
   // The Daily Report view works on YESTERDAY's report while it is still submittable (before its 12:00 PM deadline) — it must be
   // submitted before today's plan. Once it is Missed (or submitted) the page is back on today. Plan view is always today.
   const previousPending = todayStatus?.previousReport?.state === "PENDING" ? todayStatus.previousReport.date : null;
-  const activeDate = view === DailyWorkView.REPORT && previousPending ? previousPending : workDate;
+  // A Sales Officer's OLDER unfinished report (new policy) stays the Report view's date — however many days ago it was — and blocks a new plan until it is submitted.
+  const outstanding = todayStatus?.outstandingReport ?? null;
+  useLateApprovalSync(outstanding);
+  const activeDate = view === DailyWorkView.REPORT && (outstanding?.date ?? previousPending) ? (outstanding?.date ?? previousPending)! : workDate;
   const { data: dayStatus } = useDailyStatus(activeDate);
+  // A report past its deadline (and without an approved late-submission request) is read-only; the server enforces it too.
+  const sectionLocked = (dayStatus?.isFinalized ?? false) || (view === DailyWorkView.REPORT && (dayStatus?.reportDeadlinePassed ?? false));
   const previousMissed = todayStatus?.previousReport?.state === "MISSED" ? todayStatus.previousReport.date : null;
   const missedText = useLabel("daily_work.report.missed");
   const reportForText = useLabel("daily_work.report.for_date");
@@ -288,7 +299,7 @@ function OwnerDailyWorkPage() {
             ))}
           </div>
           {/* Plan and Report actions share this toolbar while retaining their existing handlers. */}
-          {view === DailyWorkView.PLAN && !dayStatus?.isFinalized && (
+          {view === DailyWorkView.PLAN && !dayStatus?.isFinalized && !outstanding && (
             <DailyWorkActions workDate={workDate} section={section} draft={draftHandle} onPlanErrors={setPlanErrors} />
           )}
           {view === DailyWorkView.REPORT && dayStatus?.hasSubmittedWork && (
@@ -310,7 +321,7 @@ function OwnerDailyWorkPage() {
         {/* Day actions live in the Plan Type fieldset; Daily Task starts directly with its content. */}
         {/* Yesterday's report that was never submitted before its deadline: informational only, it no longer blocks today's plan. */}
         {previousMissed && (
-          <p role="status" className="rounded-lg border border-dashed px-4 py-2 text-sm text-muted-foreground">{previousMissed}: {missedText}</p>
+          <p role="status" className="rounded-lg border border-dashed px-4 py-2 text-sm text-muted-foreground">{previousMissed}: {missedText.replace("{deadline}", formatDateTimeDMY(todayStatus?.previousReport?.deadline))}</p>
         )}
         {view === DailyWorkView.REPORT && activeDate !== workDate && (
           <p role="status" className="rounded-lg border bg-muted/30 px-4 py-2 text-sm text-muted-foreground">{reportForText.replace("{date}", activeDate)}</p>
@@ -328,20 +339,24 @@ function OwnerDailyWorkPage() {
           </div>
         )}
 
+        {view === DailyWorkView.PLAN && outstanding && (
+          <OutstandingReportPanel outstanding={outstanding} onOpenReport={() => setView(DailyWorkView.REPORT)} onChanged={() => qc.invalidateQueries({ queryKey: ["daily-work-status"] })} />
+        )}
         {/* Remount when the authoritative business date changes so today's editor re-seeds cleanly. */}
         <div className={cn(
+          view === DailyWorkView.PLAN && outstanding && "hidden",
           view === DailyWorkView.REPORT && dayStatus && !dayStatus.hasSubmittedWork && "hidden",
           view === DailyWorkView.PLAN && dayStatus?.isFinalized && "hidden",
         )}>
           {section === "APPOINTMENT" ? (
-            <AppointmentSection key={`appt-${activeDate}-${view}`} workDate={activeDate} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <AppointmentSection key={`appt-${activeDate}-${view}`} workDate={activeDate} view={view} locked={sectionLocked} />
           ) : section === "SCHEME_CONVERSION" ? (
-            <ConversionSection key={`conv-${activeDate}-${view}`} workDate={activeDate} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <ConversionSection key={`conv-${activeDate}-${view}`} workDate={activeDate} view={view} locked={sectionLocked} />
           ) : section === "VISITS" || section === "OTHERS" ? (
             // Visits + Others share one SUMMARY record per planning batch; the toggle focuses the visible fields.
-            <SummarySection key={`summary-${activeDate}-${view}`} workDate={activeDate} focus={section} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <SummarySection key={`summary-${activeDate}-${view}`} workDate={activeDate} focus={section} view={view} locked={sectionLocked} />
           ) : (
-            <DailyWorkSection key={`${section}-${activeDate}-${view}`} section={section} workDate={activeDate} view={view} locked={dayStatus?.isFinalized ?? false} />
+            <DailyWorkSection key={`${section}-${activeDate}-${view}`} section={section} workDate={activeDate} view={view} locked={sectionLocked} />
           )}
         </div>
         {view === DailyWorkView.PLAN && dayStatus?.isFinalized && (
@@ -465,7 +480,7 @@ function DailyReportProgress({ workDate, draft }: { workDate: string; draft: Sav
       {draft && (draft.failed || (!draft.saving && draft.savedAt)) && (
         <p role="status" className={cn("text-xs", draft.failed ? "text-destructive" : "text-muted-foreground")}>{draft.failed ? L.failed : L.saved}</p>
       )}
-      {data.reportDeadlinePassed && <p role="alert" className="max-w-xs text-right text-xs text-destructive">{data.reportMissed ? missed : deadlinePassed}</p>}
+      {data.reportDeadlinePassed && <p role="alert" className="max-w-xs text-right text-xs text-destructive">{(data.reportMissed ? missed : deadlinePassed).replace("{deadline}", formatDateTimeDMY(data.reportDeadline))}</p>}
       {error && !ratingOpen && <p className="text-xs text-destructive">{error}</p>}
       {ratingOpen && <SelfRatingModal pending={submitMut.isPending} serverError={error} onCancel={() => { setError(null); setRatingOpen(false); }} onConfirm={(rating) => submitMut.mutate(rating)} />}
     </div>

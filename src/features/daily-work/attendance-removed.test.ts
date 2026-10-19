@@ -13,7 +13,7 @@ assert.deepEqual(offenders, [], "no active application code mentions Attendance"
 assert.equal(existsSync("src/app/api/daily-work/attendance/route.ts"), false, "the attendance endpoint is gone");
 assert.deepEqual(Object.keys(DEFAULT_LABELS).filter((k) => /attendance/i.test(k) || /attendance/i.test(String(DEFAULT_LABELS[k as keyof typeof DEFAULT_LABELS]))), [], "no Attendance label is registered");
 const performance = ADMIN_MODULES.find((m) => m.id === "performance")!;
-assert.deepEqual(performance.actions, ["read"], "Performance has no 'Edit attendance' permission");
+assert.deepEqual(performance.actions, ["read", "lateReports"], "Performance has no 'Edit attendance' permission (only read and the late-report decisions)");
 // The historical table is kept in the schema (no data is dropped) but nothing in src touches it.
 assert.ok(readFileSync("prisma/schema.prisma", "utf8").includes("model DailyWorkAttendance"), "historical storage is retained");
 assert.ok(readdirSync("prisma/migrations").some((m) => /attendance/i.test(readFileSync(join("prisma/migrations", m, "migration.sql"), "utf8"))), "existing migrations are untouched");

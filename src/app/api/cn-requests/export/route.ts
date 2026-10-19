@@ -3,6 +3,7 @@ import { requireAuth, ApiError } from "@/lib/http";
 import { listCnRequestsForExport } from "@/features/cn-requests/service.server";
 import { NO_CN_EXPORT_MESSAGE, cnExportFilename, isCnRequestView } from "@/lib/cn-request";
 import { buildCnRequestsXlsx } from "@/lib/export/cn-requests-xlsx";
+import { parseCnFilters } from "@/lib/cn-request-filters";
 
 /**
  * CN Requests → Excel (Admin). GET ?view=submitted|rejected|accepted-not-posted|posted-in-ledger. The tab's own data path runs under the
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest) {
     const ctx = await requireAuth();
     const view = req.nextUrl.searchParams.get("view");
     if (!isCnRequestView(view)) return NextResponse.json({ error: "Select a CN Requests tab to export." }, { status: 400 });
-    const rows = await listCnRequestsForExport(ctx, view);
+    const rows = await listCnRequestsForExport(ctx, view, parseCnFilters(req.nextUrl.searchParams));
     if (rows.length === 0) return NextResponse.json({ error: NO_CN_EXPORT_MESSAGE }, { status: 422 });
     const filename = cnExportFilename(view);
     const buffer = await buildCnRequestsXlsx(rows, filename.replace(/^CN-Requests-|-\d{4}-\d{2}-\d{2}\.xlsx$/g, ""));

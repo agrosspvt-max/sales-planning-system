@@ -88,6 +88,15 @@ function businessWallTimeToUtc(date: string, hour: number, minute: number): Date
 export function dailyReportDeadline(workDate: string): Date {
   return businessWallTimeToUtc(addBusinessDays(workDate, 1), 12, 0);
 }
+/**
+ * NEW POLICY (Sales Officers, plans first submitted after the rollout): the report closes at the midnight that ENDS the work date, i.e. 00:00 of the following calendar day in the
+ * business timezone. The midnight instant itself is already outside the normal window (see `isStrictDeadlinePassed`).
+ */
+export const SO_MIDNIGHT_POLICY = "SO_MIDNIGHT";
+export const soMidnightDeadline = (workDate: string): Date => businessWallTimeToUtc(addBusinessDays(workDate, 1), 0, 0);
+/** A stored policy deadline is the first instant the window is CLOSED: at or after it, normal submission is refused. */
+export const isStrictDeadlinePassed = (deadline: Date, now: Date): boolean => now.getTime() >= deadline.getTime();
+
 /** Noon itself is still allowed; any later instant is past the deadline. */
 export const isReportDeadlinePassed = (workDate: string, now: Date): boolean => now.getTime() > dailyReportDeadline(workDate).getTime();
 

@@ -51,6 +51,8 @@ import {
 } from "@/lib/cn-request";
 import { CnPaymentDialog } from "./cn-payment-dialog";
 import { CnRequestDetailDialog } from "./cn-request-detail-dialog";
+import { ColumnFilterHeader, type ColumnFilterOption } from "@/components/ui/column-filter-header";
+import { cnFilterParams, cnFilterValue, filterCnRequests, type CnFilterKey, type CnFilters } from "@/lib/cn-request-filters";
 
 interface CnRequest {
   id: string; dealerId: string; partyName: string; cnType: string; amount: number | null; postedAmount: number | null; paymentStatus: string | null; paymentVerified: boolean; paymentOriginalAmount: number | null; paymentOutstandingAmount: number | null; paymentTrackingMode: string | null;
@@ -183,17 +185,24 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     },
     day: useLabel("cn_requests.duration.day"),
     days: useLabel("cn_requests.duration.days"),
+    filterAll: useLabel("cn_requests.filter.all"), filterSearch: useLabel("cn_requests.filter.search"),
+    filterNoOptions: useLabel("cn_requests.filter.no_options"), filterNoMatches: useLabel("cn_requests.filter.no_matches"),
+    filterClear: useLabel("cn_requests.filter.clear"), filterEmpty: useLabel("cn_requests.filter.empty"),
   };
 
   const [section, setSection] = useState<"submitted-rejected" | "accepted">("submitted-rejected");
   const [decisionView, setDecisionView] = useState<"submitted" | "rejected">("submitted");
   const [acceptedView, setAcceptedView] = useState<"accepted-not-posted" | "posted-in-ledger">("accepted-not-posted");
   const view: CnRequestView = section === "submitted-rejected" ? decisionView : acceptedView;
+  const [filters, setFilters] = useState<CnFilters>({});
 
   const { data: rows, isLoading } = useQuery<CnRequest[]>({
     queryKey: ["cn-requests", view],
     queryFn: () => api.get<CnRequest[]>(`/api/cn-requests?view=${encodeURIComponent(view)}`),
   });
+  const filteredRows = filterCnRequests(rows ?? [], filters);
+  const stateRows = filterCnRequests(rows ?? [], { state: filters.state });
+  const hasFilters = Object.values(filters).some((values) => !!values?.length);
 
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<{ view: CnRequestView; text: string } | null>(null);
@@ -203,10 +212,10 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   const exportExcel = async () => {
     if (exporting) return; // no duplicate requests
     setExportMessage(null);
-    if (rows && rows.length === 0) { setExportMessage(labels.exportEmpty); return; }
+    if (rows && filteredRows.length === 0) { setExportMessage(labels.exportEmpty); return; }
     setExporting(true);
     try {
-      const response = await fetch(`/api/cn-requests/export?view=${encodeURIComponent(view)}`);
+      const response = await fetch(`/api/cn-requests/export?view=${encodeURIComponent(view)}&${cnFilterParams(filters)}`);
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: string };
         setExportMessage(response.status === 422 ? labels.exportEmpty : body.error ?? labels.exportFailed);
@@ -294,6 +303,41 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   const showApproval = !isOfficer && section === "submitted-rejected";
   const columnCount = 5 + (showAmountPayment ? 2 : 0) + (showProfileColumns ? 3 : 0) + (showExpires ? 1 : 0) + (showApproval ? 1 : 0);
 
+  const filterLabel = (row: CnRequest, field: CnFilterKey): string => {
+    switch (field) {
+      case "party": return row.partyName;
+      case "employee": return row.employeeName;
+      case "cnType": return cnTypeLabel(row.cnType, labels.cnTypeLabels);
+      case "amount": return money(row.amount);
+      case "paymentStatus": return row.paymentStatus ? paymentStatusLabel(row.paymentStatus, labels.paymentStatusLabels) : "—";
+      case "state": return row.state ?? "—";
+      case "territory": return row.territory ?? "—";
+      case "days": return formatCnRequestDays(row.days, labels);
+      case "expiry": return row.expiryDate ? businessDate(row.expiryDate) : "—";
+      case "status": {
+        const value = cnFilterValue(row, field);
+        return value === "SUBMITTED" ? labels.submitted : value === "REJECTED" ? labels.rejected
+          : value === "ACCEPTED_NOT_POSTED" ? labels.acceptedNotPosted : value === "RETURNED_FROM_LEDGER" ? labels.returnedFromLedger : labels.postedInLedger;
+      }
+    }
+  };
+  const filterHeader = (field: CnFilterKey, label: string, className?: string) => {
+    // State is the parent: every other column's choices come only from the selected State(s), within this authorized tab.
+    const choices = new Map<string, ColumnFilterOption>();
+    for (const row of field === "state" ? rows ?? [] : stateRows) {
+      const value = cnFilterValue(row, field);
+      if (!choices.has(value)) choices.set(value, { value, label: filterLabel(row, field),
+        ...(field === "employee" ? { secondary: [row.territory, row.state].filter(Boolean).join(" · ") } : {}),
+      });
+    }
+    return <ColumnFilterHeader label={label} ariaLabel={label} className={className} searchable
+      options={[...choices.values()].sort((a, b) => a.label.localeCompare(b.label, "en", { sensitivity: "base", numeric: true }))}
+      selected={filters[field] ?? []} onChange={(next) => {
+        setFilters((current) => field === "state" ? { state: next } : { ...current, [field]: next });
+        setExportMessage(null);
+      }} allLabel={labels.filterAll} searchPlaceholder={labels.filterSearch} emptyText={labels.filterNoOptions} noMatchText={labels.filterNoMatches} />;
+  };
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -305,7 +349,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
 
       <PillNav
         value={section}
-        onChange={setSection}
+        onChange={(next) => { setSection(next); setFilters({}); }}
         items={[
           { value: "submitted-rejected", label: labels.submittedRejected },
           { value: "accepted", label: labels.accepted },
@@ -316,7 +360,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
         <div className="flex flex-wrap items-center justify-between gap-3">
           <UnderlineTabs
             value={decisionView}
-            onChange={setDecisionView}
+            onChange={(next) => { setDecisionView(next); setFilters({}); }}
             items={[
               { value: "submitted", label: labels.submitted },
               { value: "rejected", label: labels.rejected },
@@ -328,7 +372,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
         <div className="flex flex-wrap items-center justify-between gap-3">
           <UnderlineTabs
             value={acceptedView}
-            onChange={setAcceptedView}
+            onChange={(next) => { setAcceptedView(next); setFilters({}); }}
             items={[
               { value: "accepted-not-posted", label: labels.acceptedNotPosted },
               { value: "posted-in-ledger", label: labels.postedInLedger },
@@ -338,20 +382,21 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
         </div>
       )}
 
+      {hasFilters && <div className="flex justify-end"><Button size="sm" variant="ghost" onClick={() => { setFilters({}); setExportMessage(null); }}>{labels.filterClear}</Button></div>}
       <div className="overflow-auto rounded-lg border bg-background">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>{labels.party}</TableHead>
-              <TableHead>{labels.cnType}</TableHead>
-              {showAmountPayment && <TableHead className="text-right">{labels.amount}</TableHead>}
-              {showAmountPayment && <TableHead>{labels.paymentStatus}</TableHead>}
-              {showProfileColumns && <TableHead>{labels.employeeName}</TableHead>}
-              {showProfileColumns && <TableHead>{labels.state}</TableHead>}
-              {showProfileColumns && <TableHead>{labels.territory}</TableHead>}
-              <TableHead>{labels.status}</TableHead>
-              <TableHead>{labels.colDays}</TableHead>
-              {showExpires && <TableHead>{labels.expires}</TableHead>}
+              {filterHeader("party", labels.party)}
+              {filterHeader("cnType", labels.cnType)}
+              {showAmountPayment && filterHeader("amount", labels.amount, "text-right")}
+              {showAmountPayment && filterHeader("paymentStatus", labels.paymentStatus)}
+              {showProfileColumns && filterHeader("employee", labels.employeeName)}
+              {showProfileColumns && filterHeader("state", labels.state)}
+              {showProfileColumns && filterHeader("territory", labels.territory)}
+              {filterHeader("status", labels.status)}
+              {filterHeader("days", labels.colDays)}
+              {showExpires && filterHeader("expiry", labels.expires)}
               {showApproval && <TableHead className="text-right">{labels.approval}</TableHead>}
               <TableHead className="text-right">{labels.colAction}</TableHead>
             </TableRow>
@@ -359,10 +404,10 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
           <TableBody>
             {isLoading ? (
               <TableRow><TableCell colSpan={columnCount}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-            ) : (rows?.length ?? 0) === 0 ? (
-              <TableRow><TableCell colSpan={columnCount} className="py-10 text-center text-muted-foreground">{labels.noRequests}</TableCell></TableRow>
+            ) : filteredRows.length === 0 ? (
+              <TableRow><TableCell colSpan={columnCount} className="py-10 text-center text-muted-foreground">{hasFilters ? labels.filterEmpty : labels.noRequests}</TableCell></TableRow>
             ) : (
-              rows!.map((r) => (
+              filteredRows.map((r) => (
                 <TableRow data-dealer-id={r.dealerId} key={r.id}>
                   <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.partyName} /></TableCell>
                   <TableCell>{cnTypeLabel(r.cnType, labels.cnTypeLabels)}</TableCell>

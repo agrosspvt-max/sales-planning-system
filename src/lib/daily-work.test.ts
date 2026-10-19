@@ -52,9 +52,9 @@ test("public Daily Work routes make the current business date authoritative", ()
     // Plan routes are always today. Report routes (status / section reads / actual) may also target YESTERDAY's still-open report,
     // but only through resolveReportDate (today or yesterday, nothing else); the service enforces the noon deadline.
     const reportRoute = ["route.ts", "status/route.ts", "actual/route.ts"].includes(path);
-    assert.match(source, reportRoute ? /currentBusinessDate\(\)|resolveReportDate\(/ : /currentBusinessDate\(\)/, `${path} must use the server business date`);
+    assert.match(source, reportRoute ? /currentBusinessDate\(\)|resolveReportDate(?:ForOwner)?\(/ : /currentBusinessDate\(\)/, `${path} must use the server business date`);
   }
-  assert.match(readFileSync(resolve(routeRoot, "submit-report/route.ts"), "utf8"), /resolveReportDate\(/, "report submission may target yesterday's open report");
+  assert.match(readFileSync(resolve(routeRoot, "submit-report/route.ts"), "utf8"), /resolveReportDateForOwner\(/, "report submission may target yesterday's open report (or an authorized older one)");
   for (const path of ["save/route.ts", "submit/route.ts", "no-plan/route.ts", "submit-day/route.ts"]) {
     assert.doesNotMatch(readFileSync(resolve(routeRoot, path), "utf8"), /resolveReportDate/, `${path} always works on today`);
   }

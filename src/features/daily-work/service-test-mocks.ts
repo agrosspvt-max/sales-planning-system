@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
+import { dailyReportDeadline, dailyWorkClock, isReportDeadlinePassed } from "@/lib/daily-work";
+import { formatDateTimeDMY } from "@/lib/date-format";
 
 type TestDb = {
   $queryRaw<T = unknown>(query: Prisma.Sql): Promise<T>;
@@ -62,6 +64,28 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
     "@/lib/recovery-config": {
       getAutoTasksEnabled: async () => false,
       getAppointmentPartyPlanningEnabled: async () => false,
+    },
+    // Deadline policy + late-submission approval (own suites: report-policy.integration.ts + report-policy.test.ts). Here every day follows the PREVIOUS rules (noon of the next day).
+    "./report-policy.server": {
+      reportWindow: async (_db: unknown, _officer: string, workDate: string, now: Date = dailyWorkClock.now()) => {
+        const passed = isReportDeadlinePassed(workDate, now);
+        return { covered: false, deadline: dailyReportDeadline(workDate), passed, approved: false, open: !passed };
+      },
+      assertReportWritable: async (_db: unknown, _officer: string, workDate: string, L: Record<string, string>) => {
+        if (isReportDeadlinePassed(workDate, dailyWorkClock.now())) throw Object.assign(new Error(L["daily_work.validation.report_deadline_passed"].replace("{deadline}", formatDateTimeDMY(dailyReportDeadline(workDate)))), { status: 422 });
+        return { covered: false, deadline: dailyReportDeadline(workDate), passed: false, approved: false, open: true };
+      },
+      assertPlanWritable: async () => undefined,
+      outstandingReport: async () => null,
+      recordPolicyOnFirstSubmit: async () => undefined,
+      completeLateRequest: async () => undefined,
+      loadPolicyDeadlines: async () => new Map(),
+      loadLateRequestFacts: async () => new Map(),
+      rolloutEffectiveAt: async () => null,
+      myLateRequests: async () => [],
+      createLateReportRequest: async () => { throw new Error("not part of this fake"); },
+      listLateRequests: async () => [],
+      decideLateReportRequest: async () => { throw new Error("not part of this fake"); },
     },
     // One row per scheduled task (own suites: task-rows.test + the real-database integration); inert here.
     "./task-rows.server": {

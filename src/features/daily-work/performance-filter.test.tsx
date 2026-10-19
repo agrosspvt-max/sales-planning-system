@@ -16,6 +16,7 @@ const selects: { value?: string; onChange?: (e: { target: { value: string } }) =
 const PEOPLE = [
   { id: "rm2", name: "RM Two", state: "g2" }, { id: "so1", name: "Rahul", state: "g1" }, { id: "so3", name: "Ravi", state: "g2" },
 ];
+let patch: Record<string, Record<string, unknown>> = {};
 const payloadFor = (url: string) => {
   const q = new URLSearchParams(url.split("?")[1]);
   const state = q.get("groupId"); const person = q.get("officerId");
@@ -25,7 +26,7 @@ const payloadFor = (url: string) => {
     role: Role.SUPER_ADMIN, from: "2026-09-28", to: "2026-09-28",
     states: [{ id: "g1", name: "MP" }, { id: "g2", name: "UP" }],
     officers: pool.map((p) => ({ id: p.id, name: p.name })),
-    rows: shown.map((p) => ({ officerId: p.id, officerName: p.name, groupId: p.state, stateName: p.state, date: "2026-09-28", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: null, reportMissed: p.id === "so1", taskActivity: p.id === "so1" ? { tasks: 9, completed: 4, reschedules: 3, abandoned: 0, sections: { SALES: 3, RECOVERY: 2, APPOINTMENT: 2, VISITS: 2 } } : p.id === "so3" ? { tasks: 0, completed: 0, reschedules: 0, abandoned: 0, sections: {} } : null, selfRating: null, rmRating: null, submitted: true })),
+    rows: shown.map((p) => ({ ...(patch[p.id] ?? {}), officerId: p.id, officerName: p.name, groupId: p.state, stateName: p.state, date: "2026-09-28", planSubmittedAt: "2026-09-28T09:00:00.000Z", reportSubmittedAt: null, reportMissed: p.id === "so1", taskActivity: p.id === "so1" ? { tasks: 9, completed: 4, reschedules: 3, abandoned: 0, sections: { SALES: 3, RECOVERY: 2, APPOINTMENT: 2, VISITS: 2 } } : p.id === "so3" ? { tasks: 0, completed: 0, reschedules: 0, abandoned: 0, sections: {} } : null, selfRating: null, rmRating: null, submitted: true, ...(patch[p.id] ?? {}) })),
     summary: { salesOfficers: shown.length, employeeDays: shown.length, submittedPlans: shown.length, submittedReports: 0, averageSelfRating: null, averageRmRating: null, sections: Object.fromEntries(["sales", "recovery", "schemeConversion", "appointment", "visits"].map((k) => [k, { planned: 0, actual: 0 }])) },
   };
 };
@@ -82,6 +83,24 @@ const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
   const headCells = [...h.matchAll(/<th[^>]*>([^]*?)<\/th>/g)].length;
   const bodyCells = [...h.matchAll(/<tr[^>]*>((?:(?!<\/tr>)[^])*?<td[^]*?)<\/tr>/g)][0]![1]!.match(/<td/g)!.length;
   assert.equal(bodyCells, headCells, "the table body has exactly one cell per header after the column was removed");
+}
+
+// 0b) Late-report presentation: Missed in BOTH columns for a skipped date; "Pending Approval" / "Reopened" under Missed; the real submission time with a muted Late label.
+{
+  patch = {
+    so1: { planSubmittedAt: null, planMissed: true, reportMissed: true, reportSubmittedAt: null, lateReport: { open: null, late: false } },
+    so3: { reportMissed: true, reportSubmittedAt: null, lateReport: { open: "PENDING", late: false } },
+    rm2: { reportMissed: false, reportSubmittedAt: "2026-09-30T09:00:00.000Z", lateReport: { open: null, late: true } },
+  };
+  hooks.length = 0;
+  const h = render(Role.SUPER_ADMIN);
+  const rowsHtml = [...h.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map((m) => m[1]!).filter((x) => x.includes("<td"));
+  const rowOf = (name: string) => rowsHtml.find((x) => x.includes(name))!;
+  assert.equal((rowOf("Rahul").match(/data-testid="plan-missed"|Missed/g) ?? []).length >= 2, true, "a skipped date shows Missed under Plan Submission AND Report Submission");
+  assert.ok(rowOf("Ravi").includes("Pending Approval") && rowOf("Ravi").includes("Missed"), "an open request is shown under Missed without inventing a submission time");
+  assert.ok(rowOf("RM Two").includes("30/09/2026") && rowOf("RM Two").includes("Late") && !rowOf("RM Two").includes("Missed"), "approved late submission: real submission date/time, a muted Late label, no Missed");
+  patch = {};
+  hooks.length = 0;
 }
 
 // 1) Loads without a person filter; the header IS the filter, still labelled "Sales Officer".

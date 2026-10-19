@@ -110,7 +110,7 @@ async function batchDraftRegression() {
   }
   latencyMs = 250; statements.length = 0;
   assert.equal((await send(automatic)).count, 2);
-  assert.equal(statements.length, 7, "two unselected auto tasks are saved with bounded round trips");
+  assert.equal(statements.length, 8, "two unselected auto tasks are saved with bounded round trips (the deadline check adds one constant statement)");
   const autoSnapshots = await prisma.dailyTaskOutcome.findMany({ where: { entryId: { in: autoRows.map((e) => e.entryId) } }, orderBy: { plannedAmount: "asc" } });
   eq(autoSnapshots.map((o) => [o.unitType, Number(o.plannedAmount), o.outcome]), [["BILLING_EXCEPTION", 11111, null], ["BILLING_EXCEPTION", 12444, null]], "automatic tasks keep separate identities/amounts and incomplete choices");
   assert.ok((await prisma.dailyWorkEntry.findMany({ where: { id: { in: autoRows.map((e) => e.entryId) } } })).every((r) => r.todaysActual === null));
@@ -138,7 +138,7 @@ async function batchDraftRegression() {
   eq((await send(many)).count, 20);
   const elapsed = performance.now() - start;
   assert.equal(statements.length, oneTrips, "twenty tasks cost the same number of round trips as one");
-  assert.ok(oneTrips <= 7, `cold save took ${oneTrips} statements`);
+  assert.ok(oneTrips <= 8, `cold save took ${oneTrips} statements`);
   assert.ok(elapsed < 5000, `slow-network save must finish inside the unchanged timeout: ${elapsed}ms`);
   eq((await prisma.dailyWorkEntry.findMany({ where: { id: { in: many.map((e) => e.entryId) } } })).map((r) => [Number(r.todaysActual), r.paymentMode]), Array.from({ length: 20 }, () => [800, "UPI"]));
   assert.equal(await prisma.dailyTaskOutcome.count({ where: { entryId: { in: many.map((e) => e.entryId) } } }), 20);

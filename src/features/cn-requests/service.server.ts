@@ -11,6 +11,7 @@ import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
+import { filterCnRequests, type CnFilters } from "@/lib/cn-request-filters";
 import { getResolvedLabels } from "@/features/labels/service.server";
 import { notifyAutoTaskCreated } from "@/features/notifications/task-alerts.server";
 import { recordTaskReschedule } from "@/features/tasks/task-history.server";
@@ -380,12 +381,12 @@ export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Pr
  * Admin Excel export of ONE CN Requests tab. It is the table's own data path (listCnRequests: same scope, same tab filter, no pagination),
  * projected onto the five export columns — Dealer / CN Type / Employee Name / State / Territory — and nothing else.
  */
-export async function listCnRequestsForExport(ctx: AuthContext, view: CnRequestView): Promise<CnExportRow[]> {
+export async function listCnRequestsForExport(ctx: AuthContext, view: CnRequestView, filters: CnFilters = {}): Promise<CnExportRow[]> {
   const L = await getResolvedLabels();
   if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, L["cn_requests.error.admin_export_only"]);
   assertAdminPermission(ctx, "cnRequests", "read");
   const rows = await listCnRequests(ctx, view);
-  return toCnExportRows(rows, {
+  return toCnExportRows(filterCnRequests(rows, filters), {
     priceDifference: L["cn_requests.cn_type.price_difference"], freight: L["cn_requests.cn_type.freight"], scheme: L["cn_requests.cn_type.scheme"],
     demo: L["cn_requests.cn_type.demo"], damageExpiry: L["cn_requests.cn_type.damage_expiry"], other: L["cn_requests.cn_type.other"],
   });

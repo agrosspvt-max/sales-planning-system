@@ -40,6 +40,8 @@ model User {
   cnPaymentEvents          CnPaymentEvent[]            @relation("CnPaymentEventRecordedBy")
   cnRequests               CnRequest[]                 @relation("OfficerCnRequests")
   dailyWorkAttendance      DailyWorkAttendance[]       @relation("DailyWorkAttendanceOfficer")
+  dailyReportPolicies      DailyReportPolicy[]         @relation("DailyReportPolicyOfficer")
+  lateReportRequests       LateReportRequest[]         @relation("LateReportRequestOfficer")
   dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
   marketRequests           MarketRequest[]             @relation("MarketRequestRequester")
   dealerStatusRequested    DealerStatusRequest[]       @relation("DealerStatusRequester")
@@ -2533,4 +2535,48 @@ model DailyTaskOutcome {
   @@index([unitType, unitId])
   @@index([officerId, workDate])
   @@index([committedAt])
+}
+
+/// Daily Report deadline policy rollout: Daily Plans first submitted at or after `effectiveAt` follow the new policy (Sales Officer reports close at midnight ending the work date);
+/// earlier plans keep the previous rules. One row, id = SO_MIDNIGHT.
+model DailyReportRollout {
+  id          String   @id
+  effectiveAt DateTime @db.Timestamptz(3)
+  createdAt   DateTime @default(now())
+}
+
+/// The deadline policy of ONE covered reporting day, written when the day's plan is first submitted and never changed afterwards.
+model DailyReportPolicy {
+  id        String   @id @default(cuid())
+  officerId String
+  workDate  DateTime @db.Date
+  version   String // SO_MIDNIGHT
+  deadline  DateTime @db.Timestamptz(3) // the first instant the normal reporting window is CLOSED
+  createdAt DateTime @default(now())
+  officer   User     @relation("DailyReportPolicyOfficer", fields: [officerId], references: [id])
+
+  @@unique([officerId, workDate])
+}
+
+/// A Sales Officer's request to submit an overdue Daily Report. PENDING → APPROVED | REJECTED; APPROVED → COMPLETED once the report is finally submitted. One open request per officer/date.
+model LateReportRequest {
+  id             String    @id @default(cuid())
+  officerId      String
+  workDate       DateTime  @db.Date
+  reason         String
+  status         String    @default("PENDING")
+  deadline       DateTime  @db.Timestamptz(3)
+  requestedAt    DateTime  @default(now())
+  decidedById    String?
+  decidedByName  String?
+  decidedByRole  String?
+  decidedAt      DateTime?
+  decisionReason String?
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
+  officer        User      @relation("LateReportRequestOfficer", fields: [officerId], references: [id])
+
+  @@index([status, requestedAt])
+  @@index([officerId, workDate])
 }

@@ -16,7 +16,7 @@ import { ADMIN_MODULES, type AdminModule, type AdminPermissions } from "./permis
 interface Account { id: string; name: string; username: string; designation: string | null; isActive: boolean; permissions: AdminPermissions }
 const ACTION_LABELS: Record<string, string> = { read: "Module access / View", create: "Create", update: "Edit", delete: "Delete / Deactivate", submit: "Submit",
   approve: "Approve / Accept", reject: "Reject", return: "Return for correction", lifecycle: "Lifecycle actions", analyze: "Upload / Analyze", review: "Review", import: "Confirm / Import",
-  upload: "Upload", verify: "Verify enrollment", payment: "Record payments", verifyPayment: "Verify payment", post: "Post in Ledger",
+  upload: "Upload", verify: "Verify enrollment", payment: "Record payments", verifyPayment: "Verify payment", post: "Post in Ledger", lateReports: "Decide late report requests",
   assign: "Assign tag", revoke: "Revoke tag", merge: "Merge / Unmerge", export: "Export", transfer: "Transfer" };
 export function AccountsPage() {
   const accounts = useQuery({ queryKey: ["administrative-accounts"], queryFn: () => api.get<Account[]>("/api/accounts") });

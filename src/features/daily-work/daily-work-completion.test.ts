@@ -277,7 +277,7 @@ async function readyToday(f: ReturnType<typeof makeFake>, ctx: AuthContext = SO)
 }
 const planStatuses = (f: ReturnType<typeof makeFake>) => f.entries.filter((row) => row.workDate === DATE).map((row) => row.status);
 const REQUIRED = "Submit the previous day's Daily Report before submitting today's Daily Plan.";
-const TOO_LATE = "The Daily Report can only be submitted until 12:00 PM on the following day. This deadline has passed.";
+const TOO_LATE = "The Daily Report submission deadline (21/09/2026, 12:00 pm IST) has passed.";
 async function expectMessage(fn: () => Promise<unknown>, status: number, message: string, label: string) {
   try { await fn(); assert.fail(`${label}: expected ${status} but succeeded`); }
   catch (error) { assert.equal((error as { status?: number }).status, status, `${label}: ${(error as Error).message}`); assert.equal((error as Error).message, message, label); }

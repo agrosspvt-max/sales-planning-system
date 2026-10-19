@@ -612,7 +612,7 @@ async function main() {
   assert.match(createPageSource, /<Textarea\s+required/);
   assert.doesNotMatch(createPageSource, /<Label>Approx Amount<\/Label>/);
   assert.doesNotMatch(createPageSource, /<Label>Payment Status \*<\/Label>/);
-  assert.match(createPageSource, /<TableHead>\{labels\.paymentStatus\}<\/TableHead>/, "Payment Status remains visible and label-driven in the table");
+  assert.match(createPageSource, /filterHeader\("paymentStatus", labels\.paymentStatus\)/, "Payment Status remains visible and label-driven as a searchable table header");
   assert.ok(createPageSource.includes("export function CreateRequestDialog"), "Recovery reuses the existing Create CN Request dialog");
   assert.ok(createPageSource.includes("initialDealerId?: string"), "the shared dialog accepts an optional dealer identity");
   assert.ok(createPageSource.includes('useState(initialDealerId ?? "")'), "the clicked Dealer.id pre-fills the shared dialog");
@@ -711,7 +711,7 @@ async function main() {
   assert.ok(createPageSource.includes("labels.cnExpiryDays"), "Accepted, Not Posted shows the required expiry input");
   assert.ok(createPageSource.includes("labels.postedAmount"), "Posted in Ledger shows the required Posted Amount input");
   assert.ok(createPageSource.includes("labels.outstandingAmount"), "Payment Pending shows the required Outstanding Amount input");
-  assert.ok(createPageSource.includes("showExpires && <TableHead>{labels.expires}</TableHead>"), "only the Accepted / Not Posted table adds Expires");
+  assert.ok(createPageSource.includes('showExpires && filterHeader("expiry", labels.expires)'), "only the Accepted / Not Posted table adds the searchable Expires header");
   assert.ok(createPageSource.includes('const showApproval = !isOfficer && section === "submitted-rejected"'), "Approval is limited to Submitted / Rejected");
   assert.ok(createPageSource.includes('{showApproval && <TableHead className="text-right">{labels.approval}</TableHead>}'), "Accepted tables do not render the Approval header");
   // Test 3 — no manual Post in Ledger route: the CN Working Shared (and Posted) row menu is View Details + Download only.

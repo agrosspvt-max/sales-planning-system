@@ -48,7 +48,7 @@ const load = testLoader({
   "@/features/labels/service.server": { getResolvedLabels: async () => ({ ...DEFAULT_LABELS, ...labelOverrides }) },
 });
 const route = load<{ GET: (req: { nextUrl: { searchParams: URLSearchParams } }) => Promise<FakeNextResponse> }>("src/app/api/cn-requests/export/route.ts");
-const call = (view: string | null) => route.GET({ nextUrl: { searchParams: new URLSearchParams(view ? { view } : {}) } });
+const call = (view: string | null, filters: Record<string, string> = {}) => route.GET({ nextUrl: { searchParams: new URLSearchParams({ ...(view ? { view } : {}), ...filters }) } });
 const sheet = async (res: FakeNextResponse) => {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(res.body as Parameters<typeof wb.xlsx.load>[0]);
@@ -91,6 +91,8 @@ async function main() {
   assert.deepEqual((await sheet(await call("submitted"))).grid.slice(1).find((r) => r[0] === "Dealer s2"), ["Dealer s2", "Freight", "Officer One", "State One", "North"]);
   assert.equal((await sheet(await call("rejected"))).grid.slice(1).find((r) => r[0] === "Dealer r2")![1], "Damage/Expiry", "legacy Damage reads as Damage/Expiry");
   assert.equal((await sheet(await call("submitted"))).grid[1]![1], "Price diff", "CN Type is the displayed label");
+  assert.deepEqual((await sheet(await call("submitted", { cnType: "Freight", employee: "so-1", state: "State One" }))).grid.slice(1).map((r) => r[0]), ["Dealer s2"], "admin export follows the same combined column filters as the table");
+  assert.equal((await call("submitted", { state: "Unmatched State" })).status, 422, "a filter with no matches never downloads the unfiltered data");
   labelOverrides = { "cn_requests.cn_type.price_difference": "Rate Difference" };
   assert.equal((await sheet(await call("submitted"))).grid[1]![1], "Rate Difference", "a configured CN Type label is used");
   labelOverrides = {};
@@ -151,7 +153,7 @@ async function main() {
   const ui = readFileSync("src/features/cn-requests/cn-requests-page.tsx", "utf8");
   assert.equal((ui.match(/\{exportButton\}/g) ?? []).length, 2, "one Export Excel button beside the Submitted/Rejected tabs and the Accepted tabs");
   assert.ok(ui.includes("const exportButton = isAdmin ?") && ui.includes("if (exporting) return;") && ui.includes("disabled={exporting || isLoading}") && ui.includes("labels.exporting"), "Admin only, loading state, duplicate clicks ignored");
-  assert.ok(ui.includes("api/cn-requests/export?view=${encodeURIComponent(view)}") && ui.includes("rows.length === 0") && ui.includes("labels.exportEmpty"), "exports the selected tab; empty tab → message");
+  assert.ok(ui.includes("api/cn-requests/export?view=${encodeURIComponent(view)}") && ui.includes("filteredRows.length === 0") && ui.includes("labels.exportEmpty") && ui.includes("cnFilterParams(filters)"), "exports the selected tab and filters; empty selection → message");
   const fn = ui.slice(ui.indexOf("const exportExcel"), ui.indexOf("const exportButton"));
   assert.ok(!/rows[!?]?\.(map|filter|forEach)/.test(fn) && !/xlsx|exceljs/i.test(fn), "the file is never built from the on-screen rows");
   assert.ok(DEFAULT_LABELS["cn_requests.action.export_excel"] === "Export Excel");

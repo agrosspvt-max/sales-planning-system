@@ -2326,8 +2326,10 @@ function enumerateDates(from: string, to: string): string[] {
 const performanceFilterSchema = z.object({
   from: z.string().optional(),
   to: z.string().optional(),
-  officerId: z.string().optional(),
-  groupId: z.string().optional(), // State (region) filter — Admin only
+  officerId: z.string().optional(), // legacy single-person callers
+  officerIds: z.array(z.string().min(1)).optional(),
+  groupId: z.string().optional(), // legacy single-State callers — Admin only
+  groupIds: z.array(z.string().min(1)).optional(), // State column multiselect — Admin only
 });
 
 /** Roles that own Daily Work (and therefore appear in Performance). */
@@ -2400,16 +2402,18 @@ async function resolvePerformanceFilters(ctx: AuthContext, raw: unknown) {
 
   let population = await performancePopulation(ctx);
 
-  // State establishes the Admin's authoritative SO scope first. The officer filter is then validated against
-  // that narrowed population, so State=MP + an UP officer cannot bypass the State filter.
-  if (isAdministrativeRole(ctx.role) && filters.groupId) {
-    population = population.filter((p) => p.groupId === filters.groupId);
+  // OR within selected States, then AND with employee choices. State never widens role scope.
+  const selectedGroupIds = new Set([...(filters.groupIds ?? []), ...(filters.groupId ? [filters.groupId] : [])]);
+  if (isAdministrativeRole(ctx.role) && selectedGroupIds.size > 0) {
+    population = population.filter((p) => p.groupId != null && selectedGroupIds.has(p.groupId));
   }
-  if (ctx.role !== Role.SALES_OFFICER && filters.officerId) {
-    if (!population.some((p) => p.id === filters.officerId)) throw new ApiError(403, L["daily_work.performance.forbidden"]);
-    population = population.filter((p) => p.id === filters.officerId);
+  const selectedIds = new Set([...(filters.officerIds ?? []), ...(filters.officerId ? [filters.officerId] : [])]);
+  if (ctx.role !== Role.SALES_OFFICER && selectedIds.size > 0) {
+    const allowed = new Set(population.map((p) => p.id));
+    if ([...selectedIds].some((id) => !allowed.has(id))) throw new ApiError(403, L["daily_work.performance.forbidden"]);
+    population = population.filter((p) => selectedIds.has(p.id));
   }
-  return { L, filters, from, to, dates, population };
+  return { L, filters, from, to, dates, population, selectedGroupIds };
 }
 
 /**
@@ -2429,7 +2433,7 @@ export async function taskAnalysisScope(ctx: AuthContext, raw: { officerId?: str
 }
 
 export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): Promise<PerformancePayload> {
-  const { filters, from, to, dates, population } = await resolvePerformanceFilters(ctx, raw);
+  const { from, to, dates, population, selectedGroupIds } = await resolvePerformanceFilters(ctx, raw);
 
   const ids = population.map((p) => p.id);
   const [planRows, dayRows, rmRows, entryRows] = ids.length === 0
@@ -2522,8 +2526,8 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   // State options always span the full authoritative population. Admin officer options follow the selected State;
   // with All States they span the company. RM options retain their existing team scope.
   const fullPopulation = await performancePopulation(ctx);
-  const officerOptions = isAdministrativeRole(ctx.role) && filters.groupId
-    ? fullPopulation.filter((p) => p.groupId === filters.groupId)
+  const officerOptions = isAdministrativeRole(ctx.role) && selectedGroupIds.size > 0
+    ? fullPopulation.filter((p) => p.groupId != null && selectedGroupIds.has(p.groupId))
     : fullPopulation;
   const officers = officerOptions.map((p) => ({ id: p.id, name: p.name }));
   const states = isAdministrativeRole(ctx.role)
@@ -2559,7 +2563,7 @@ const DETAIL_MAX_PAGE_SIZE = 100;
  */
 export async function getPerformanceMetricDetail(ctx: AuthContext, raw: unknown = {}): Promise<PerformanceDetailPayload> {
   const input = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const { L, filters, from, to, population } = await resolvePerformanceFilters(ctx, input);
+  const { L, filters, from, to, population, selectedGroupIds } = await resolvePerformanceFilters(ctx, input);
   if (!isPerformanceMetric(input.metric)) throw new ApiError(422, L["daily_work.performance.invalid_metric"]);
   const metric = input.metric;
   const info = PERFORMANCE_METRIC_INFO[metric];
@@ -2614,9 +2618,11 @@ export async function getPerformanceMetricDetail(ctx: AuthContext, raw: unknown 
     };
   });
 
-  const stateName = filters.groupId ? (await performancePopulation(ctx)).find((p) => p.groupId === filters.groupId)?.groupName ?? null : null;
+  const stateName = isAdministrativeRole(ctx.role) && selectedGroupIds.size > 0
+    ? [...new Set((await performancePopulation(ctx)).filter((p) => p.groupId != null && selectedGroupIds.has(p.groupId)).map((p) => p.groupName).filter((name): name is string => name != null))].sort((a, b) => a.localeCompare(b)).join(", ") || null
+    : null;
   return {
-    metric, unit: info.unit, kind: info.kind, from, to, stateName, officerName: filters.officerId ? people.get(filters.officerId)?.name ?? null : null,
+    metric, unit: info.unit, kind: info.kind, from, to, stateName, officerName: filters.officerId || filters.officerIds?.length ? population.map((p) => p.name).join(", ") || null : null,
     total, recordCount: contributions.length, employeeCount, rows, page, pageSize, totalPages, sort, dir,
   };
 }

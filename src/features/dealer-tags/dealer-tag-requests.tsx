@@ -55,7 +55,7 @@ export function DealerTagRequests({ pendingOnly = false }: { pendingOnly?: boole
         <p className="text-sm text-destructive">{(error ?? act.error)?.message}</p>
       )}
       <div className="rounded-lg border">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <Th labelKey="dealer_tags.col.dealer" />

@@ -23,7 +23,7 @@ interface DealerRow {
   salesOfficerId: string; salesOfficerName: string; state: string | null;
   paymentCount: number; totalPaid: number; lastReceivedDate: string | null; lastRecordedAt: string | null;
 }
-interface DealerList { rows: DealerRow[]; filters: { states: string[]; officers: { id: string; name: string }[] } }
+interface DealerList { rows: DealerRow[]; filters: { states: { id: string; name: string }[]; officers: { id: string; name: string }[]; applied: { stateId: string; officerId: string } } }
 interface TInstallment { installmentId: string; instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; plannedAmount: number; receivedAmount: number; status: string; receivedPct: number }
 interface TAllocation { instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; allocated: number; cumulative: number; plannedAmount: number; resultingStatus: string; receivedPct: number }
 interface TPayment { id: string; amount: number; receivedDate: string; recordedAt: string; createdByName: string | null; note: string | null; allocations: TAllocation[] }
@@ -60,7 +60,7 @@ export function SchemePaymentsPage() {
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
-    if (state) p.set("state", state);
+    if (state) p.set("stateId", state);
     if (officerId) p.set("officerId", officerId);
     if (receivedFrom) p.set("receivedFrom", receivedFrom);
     if (receivedTo) p.set("receivedTo", receivedTo);
@@ -97,6 +97,13 @@ export function SchemePaymentsPage() {
   const rows = data?.rows ?? [];
   const officers = data?.filters.officers ?? [];
   const states = data?.filters.states ?? [];
+  // The server returns the filters it actually applied: a State / officer that is no longer a valid choice is dropped here too (never a stale hidden filter).
+  useEffect(() => {
+    const applied = data?.filters.applied;
+    if (!applied) return;
+    if (applied.stateId !== state) setState(applied.stateId);
+    if (applied.officerId !== officerId) setOfficerId(applied.officerId);
+  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-5">
@@ -110,7 +117,7 @@ export function SchemePaymentsPage() {
       <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-3">
         <div className="space-y-1.5">
           <Label>State</Label>
-          <NativeSelect value={state} onChange={(e) => setState(e.target.value)} options={[{ value: "", label: "All states" }, ...states.map((s) => ({ value: s, label: s }))]} />
+          <NativeSelect value={state} onChange={(e) => { setState(e.target.value); setOfficerId(""); }} options={[{ value: "", label: "All states" }, ...states.map((s) => ({ value: s.id, label: s.name }))]} />
         </div>
         <div className="space-y-1.5">
           <Label>Sales Officer</Label>

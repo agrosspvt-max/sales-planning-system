@@ -108,7 +108,7 @@ export function AdminPerformancePage() {
       </div>
 
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>{L.colOfficer}</TableHead>

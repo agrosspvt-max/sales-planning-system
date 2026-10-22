@@ -51,7 +51,7 @@ export function ImportHistoryPage() {
       />
 
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>When</TableHead>

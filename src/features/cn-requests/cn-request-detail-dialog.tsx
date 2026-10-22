@@ -9,6 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CnTimeline } from "./cn-timeline";
+import type { CnTimelineEntry } from "@/lib/cn-timeline";
 import { useLabel } from "@/features/labels/label-ui";
 import {
   CN_REQUEST_STATUSES,
@@ -25,6 +27,7 @@ export interface CnRequestDetailData {
   acceptanceReason: string | null; acceptanceReasonDetails: string | null; remarks: string | null; createdAt: string;
   cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null;
   finalCn?: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null;
+  timeline?: CnTimelineEntry[];
 }
 
 const STATUS_VARIANT: Record<string, "secondary" | "default" | "success" | "destructive" | "muted"> = {
@@ -43,6 +46,8 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
     queryKey: ["cn-request-detail", requestId],
     queryFn: () => api.get<CnRequestDetailData>(`/api/cn-requests/${requestId}`),
     initialData: initialRequest,
+    initialDataUpdatedAt: 0,
+    staleTime: 0,
   });
   const L = {
     title: useLabel("cn_requests.detail.title"), close: useLabel("cn_requests.action.close"),
@@ -72,7 +77,7 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
   };
   const Row = ({ label, value }: { label: string; value: React.ReactNode }) => (
     <div className="flex justify-between gap-4 border-b py-1.5 text-sm last:border-0">
-      <span className="text-muted-foreground">{label}</span><span className="text-right font-medium">{value}</span>
+      <span className="text-muted-foreground">{label}</span><span className="min-w-0 break-words text-right font-medium">{value}</span>
     </div>
   );
   const statusBadge = request ? (() => {
@@ -89,12 +94,13 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
+      <DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto">
         <DialogHeader><DialogTitle>{L.title}{request ? <> — <DealerName id={request.dealerId} name={request.partyName} /></> : ""}</DialogTitle></DialogHeader>
         {isLoading ? <Skeleton className="h-64 w-full" /> : error || !request ? (
           <p className="text-sm text-destructive">{(error as Error | null)?.message ?? L.unavailable}</p>
         ) : (
-          <div className="space-y-0.5">
+          <div className="grid gap-6 md:grid-cols-2">
+            <div className="min-w-0 space-y-0.5">
             <Row label={L.party} value={<DealerName id={request.dealerId} name={request.partyName} />} />
             <Row label={L.cnType} value={cnTypeLabel(request.cnType, L.cnTypes)} />
             <Row label={request.postedAmount != null ? L.postedAmount : L.approxAmount} value={money(request.amount)} />
@@ -124,6 +130,8 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
             {rejectionReason && <Row label={L.reason} value={rejectionReason} />}
             {request.rejectionReasonDetails && <Row label={L.otherReason} value={request.rejectionReasonDetails} />}
             {request.remarks && <Row label={L.remarks} value={request.remarks} />}
+            </div>
+            <CnTimeline entries={request.timeline} submittedAt={request.createdAt} />
           </div>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.close}</Button></DialogFooter>

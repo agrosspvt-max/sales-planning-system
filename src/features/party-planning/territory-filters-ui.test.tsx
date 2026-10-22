@@ -10,6 +10,7 @@ import { filterSearchableOptions } from "@/components/ui/searchable-select";
 const hooks: unknown[] = [];
 let cursor = 0;
 const urls: string[] = [];
+const marketKeys: string[] = []; // the Market choices are requested per (State, Sales Officer) pair
 type Sel = { options: { value: string; label: string }[]; value: string; onChange: (e: { target: { value: string } }) => void };
 let selects: Sel[] = [];
 let searchables: { options: { value: string; label: string }[]; value: string; onChange: (v: string) => void; ariaLabel: string }[] = [];
@@ -28,8 +29,9 @@ const overrides = {
     useQuery: (o: { queryKey: unknown[]; enabled?: boolean }) => {
       const key = String(o.queryKey[0]);
       if (key === "territory-dealers") urls.push(JSON.stringify(o.queryKey.slice(1)));
+      if (key === "territory-market-filter") marketKeys.push(JSON.stringify(o.queryKey.slice(1)));
       if (o.enabled === false) return { data: undefined, isLoading: false };
-      return { data: key === "territory-markets" ? MARKETS : key === "territory-filters" ? FILTERS : key === "territory-dealers" ? dealersPage : undefined, isLoading: false };
+      return { data: key === "territory-markets" || key === "territory-market-filter" ? MARKETS : key === "territory-filters" ? FILTERS : key === "territory-dealers" ? dealersPage : undefined, isLoading: false };
     },
     useQueryClient: () => ({ invalidateQueries: () => undefined }),
     useMutation: () => ({ isPending: false, mutate: () => undefined }),
@@ -53,7 +55,7 @@ async function main() {
     assert.equal(searchables.length, 1, `${r}: Market is the searchable dropdown`);
     assert.equal(searchables[0]!.options[0]!.label, "All Markets"); assert.equal(searchables[0]!.value, "", "All Markets is the default");
     assert.ok(html.includes("4 mapped · 2 unmapped") && html.includes("Import Excel"), `${r}: counts and Import Excel stay`);
-    assert.ok(html.indexOf("Market") < (html.indexOf("Sales Officer") === -1 ? Infinity : html.indexOf("Sales Officer")), `${r}: Market comes first`);
+    assert.ok((html.indexOf("Sales Officer") === -1 ? -Infinity : html.indexOf("Sales Officer")) < html.indexOf(">Market<"), `${r}: Sales Officer comes before Market`);
   }
   // SO: Market only.
   let html = reset(Role.SALES_OFFICER);
@@ -64,19 +66,29 @@ async function main() {
   assert.equal(selects[0]!.options.map((o) => o.label).join("|"), "All Sales Officers|Rahul Patidar|Anil Rao", "default All + the officers the server returned");
   // Admin: Market + Sales Officer + State, in that order.
   html = reset(Role.SUPER_ADMIN);
-  assert.equal(selects.length, 2); assert.ok(html.indexOf(">Market<") < html.indexOf(">Sales Officer<") && html.indexOf(">Sales Officer<") < html.indexOf(">State<"), "Market → Sales Officer → State");
-  assert.equal(selects[1]!.options.map((o) => o.label).join("|"), "All States|Madhya Pradesh|Uttar Pradesh", "States come from the server list");
+  assert.equal(selects.length, 2); assert.ok(html.indexOf(">State<") < html.indexOf(">Sales Officer<") && html.indexOf(">Sales Officer<") < html.indexOf(">Market<"), "State → Sales Officer → Market");
+  assert.equal(selects[0]!.options.map((o) => o.label).join("|"), "All States|Madhya Pradesh|Uttar Pradesh", "States come from the server list (first dropdown)");
 
-  // Combined filters go to the server together; changing one keeps the others, All restores.
+  // Combined filters go to the server together; a parent change keeps valid siblings but clears its dependent Market; All restores.
+  const [stateSel, officerSel] = [() => selects[0]!, () => selects[1]!]; // admin: State, then Sales Officer
+  officerSel().onChange({ target: { value: "so1" } }); render();
+  assert.equal(marketKeys.at(-1), JSON.stringify(["", "so1"]), "Market choices are requested for the chosen Sales Officer");
   searchables[0]!.onChange("m1"); render();
-  selects[0]!.onChange({ target: { value: "so1" } }); render();
-  assert.equal(urls.at(-1), JSON.stringify(["m1", "so1", "", 1]), "market + officer");
-  selects[1]!.onChange({ target: { value: "mp" } }); render();
-  assert.equal(urls.at(-1), JSON.stringify(["m1", "so1", "mp", 1]), "State added; the other valid selections are kept");
-  assert.equal(selects[0]!.options.map((o) => o.label).join("|"), "All Sales Officers|Rahul Patidar", "Sales Officer choices narrow to the chosen State");
-  selects[1]!.onChange({ target: { value: "up" } }); render();
-  assert.equal(urls.at(-1), JSON.stringify(["m1", "", "up", 1]), "an officer outside the new State is cleared safely");
-  selects[1]!.onChange({ target: { value: "" } }); searchables[0]!.onChange(""); render();
+  assert.equal(urls.at(-1), JSON.stringify(["m1", "so1", "", 1]), "officer + market");
+  stateSel().onChange({ target: { value: "mp" } }); render();
+  assert.equal(urls.at(-1), JSON.stringify(["", "so1", "mp", 1]), "State added; the valid officer is kept, the dependent Market is cleared, page 1");
+  assert.equal(marketKeys.at(-1), JSON.stringify(["mp", "so1"]));
+  assert.equal(officerSel().options.map((o) => o.label).join("|"), "All Sales Officers|Rahul Patidar", "Sales Officer choices narrow to the chosen State");
+  searchables[0]!.onChange("m2"); render();
+  officerSel().onChange({ target: { value: "" } }); render();
+  assert.equal(urls.at(-1), JSON.stringify(["", "", "mp", 1]), "changing the Sales Officer clears the dependent Market");
+  searchables[0]!.onChange("m1"); render();
+  stateSel().onChange({ target: { value: "up" } }); render();
+  assert.equal(urls.at(-1), JSON.stringify(["", "", "up", 1]), "changing the State clears Market (and an officer outside the new State)");
+  officerSel().onChange({ target: { value: "so2" } }); render();
+  stateSel().onChange({ target: { value: "mp" } }); render();
+  assert.equal(urls.at(-1), JSON.stringify(["", "", "mp", 1]), "an officer outside the new State is cleared safely");
+  stateSel().onChange({ target: { value: "" } }); render();
   assert.equal(urls.at(-1), JSON.stringify(["", "", "", 1]), "All / All / All restores the full set");
 
   // Market search is case-insensitive.

@@ -172,7 +172,7 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
           <div key={sec.key} className="space-y-2">
             <h3 className="text-sm font-semibold">{sec.title}</h3>
             <div className="rounded-lg border bg-background">
-              <Table>
+              <Table numbered>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Season</TableHead>

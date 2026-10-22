@@ -148,16 +148,42 @@ export interface DistrictFields { district: string | null; districtId: string | 
 /** market: "" = all, "__none__" = unmapped, else a marketId. officer (RM / Admin) = a dealer-owner's user id; state (Admin) = a UserGroup id; "" / undefined = all. */
 export interface TerritoryListParams extends PageParams { market: string; officer?: string; state?: string }
 
-export async function listTerritoryDealers(ctx: AuthContext, params: TerritoryListParams): Promise<Paginated<TerritoryDealerRow> & { mapped: number; unmapped: number }> {
+/**
+ * The Territory filter scope: State → Sales Officer → Market. Filter restrictions are enforced here, not just by hiding the controls: an SO has neither filter, an RM filters only inside
+ * their team, only an Admin filters by State, and a Sales Officer must belong to the chosen State (their dealers' State is the current owner's group) — an incompatible pair can never widen
+ * the result, it simply matches nothing.
+ */
+async function territoryFilterScope(ctx: AuthContext, officerRaw: string | undefined, stateRaw: string | undefined): Promise<{ officer: string; stateFilter: string; dealers: ScopedDealer[]; states: Map<string, StateRef | null> }> {
   assertTerritoryUser(ctx);
-  const officer = params.officer?.trim() ?? "", stateFilter = params.state?.trim() ?? "";
-  // Filter restrictions are enforced here, not just by hiding the controls: an SO has neither filter, an RM filters only inside their team, only Admin filters by State.
+  const officer = officerRaw?.trim() ?? "", stateFilter = stateRaw?.trim() ?? "";
   if (stateFilter && !isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only an Admin can filter by State");
   if (officer) {
     const scope = await getOfficerScope(ctx);
     if (ctx.role === Role.SALES_OFFICER ? officer !== ctx.userId : !scope.all && !scope.ids.includes(officer)) throw new ApiError(403, "That Sales Officer is outside your scope");
   }
-  const dealers = (await loadScopedDealers(ctx)).filter((d) => !officer || d.ownerId === officer);
+  const scoped = (await loadScopedDealers(ctx)).filter((d) => !officer || d.ownerId === officer);
+  const states = await dealerStates(scoped.map((d) => d.id));
+  const dealers = stateFilter ? scoped.filter((d) => states.get(d.id)?.id === stateFilter) : scoped;
+  return { officer, stateFilter, dealers, states };
+}
+
+/**
+ * Market choices for the filter (State → Sales Officer → Market): only Markets that the dealers of the selected State / Sales Officer are actually mapped to, within the caller's scope.
+ * "All" choices mean all within the caller's authorization — a parent filter only narrows. One scoped dealer read + one mapping read.
+ */
+export async function listMarketFilterChoices(ctx: AuthContext, params: { officer?: string; state?: string }): Promise<MarketDto[]> {
+  const { dealers } = await territoryFilterScope(ctx, params.officer, params.state);
+  const ids = dealers.map((d) => d.id);
+  if (ids.length === 0) return [];
+  const mapped = await prisma.dealerMarketMapping.findMany({ where: { dealerId: { in: ids }, marketId: { not: null } }, select: { marketId: true }, distinct: ["marketId"] });
+  const marketIds = mapped.map((m) => m.marketId).filter((v): v is string => !!v);
+  if (marketIds.length === 0) return [];
+  const rows = await prisma.market.findMany({ where: { id: { in: marketIds } }, select: { id: true, name: true, potential: true, source: true }, orderBy: { name: "asc" } });
+  return rows.map((m) => ({ id: m.id, name: m.name, potential: asPotential(m.potential), source: m.source }));
+}
+
+export async function listTerritoryDealers(ctx: AuthContext, params: TerritoryListParams): Promise<Paginated<TerritoryDealerRow> & { mapped: number; unmapped: number }> {
+  const { dealers, stateFilter } = await territoryFilterScope(ctx, params.officer, params.state);
   const ids = dealers.map((d) => d.id);
   const [aliases, mappings, edited, states, pendingRequests] = await Promise.all([
     loadDealerAliasNameMap(ids),
@@ -697,7 +723,7 @@ export interface StatusRequestEditDealer { id: string; name: string; officerId: 
 export interface DealerStatusRequestDto {
   id: string; dealerId: string; partyName: string; statusAtRequest: string; currentStatus: string;
   reason: DealerStatusReason; description: string | null;
-  requestedById: string; requestedByName: string; requestedByRole: Role; createdAt: string;
+  requestedById: string; requestedByName: string; /** The requester's own territory (User.territory); null when none is recorded. */ requestedByTerritory: string | null; requestedByRole: Role; createdAt: string;
   status: DealerStatusRequestState; resolvedByName: string | null; resolvedAt: string | null; resolutionNotes: string | null;
   editDealer: StatusRequestEditDealer | null;
 }
@@ -715,13 +741,14 @@ async function toStatusRequestDtos(ctx: AuthContext, rows: StatusRequestRow[], w
   const userIds = [...new Set(rows.flatMap((r) => [r.requestedById, r.resolvedById]).filter((v): v is string => !!v))];
   const [dealers, users, aliasNames, editable] = await Promise.all([
     prisma.dealer.findMany({ where: { id: { in: dealerIds } }, select: { id: true, name: true, status: true } }),
-    prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true } }),
+    prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, territory: true } }),
     loadDealerAliasNameMap(dealerIds),
     // The SAME loader the Dealer Alias page uses for its Edit dialog — no second dealer-data path.
     withEdit ? listDealersForAlias(ctx, "all", undefined, undefined, undefined, dealerIds) : Promise.resolve(null),
   ]);
   const dealerById = new Map(dealers.map((d) => [d.id, d]));
   const userName = new Map(users.map((u) => [u.id, u.name]));
+  const userTerritory = new Map(users.map((u) => [u.id, territoryText(u.territory)]));
   const editById = new Map((editable?.dealers ?? []).map((d) => [d.id, d]));
   return rows.map((r) => {
     const d = dealerById.get(r.dealerId);
@@ -729,7 +756,7 @@ async function toStatusRequestDtos(ctx: AuthContext, rows: StatusRequestRow[], w
     return {
       id: r.id, dealerId: r.dealerId, partyName: aliasNames.get(r.dealerId) ?? d?.name ?? "—", statusAtRequest: r.statusAtRequest, currentStatus: d?.status ?? r.statusAtRequest,
       reason: r.reason as DealerStatusReason, description: r.description,
-      requestedById: r.requestedById, requestedByName: userName.get(r.requestedById) ?? "—", requestedByRole: r.requestedByRole, createdAt: r.createdAt.toISOString(),
+      requestedById: r.requestedById, requestedByName: userName.get(r.requestedById) ?? "—", requestedByTerritory: userTerritory.get(r.requestedById) ?? null, requestedByRole: r.requestedByRole, createdAt: r.createdAt.toISOString(),
       status: r.status as DealerStatusRequestState, resolvedByName: r.resolvedById ? userName.get(r.resolvedById) ?? null : null, resolvedAt: r.resolvedAt?.toISOString() ?? null, resolutionNotes: r.resolutionNotes,
       editDealer: e ? { id: e.id, name: e.name, officerId: e.officerId, groupId: e.groupId, town: e.town, status: e.status, inActivePlan: e.inActivePlan, aliases: e.aliases } : null,
     };
@@ -777,6 +804,36 @@ export async function listDealerStatusRequests(ctx: AuthContext, view: "pending"
     take: 500,
   });
   return toStatusRequestDtos(ctx, rows, view === "pending");
+}
+
+export interface StatusRequestList {
+  items: DealerStatusRequestDto[];
+  /** Requested-by choices: the requesters of THIS view's authorized requests (territory first, then name), one entry per user id. */
+  requesters: RequesterChoice[];
+  /** The selection actually applied: ids that are not one of the view's requesters are dropped, so a stale / forged id can never hide or widen anything. */
+  applied: { requesterIds: string[] };
+}
+/**
+ * The same list, narrowed by Requested by (OR within the selection, AND with the view). Choices come from the whole view — not the current page or the current selection — and are built
+ * from one batched read (never one query per row). Authorization is the same Admin check as the plain list.
+ */
+export async function listDealerStatusRequestsFiltered(ctx: AuthContext, view: "pending" | "resolved", raw: { requesterIds?: string[] } = {}): Promise<StatusRequestList> {
+  assertStatusRequestAdmin(ctx);
+  const status = view === "pending" ? "PENDING" : "RESOLVED";
+  const who = await prisma.dealerStatusRequest.findMany({ where: { status }, distinct: ["requestedById"], select: { requestedById: true } });
+  const users = who.length ? await prisma.user.findMany({ where: { id: { in: who.map((w) => w.requestedById) } }, select: { id: true, name: true, territory: true } }) : [];
+  const requesters: RequesterChoice[] = users.map((u) => ({ id: u.id, name: u.name, territory: territoryText(u.territory) })).sort((a, b) => {
+    if ((a.territory === null) !== (b.territory === null)) return a.territory === null ? 1 : -1;
+    return (a.territory ?? "").localeCompare(b.territory ?? "", undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id);
+  });
+  const valid = new Set(requesters.map((r) => r.id));
+  const requesterIds = idList(raw.requesterIds).filter((id) => valid.has(id));
+  const rows = await prisma.dealerStatusRequest.findMany({
+    where: { status, ...(requesterIds.length ? { requestedById: { in: requesterIds } } : {}) },
+    orderBy: view === "pending" ? { createdAt: "asc" } : { resolvedAt: "desc" },
+    take: 500,
+  });
+  return { items: await toStatusRequestDtos(ctx, rows, view === "pending"), requesters, applied: { requesterIds } };
 }
 
 /**

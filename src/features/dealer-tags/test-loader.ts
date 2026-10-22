@@ -57,6 +57,7 @@ export function testLoader(overrides: Record<string, unknown>) {
       URL,
       URLSearchParams,
       process,
+      crypto: globalThis.crypto,
     });
     cache.set(file, mod.exports);
     return mod.exports as T;

@@ -159,7 +159,7 @@ async function main() {
     // Admin: Month, Sales Officer, State filters; column order unchanged.
     let html = render(Role.SUPER_ADMIN, "admin", mode);
     assert.deepEqual(filterButtons(html), ["Month", "Sales Officer", "State"], `1–3 (${mode})`);
-    assert.deepEqual(headerCells(html).map((c) => c.replace(/<[^>]*>/g, "").trim()), ["Season", "Month", "Sales Officer", "State", "Territory", "Cutoff", "Status", "Open"]);
+    assert.deepEqual(headerCells(html).map((c) => c.replace(/<[^>]*>/g, "").trim()), ["S.No", "Season", "Month", "Sales Officer", "State", "Territory", "Cutoff", "Status", "Open"]);
     assert.deepEqual(openedPlans(html), ids(ALL_PLANS), "20/19: every plan is listed and opens its own page");
     // RM: Month + Sales Officer filter; State is a plain header.
     html = render(Role.REGIONAL_MANAGER, "rm-1", mode);

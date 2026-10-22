@@ -133,7 +133,7 @@ export function AssignmentPage({ config }: { config: AssignmentConfig }) {
       />
 
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               {config.columns.map((c) => (
@@ -228,7 +228,7 @@ export function AssignmentPage({ config }: { config: AssignmentConfig }) {
           <DialogHeader>
             <DialogTitle>Assignment history — {historyFor?.label}</DialogTitle>
           </DialogHeader>
-          <Table>
+          <Table numbered>
             <TableHeader>
               <TableRow>
                 <TableHead>{config.history.nameLabel}</TableHead>

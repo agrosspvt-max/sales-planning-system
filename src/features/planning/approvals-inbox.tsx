@@ -53,7 +53,7 @@ export function ApprovalsInbox({ role, userId }: { role: Role; userId: string })
       <PageHeader title="Approvals" subtitle="Plans awaiting your review, oldest first." />
 
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>
@@ -137,7 +137,7 @@ function RecoveryApprovals({ role }: { role: Role }) {
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">Recovery plans awaiting review</h3>
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>
@@ -191,7 +191,7 @@ function MonthlyApprovals({ role }: { role: Role }) {
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">Monthly plans awaiting review</h3>
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>
@@ -241,7 +241,7 @@ function MonthExtensionReview() {
       <h3 className="text-sm font-semibold">Legacy month extension requests</h3>
       <p className="text-xs text-muted-foreground">Use Seasons → Add Months for calendar additions. These requests lack a reliable year and remain available for review/decline.</p>
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>
@@ -307,7 +307,7 @@ function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">CN Requests awaiting {isAdmin ? "approval" : "your review"}</h3>
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Party</TableHead>

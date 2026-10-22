@@ -210,3 +210,41 @@
     overflow-wrap: break-word; /* only a genuinely too-long single word breaks, as a last resort */
   }
 }
+
+/* Record lists with S.No keep BOTH the compact ordinal and the original identity column frozen. */
+.numbered-sticky [data-serial-cell] {
+  width: 3.5rem;
+  min-width: 3.5rem;
+  max-width: 3.5rem;
+  white-space: nowrap;
+}
+.numbered-sticky tr > th:nth-child(2),
+.numbered-sticky tr > td:nth-child(2) {
+  position: sticky;
+  left: 3.5rem;
+  z-index: 2;
+  background-color: hsl(var(--background));
+  box-shadow: inset -1px 0 0 0 hsl(var(--border));
+}
+.numbered-sticky thead th:nth-child(2) { z-index: 3; }
+.numbered-sticky tbody tr:hover > td:nth-child(2) {
+  background-color: color-mix(in srgb, hsl(var(--muted)) 50%, hsl(var(--background)));
+}
+.numbered-sticky tr.bg-muted\/40 > th:nth-child(2),
+.numbered-sticky tr.bg-muted\/40 > td:nth-child(2) {
+  background-color: color-mix(in srgb, hsl(var(--muted)) 40%, hsl(var(--background)));
+}
+.numbered-sticky.sticky-head thead tr:last-child th:nth-child(2) {
+  top: 0;
+  z-index: 5;
+  background-color: color-mix(in srgb, hsl(var(--muted)) 40%, hsl(var(--background)));
+}
+@media (max-width: 639.98px) {
+  .numbered-sticky tr > th:nth-child(2),
+  .numbered-sticky tr > td:nth-child(2) {
+    min-width: 0;
+    max-width: 8.5rem;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+}

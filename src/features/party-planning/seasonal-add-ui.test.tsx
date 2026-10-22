@@ -121,7 +121,7 @@ async function main() {
   assert.ok(!html.includes("Season: Kharif") && !html.includes("Apr 2026 → Nov 2026"), "the redundant season banner is gone");
   assert.ok(!html.includes("Search market or party"), "the global search is gone");
   assert.ok(!inputs.some((i) => i.placeholder === "Search Market...") && selects.length === 0 && !html.includes("Search Market..."), "no Market search box and no Market Potential dropdown in the header");
-  assert.deepEqual([...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["Market", "Type", "Market Potential", "Status", "Date", "Approval", "Action"], "plain headers: no controls, no gaps; the Market Potential column itself stays");
+  assert.deepEqual([...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["S.No", "Market", "Type", "Market Potential", "Status", "Date", "Approval", "Action"], "plain headers: compact serial column first; the Market Potential column itself stays");
   for (const gone of ["My plans", "To review", "All plans"]) assert.ok(!html.includes(gone), `the old "${gone}" tab is gone`);
   assert.ok(!html.includes("No Seasonal Plans here yet."));
   assert.equal(buttons.filter((b) => String(b.children).includes("Add Market")).length, 1, "ONE Add Market button remains, at the bottom of the list");

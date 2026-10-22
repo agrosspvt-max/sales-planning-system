@@ -60,7 +60,7 @@ export function LateRequestsView({ active = true }: { active?: boolean }) {
       </div>
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader><TableRow>
             <TableHead>{L.officer}</TableHead><TableHead>{L.workDate}</TableHead><TableHead>{L.deadline}</TableHead><TableHead>{L.reason}</TableHead><TableHead>{L.requestedAt}</TableHead><TableHead>{L.status}</TableHead>
             {view === "history" && <TableHead>{L.decision}</TableHead>}

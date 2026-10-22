@@ -141,7 +141,7 @@ export function SeasonalPlanDetailPage({ role, sheetId, stage = "create" }: { ro
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader><TableRow>
             <TableHead>{L.market}</TableHead>
             <TableHead>{L.type}</TableHead>

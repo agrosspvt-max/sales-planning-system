@@ -172,7 +172,7 @@ export function ProductCataloguePage({ groupId }: { groupId: string }) {
           )}
 
           <div className="overflow-auto rounded-lg border bg-background">
-            <Table>
+            <Table numbered>
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8"></TableHead>

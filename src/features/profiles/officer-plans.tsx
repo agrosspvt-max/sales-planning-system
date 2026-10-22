@@ -184,7 +184,7 @@ export function OfficerPlansManagement({ officerId, role }: { officerId: string;
           <div key={g.kind} className="space-y-2">
             <h3 className="text-sm font-semibold">{g.kind === "SEASONAL" ? "Seasonal" : g.kind === "MONTHLY" ? "Monthly" : "Recovery"}</h3>
             <div className="overflow-x-auto rounded-lg border bg-background">
-              <Table stickyFirstColumn>
+              <Table numbered stickyFirstColumn>
                 <TableHeader>
                   <TableRow>
                     <TableHead className="min-w-[140px]">Plan</TableHead>

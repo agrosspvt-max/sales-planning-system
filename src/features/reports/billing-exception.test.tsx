@@ -250,7 +250,7 @@ let preset: Record<number, unknown> = {}; let stateCall = 0; let served: unknown
 let requested = ""; const permissions: Row = { role: "SUPER_ADMIN" };
 const pageLoad = testLoader({
   "@/features/labels/label-ui": { useLabel: (key: string) => (DEFAULT_LABELS as Record<string, string>)[key] ?? key },
-  react: { ...React, useState: (initial: unknown) => { const i = stateCall++; return [i in preset ? preset[i] : initial, () => {}]; }, useContext: () => permissions },
+  react: { ...React, useState: (initial: unknown) => { const i = stateCall++; return [i in preset ? preset[i] : initial, () => {}]; } },
   "next/navigation": { useSearchParams: () => new URLSearchParams("") },
   "@tanstack/react-query": { keepPreviousData: {}, useQuery: ({ queryKey, queryFn }: { queryKey: unknown[]; queryFn: () => unknown }) => { void queryFn(); return { data: String(queryKey[0]).endsWith("options") ? undefined : served, isLoading: false, isFetching: false, isPlaceholderData: false, error: null }; }, useMutation: () => ({ isPending: false, mutate() {} }), useQueryClient: () => ({ invalidateQueries() {} }) },
   "@/lib/api-client": { api: { get: async (url: string) => { if (!url.includes("optionsOnly")) requested = url; return {}; }, post: async () => ({}) } },
@@ -262,7 +262,7 @@ const pageLoad = testLoader({
 const { LastPaymentReportPage } = pageLoad<typeof import("./last-payment-report-page")>("src/features/reports/last-payment-report-page.tsx");
 const ui = pageLoad<typeof import("./billing-exception-ui")>("src/features/reports/billing-exception-ui.tsx");
 const draw = (p: Record<number, unknown> = {}, items: unknown[] = [], extra: Row = {}) => { served = { items, total: items.length, page: 1, pageSize: 50, totalPages: 1, options: { party: [], status: [], state: [], territory: [], officer: [] }, appliedFilters: {}, lastUpdate: null, ...extra }; preset = p; stateCall = 0; return renderToStaticMarkup(<LastPaymentReportPage />); };
-const heads = (html: string) => [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim());
+const heads = (html: string) => [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).filter((name) => name !== "S.No");
 const LP = (over: Row = {}) => ({ dealerId: "d1", party: "Alpha", status: "ACTIVE", state: "MP", territory: "BHOPAL", salesOfficer: "Arjun", lastPaymentDate: "2026-08-16", amount: 5000, days: 50, billingStatus: "BLOCKED", currentExceptions: 0, ...over });
 const EX = (id: string, over: Row = {}) => ({ exceptionId: id, dealerId: "d1", party: "Alpha", status: "ACTIVE", state: "MP", territory: "BHOPAL", salesOfficer: "Arjun", lastPaymentDate: "2026-08-16", amount: 5000, days: 50, billingDate: "2026-10-01", billNo: `B-${id}`, authPerson: "Varun sir", exceptionStatus: "CURRENT", createdAt: "2026-10-05T01:00:00.000Z", ...over });
 
@@ -291,7 +291,8 @@ function page() {
   assert.ok(plainHtml.includes("Blocked") && plainHtml.includes("Billing Exception") && plainHtml.includes("bg-warning") && plainHtml.includes("bg-purple-500/15") && !/cursor-pointer|hover:/.test(plainHtml.slice(plainHtml.indexOf("<tbody"), plainHtml.indexOf("</tbody>")).replace(/hover:bg-muted\/50/g, "")), "same text and colours, no pointer / hover affordance");
   Object.assign(permissions, { role: "SUPER_ADMIN", permissions: undefined });
   // Last Payment Date + Amount are ONE cell: the date, with the amount underneath as smaller muted text (display only; both stay separate API / export fields).
-  const stack = (view: Row, items: unknown[]) => { const out = draw(view, items); return [...out.matchAll(/<tr[^>]*data-dealer-id="([^"]+)"[^>]*>(.*?)<\/tr>/g)].map((m) => [m[1], [...m[2].matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((c) => c[1])] as const); };
+  // Financial-cell contracts exclude the display-only ordinal; shared numbering has its own render tests.
+  const stack = (view: Row, items: unknown[]) => { const out = draw(view, items).replace(/<td\b[^>]*data-serial-cell="true"[^>]*>.*?<\/td>/g, ""); return [...out.matchAll(/<tr[^>]*data-dealer-id="([^"]+)"[^>]*>(.*?)<\/tr>/g)].map((m) => [m[1], [...m[2].matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((c) => c[1])] as const); };
   const payCell = (cells: readonly string[]) => cells[5];
   const stacked = '<div class="flex flex-col items-end gap-0.5"><span>07/04/2026</span><span class="text-xs text-muted-foreground" data-testid="payment-amount">₹2,20,706</span></div>';
   const lpRows = stack({}, [LP({ dealerId: "p1", lastPaymentDate: "2026-04-07", amount: 220706 }), LP({ dealerId: "p2", lastPaymentDate: "2026-04-07", amount: 0 }), LP({ dealerId: "p3", lastPaymentDate: null, amount: null, days: null, billingStatus: "UNAVAILABLE" })]);
@@ -366,8 +367,8 @@ function page() {
   html = draw({ 0: "billing-exception", 1: "history" }, [EX("e1", { exceptionStatus: "RESOLVED" })]);
   assert.ok(requested.includes("view=history"));
   // empty / colSpan
-  assert.ok(draw({ 0: "billing-exception" }, []).includes("No billing exceptions found.") && /colSpan="10"/.test(draw({ 0: "billing-exception" }, [])), "empty state spans all ten columns");
-  assert.ok(/colSpan="8"/.test(draw({}, [])) && draw({}, []).includes("No dealers found."));
+  assert.ok(draw({ 0: "billing-exception" }, []).includes("No billing exceptions found.") && /colSpan="11"/.test(draw({ 0: "billing-exception" }, [])), "empty state spans all columns including S.No");
+  assert.ok(/colSpan="9"/.test(draw({}, [])) && draw({}, []).includes("No dealers found."));
   // exports use the dedicated endpoint for the exception views
   const src = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
   assert.ok(src.includes("/api/reports/last-payment/billing-exceptions/export?") && src.includes("/api/reports/last-payment/export?${reportQuery()}"));

@@ -91,7 +91,7 @@ function OpenSchemesTable() {
   };
   return (
     <div className="overflow-auto rounded-lg border bg-background">
-      <Table stickyFirstColumn>
+      <Table numbered stickyFirstColumn>
         <TableHeader>
           <TableRow>
             <TableHead>{col.name}</TableHead>
@@ -173,7 +173,7 @@ export function RunningSchemesTab({ onView }: { onView: (id: string) => void }) 
   const { data, isLoading } = useQuery<RunningScheme[]>({ queryKey: ["running-schemes"], queryFn: () => api.get("/api/schemes/running") });
   return (
     <div className="overflow-auto rounded-lg border bg-background">
-      <Table>
+      <Table numbered>
         <TableHeader>
           <TableRow>
             <TableHead>Scheme Name</TableHead>
@@ -349,7 +349,7 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
                 <p className="text-sm text-muted-foreground">{teamMode ? "No dealers are assigned to the selected Sales Officer." : "No dealers are assigned to you."}</p>
               ) : (
                 <div className="overflow-auto rounded-md border">
-                  <Table>
+                  <Table numbered>
                     <TableHeader><TableRow><TableHead className="w-12"></TableHead><TableHead>Dealer Name</TableHead><TableHead>Territory</TableHead><TableHead>Status</TableHead></TableRow></TableHeader>
                     <TableBody>
                       {data!.dealers.map((d) => {
@@ -376,7 +376,7 @@ export function SchemePlanningView({ schemeId, onBack, enableRmScope = false }: 
               <CardHeader className="pb-2"><CardTitle className="text-base">Planning</CardTitle></CardHeader>
               <CardContent>
                 <div className="overflow-auto rounded-md border">
-                  <Table>
+                  <Table numbered>
                     <TableHeader><TableRow><TableHead>Dealer Name</TableHead><TableHead>Conversion Date</TableHead>{allowMulti && <><TableHead>Number of Schemes</TableHead><TableHead className="text-right">Total Amount</TableHead></>}<TableHead>Status</TableHead></TableRow></TableHeader>
                     <TableBody>
                       {selectedDealers.map((d) => {

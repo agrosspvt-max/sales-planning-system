@@ -186,7 +186,7 @@ export function PartyCreatePlanPage() {
       )}
 
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead className="w-[34%]"><L k="party_planning.col.party_name" /></TableHead>
@@ -293,7 +293,7 @@ function PartyTable({ view, showAction }: { view: "submitted" | "approved"; show
   const cols = showAction ? 5 : 4;
   return (
     <div className="overflow-auto rounded-lg border bg-background">
-      <Table>
+      <Table numbered>
         <TableHeader>
           <TableRow>
             <TableHead><L k="party_planning.col.party_name" /></TableHead>

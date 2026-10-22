@@ -65,7 +65,7 @@ function EnrolledSchemeList({ onOpen, officerId, schemeStatusFilter }: { onOpen:
     : raw;
   return (
     <div className="overflow-auto rounded-lg border bg-background">
-      <Table>
+      <Table numbered>
         <TableHeader>
           <TableRow>
             <TableHead>Scheme Name</TableHead>
@@ -137,7 +137,7 @@ function EnrolledSchemeDetail({ schemeId, onBack, officerId }: { schemeId: strin
         <Skeleton className="h-64 w-full" />
       ) : (
         <div className={schemeTable.outer}>
-          <Table>
+          <Table numbered>
             <TableHeader>
               <TableRow>
                 <TableHead className="w-8" />

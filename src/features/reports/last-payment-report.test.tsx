@@ -723,7 +723,7 @@ async function exportTests() {
   assert.deepEqual(all.headers, ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Amount", "Days", "Billing Status"], "same columns and order as the UI (Billing Status appended)");
   assert.equal(all.rows.length, 8, "all authorized dealers (Dealer Master incl. inactive)");
   const pageHtml = await draw(admin);
-  assert.deepEqual([...pageHtml.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).slice(0, 9), all.headers.filter((h) => h !== "Amount"), "export headers == UI headers (the UI shows the amount under the date; the Excel keeps both columns)");
+  assert.deepEqual([...pageHtml.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).slice(1, 10), all.headers.filter((h) => h !== "Amount"), "business export headers == UI headers after S.No (the UI stacks amount below date)");
   const a = all.rows.find((r) => r["Party"] === "Alpha Traders")!;
   const paidOn = a["Last Payment Date"] as unknown;
   assert.ok(paidOn instanceof Date && paidOn.toISOString() === "2026-10-02T00:00:00.000Z", "the payment date is a real Excel DATE cell at UTC midnight (no time-zone shift)");
@@ -908,9 +908,9 @@ async function page() {
   let html = await draw(admin);
   // 1 — the page renders; columns appear in the required order.
   assert.ok(html.includes("Last Payment Report"));
-  assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()), ["Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Days", "Billing Status"]);
+  assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()), ["S.No", "Party", "Status", "State", "Territory", "Sales Officer", "Last Payment Date", "Days", "Billing Status"]);
   const row = (id: string) => (html.match(new RegExp(`<tr[^>]*data-dealer-id="${id}"[^>]*>(.*?)</tr>`)) ?? [])[1] ?? "";
-  const cells = (id: string) => [...row(id).matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim());
+  const cells = (id: string) => [...row(id).matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]*>/g, "").trim()).slice(1);
   // 3, 6 — formatting conventions: date, ₹ currency, Days.
   assert.deepEqual(cells("d-a"), ["Alpha Traders", "Active", "MP", "BHOPAL", "Arjun Yadav", "02/10/2026₹50,000", "3", "Open"]);
   // 8 — empty representation.

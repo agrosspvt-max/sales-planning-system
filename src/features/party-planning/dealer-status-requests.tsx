@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatDMY } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -14,9 +14,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { NativeSelect } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { DealerDialog } from "@/features/sales-upload/create-dealer-dialog";
 import { fill, useLabels } from "./party-labels";
-import type { DealerStatusRequestDto } from "./territory.server";
+import { RequesterCell, requesterFilterOptions } from "./requester-display";
+import type { DealerStatusRequestDto, StatusRequestList } from "./territory.server";
 
 const STATUS_VARIANT: Record<string, "success" | "muted" | "secondary" | "destructive"> = { ACTIVE: "success", INACTIVE: "muted", PENDING: "secondary", DEFAULTER: "destructive" };
 const dateText = (iso: string | null) => (iso ? formatDMY(iso) : "—");
@@ -126,6 +128,8 @@ export function StatusRequestsTab() {
     unavailable: "party_planning.territory.sr.edit_unavailable", empty: "party_planning.territory.sr.empty",
     rTitle: "party_planning.territory.sr.resolve.title", rBody: "party_planning.territory.sr.resolve.body", rNotes: "party_planning.territory.sr.resolve.notes", rConfirm: "party_planning.territory.sr.resolve.confirm", rDone: "party_planning.territory.sr.resolve.done",
     cancel: "party_planning.common.cancel", saving: "party_planning.common.saving",
+    noTerritory: "party_planning.territory.requester.no_territory", searchHere: "party_planning.territory.filter.search", noMatchChoice: "party_planning.territory.filter.no_match_choice", allChoices: "party_planning.territory.filter.all",
+    noMatching: "party_planning.territory.sr.no_matching",
   });
   const [view, setView] = useState<"pending" | "resolved">("pending");
   const [editId, setEditId] = useState<string | null>(null);
@@ -134,7 +138,16 @@ export function StatusRequestsTab() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const { data, isLoading } = useQuery<DealerStatusRequestDto[]>({ queryKey: ["dealer-status-requests", view], queryFn: () => api.get(`/api/territory-mapping/status-requests?view=${view}`) });
+  // Requested by: a multi-select over the requesters of THIS tab's authorized requests (identity = user id; OR within the selection, AND with the tab). The server validates the ids and
+  // returns what it applied, so a selection that stops being valid (tab change) is dropped here too — never an invisible filter hiding results.
+  const [requesterIds, setRequesterIds] = useState<string[]>([]);
+  const query = new URLSearchParams({ view });
+  requesterIds.forEach((id) => query.append("requesterId", id));
+  const { data: list, isLoading } = useQuery<StatusRequestList>({ queryKey: ["dealer-status-requests", view, requesterIds], queryFn: () => api.get(`/api/territory-mapping/status-requests?${query.toString()}`) });
+  const data = list?.items;
+  useEffect(() => {
+    if (list && list.applied.requesterIds.length !== requesterIds.length) setRequesterIds(list.applied.requesterIds);
+  }, [list]); // eslint-disable-line react-hooks/exhaustive-deps
   // The dialog is fed from LIVE list data, so it reflects the dealer as Admin last saved it.
   const editDealer = data?.find((r) => r.dealerId === editId)?.editDealer ?? null;
   const resolve = useMutation({
@@ -157,14 +170,14 @@ export function StatusRequestsTab() {
       {error && !resolving && <p className="text-sm text-destructive">{error}</p>}
       {notice && <p role="status" className="text-sm text-success">{notice}</p>}
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader><TableRow>
             <TableHead>{L.party}</TableHead><TableHead>{L.current}</TableHead><TableHead>{L.reason}</TableHead><TableHead>{L.description}</TableHead>
-            <TableHead>{L.by}</TableHead><TableHead>{L.date}</TableHead><TableHead>{L.status}</TableHead><TableHead className="text-right">{L.action}</TableHead>
+            <ColumnFilterHeader label={L.by} ariaLabel={L.by} options={requesterFilterOptions(list?.requesters ?? [], L.noTerritory)} selected={requesterIds} onChange={setRequesterIds} searchable searchPlaceholder={L.searchHere} noMatchText={L.noMatchChoice} allLabel={L.allChoices} /><TableHead>{L.date}</TableHead><TableHead>{L.status}</TableHead><TableHead className="text-right">{L.action}</TableHead>
           </TableRow></TableHeader>
           <TableBody>
             {isLoading ? <TableRow><TableCell colSpan={8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
-              : rows.length === 0 ? <TableRow><TableCell colSpan={8} className="py-10 text-center text-muted-foreground">{L.empty}</TableCell></TableRow>
+              : rows.length === 0 ? <TableRow><TableCell colSpan={8} className="py-10 text-center text-muted-foreground" data-testid="sr-empty">{requesterIds.length > 0 ? L.noMatching : L.empty}</TableCell></TableRow>
                 : rows.map((r) => (
                   <TableRow key={r.id} data-request-id={r.id}>
                     <TableCell className="font-medium">{r.partyName}</TableCell>
@@ -174,7 +187,7 @@ export function StatusRequestsTab() {
                     </TableCell>
                     <TableCell>{reasons[r.reason]}</TableCell>
                     <TableCell className="max-w-xs whitespace-normal">{r.description ?? <span className="text-muted-foreground">—</span>}</TableCell>
-                    <TableCell>{r.requestedByName}</TableCell>
+                    <RequesterCell territory={r.requestedByTerritory} name={r.requestedByName} fallback={L.noTerritory} />
                     <TableCell>{dateText(r.createdAt)}</TableCell>
                     <TableCell>
                       <Badge variant={r.status === "PENDING" ? "secondary" : "success"}>{L[r.status]}</Badge>

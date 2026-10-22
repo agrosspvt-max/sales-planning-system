@@ -41,6 +41,8 @@ model User {
   cnRequests               CnRequest[]                 @relation("OfficerCnRequests")
   dailyWorkAttendance      DailyWorkAttendance[]       @relation("DailyWorkAttendanceOfficer")
   dailyReportPolicies      DailyReportPolicy[]         @relation("DailyReportPolicyOfficer")
+  retailerRequests         RetailerRequest[]           @relation("RetailerRequestRequester")
+  retailersCreated         Retailer[]                  @relation("RetailerCreator")
   lateReportRequests       LateReportRequest[]         @relation("LateReportRequestOfficer")
   dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
   marketRequests           MarketRequest[]             @relation("MarketRequestRequester")
@@ -681,18 +683,20 @@ model ProductMerge {
 
 /// Dealer master. Ownership over time is expressed via DealerAssignment.
 model Dealer {
-  id                        String                 @id @default(cuid())
+  id                        String                  @id @default(cuid())
   name                      String
+  retailerRequestDealers    RetailerRequestDealer[] @relation("RetailerRequestDealerDealer")
+  retailerLinks             RetailerDealerLink[]    @relation("RetailerLinkDealer")
   town                      String?
-  isActive                  Boolean                @default(true)
-  createdAt                 DateTime               @default(now())
-  updatedAt                 DateTime               @updatedAt
+  isActive                  Boolean                 @default(true)
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
   mobile                    String?
   village                   String?
   tehsil                    String?
   district                  String?
   address                   String?
-  status                    String                 @default("ACTIVE")
+  status                    String                  @default("ACTIVE")
   createdByUserId           String?
   createdFrom               String?
   deletedAt                 DateTime?
@@ -708,7 +712,7 @@ model Dealer {
   recoveryPlanDealers       RecoveryPlanDealer[]
   schemeSales               SchemeSale[]
   marketMapping             DealerMarketMapping?
-  appointedFromMonthlyPlans PartyMonthlyPlan[]     @relation("PartyMonthlyAppointedDealer")
+  appointedFromMonthlyPlans PartyMonthlyPlan[]      @relation("PartyMonthlyAppointedDealer")
   marketEdits               TerritoryMarketEdit[]
   statusRequests            DealerStatusRequest[]
   billingExceptions         BillingException[]
@@ -2579,4 +2583,68 @@ model LateReportRequest {
 
   @@index([status, requestedAt])
   @@index([officerId, workDate])
+}
+
+/// Retailer Mapping: a retailer-creation REQUEST (SO / RM) with its submitted details; the original dealer selection is kept in RetailerRequestDealer as history.
+model RetailerRequest {
+  id              String                  @id @default(cuid())
+  requesterId     String
+  requesterRole   String
+  retailerName    String
+  firmName        String
+  phone           String // exactly ten digits, stored as text
+  submissionKey   String // one per form open: a double click / retry of the same submission is idempotent
+  status          String                  @default("PENDING") // PENDING | APPROVED | REJECTED
+  decidedById     String?
+  decidedByName   String?
+  decidedAt       DateTime?
+  rejectionReason String?
+  retailerId      String?
+  createdAt       DateTime                @default(now())
+  requester       User                    @relation("RetailerRequestRequester", fields: [requesterId], references: [id])
+  dealers         RetailerRequestDealer[]
+  retailer        Retailer?               @relation("RetailerRequestRetailer", fields: [retailerId], references: [id])
+  origin          Retailer?               @relation("RetailerOriginRequest")
+
+  @@unique([requesterId, submissionKey])
+  @@index([status, createdAt])
+}
+
+model RetailerRequestDealer {
+  id         String          @id @default(cuid())
+  requestId  String
+  dealerId   String
+  dealerName String
+  request    RetailerRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  dealer     Dealer          @relation("RetailerRequestDealerDealer", fields: [dealerId], references: [id])
+
+  @@unique([requestId, dealerId])
+  @@index([dealerId])
+}
+
+/// The approved retailer — its own entity, never a Dealer. One record however many dealers it links to.
+model Retailer {
+  id          String               @id @default(cuid())
+  name        String
+  firmName    String
+  phone       String
+  createdById String
+  requestId   String               @unique
+  createdAt   DateTime             @default(now())
+  createdBy   User                 @relation("RetailerCreator", fields: [createdById], references: [id])
+  request     RetailerRequest      @relation("RetailerOriginRequest", fields: [requestId], references: [id])
+  approvedFor RetailerRequest[]    @relation("RetailerRequestRetailer")
+  links       RetailerDealerLink[]
+}
+
+model RetailerDealerLink {
+  id         String   @id @default(cuid())
+  retailerId String
+  dealerId   String
+  createdAt  DateTime @default(now())
+  retailer   Retailer @relation(fields: [retailerId], references: [id], onDelete: Cascade)
+  dealer     Dealer   @relation("RetailerLinkDealer", fields: [dealerId], references: [id])
+
+  @@unique([retailerId, dealerId])
+  @@index([dealerId])
 }

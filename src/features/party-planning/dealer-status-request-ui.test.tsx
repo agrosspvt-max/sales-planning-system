@@ -19,7 +19,7 @@ const overrides = {
   react: { ...React, useState: (initial: unknown) => { const i = cursor++; if (!(i in hooks)) hooks[i] = typeof initial === "function" ? (initial as () => unknown)() : initial; return [hooks[i], (u: unknown) => { hooks[i] = typeof u === "function" ? (u as (v: unknown) => unknown)(hooks[i]) : u; }]; } },
   "@/features/labels/label-ui": { useLabel: (k: string) => (DEFAULT_LABELS as Record<string, string>)[k] ?? k },
   "@tanstack/react-query": {
-    useQuery: () => ({ data: listData, isLoading: false }),
+    useQuery: () => ({ data: { items: listData, requesters: [], applied: { requesterIds: [] } }, isLoading: false }),
     useQueryClient: () => ({ invalidateQueries: () => undefined }),
     useMutation: (o: { mutationFn: (v?: unknown) => Promise<unknown>; onSuccess?: (r: unknown) => void; onError?: (e: unknown) => void }) => ({ isPending: false, mutate: (v?: unknown) => { void o.mutationFn(v).then((r) => o.onSuccess?.(r), (e) => o.onError?.(e)); } }),
   },
@@ -32,6 +32,7 @@ const overrides = {
   "@/components/ui/select": { NativeSelect: (p: (typeof selects)[number]) => { selects.push(p); return <select />; } },
   "@/components/ui/table": { Table: (p: { children?: React.ReactNode }) => <table>{p.children}</table>, TableBody: (p: { children?: React.ReactNode }) => <tbody>{p.children}</tbody>, TableCell: (p: { children?: React.ReactNode }) => <td>{p.children}</td>, TableHead: (p: { children?: React.ReactNode }) => <th>{p.children}</th>, TableHeader: (p: { children?: React.ReactNode }) => <thead>{p.children}</thead>, TableRow: (p: { children?: React.ReactNode }) => <tr>{p.children}</tr> },
   "@/components/ui/dialog": { Dialog: ({ open, children }: { open: boolean; children?: React.ReactNode }) => (open ? <div data-dialog>{children}</div> : null), DialogContent: (p: { children?: React.ReactNode }) => <>{p.children}</>, DialogHeader: (p: { children?: React.ReactNode }) => <>{p.children}</>, DialogTitle: (p: { children?: React.ReactNode }) => <h2>{p.children}</h2>, DialogFooter: (p: { children?: React.ReactNode }) => <>{p.children}</> },
+  "@/components/ui/column-filter-header": { ColumnFilterHeader: ({ label }: { label: string }) => <th>{label}</th> }, // its own suite: status-requests-filter-ui.test.tsx
   "@/features/sales-upload/create-dealer-dialog": { DealerDialog: (p: (typeof dealerDialogs)[number]) => { dealerDialogs.push(p); return null; } },
 };
 const mod = testLoader(overrides)("src/features/party-planning/dealer-status-requests.tsx") as { StatusRequestCell: React.ComponentType<Record<string, unknown>>; StatusRequestsTab: React.ComponentType };

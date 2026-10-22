@@ -62,7 +62,7 @@ export function MyApprovals() {
       <PageHeader title="Approvals" subtitle="Your plans and their approval status. Submitted plans are read-only until reviewed." />
 
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>

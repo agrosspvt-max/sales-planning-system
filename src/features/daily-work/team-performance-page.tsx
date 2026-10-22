@@ -196,7 +196,7 @@ export function DealerSection({ title, rows, recovery = false, autoEntryIds = []
   const typeText = (row: DealerRow) => (row.recoverySource === "BILLING_EXCEPTION" ? C.sourceBilling : row.recoverySource === "CN_REQUEST" ? C.sourceCn : row.entryType === "SCHEME" ? C.schemeType : C.regular);
   return (
     <ReadSection title={title} section={recovery ? "recovery" : "sales"} empty={rows.length === 0} noPlan={noPlan}>
-      <Table>
+      <Table numbered>
         <TableHeader><TableRow>
           <TableHead>{C.dealer}</TableHead><TableHead>{C.task}</TableHead>
           <TableHead className="text-right">{C.planned}</TableHead><TableHead className="text-right">{C.actual}</TableHead>
@@ -228,7 +228,7 @@ export function AppointmentSection({ title, rows, noPlan = false }: { title: str
   // A linked row IS its Monthly Party Planning market; a legacy typed row keeps its dealer / client name and market text.
   return (
     <ReadSection title={title} section="appointment" empty={rows.length === 0} noPlan={noPlan}>
-      <Table>
+      <Table numbered>
         <TableHeader><TableRow><TableHead>{C.dealerClient}</TableHead><TableHead>{C.reportedDealer}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
           {rows.map((r) => (
@@ -251,7 +251,7 @@ export function ConversionSection({ title, rows, noPlan = false }: { title: stri
   const result = (v: string | null) => v === "YES" ? C.yes : v === "NO" ? C.no : dash;
   return (
     <ReadSection title={title} section="scheme_conversion" empty={rows.length === 0} noPlan={noPlan}>
-      <Table>
+      <Table numbered>
         <TableHeader><TableRow>
           <TableHead>{C.dealer}</TableHead><TableHead>{C.scheme}</TableHead>
           <TableHead className="text-right">{C.planned}</TableHead><TableHead>{C.actual}</TableHead>

@@ -26,7 +26,7 @@ export function AccountsPage() {
     <PageHeader title="Account Management" subtitle="Designations identify accounts. Explicit permissions authorize their actions." actions={<Button onClick={() => { setSaved(false); setEditing("new"); }}><Plus className="mr-2 h-4 w-4" />Create Account</Button>} />
     {saved && <p className="text-sm text-green-600" role="status">Account saved.</p>}
     {accounts.isError && <p className="text-sm text-destructive">{accounts.error.message}</p>}
-    <Card><CardContent className="pt-4"><div className="overflow-x-auto"><Table>
+    <Card><CardContent className="pt-4"><div className="overflow-x-auto"><Table numbered>
       <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Login ID</TableHead><TableHead>Designation</TableHead><TableHead>Status</TableHead><TableHead>Permissions</TableHead><TableHead /></TableRow></TableHeader>
       <TableBody>{accounts.data?.map(a => <TableRow key={a.id}><TableCell>{a.name}</TableCell><TableCell>{a.username}</TableCell><TableCell>{a.designation}</TableCell><TableCell>{a.isActive ? "Active" : "Inactive"}</TableCell><TableCell>{Object.keys(a.permissions).length} modules</TableCell><TableCell><Button variant="outline" size="sm" onClick={() => { setSaved(false); setEditing(a); }}>View / Edit</Button></TableCell></TableRow>)}</TableBody>
     </Table>{accounts.isLoading && <p className="p-4 text-sm text-muted-foreground">Loading accounts…</p>}{accounts.data?.length === 0 && <p className="p-4 text-sm text-muted-foreground">No administrative accounts.</p>}</div></CardContent></Card>

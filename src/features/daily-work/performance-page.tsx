@@ -15,7 +15,6 @@ import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { RmBadge } from "@/components/ui/rm-badge";
-import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -56,8 +55,8 @@ export function PerformancePage({ role }: { role: Role }) {
   const qc = useQueryClient();
   const [from, setFrom] = useState(currentBusinessDate);
   const [to, setTo] = useState(currentBusinessDate);
-  const [officerId, setOfficerId] = useState("");
-  const [groupId, setGroupId] = useState("");
+  const [officerIds, setOfficerIds] = useState<string[]>([]);
+  const [groupIds, setGroupIds] = useState<string[]>([]);
   const [detail, setDetail] = useState<{ officerId: string; date: string } | null>(null);
   // Performance (the default, unchanged view) | Tasks (task analysis). Tasks opens on Auto; its filters live here so they survive switching back and forth, and so a Task Activity
   // link in the Performance table can open it pre-filtered. Once opened, Tasks stays mounted (hidden) so its page, calendar and selection are kept.
@@ -133,25 +132,22 @@ export function PerformancePage({ role }: { role: Role }) {
     (["SALES", "RECOVERY", "APPOINTMENT", "SCHEME_CONVERSION", "VISITS", "OTHERS"] as const).filter((k) => (sections[k] ?? 0) > 0).map((k) => `${L[`sec${k}` as const]} ${sections[k]}`).join(" · ");
 
   const query = new URLSearchParams({ from, to });
-  if (!isSO && officerId) query.set("officerId", officerId);
-  if (isAdmin && groupId) query.set("groupId", groupId);
+  if (!isSO) officerIds.forEach((id) => query.append("officerId", id));
+  if (isAdmin) groupIds.forEach((id) => query.append("groupId", id));
   const { data, isLoading } = useQuery<Payload>({
-    queryKey: ["performance", role, from, to, officerId, groupId],
+    queryKey: ["performance", role, from, to, officerIds, groupIds],
     queryFn: () => api.get<Payload>(`/api/daily-work/performance?${query.toString()}`),
   });
 
   const showOfficer = !isSO;
   const showState = isAdmin;
   const colCount = 1 + (showOfficer ? 1 : 0) + (showState ? 1 : 0) + 6; // date + officer? + state? + plan/report/self/rm/task activity/action
-  const changeState = (value: string) => {
-    setGroupId(value);
+  const changeState = (values: string[]) => {
+    setGroupIds(values);
     // A State change establishes a new authoritative SO scope. Resetting is predictable and prevents a
     // previously selected officer from being sent with an incompatible State while the options refresh.
-    setOfficerId("");
+    setOfficerIds([]);
   };
-
-  // Single selection through the shared multi-select header: ticking a different person replaces the choice, unticking clears it.
-  const pickOfficer = (next: string[]) => setOfficerId(next.find((id) => id !== officerId) ?? "");
 
   return (
     <div className="space-y-5">
@@ -171,12 +167,7 @@ export function PerformancePage({ role }: { role: Role }) {
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5"><Label>{L.dateFrom}</Label><DateInputDMY value={from} onChange={(v) => setFrom(v || currentBusinessDate())} className="w-44" aria-label={L.dateFrom} /></div>
         <div className="space-y-1.5"><Label>{L.dateTo}</Label><DateInputDMY value={to} onChange={(v) => setTo(v || currentBusinessDate())} className="w-44" aria-label={L.dateTo} /></div>
-        {showState && (
-          <div className="space-y-1.5"><Label>{L.fState}</Label>
-            <NativeSelect className="w-48" value={groupId} onChange={(e) => changeState(e.target.value)}
-              options={[{ value: "", label: L.allStates }, ...(data?.states ?? []).map((s) => ({ value: s.id, label: s.name }))]} />
-          </div>
-        )}
+
       </div>
 
       {/* Summary cards for the selected range. */}
@@ -202,7 +193,7 @@ export function PerformancePage({ role }: { role: Role }) {
       </div>
 
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>{L.colDate}</TableHead>
@@ -211,11 +202,19 @@ export function PerformancePage({ role }: { role: Role }) {
                   label={L.colOfficer}
                   ariaLabel={L.officerLabel}
                   options={(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))}
-                  selected={officerId ? [officerId] : []}
-                  onChange={pickOfficer}
+                  selected={officerIds}
+                  onChange={setOfficerIds}
                 />
               )}
-              {showState && <TableHead>{L.colState}</TableHead>}
+              {showState && (
+                <ColumnFilterHeader
+                  label={L.colState}
+                  ariaLabel={L.fState}
+                  options={(data?.states ?? []).map((s) => ({ value: s.id, label: s.name }))}
+                  selected={groupIds}
+                  onChange={changeState}
+                />
+              )}
               <TableHead>{L.colPlan}</TableHead>
               <TableHead>{L.colReport}</TableHead>
               <TableHead>{L.colSelf}</TableHead>
@@ -281,7 +280,7 @@ export function PerformancePage({ role }: { role: Role }) {
 
       {metric && data && (
         // The drill-down uses the filters of the data the card was computed from (this page's Date From / Date To / State / officer).
-        <PerformanceMetricDetail request={{ ...metric, from: data.from, to: data.to, officerId, groupId, isSO, isAdmin } satisfies MetricRequest} onClose={() => setMetric(null)} />
+        <PerformanceMetricDetail request={{ ...metric, from: data.from, to: data.to, officerIds, groupIds, isSO, isAdmin } satisfies MetricRequest} onClose={() => setMetric(null)} />
       )}
 
       {detail && (

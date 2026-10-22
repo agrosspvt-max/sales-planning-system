@@ -319,7 +319,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
         />
       )}
       <div className="overflow-auto rounded-lg border bg-background" aria-busy={busy}>
-        <Table className={exceptionView ? "min-w-[1360px] table-fixed" : "min-w-[1130px] table-fixed"}>
+        <Table numbered numberStart={(data ? (data.page - 1) * data.pageSize : 0) + 1} className={exceptionView ? "min-w-[1360px] table-fixed" : "min-w-[1130px] table-fixed"}>
           <TableHeader>
             <TableRow>
               {FILTER_COLUMNS.map(({ key, label, width }) => (

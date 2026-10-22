@@ -102,7 +102,7 @@ export function SchemeDetailDialog({ schemeId, schemeName, onClose }: { schemeId
           <>
             <DialogHeader><DialogTitle>{schemeName} — Dealer Plans</DialogTitle></DialogHeader>
             <div className="overflow-auto rounded-lg border bg-background">
-              <Table>
+              <Table numbered>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Dealer Name</TableHead>

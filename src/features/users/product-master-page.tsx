@@ -70,7 +70,7 @@ export function ProductMasterPage() {
         }
       />
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table stickyFirstColumn>
+        <Table numbered stickyFirstColumn>
           <TableHeader>
             <TableRow>
               <TableHead className="min-w-[160px]">Product</TableHead>

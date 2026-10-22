@@ -384,7 +384,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
 
       {hasFilters && <div className="flex justify-end"><Button size="sm" variant="ghost" onClick={() => { setFilters({}); setExportMessage(null); }}>{labels.filterClear}</Button></div>}
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               {filterHeader("party", labels.party)}

@@ -117,7 +117,7 @@ export function ResourcePage({
       </div>
 
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered numberStart={(data ? (data.page - 1) * data.pageSize : 0) + 1}>
           <TableHeader>
             <TableRow>
               {config.columns.map((c) => (

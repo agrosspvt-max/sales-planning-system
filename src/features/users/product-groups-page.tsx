@@ -33,7 +33,7 @@ export function ProductGroupsPage() {
         actions={<Input className="w-64" placeholder="Search product…" value={search} onChange={(e) => setSearch(e.target.value)} />}
       />
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Product</TableHead>

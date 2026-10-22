@@ -204,7 +204,7 @@ export function ReportsPage({ initialType = "product", lockType = false, title }
             <Skeleton className="h-6 w-full" />
           </div>
         ) : (
-          <Table>
+          <Table numbered>
             <TableHeader>
               <TableRow>
                 {data.columns.map((c) => (

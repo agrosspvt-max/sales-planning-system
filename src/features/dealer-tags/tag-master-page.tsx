@@ -73,7 +73,7 @@ export function TagMasterPage() {
         }
       />
       {error && <p className="text-sm text-destructive">{error.message}</p>}
-      <Table>
+      <Table numbered>
         <TableHeader>
           <TableRow>
             <TableHead>Tag Name</TableHead>

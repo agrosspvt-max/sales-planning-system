@@ -496,7 +496,7 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
         </div>
       )}
       <div className={schemeTable.outer}>
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead className="w-8" />
@@ -585,7 +585,7 @@ function SchemeReviewWorkspace({ role, userId, embedded = false }: { role: Role;
                         <TableCell colSpan={COLS + 1} className={schemeTable.nestedCell}>
                           <div className={schemeTable.nestedInset}>
                             <div className={schemeTable.nestedShell}>
-                            <Table>
+                            <Table numbered>
                               <TableHeader>
                                 <TableRow>
                                   <TableHead><L k="scheme_planning.nested.dealer" /></TableHead>

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Check, Upload, X } from "lucide-react";
+import { Check, Plus, Upload, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { POTENTIALS, serialNumber, validateMarketRequest, type ImportPlanRow, type ImportSummary, type Potential } from "@/lib/territory-mapping";
@@ -23,7 +23,10 @@ import { UnderlineTabs } from "@/components/ui/underline-tabs";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { fill, fillNodes, useLabels } from "./party-labels";
+import { RequesterCell, requesterFilterOptions } from "./requester-display";
 import { StatusRequestCell, StatusRequestsTab } from "./dealer-status-requests";
+import { RetailerMappingTab, RetailerRequestsTab } from "./retailer-mapping";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
 import type { DealerStatusReason } from "@/lib/dealer-status-request";
 
 /* ------------------------------------------- DTOs (mirror territory.server.ts) ------------------------------------------- */
@@ -56,21 +59,19 @@ const REQUEST_VARIANT: Record<MarketRequest["status"], "secondary" | "success" |
 const dateText = (iso: string | null) => (iso ? formatDMY(iso) : "—");
 const dash = <span className="text-muted-foreground">—</span>;
 
-/** Display only: full territory names remain available to filtering and on hover. */
-function requesterTerritoryPreview(territory: string): string {
-  const words = territory.trim().split(/\s+/);
-  return words.length > 4 ? words.slice(0, 4).join(" ").replace(/[,;]+$/, "") + "…" : territory;
-}
-
 /* ===================================================== Page ===================================================== */
 
 export function TerritoryMappingPage({ role }: { role: Role }) {
-  const [tab, setTab] = useState<"existing" | "add" | "request">("existing");
+  const [tab, setTab] = useState<"existing" | "add" | "retailer" | "request">("existing");
+  const [retailerAddOpen, setRetailerAddOpen] = useState(false);
   const isAdmin = isAdministrativeRole(role);
   const territory = useLabel("party_planning.nav.territory"); // standalone module: its own title (it is no longer inside Party Planning)
   const tabExisting = useLabel("party_planning.territory.tab_existing");
   const tabAdd = useLabel("party_planning.territory.tab_add_market");
   const tabRequest = useLabel("party_planning.territory.tab_request");
+  const tabRetailer = useLabel("party_planning.retailer.title");
+  const addRetailer = useLabel("party_planning.retailer.add");
+  const canAddRetailer = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
   const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.territory.subtitle" });
   return (
     <div className="space-y-5">
@@ -80,10 +81,24 @@ export function TerritoryMappingPage({ role }: { role: Role }) {
         subtitle={T.subtitle}
         pinned={false} // the table column headings are the pinned element on this page, not the title
       />
-      <UnderlineTabs active={tab} onChange={(key) => setTab(key as "existing" | "add" | "request")} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }, ...(isAdmin ? [{ key: "request", label: tabRequest }] : [])]} />
-      {tab === "existing" ? <ExistingDealers role={role} /> : tab === "request" && isAdmin ? <StatusRequestsTab /> : <AddMarket role={role} />}
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1 overflow-x-auto [&_button]:whitespace-nowrap">
+          <UnderlineTabs active={tab} onChange={(key) => { setTab(key as typeof tab); setRetailerAddOpen(false); }} tabs={[{ key: "existing", label: tabExisting }, { key: "add", label: tabAdd }, { key: "retailer", label: tabRetailer }, ...(isAdmin ? [{ key: "request", label: tabRequest }] : [])]} />
+        </div>
+        {tab === "retailer" && canAddRetailer && <Button className="shrink-0" onClick={() => setRetailerAddOpen(true)}><Plus className="mr-1 h-4 w-4" />{addRetailer}</Button>}
+      </div>
+      {tab === "existing" ? <ExistingDealers role={role} /> : tab === "retailer" ? <RetailerMappingTab role={role} addOpen={retailerAddOpen} onAddClose={() => setRetailerAddOpen(false)} /> : tab === "request" && isAdmin ? <TerritoryRequests /> : <AddMarket role={role} />}
     </div>
   );
+}
+
+function TerritoryRequests() {
+  const [kind, setKind] = useState<"party" | "retailer">("party");
+  const canReviewRetailers = useAdminPermission("partyPlanning", "manage");
+  const labels = useLabels({ party: "party_planning.retailer.party_requests", retailer: "party_planning.retailer.retailer_requests" });
+  return <div className="space-y-4"><div className="inline-flex rounded-md border bg-background p-0.5 text-sm" role="group" aria-label={`${labels.party} / ${labels.retailer}`}>
+    {(["party", ...(canReviewRetailers ? ["retailer"] : [])] as ("party" | "retailer")[]).map((value) => <button type="button" key={value} aria-pressed={kind === value} onClick={() => setKind(value)} className={`rounded px-3 py-1.5 ${kind === value ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{labels[value]}</button>)}
+  </div>{kind === "retailer" && canReviewRetailers ? <RetailerRequestsTab /> : <StatusRequestsTab />}</div>;
 }
 
 /* ============================================= Existing Dealers ============================================= */
@@ -107,7 +122,12 @@ function ExistingDealers({ role }: { role: Role }) {
     allMarkets: useLabel("party_planning.territory.all_markets"), unmapped: useLabel("party_planning.territory.unmapped"), empty: useLabel("party_planning.territory.empty"),
   };
   const T = useLabels({ counts: "party_planning.territory.msg.mapped_counts", pageOf: "party_planning.territory.msg.page_of", previous: "party_planning.common.previous", next: "party_planning.common.next" });
-  const { data: markets } = useQuery<MarketDto[]>({ queryKey: ["territory-markets"], queryFn: () => api.get<MarketDto[]>("/api/territory-mapping/markets") });
+  // Market choices follow the parents (State → Sales Officer → Market): only Markets mapped by the dealers of that scope. One request per (State, officer) pair; an older answer can never
+  // replace the choices of a newer selection because each pair is its own query.
+  const { data: markets } = useQuery<MarketDto[]>({
+    queryKey: ["territory-market-filter", state, officer],
+    queryFn: () => api.get<MarketDto[]>(`/api/territory-mapping/market-filter?${new URLSearchParams({ state, officer })}`),
+  });
   const { data: districtsByState } = useQuery<Record<string, DistrictOption[]>>({ queryKey: ["territory-districts"], queryFn: () => api.get<Record<string, DistrictOption[]>>("/api/territory-mapping/districts") });
   const { data, isLoading } = useQuery<DealerPage>({
     queryKey: ["territory-dealers", market, officer, state, page],
@@ -118,10 +138,16 @@ function ExistingDealers({ role }: { role: Role }) {
   const { data: filterOptions } = useQuery<FilterOptions>({ queryKey: ["territory-filters"], queryFn: () => api.get<FilterOptions>("/api/territory-mapping/filters"), enabled: showOfficer });
   // Admin: the officer list narrows to the chosen State. A selected officer who is no longer in the list is cleared (see changeState).
   const officerChoices = (filterOptions?.officers ?? []).filter((o) => !state || o.groupId === state);
+  // A parent change clears its dependents (never leaves a hidden child value filtering the new scope) and returns to page 1.
   const changeState = (next: string) => {
-    setState(next); setPage(1);
+    setState(next); setPage(1); setMarket("");
     if (officer && next && (filterOptions?.officers ?? []).find((o) => o.id === officer)?.groupId !== next) setOfficer("");
   };
+  const changeOfficer = (next: string) => { setOfficer(next); setMarket(""); setPage(1); };
+  // A Market that is no longer one of the scope's choices (e.g. after the officer's dealers were remapped) is dropped, never kept as an invisible filter.
+  useEffect(() => {
+    if (markets && market && market !== "__none__" && !markets.some((m) => m.id === market)) { setMarket(""); setPage(1); }
+  }, [markets]); // eslint-disable-line react-hooks/exhaustive-deps
   const save = useMutation({
     mutationFn: (v: { dealerId: string; marketId?: string | null; potential?: Potential | null }) => api.put(`/api/territory-mapping/dealers/${v.dealerId}`, { marketId: v.marketId, potential: v.potential }),
     onSuccess: () => { setError(null); qc.invalidateQueries({ queryKey: ["territory-dealers"] }); },
@@ -132,22 +158,22 @@ function ExistingDealers({ role }: { role: Role }) {
     <div className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-wrap items-end gap-3">
-          <div className="space-y-1.5"><Label>{L.market}</Label>
-            <SearchableSelect className="w-60" ariaLabel={L.market} placeholder={L.searchMarket} emptyText={L.noMarkets} value={market} onChange={(v) => { setMarket(v); setPage(1); }}
-              options={[{ value: "", label: L.allMarkets }, { value: "__none__", label: L.unmapped }, ...(markets ?? []).map((m) => ({ value: m.id, label: m.name }))]} />
-          </div>
-          {showOfficer && (
-            <div className="space-y-1.5"><Label>{L.officer}</Label>
-              <NativeSelect className="w-52" value={officer} onChange={(e) => { setOfficer(e.target.value); setPage(1); }}
-                options={[{ value: "", label: L.allOfficers }, ...officerChoices.map((o) => ({ value: o.id, label: o.name }))]} />
-            </div>
-          )}
           {isAdmin && (
             <div className="space-y-1.5"><Label>{L.state}</Label>
               <NativeSelect className="w-48" value={state} onChange={(e) => changeState(e.target.value)}
                 options={[{ value: "", label: L.allStates }, ...(filterOptions?.states ?? []).map((g) => ({ value: g.id, label: g.name }))]} />
             </div>
           )}
+          {showOfficer && (
+            <div className="space-y-1.5"><Label>{L.officer}</Label>
+              <NativeSelect className="w-52" value={officer} onChange={(e) => changeOfficer(e.target.value)}
+                options={[{ value: "", label: L.allOfficers }, ...officerChoices.map((o) => ({ value: o.id, label: o.name }))]} />
+            </div>
+          )}
+          <div className="space-y-1.5"><Label>{L.market}</Label>
+            <SearchableSelect className="w-60" ariaLabel={L.market} placeholder={L.searchMarket} emptyText={L.noMarkets} value={market} onChange={(v) => { setMarket(v); setPage(1); }}
+              options={[{ value: "", label: L.allMarkets }, { value: "__none__", label: L.unmapped }, ...(markets ?? []).map((m) => ({ value: m.id, label: m.name }))]} />
+          </div>
           {data && <span className="pb-2 text-sm text-muted-foreground">{fill(T.counts, { mapped: data.mapped, unmapped: data.unmapped })}</span>}
         </div>
         <Button variant="outline" onClick={() => setImportOpen(true)}><Upload className="h-4 w-4" /> {L.importExcel}</Button>
@@ -612,11 +638,7 @@ export function AddMarket({ role }: { role: Role }) {
         <div className="w-max min-w-full rounded-lg border bg-background">
           <Table stickyHeader externalScroll>
             <TableHeader><TableRow>
-              <TableHead className="w-14">{L.serial}</TableHead><ColumnFilterHeader label={L.district} ariaLabel={L.district} options={(list?.districts ?? []).map((d) => ({ value: d.id, label: d.name }))} selected={districtIds} onChange={setDistrictIds} searchable searchPlaceholder={T.searchHere} noMatchText={T.noMatchChoice} allLabel={T.allChoices} /><TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><ColumnFilterHeader label={T.requestedBy} ariaLabel={T.requestedBy} options={(list?.requesters ?? []).map((r) => {
-                const label = r.territory ?? T.noTerritory;
-                const preview = requesterTerritoryPreview(label);
-                return { value: r.id, label, displayLabel: preview === label ? undefined : preview, secondary: r.name };
-              })} selected={requesterIds} onChange={setRequesterIds} searchable searchPlaceholder={T.searchHere} noMatchText={T.noMatchChoice} allLabel={T.allChoices} /><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
+              <TableHead className="w-14">{L.serial}</TableHead><ColumnFilterHeader label={L.district} ariaLabel={L.district} options={(list?.districts ?? []).map((d) => ({ value: d.id, label: d.name }))} selected={districtIds} onChange={setDistrictIds} searchable searchPlaceholder={T.searchHere} noMatchText={T.noMatchChoice} allLabel={T.allChoices} /><TableHead>{L.name}</TableHead><TableHead>{L.potential}</TableHead><TableHead>{L.parties}</TableHead><ColumnFilterHeader label={T.requestedBy} ariaLabel={T.requestedBy} options={requesterFilterOptions(list?.requesters ?? [], T.noTerritory)} selected={requesterIds} onChange={setRequesterIds} searchable searchPlaceholder={T.searchHere} noMatchText={T.noMatchChoice} allLabel={T.allChoices} /><TableHead>{T.date}</TableHead><TableHead>{T.status}</TableHead><TableHead>{T.decision}</TableHead>
               {view === "review" && <TableHead className="text-right">{T.action}</TableHead>}
             </TableRow></TableHeader>
             <TableBody>
@@ -626,7 +648,7 @@ export function AddMarket({ role }: { role: Role }) {
                     <TableRow key={r.id}>
                       <TableCell className="tabular-nums text-muted-foreground">{i + 1}</TableCell>
                       <TableCell>{r.districtName ?? dash}</TableCell><TableCell className="font-medium">{r.marketName}</TableCell><TableCell>{r.potential}</TableCell><TableCell>{r.numberOfParties}</TableCell>
-                      <TableCell data-testid="requested-by"><div className="font-medium leading-tight"><span className="block max-w-72 truncate" title={r.requesterTerritory ?? T.noTerritory} aria-label={r.requesterTerritory ?? T.noTerritory}>{requesterTerritoryPreview(r.requesterTerritory ?? T.noTerritory)}</span></div><div className="text-xs leading-tight text-muted-foreground">{r.requesterName}</div></TableCell><TableCell className="whitespace-nowrap">{dateText(r.createdAt)}</TableCell>
+                      <RequesterCell territory={r.requesterTerritory} name={r.requesterName} fallback={T.noTerritory} /><TableCell className="whitespace-nowrap">{dateText(r.createdAt)}</TableCell>
                       <TableCell><Badge variant={REQUEST_VARIANT[r.status]}>{T[r.status]}</Badge></TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {r.rmDecidedByName && <div>{fill(T.decidedRm, { name: r.rmDecidedByName, date: dateText(r.rmDecidedAt) })}</div>}

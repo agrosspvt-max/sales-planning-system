@@ -49,7 +49,7 @@ export function MonthlyPlanListPage({ role, stage = "create" }: { role: Role; st
         actions={stage === "create" && (canPlan || isAdministrativeRole(role)) ? <Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> {T.createPlan}</Button> : undefined} />
 
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader><TableRow>
             <TableHead>{T.season}</TableHead><TableHead>{T.month}</TableHead>{showOwner && <TableHead>{T.officer}</TableHead>}<TableHead>{T.overall}</TableHead><TableHead>{T.markets}</TableHead><TableHead>{stage === "create" || stage === "older" ? T.lastSaved : T.submittedLastSaved}</TableHead><TableHead className="text-right">{T.open}</TableHead>
           </TableRow></TableHeader>

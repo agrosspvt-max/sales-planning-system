@@ -10,6 +10,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
+import { buildCnTimeline, type CnTimelineEntry } from "@/lib/cn-timeline";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { filterCnRequests, type CnFilters } from "@/lib/cn-request-filters";
 import { getResolvedLabels } from "@/features/labels/service.server";
@@ -392,14 +393,54 @@ export async function listCnRequestsForExport(ctx: AuthContext, view: CnRequestV
   });
 }
 
-export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequestRow> {
+/** Display the identifiable login account, with a designation only when it was saved at the action. */
+function timelineAccount(user: { name: string; username?: string }, designation?: string | null): string {
+  return actorDisplayName(user.username ? `${user.name} (@${user.username})` : user.name, designation);
+}
+
+export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequestRow & { timeline: CnTimelineEntry[] }> {
   const L = await getResolvedLabels();
-  const r = (await prisma.cnRequest.findUnique({ where: { id }, select: ROW_SELECT })) as unknown as RawRow | null;
+  const r = await prisma.cnRequest.findUnique({ where: { id }, select: {
+    ...ROW_SELECT,
+    actedByRmId: true, actedByAdminId: true, cnWorkingUploadedById: true, finalCnUploadedById: true,
+    paymentEvents: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: {
+      id: true, source: true, requestKey: true, createdAt: true, status: true, amountPaid: true, outstandingAfter: true,
+      recordedById: true, actorDesignation: true, recordedBy: { select: { name: true, username: true } },
+    } },
+  } });
   if (!r) throw new ApiError(404, L["cn_requests.error.not_found"]);
   const scope = await getOfficerScope(ctx);
   if (!scope.all && !scope.ids.includes(r.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_view"]);
+  // Detail-only, batched identity lookups after authorization. No document bytes or whole-company history.
+  const actorIds = [...new Set([r.actedByRmId, r.actedByAdminId, r.cnWorkingUploadedById, r.finalCnUploadedById].filter((value): value is string => !!value))];
+  const [audits, users] = await Promise.all([
+    prisma.auditLog.findMany({ where: { entity: "cnRequest", entityId: id, action: { in: ["CREATE", "UPDATE"] } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { action: true, summary: true, userId: true, actorDesignation: true, user: { select: { name: true, username: true } } } }),
+    actorIds.length ? prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, name: true, username: true } }) : [],
+  ]);
+  const userMap = new Map(users.map((user) => [user.id, user]));
+  const submission = audits.find((audit) => audit.action === "CREATE");
+  const working = audits.find((audit) => audit.summary?.startsWith("CN Request accepted, not posted"));
+  const rejection = audits.find((audit) => audit.summary?.startsWith("CN Request rejected"));
+  const posting = audits.find((audit) => audit.summary?.startsWith("CN Request accepted, posted in ledger"));
+  const paymentAt = (at: Date | null) => at ? r.paymentEvents.find((event) => event.source === "ADMIN_VERIFY" && event.status === "PAID" && event.createdAt.getTime() === at.getTime()) : undefined;
+  const recordedAccount = (userId: string | null, audit?: typeof submission, payment?: typeof r.paymentEvents[number]): string | undefined => {
+    if (audit && (!userId || userId === audit.userId)) return timelineAccount(audit.user, audit.actorDesignation ?? (payment?.recordedById === audit.userId ? payment.actorDesignation : null));
+    if (payment && (!userId || payment.recordedById === userId)) return timelineAccount(payment.recordedBy, payment.actorDesignation);
+    const user = userId ? userMap.get(userId) : undefined;
+    return user ? timelineAccount(user) : undefined;
+  };
   const row = toRow({ ...r, paymentVerified: (await paymentVerifiedMap([id])).get(id) ?? false });
-  return (await withDealerDisplayNames([row]))[0];
+  const timeline = buildCnTimeline({ ...r, actors: {
+    // The CREATE audit identifies the actual submitter, including an RM submitting for an SO.
+    SUBMITTED: submission ? timelineAccount(submission.user, submission.actorDesignation) : undefined,
+    WORKING_SHARED: recordedAccount(r.cnWorkingUploadedById, working, r.paymentEvents.find((event) => event.source === "ACCEPTANCE")),
+    REJECTED: recordedAccount(r.actedByRmId ?? r.actedByAdminId, rejection),
+    POSTED_IN_LEDGER: recordedAccount(r.actedByAdminId, posting, paymentAt(r.postedAt)),
+    FINAL_CN_SHARED: recordedAccount(r.finalCnUploadedById, undefined, paymentAt(r.finalCnUploadedAt)),
+  }, payments: r.paymentEvents.map((event) => ({
+    ...event, actor: timelineAccount(event.recordedBy, event.actorDesignation), amountPaid: num(event.amountPaid), outstandingAfter: Number(event.outstandingAfter),
+  })) });
+  return { ...(await withDealerDisplayNames([row]))[0], timeline };
 }
 
 /**
@@ -1081,6 +1122,8 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
 
       const verifiedEvent = await tx.cnPaymentEvent.create({
         data: {
+          // One app-clock timestamp for this decision, Final CN and posting (database clocks may differ).
+          createdAt: transitionAt,
           cnRequestId: id,
           status: data.status,
           amountPaid,
@@ -1142,7 +1185,7 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
   });
   if (postingResult.posted) {
     await writeAudit({
-      userId: ctx.userId,
+      userId: ctx.userId, actorDesignation: ctx.designation,
       action: "UPDATE",
       entity: "cnRequest",
       entityId: id,

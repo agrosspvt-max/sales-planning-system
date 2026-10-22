@@ -66,7 +66,7 @@ async function main() {
   // populated: the SAME footer row
   plans = [PLAN]; html = render();
   assert.ok(/border-t p-2"><div><button>[^]*?Add Market<\/button><\/div>/.test(html), "same position with rows");
-  assert.deepEqual([...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["Market", "Party Options", "Status", "Conversion Date", "Days"]);
+  assert.deepEqual([...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["S.No", "Market", "Party Options", "Status", "Conversion Date", "Days"]);
   assert.ok(html.includes("Party A") && html.includes("Party B") && html.includes("Pipariya"));
   // Add Market dialog: market (searchable), Conversion Date, Option 1 required, Option 2 optional → POST → stays in Create
   click("Add Market"); html = render();

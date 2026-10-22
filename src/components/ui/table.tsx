@@ -1,5 +1,35 @@
+"use client";
+
 import * as React from "react";
 import { cn } from "@/lib/utils";
+
+const Numbering = React.createContext<{ start: number; label: React.ReactNode } | null>(null);
+type CellProps = { children?: React.ReactNode; colSpan?: number };
+type RowProps = React.HTMLAttributes<HTMLTableRowElement> & { "data-serial-processed"?: boolean; "data-row-kind"?: string };
+
+/** Pure render-time numbering. Filtering, sorting and pagination cannot leave stale ordinals. */
+function numberedRows(children: React.ReactNode, kind: "header" | "body", start: number, label: React.ReactNode): React.ReactNode {
+  let next = start;
+  const visit = (nodes: React.ReactNode): React.ReactNode => React.Children.map(nodes, (node) => {
+    if (!React.isValidElement<RowProps>(node)) return node;
+    if (node.type === TableRow || node.type === "tr") {
+      const cells = React.Children.toArray(node.props.children);
+      const first = cells[0];
+      const spanned = React.isValidElement<CellProps>(first) && first.props.colSpan != null;
+      const summary = node.props["data-row-kind"] === "summary";
+      const numbered = spanned
+        ? [React.cloneElement(first, { colSpan: first.props.colSpan! + 1 }), ...cells.slice(1)]
+        : [kind === "header"
+          ? <TableHead key="serial" scope="col" className="w-14 whitespace-nowrap" data-serial-cell>{label}</TableHead>
+          : <TableCell key="serial" className="w-14 whitespace-nowrap tabular-nums text-muted-foreground" data-serial-cell>{summary ? null : next++}</TableCell>, ...cells];
+      return React.cloneElement(node, { "data-serial-processed": true }, numbered);
+    }
+    // Explicit fragments/row groups are traversed; cell contents and nested tables are left alone.
+    if (node.type !== Table && node.type !== "table" && node.props.children) return React.cloneElement(node, {}, visit(node.props.children));
+    return node;
+  });
+  return visit(children);
+}
 
 const Table = React.forwardRef<
   HTMLTableElement,
@@ -28,47 +58,62 @@ const Table = React.forwardRef<
      * wrapper is the single scroll region, exactly as every existing grid relies on.
      */
     externalScroll?: boolean;
+    /** Opt in for record lists; existing serial columns and planning matrices are unaffected. */
+    numbered?: boolean;
+    /** First visible record's ordinal, including any pagination offset. */
+    numberStart?: number;
+    numberLabel?: React.ReactNode;
   }
->(({ className, stickyFirstColumn, stickyHeader, externalScroll, ...props }, ref) => (
+>(({ className, stickyFirstColumn, stickyHeader, externalScroll, numbered, numberStart = 1, numberLabel = "S.No", ...props }, ref) => (
+  <Numbering.Provider value={numbered ? { start: numberStart, label: numberLabel } : null}>
   <div className={cn("relative w-full", !externalScroll && "overflow-auto", stickyHeader && !externalScroll && "h-full min-h-0 flex-1")}>
     <table
       ref={ref}
       className={cn(
         "w-full caption-bottom text-sm",
         stickyFirstColumn && "sticky-first-col",
+        stickyFirstColumn && numbered && "numbered-sticky",
         stickyHeader && "sticky-head",
         className,
       )}
       {...props}
     />
   </div>
+  </Numbering.Provider>
 ));
 Table.displayName = "Table";
 
 const TableHeader = React.forwardRef<
   HTMLTableSectionElement,
   React.HTMLAttributes<HTMLTableSectionElement>
->(({ className, ...props }, ref) => (
-  <thead ref={ref} className={cn("[&_tr]:border-b bg-muted/40", className)} {...props} />
-));
+>(({ className, children, ...props }, ref) => {
+  const numbering = React.useContext(Numbering);
+  return <thead ref={ref} className={cn("[&_tr]:border-b bg-muted/40", className)} {...props}>{numbering ? numberedRows(children, "header", numbering.start, numbering.label) : children}</thead>;
+});
 TableHeader.displayName = "TableHeader";
 
 const TableBody = React.forwardRef<
   HTMLTableSectionElement,
   React.HTMLAttributes<HTMLTableSectionElement>
->(({ className, ...props }, ref) => (
-  <tbody ref={ref} className={cn("[&_tr:last-child]:border-0", className)} {...props} />
-));
+>(({ className, children, ...props }, ref) => {
+  const numbering = React.useContext(Numbering);
+  return <tbody ref={ref} className={cn("[&_tr:last-child]:border-0", className)} {...props}>{numbering ? numberedRows(children, "body", numbering.start, numbering.label) : children}</tbody>;
+});
 TableBody.displayName = "TableBody";
 
-const TableRow = React.forwardRef<HTMLTableRowElement, React.HTMLAttributes<HTMLTableRowElement>>(
-  ({ className, ...props }, ref) => (
-    <tr
-      ref={ref}
-      className={cn("border-b transition-colors hover:bg-muted/50", className)}
-      {...props}
-    />
-  ),
+const TableRow = React.forwardRef<HTMLTableRowElement, RowProps>(
+  ({ className, children, "data-serial-processed": processed, ...props }, ref) => {
+    const numbering = React.useContext(Numbering);
+    // Custom loading/empty-row components and footers render after the body walk; align them without counting them.
+    if (numbering && !processed) {
+      const cells = React.Children.toArray(children);
+      const first = cells[0];
+      children = React.isValidElement<CellProps>(first) && first.props.colSpan != null
+        ? [React.cloneElement(first, { colSpan: first.props.colSpan! + 1 }), ...cells.slice(1)]
+        : [<TableCell key="serial-spacer" data-serial-cell />, ...cells];
+    }
+    return <tr ref={ref} className={cn("border-b transition-colors hover:bg-muted/50", className)} {...props}>{children}</tr>;
+  },
 );
 TableRow.displayName = "TableRow";
 

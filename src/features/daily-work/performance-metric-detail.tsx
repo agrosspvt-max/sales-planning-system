@@ -14,7 +14,7 @@ import type { PerformanceDetailPayload } from "./service.server";
 
 type Detail = Omit<PerformanceDetailPayload, never>;
 type SortKey = "date" | "employee" | "value";
-export interface MetricRequest { metric: string; title: string; from: string; to: string; officerId: string; groupId: string; isSO: boolean; isAdmin: boolean }
+export interface MetricRequest { metric: string; title: string; from: string; to: string; officerId?: string; officerIds?: string[]; groupId?: string; groupIds?: string[]; isSO: boolean; isAdmin: boolean }
 
 export const rupees = (v: number) => `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v)}`; // Sales / Recovery are money
 export const countText = (v: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(v); // Scheme units, appointments and visits are counts
@@ -49,10 +49,12 @@ export function PerformanceMetricDetail({ request, onClose }: { request: MetricR
   const sectionText: Record<string, string> = { SALES: L.secSales, RECOVERY: L.secRecovery, APPOINTMENT: L.secAppointment, SCHEME_CONVERSION: L.secScheme, SUMMARY: L.secVisits };
 
   const query = new URLSearchParams({ metric: request.metric, from: request.from, to: request.to, page: String(page), pageSize: "25", sort, dir });
-  if (!request.isSO && request.officerId) query.set("officerId", request.officerId);
-  if (request.isAdmin && request.groupId) query.set("groupId", request.groupId);
+  const officerIds = request.officerIds ?? (request.officerId ? [request.officerId] : []);
+  if (!request.isSO) officerIds.forEach((id) => query.append("officerId", id));
+  const groupIds = request.groupIds ?? (request.groupId ? [request.groupId] : []);
+  if (request.isAdmin) groupIds.forEach((id) => query.append("groupId", id));
   const { data, isLoading, error } = useQuery<Detail>({
-    queryKey: ["performance-detail", request.metric, request.from, request.to, request.officerId, request.groupId, page, sort, dir],
+    queryKey: ["performance-detail", request.metric, request.from, request.to, officerIds, groupIds, page, sort, dir],
     queryFn: () => api.get<Detail>(`/api/daily-work/performance/detail?${query.toString()}`),
     placeholderData: keepPreviousData,
   });
@@ -72,7 +74,7 @@ export function PerformanceMetricDetail({ request, onClose }: { request: MetricR
         <DialogHeader><DialogTitle>{request.title}</DialogTitle></DialogHeader>
         <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-muted-foreground">
           <span>{L.range}: <b className="text-foreground">{dateText(request.from)} – {dateText(request.to)}</b></span>
-          {request.isAdmin && <span>{L.state}: <b className="text-foreground">{data ? data.stateName ?? L.allStates : request.groupId ? "…" : L.allStates}</b></span>}
+          {request.isAdmin && <span>{L.state}: <b className="text-foreground">{data ? data.stateName ?? L.allStates : groupIds.length ? "…" : L.allStates}</b></span>}
           {data?.officerName && <span>{L.officer}: <b className="text-foreground">{data.officerName}</b></span>}
         </div>
         <div className="grid grid-cols-3 gap-3 rounded-lg border bg-muted/30 p-3">
@@ -84,7 +86,7 @@ export function PerformanceMetricDetail({ request, onClose }: { request: MetricR
           <p className="py-8 text-center text-sm text-muted-foreground">{L.empty}</p>
         ) : data && (
           <div className="overflow-auto rounded-lg border">
-            <Table>
+            <Table numbered numberStart={(data.page - 1) * data.pageSize + 1}>
               <TableHeader>
                 <TableRow>
                   <SortHead k="date">{L.colDate}</SortHead><SortHead k="employee">{L.colEmployee}</SortHead><TableHead>{L.colRole}</TableHead><TableHead>{L.colState}</TableHead>

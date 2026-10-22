@@ -138,7 +138,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
       )}
 
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered numberStart={(data ? (data.page - 1) * data.pageSize : 0) + 1}>
           <TableHeader>
             <TableRow>
               <Th labelKey="tasks.col.employee" /><Th labelKey="tasks.col.task" /><Th labelKey="tasks.col.detail" /><Th labelKey="tasks.col.planned" /><Th labelKey="tasks.col.original" /><Th labelKey="tasks.col.current" />

@@ -140,7 +140,7 @@ async function page() {
   for (const role of [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER]) {
     // Test 1 — the Sales Officers column sits immediately after Dealer (Admin and RM share the page).
     const html = render(role);
-    assert.deepEqual(heads(html), ["Dealer", "Sales Officers", "Status", "Assignments"]);
+    assert.deepEqual(heads(html), ["S.No", "Dealer", "Sales Officers", "Status", "Assignments"]);
     // Test 3 — the header itself is the filter control.
     assert.ok(/<th[^>]*>\s*<button[^>]*aria-label="Filter by Sales Officers"[^>]*>Sales Officers/.test(html), "the column header is a clickable filter trigger");
     // Test 2 — officers shown per dealer; an unassociated dealer shows the empty marker.

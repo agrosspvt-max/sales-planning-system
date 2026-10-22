@@ -12,6 +12,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { Prisma, Role } from "@prisma/client";
 import type { AuthContext } from "@/lib/http";
+import { testLoader } from "@/features/dealer-tags/test-loader";
 import { dailyWorkServiceInfrastructureMocks } from "./service-test-mocks";
 
 class TestApiError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
@@ -394,19 +395,57 @@ async function main() {
     assert.deepEqual([...new Set(rmFilter.rows.map((r) => r.officerId))], ["so2"]);
   }
 
-  // 9b) UI: the Sales Officer COLUMN HEADER is the filter (shared ColumnFilterHeader); State stays above and resets it.
+  // Multiple employee choices combine with OR, while State/role scope still applies to every ID.
+  {
+    const svc = loadService(makeFake().prisma);
+    const selected = await svc.getDailyPerformance(ADMIN, { ...RANGE, officerIds: ["so1", "so3", "so1"] });
+    assert.deepEqual(flat0([...new Set(selected.rows.map((r) => r.officerId))].sort()), ["so1", "so3"]);
+    assert.equal(selected.summary.salesOfficers, 2);
+    assert.equal(selected.summary.employeeDays, 6, "duplicates never duplicate rows or totals");
+    assert.equal(selected.officers.length, 7, "choices remain available for adding another name");
+    const team = await svc.getDailyPerformance(RM1, { ...RANGE, officerIds: ["rm1", "so2"] });
+    assert.deepEqual(flat0([...new Set(team.rows.map((r) => r.officerId))].sort()), ["rm1", "so2"]);
+    assert.equal(team.summary.salesOfficers, 1, "an RM still is not counted as an SO");
+    await expectStatus(() => svc.getDailyPerformance(RM1, { ...RANGE, officerIds: ["so1", "so3"] }), 403, "one out-of-scope choice rejects the whole request");
+    await expectStatus(() => svc.getDailyPerformance(ADMIN, { ...RANGE, groupId: "g1", officerIds: ["so1", "so3"] }), 403, "State applies to all selected people");
+    const own = await svc.getDailyPerformance(SO1, { ...RANGE, officerIds: ["so2", "so3"] });
+    assert.deepEqual(flat0([...new Set(own.rows.map((r) => r.officerId))]), ["so1"], "SO cannot widen scope with an array");
+    assert.equal((await svc.getDailyPerformance(ADMIN, { ...RANGE, officerIds: [] })).rows.length, 21, "All restores the full scope");
+  }
+
+  // Multiple States combine with OR and employee choices further narrow that union.
+  {
+    const svc = loadService(makeFake().prisma);
+    const both = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupIds: ["g1", "g2", "g1"] });
+    assert.deepEqual(flat0([...new Set(both.rows.map((r) => r.officerId))].sort()), ["rm1", "rm2", "so1", "so2", "so3"]);
+    assert.equal(both.summary.salesOfficers, 3);
+    assert.equal(both.summary.employeeDays, 15, "duplicate State choices do not duplicate rows");
+    assert.deepEqual(flat0(both.officers.map((o) => o.id).sort()), ["rm1", "rm2", "so1", "so2", "so3"]);
+    assert.equal(both.states.length, 4, "all State options remain available for adding another State");
+    const narrowed = await svc.getDailyPerformance(ADMIN, { ...RANGE, groupIds: ["g1", "g2"], officerIds: ["so1", "so3"] });
+    assert.deepEqual(flat0([...new Set(narrowed.rows.map((r) => r.officerId))].sort()), ["so1", "so3"]);
+    await expectStatus(() => svc.getDailyPerformance(ADMIN, { ...RANGE, groupIds: ["g1", "g2"], officerIds: ["so1", "so4"] }), 403, "a selected officer outside every selected State is refused");
+    const rm = await svc.getDailyPerformance(RM1, { ...RANGE, groupIds: ["g2", "g3"] });
+    assert.deepEqual(flat0([...new Set(rm.rows.map((r) => r.officerId))].sort()), ["rm1", "so1", "so2"], "spoofed States never widen an RM scope");
+    const so = await svc.getDailyPerformance(SO1, { ...RANGE, groupIds: ["g2"] });
+    assert.deepEqual(flat0([...new Set(so.rows.map((r) => r.officerId))]), ["so1"]);
+    assert.equal((await svc.getDailyPerformance(ADMIN, { ...RANGE, groupIds: [] })).rows.length, 21);
+  }
+
+  // 9b) UI: the Sales Officer COLUMN HEADER is the filter (shared ColumnFilterHeader); State is a multiselect column header and resets employee choices.
   {
     const page = readFileSync(resolve("src/features/daily-work/performance-page.tsx"), "utf8");
     const fromAt = page.indexOf("<Label>{L.dateFrom}</Label>");
     const toAt = page.indexOf("<Label>{L.dateTo}</Label>");
-    const stateAt = page.indexOf("<Label>{L.fState}</Label>");
-    assert.ok(fromAt < toAt && toAt < stateAt, "Date From → Date To → State filters remain");
+    assert.ok(fromAt < toAt, "Date From → Date To filters remain");
+    assert.ok(/<ColumnFilterHeader[^>]*label=\{L\.colState\}/s.test(page), "State is a multiselect column header");
+    assert.ok(!page.includes("<NativeSelect"), "no duplicate single-State control");
     assert.ok(!page.includes("<Label>{L.officerLabel}</Label>"), "the separate Sales Officer dropdown above the table is gone");
     assert.ok(/<ColumnFilterHeader[^>]*label=\{L\.colOfficer\}/s.test(page), "Sales Officer header is a ColumnFilterHeader");
     assert.ok(page.includes("options={(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))}"), "options come from the server's scoped list");
-    assert.ok(page.includes("setOfficerId(next.find((id) => id !== officerId) ?? \"\")"), "single selection: a new tick replaces, untick clears");
-    assert.ok(page.includes('setGroupId(value);') && page.includes('setOfficerId("");'), "State change clears the selected person");
-    assert.ok(page.includes("if (!isSO && officerId) query.set(\"officerId\", officerId)") && page.includes("query.set(\"groupId\", groupId)"), "the selection travels to the server with State and the date range");
+    assert.ok(page.includes("selected={officerIds}") && page.includes("onChange={setOfficerIds}"), "the column preserves the complete selection");
+    assert.ok(page.includes('setGroupIds(values);') && page.includes('setOfficerIds([]);'), "State change clears the selected person");
+    assert.ok(page.includes('officerIds.forEach((id) => query.append("officerId", id))') && page.includes('groupIds.forEach((id) => query.append("groupId", id))'), "the selection travels to the server with State and the date range");
     assert.ok(page.includes("const showOfficer = !isSO"), "Sales Officers never get the person filter");
   }
 
@@ -511,7 +550,7 @@ async function main() {
       E("so1", "2026-10-01", "SALES", { todaysPlan: 55555, todaysActual: 55555 }),
     ];
     const days = new Map([["so1|2026-09-28", FIN], ["so3|2026-09-28", FIN], ["so2|2026-09-27", { finalizedAt: TS("2026-09-27T12:00:00Z"), selfRating: 5 }], ["so1|2026-10-01", FIN]]);
-    const run = (ctx: AuthContext, filters: Record<string, string> = {}) => { const f = makeFake({ entries, days }); return loadService(f.prisma).getDailyPerformance(ctx, { ...RANGE, ...filters }).then((p) => ({ p, f })); };
+    const run = (ctx: AuthContext, filters: Record<string, unknown> = {}) => { const f = makeFake({ entries, days }); return loadService(f.prisma).getDailyPerformance(ctx, { ...RANGE, ...filters }).then((p) => ({ p, f })); };
     const flat = (t: unknown) => JSON.parse(JSON.stringify(t));
 
     // so1 alone, 28th only: every section, each rule.
@@ -573,7 +612,7 @@ async function main() {
     assert.ok(!/others_(planned|actual)/.test(page) && !page.includes("sections.others"), "no totals for Others");
     assert.ok(page.includes('[L.sSalesP, L.sSalesA, "sales", rupees, "sales"]') && page.includes('[L.sRecoveryP, L.sRecoveryA, "recovery", rupees, "recovery"]') && page.includes('"schemeConversion", countText') && page.includes('"appointment", countText') && page.includes('"visits", countText'), "Sales/Recovery in rupees; the others as counts/units");
     for (const old of ["sOfficers", "sPlans", "sReports", "sAvgSelf", "sAvgRm"]) assert.ok(page.includes(`label={L.${old}}`), `existing card ${old} kept`);
-    assert.ok(page.includes('queryKey: ["performance", role, from, to, officerId, groupId]'), "cards refetch whenever Date From / Date To / State change");
+    assert.ok(page.includes('queryKey: ["performance", role, from, to, officerIds, groupIds]'), "cards refetch whenever Date From / Date To / State change");
     const svc = readFileSync(resolve("src/features/daily-work/service.server.ts"), "utf8");
     assert.ok(svc.includes(`e."planSubmittedAt" IS NOT NULL AND e."status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')`) && svc.includes('e."officerId" IN (${Prisma.join(ids)}) AND e."workDate" BETWEEN ${from}::date AND ${to}::date'), "totals query: submitted rows of the filtered officers and dates only");
   }
@@ -604,15 +643,15 @@ async function main() {
     (f0.prisma as Record<string, unknown>).scheme = { findMany: async () => [{ id: "sch1", schemeName: "Monsoon Offer" }] };
     const svc = loadService(f0.prisma);
     const detail = (ctx: AuthContext, input: Record<string, unknown>) => svc.getPerformanceMetricDetail(ctx, { ...RANGE, ...input });
-    const summary = async (ctx: AuthContext, filters: Record<string, string> = {}) => (await svc.getDailyPerformance(ctx, { ...RANGE, ...filters })).summary.sections;
+    const summary = async (ctx: AuthContext, filters: Record<string, unknown> = {}) => (await svc.getDailyPerformance(ctx, { ...RANGE, ...filters })).summary.sections;
     const flat = (t: unknown) => JSON.parse(JSON.stringify(t));
     const METRICS = [["sales", "SALES"], ["recovery", "RECOVERY"], ["scheme_conversion", "SCHEME_CONVERSION"], ["appointment", "APPOINTMENT"], ["visits", "SUMMARY"]] as const;
     const KEY: Record<string, "sales" | "recovery" | "schemeConversion" | "appointment" | "visits"> = { sales: "sales", recovery: "recovery", scheme_conversion: "schemeConversion", appointment: "appointment", visits: "visits" };
 
     // Every one of the ten metrics: the listed records add up EXACTLY to the summary card, for several scopes / filters.
-    const scopes: [string, AuthContext, Record<string, string>][] = [
+    const scopes: [string, AuthContext, Record<string, unknown>][] = [
       ["admin company", ADMIN, {}], ["admin State=MP", ADMIN, { groupId: "g1" }], ["admin State=UP", ADMIN, { groupId: "g2" }], ["admin one day", ADMIN, { from: "2026-09-28", to: "2026-09-28" }],
-      ["admin MP one day", ADMIN, { groupId: "g1", from: "2026-09-28", to: "2026-09-28" }], ["admin one officer", ADMIN, { officerId: "so3" }], ["RM1", RM1, {}], ["SO1", SO1, {}], ["empty range", ADMIN, { from: "2026-09-20", to: "2026-09-20" }],
+      ["admin MP one day", ADMIN, { groupId: "g1", from: "2026-09-28", to: "2026-09-28" }], ["admin one officer", ADMIN, { officerId: "so3" }], ["admin multiple officers", ADMIN, { officerIds: ["so1", "so3"] }], ["admin State multiple", ADMIN, { groupId: "g1", officerIds: ["so1", "so2"] }], ["admin multiple States", ADMIN, { groupIds: ["g1", "g2"] }], ["admin multiple States + officers", ADMIN, { groupIds: ["g1", "g2"], officerIds: ["so1", "so3"] }], ["RM multiple", RM1, { officerIds: ["rm1", "so2"] }], ["RM1", RM1, {}], ["SO1", SO1, {}], ["empty range", ADMIN, { from: "2026-09-20", to: "2026-09-20" }],
     ];
     for (const [name, ctx, filters] of scopes) {
       const sum = await summary(ctx, filters);
@@ -652,6 +691,17 @@ async function main() {
     assert.equal(mp.stateName, "MP"); assert.equal(mp.from, "2026-09-28"); assert.equal(mp.to, "2026-09-28");
     assert.equal((await detail(ADMIN, { metric: "sales_planned" })).stateName, null, "All States");
     assert.equal((await detail(ADMIN, { metric: "sales_planned", groupId: "g2" })).total, 4000, "State=UP never includes MP's plans");
+
+    const multi = await detail(ADMIN, { metric: "sales_planned", officerIds: ["so1", "so3"], pageSize: 2 });
+    assert.equal(multi.total, 7500);
+    assert.equal(multi.employeeCount, 2);
+    assert.equal(multi.recordCount, 4);
+    assert.equal(multi.officerName, "Rahul, Ravi");
+    const statesDetail = await detail(ADMIN, { metric: "sales_planned", groupIds: ["g1", "g2"], officerIds: ["so1", "so3"] });
+    assert.equal(statesDetail.stateName, "MP, UP", "detail identifies every selected State");
+    assert.equal(statesDetail.total, 7500);
+    assert.equal(statesDetail.employeeCount, 2);
+    await expectStatus(() => detail(RM1, { metric: "sales_planned", officerIds: ["so1", "so3"] }), 403, "detail validates every selected employee");
 
     // Empty results.
     const none = await detail(ADMIN, { metric: "sales_actual", from: "2026-09-20", to: "2026-09-20" });
@@ -697,7 +747,7 @@ async function main() {
     assert.equal((page.match(/onOpen=\{data \? \(\) => setMetric\(\{ metric: `\$\{id\}_(planned|actual)`/g) ?? []).length, 2, "each pair's two cards open `<section>_planned` / `<section>_actual`");
     assert.ok(page.includes('"scheme_conversion"') && page.includes('"sales"') && page.includes('"recovery"') && page.includes('"appointment"') && page.includes('"visits"'), "ids for all five sections");
     assert.ok(page.includes("<button type=\"button\"") && page.includes("focus-visible:ring-2") && page.includes("cursor-pointer") && page.includes("hover:bg-muted/60"), "keyboard-accessible button with hover/focus state");
-    assert.ok(page.includes("<PerformanceMetricDetail request={{ ...metric, from: data.from, to: data.to, officerId, groupId, isSO, isAdmin }"), "the drill-down inherits the page's filters");
+    assert.ok(page.includes("<PerformanceMetricDetail request={{ ...metric, from: data.from, to: data.to, officerIds, groupIds, isSO, isAdmin }"), "the drill-down inherits the page's filters");
     const modal = readFileSync(resolve("src/features/daily-work/performance-metric-detail.tsx"), "utf8");
     assert.ok(modal.includes("/api/daily-work/performance/detail?") && modal.includes("keepPreviousData") && modal.includes("data-testid=\"detail-total\"") && modal.includes("L.pageTotal") && modal.includes("L.grandTotal") && modal.includes("L.empty"), "total, page total, all-records total and empty state");
     assert.ok(!/<select|<NativeSelect|type="date"/.test(modal), "no independent filters in the detail view");
@@ -706,6 +756,27 @@ async function main() {
     assert.deepEqual(flat0(apiPermission("/api/daily-work/performance", "GET")), ["performance", "read"]);
     const route = readFileSync(resolve("src/app/api/daily-work/performance/detail/route.ts"), "utf8");
     assert.ok(route.includes("requireAuth()") && route.includes("getPerformanceMetricDetail(auth"), "authenticated; scope is enforced in the service");
+  }
+
+  // Both HTTP endpoints decode repeated IDs without losing all but the first choice.
+  {
+    const captured: Record<string, unknown>[] = [];
+    const capture = async (_ctx: unknown, input: Record<string, unknown>) => { captured.push(input); return input; };
+    const load = testLoader({
+      "@/lib/http": { handle: (fn: () => Promise<unknown>) => fn(), ok: (value: unknown) => value, requireAuth: async () => ADMIN },
+      "@/features/daily-work/service.server": { getDailyPerformance: capture, getPerformanceMetricDetail: capture },
+    });
+    for (const path of ["route.ts", "detail/route.ts"]) {
+      const route = load(`src/app/api/daily-work/performance/${path}`) as { GET: (req: unknown) => Promise<unknown> };
+      await route.GET({ nextUrl: new URL("https://test.invalid/?officerId=so1&officerId=so3&groupId=g1&groupId=g2&metric=sales_planned") });
+      assert.deepEqual(flat0(captured.at(-1)!.officerIds), ["so1", "so3"]);
+      assert.deepEqual(flat0(captured.at(-1)!.groupIds), ["g1", "g2"]);
+      await route.GET({ nextUrl: new URL("https://test.invalid/?officerId=so1") });
+      assert.deepEqual(flat0(captured.at(-1)!.officerIds), ["so1"], "single-person links remain compatible");
+      await route.GET({ nextUrl: new URL("https://test.invalid/") });
+      assert.deepEqual(flat0(captured.at(-1)!.officerIds), [], "All remains unfiltered");
+      assert.deepEqual(flat0(captured.at(-1)!.groupIds), [], "All States remains unfiltered");
+    }
   }
 
   console.log("daily-performance.test.ts — all assertions passed");

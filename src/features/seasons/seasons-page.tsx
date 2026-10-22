@@ -206,7 +206,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
       </div>
 
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>

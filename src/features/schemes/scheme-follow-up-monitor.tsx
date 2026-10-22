@@ -182,7 +182,7 @@ export function SchemeConversionFollowUp({ role, officerId, representation = "sc
   if (representation === "dealer") {
     return (
       <div className={schemeTable.outer}>
-        <Table>
+        <Table numbered>
           <TableHeader>{dealerHead(true)}</TableHeader>
           <TableBody>
             {isLoading ? (
@@ -201,7 +201,7 @@ export function SchemeConversionFollowUp({ role, officerId, representation = "sc
 
   return (
     <div className={schemeTable.outer}>
-      <Table>
+      <Table numbered>
         <TableHeader>
           <TableRow>
             <TableHead className="w-8" />
@@ -241,7 +241,7 @@ export function SchemeConversionFollowUp({ role, officerId, representation = "sc
                       <TableCell colSpan={SCHEME_COLS} className={schemeTable.nestedCell}>
                         <div className={schemeTable.nestedInset}>
                           <div className={schemeTable.nestedShell}>
-                            <Table>
+                            <Table numbered>
                               <TableHeader>{dealerHead(false)}</TableHeader>
                               <TableBody>
                                 {g.plans.map((p) => dealerRow(p, false))}

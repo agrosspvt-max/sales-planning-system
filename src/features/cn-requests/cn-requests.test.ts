@@ -65,6 +65,7 @@ import {
   validateCnRequestDetails,
 } from "@/lib/cn-request";
 import { DEFAULT_LABELS, labelMeta } from "@/features/labels/labels";
+import { buildCnTimeline } from "@/lib/cn-timeline";
 
 interface StoredRequest {
   id: string;
@@ -252,6 +253,8 @@ function makeStore() {
   };
   const normSql = (a: unknown, rest: unknown[]) => (Array.isArray(a) ? { sql: (a as string[]).join("?"), values: rest } : (a as { sql: string; values: unknown[] }));
   const prisma = {
+    auditLog: { findMany: async () => [] },
+    user: { findMany: async ({ where }: { where: { id: { in: string[] } } }) => where.id.in.map((id) => ({ id, name: id === "admin-1" ? "Admin One" : "Officer One", username: id })) },
     $queryRaw: async (a: unknown, ...rest: unknown[]) => runRaw(normSql(a, rest)),
     $executeRaw: async (a: unknown, ...rest: unknown[]) => runRaw(normSql(a, rest)),
     dealerAssignment: {
@@ -429,6 +432,7 @@ function loadService(
   const mocks: Record<string, unknown> = {
     "server-only": {},
     "@/lib/prisma": { prisma },
+    "@/lib/cn-timeline": { buildCnTimeline },
     "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (rows: unknown[]) => rows, dealerDisplayName: (n: string) => n },
     "@/lib/http": { ApiError: TestApiError },
     "@/lib/scope": { getOfficerScope: async (ctx: AuthContext) => ctx.role === Role.SUPER_ADMIN ? ({ all: true, ids: [] }) : ctx.role === Role.REGIONAL_MANAGER ? ({ all: false, ids: [ctx.userId, "so-1", "so-2"] }) : ({ all: false, ids: [ctx.userId] }) },
@@ -1613,6 +1617,8 @@ async function main() {
     assert.equal((await verifyService.listCnRequests(ADMIN, "posted-in-ledger")).map((row) => row.id).join(","), verifyId, "Paid enters Posted in Ledger");
     const lastEvent = verifyStore.paymentEvents[verifyStore.paymentEvents.length - 1]!;
     assert.equal(lastEvent.source, "ADMIN_VERIFY");
+    assert.equal(lastEvent.createdAt.getTime(), vRequest.postedAt!.getTime(), "Paid verification and posting share the same authoritative timestamp");
+    assert.equal(vRequest.finalCnUploadedAt!.getTime(), lastEvent.createdAt.getTime(), "Final CN sharing belongs to the same verification transaction");
     assert.equal(lastEvent.taskStatus, null, "Admin-verified Paid creates no follow-up task");
     const eventIds = new Set(verifyStore.paymentEvents.map((e) => e.id));
     assert.equal((await verifyService.listPendingCnTasks(SO)).filter((t) => t.taskId != null && eventIds.has(t.taskId)).length, 0, "no open Recovery task remains after Admin Paid");

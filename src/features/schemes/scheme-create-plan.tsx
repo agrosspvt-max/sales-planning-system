@@ -385,7 +385,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
         <div className="rounded-lg border bg-background py-10 text-center text-muted-foreground">Select a Sales Officer to plan their dealers.</div>
       ) : (
         <div className={schemeTable.outer}>
-          <Table>
+          <Table numbered>
             <TableHeader>
               <TableRow>
                 <TableHead className="w-8" />
@@ -441,7 +441,7 @@ export function SchemeCreatePlanWorkspace({ enableRmScope = false, readOnly = fa
                           <TableCell colSpan={8} className={schemeTable.nestedCell}>
                             <div className={schemeTable.nestedInset}>
                               <div className={schemeTable.nestedShell}>
-                                <Table>
+                                <Table numbered>
                                   <TableHeader>
                                     <TableRow>
                                       <TableHead>Dealer Name</TableHead>

@@ -96,7 +96,7 @@ export function LabelsPage() {
             {[...groups.entries()].map(([group, entries]) => (
               <div key={group} className="overflow-hidden rounded-lg border bg-background">
                 <div className="border-b bg-muted/30 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group}</div>
-                <Table>
+                <Table numbered>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Default</TableHead>

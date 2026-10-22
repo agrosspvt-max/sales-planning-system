@@ -41,7 +41,7 @@ export function SalesUploadHistoryPage() {
     <div className="space-y-5">
       <PageHeader title="Sales Upload History" subtitle="Every Tally sales import — audit trail only; workbooks are never stored." />
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>When</TableHead>

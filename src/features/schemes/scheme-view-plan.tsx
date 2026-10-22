@@ -265,7 +265,7 @@ export function SchemeWiseCollapsibleView({ officerId, groupByOfficer = false, o
         </div>
       )}
       <div className={schemeTable.outer}>
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead className="w-8" />
@@ -336,7 +336,7 @@ export function SchemeWiseCollapsibleView({ officerId, groupByOfficer = false, o
                         <TableCell colSpan={cols} className={schemeTable.nestedCell}>
                           <div className={schemeTable.nestedInset}>
                             <div className={schemeTable.nestedShell}>
-                            <Table>
+                            <Table numbered>
                               <TableHeader>
                                 {/* Submitted is the planning/approval stage — it hides Scheme Status + the four
                                     post-approval conversion detail columns; Approved/Older keep the full set. */}

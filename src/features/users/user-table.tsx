@@ -93,7 +93,7 @@ export function UserTable({
 
   return (
     <div className="rounded-lg border bg-background">
-      <Table>
+      <Table numbered>
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>

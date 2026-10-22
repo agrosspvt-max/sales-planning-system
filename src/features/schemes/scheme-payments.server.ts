@@ -145,11 +145,18 @@ export interface PaymentDealerRow {
   salesOfficerId: string; salesOfficerName: string; state: string | null;
   paymentCount: number; totalPaid: number; lastReceivedDate: string | null; lastRecordedAt: string | null;
 }
-export interface PaymentFilterOptions { states: string[]; officers: { id: string; name: string }[] }
+export interface PaymentFilterOptions {
+  /** States (UserGroup ids) of the caller's authorized plans. */
+  states: { id: string; name: string }[];
+  /** Sales Officers of the caller's authorized plans, narrowed to the selected State (never the full company list). */
+  officers: { id: string; name: string }[];
+  /** The filters actually applied after validation: a State / officer outside the caller's authorized choices is dropped, never trusted. */
+  applied: { stateId: string; officerId: string };
+}
 export interface PaymentDealerList { rows: PaymentDealerRow[]; filters: PaymentFilterOptions }
 
 const rangeSchema = z.object({
-  state: z.string().trim().optional(),
+  stateId: z.string().trim().optional(),
   officerId: z.string().trim().optional(),
   receivedFrom: z.coerce.date().optional(),
   receivedTo: z.coerce.date().optional(),
@@ -160,7 +167,7 @@ export type PaymentFilters = z.infer<typeof rangeSchema>;
 export function parsePaymentFilters(params: URLSearchParams): PaymentFilters {
   const get = (k: string) => { const v = (params.get(k) ?? "").trim(); return v || undefined; };
   return rangeSchema.parse({
-    state: get("state"), officerId: get("officerId"),
+    stateId: get("stateId"), officerId: get("officerId"),
     receivedFrom: get("receivedFrom"), receivedTo: get("receivedTo"), recordedFrom: get("recordedFrom"), recordedTo: get("recordedTo"),
   });
 }
@@ -183,13 +190,25 @@ function paymentWhere(f: PaymentFilters) {
 export async function paymentDealers(ctx: AuthContext, f: PaymentFilters): Promise<PaymentDealerList> {
   const scope = await getOfficerScope(ctx);
   const hasDateFilter = !!(f.receivedFrom || f.receivedTo || f.recordedFrom || f.recordedTo);
+  const inScope = scope.all ? {} : { salesOfficerId: { in: scope.ids } };
+
+  // Filter CHOICES come from the caller's authorized plans only (one grouped read), never from the whole company: State → Sales Officers of that State. A State / officer that is not one of
+  // those choices (forged, stale, or incompatible with the chosen State) is dropped, so a filter can only ever NARROW the authorized scope.
+  const owners = (await prisma.dealerSchemePlan.findMany({
+    where: { ...billFinancialScope, ...inScope }, distinct: ["salesOfficerId"],
+    select: { salesOfficerId: true, salesOfficer: { select: { name: true, group: { select: { id: true, name: true } } } } },
+  })) as unknown as { salesOfficerId: string; salesOfficer: { name: string; group: { id: string; name: string } | null } }[];
+  const stateChoices = new Map<string, string>();
+  for (const o of owners) if (o.salesOfficer.group) stateChoices.set(o.salesOfficer.group.id, o.salesOfficer.group.name);
+  const stateId = f.stateId && stateChoices.has(f.stateId) ? f.stateId : "";
+  const officerChoices = owners.filter((o) => !stateId || o.salesOfficer.group?.id === stateId).map((o) => ({ id: o.salesOfficerId, name: o.salesOfficer.name })).sort((a, b) => a.name.localeCompare(b.name));
+  const officerId = f.officerId && officerChoices.some((o) => o.id === f.officerId) ? f.officerId : "";
+  const allowedOfficers = officerId ? [officerId] : stateId ? officerChoices.map((o) => o.id) : null;
 
   const plans = (await prisma.dealerSchemePlan.findMany({
     where: {
       ...billFinancialScope,
-      ...(scope.all ? {} : { salesOfficerId: { in: scope.ids } }),
-      ...(f.officerId ? { salesOfficerId: f.officerId } : {}),
-      ...(f.state ? { salesOfficer: { group: { name: f.state } } } : {}),
+      AND: [inScope, ...(allowedOfficers ? [{ salesOfficerId: { in: allowedOfficers } }] : [])],
     },
     select: {
       id: true, dealerId: true, schemeId: true, salesOfficerId: true,
@@ -205,12 +224,8 @@ export async function paymentDealers(ctx: AuthContext, f: PaymentFilters): Promi
     payments: { amount: unknown; receivedDate: Date; recordedAt: Date }[];
   }[];
 
-  const statesSet = new Set<string>();
-  const officersMap = new Map<string, string>();
   const rows: PaymentDealerRow[] = [];
   for (const p of plans) {
-    if (p.salesOfficer.group?.name) statesSet.add(p.salesOfficer.group.name);
-    officersMap.set(p.salesOfficerId, p.salesOfficer.name);
     // With a date filter active, only surface plans that actually have a matching payment.
     if (hasDateFilter && p.payments.length === 0) continue;
     rows.push({
@@ -230,8 +245,7 @@ export async function paymentDealers(ctx: AuthContext, f: PaymentFilters): Promi
     return a.dealerName.localeCompare(b.dealerName);
   });
 
-  const officers = [...officersMap.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
-  return { rows, filters: { states: [...statesSet].sort(), officers } };
+  return { rows, filters: { states: [...stateChoices].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)), officers: officerChoices, applied: { stateId, officerId } } };
 }
 
 export interface TimelineInstallment { installmentId: string; instanceNumber: number | null; billPartNumber?: number | null; installmentNumber: number; plannedAmount: number; receivedAmount: number; status: string; receivedPct: number }

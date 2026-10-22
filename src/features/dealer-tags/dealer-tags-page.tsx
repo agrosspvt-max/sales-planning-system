@@ -181,7 +181,7 @@ export function DealerTagsPage({ role }: { role: Role }) {
           </Button>
         )}
       </div>
-      <Table>
+      <Table numbered>
         <TableHeader>
           <TableRow>
             <Th labelKey="dealer_tags.col.dealer" />

@@ -139,7 +139,7 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
       )}
 
       <div className="overflow-auto rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader><TableRow><TableHead>{L.market}</TableHead><TableHead>{L.partyOptions}</TableHead><TableHead>{T.status}</TableHead><TableHead>{L.planDate}</TableHead><TableHead className="w-20 text-right">{L.days}</TableHead></TableRow></TableHeader>
           <TableBody>
             {isLoading ? <TableRow><TableCell colSpan={5}><Skeleton className="h-6 w-full" /></TableCell></TableRow>

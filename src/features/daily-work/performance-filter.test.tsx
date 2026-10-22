@@ -19,9 +19,9 @@ const PEOPLE = [
 let patch: Record<string, Record<string, unknown>> = {};
 const payloadFor = (url: string) => {
   const q = new URLSearchParams(url.split("?")[1]);
-  const state = q.get("groupId"); const person = q.get("officerId");
-  const pool = PEOPLE.filter((p) => !state || p.state === state);
-  const shown = pool.filter((p) => !person || p.id === person);
+  const states = q.getAll("groupId"); const people = q.getAll("officerId");
+  const pool = PEOPLE.filter((p) => !states.length || states.includes(p.state));
+  const shown = pool.filter((p) => !people.length || people.includes(p.id));
   return {
     role: Role.SUPER_ADMIN, from: "2026-09-28", to: "2026-09-28",
     states: [{ id: "g1", name: "MP" }, { id: "g2", name: "UP" }],
@@ -65,7 +65,8 @@ const { PerformancePage } = load("src/features/daily-work/performance-page.tsx")
 
 const render = (role: Role) => { cursor = 0; headers.length = 0; selects.length = 0; return renderToStaticMarkup(<PerformancePage role={role} />); };
 const lastUrl = () => urls[urls.length - 1]!;
-const lastHeader = () => headers[headers.length - 1]!;
+const lastHeader = () => headers.find((h) => h.label === "Sales Officer")!;
+const stateHeader = () => headers.find((h) => h.label === "State")!;
 const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 
 // 0) Performance | Tasks switches above the filters (Performance selected by default) and the compact Task Activity column.
@@ -122,28 +123,49 @@ assert.deepEqual(plain(lastHeader().selected), ["so3"]);
 assert.ok(html.includes("Ravi") && !html.includes("Rahul") && !html.includes("RM Two"), "table shows only the selected person");
 assert.ok(/Sales Officers<\/div><div[^>]*>1</.test(html), "summary cards follow the selection");
 
-// 3) Single selection: ticking another person replaces; ticking the selected one clears.
+// 3) Multiple names stay selected; unchecking one preserves the others; All clears.
 lastHeader().onChange(["so3", "rm2"]);
+html = render(Role.SUPER_ADMIN);
+assert.deepEqual(plain(lastHeader().selected), ["so3", "rm2"], "ticking an RM preserves the earlier SO selection");
+assert.deepEqual(new URLSearchParams(lastUrl().split("?")[1]).getAll("officerId"), ["so3", "rm2"]);
+assert.ok(html.includes("Ravi") && html.includes("RM Two") && !html.includes("Rahul"), "rows include either selected person");
+assert.ok(/Sales Officers<\/div><div[^>]*>2</.test(html), "summary follows the full selection");
+lastHeader().onChange(["so3", "rm2", "so1"]);
 render(Role.SUPER_ADMIN);
-assert.deepEqual(plain(lastHeader().selected), ["rm2"], "an RM is selectable and replaces the previous person");
-assert.ok(lastUrl().includes("officerId=rm2"));
+assert.deepEqual(plain(lastHeader().selected), ["so3", "rm2", "so1"], "a third tick preserves both earlier names");
+lastHeader().onChange(["so3", "so1"]);
+html = render(Role.SUPER_ADMIN);
+assert.deepEqual(plain(lastHeader().selected), ["so3", "so1"], "unticking one removes only that person");
+assert.ok(html.includes("Ravi") && html.includes("Rahul") && !html.includes("RM Two"));
 lastHeader().onChange([]);
 render(Role.SUPER_ADMIN);
 assert.deepEqual(plain(lastHeader().selected), []);
 assert.ok(!lastUrl().includes("officerId"), "clearing restores the full scope");
 
 // 4) State + person: State narrows the options; changing State clears a person who no longer belongs.
-lastHeader().onChange(["so1"]);
+lastHeader().onChange(["so1", "so3"]);
 render(Role.SUPER_ADMIN);
-const stateSelect = selects.find((s) => s.options.some((o) => o.label === "UP"))!;
-stateSelect.onChange!({ target: { value: "g2" } });
+assert.ok(stateHeader(), "State column header is also a multiselect");
+assert.equal(selects.length, 0, "no duplicate State dropdown above the table");
+stateHeader().onChange(["g2"]);
 render(Role.SUPER_ADMIN);
 assert.ok(lastUrl().includes("groupId=g2") && !lastUrl().includes("officerId"), "changing State cleared the previous person");
 assert.deepEqual(lastHeader().options.map((o) => o.label).sort(), ["RM Two", "Ravi"], "only UP people are offered, RM included");
 lastHeader().onChange(["rm2"]);
 render(Role.SUPER_ADMIN);
 assert.ok(lastUrl().includes("groupId=g2") && lastUrl().includes("officerId=rm2"), "State + person together");
-selects.find((s) => s.options.some((o) => o.label === "UP"))!.onChange!({ target: { value: "" } });
+stateHeader().onChange(["g2", "g1"]);
+html = render(Role.SUPER_ADMIN);
+assert.deepEqual(plain(stateHeader().selected), ["g2", "g1"], "adding another State preserves the first");
+assert.deepEqual(new URLSearchParams(lastUrl().split("?")[1]).getAll("groupId"), ["g2", "g1"]);
+assert.equal(lastHeader().options.length, 3, "officer choices include all selected States");
+assert.ok(html.includes("Rahul") && html.includes("Ravi") && html.includes("RM Two"));
+stateHeader().onChange(["g1"]);
+html = render(Role.SUPER_ADMIN);
+assert.deepEqual(plain(stateHeader().selected), ["g1"], "unchecking a State preserves the others");
+assert.deepEqual(lastHeader().options.map((o) => o.label), ["Rahul"]);
+assert.ok(html.includes("Rahul") && !html.includes("Ravi") && !html.includes("RM Two"));
+stateHeader().onChange([]);
 render(Role.SUPER_ADMIN);
 assert.ok(!lastUrl().includes("groupId") && !lastUrl().includes("officerId"), "clearing State restores the authorized scope");
 assert.equal(lastHeader().options.length, 3);
@@ -155,5 +177,53 @@ assert.equal(headers.length, 1, "RM sees the person filter");
 hooks = [];
 render(Role.SALES_OFFICER);
 assert.equal(headers.length, 0, "Sales Officer view has no person filter");
+
+// Exercise real checkbox events through the shared header and the page, not just the callback props.
+{
+  type Item = { "data-filter-value"?: string; "data-testid"?: string; onSelect: (e: { preventDefault: () => void }) => void; children?: React.ReactNode };
+  const items: Item[] = [];
+  const passthrough = ({ children }: { children?: React.ReactNode }) => <>{children}</>;
+  const realOverrides = { ...overrides };
+  delete realOverrides["@/components/ui/column-filter-header"];
+  realOverrides["@/components/ui/dropdown-menu"] = {
+    DropdownMenu: passthrough, DropdownMenuTrigger: passthrough, DropdownMenuContent: passthrough,
+    DropdownMenuItem: (p: Item) => { items.push(p); return <div>{p.children}</div>; },
+  };
+  const { PerformancePage: RealPage } = testLoader(realOverrides)("src/features/daily-work/performance-page.tsx") as { PerformancePage: typeof PerformancePage };
+  hooks = [];
+  const draw = () => { cursor = 0; items.length = 0; return renderToStaticMarkup(<RealPage role={Role.SUPER_ADMIN} />); };
+  const click = (id: string) => { items.find((p) => p["data-filter-value"] === id)!.onSelect({ preventDefault() {} }); return draw(); };
+  const checked = (h: string, name: string) => [...h.matchAll(/<input\b[^>]*>/g)].some(([tag]) => tag.includes(`aria-label="${name}"`) && tag.includes('checked=""'));
+  draw(); click("so3"); let h = click("rm2");
+  assert.ok(checked(h, "Ravi") && checked(h, "RM Two"), "real checkbox clicks preserve both choices");
+  assert.ok(h.includes("Sales Officer (2)"), "header shows the full selection count");
+  h = click("so3");
+  assert.ok(!checked(h, "Ravi") && checked(h, "RM Two"), "unchecking removes only that choice");
+  items.find((p) => p["data-testid"] === "filter-all")!.onSelect({ preventDefault() {} });
+  h = draw();
+  assert.ok(!lastUrl().includes("officerId") && !checked(h, "RM Two"), "All clears the filter");
+  click("g1"); h = click("g2");
+  assert.ok(checked(h, "MP") && checked(h, "UP") && h.includes("State (2)"), "real State checkbox clicks keep both choices");
+  h = click("g1");
+  assert.ok(!checked(h, "MP") && checked(h, "UP"), "a State can be unticked independently");
+  items.filter((p) => p["data-testid"] === "filter-all")[1]!.onSelect({ preventDefault() {} });
+  draw();
+  assert.ok(!lastUrl().includes("groupId"), "State All clears every State selection");
+}
+
+// The real metric popup carries every selected person (and State) to its detail endpoint.
+{
+  const detailUrls: string[] = [];
+  const { PerformanceMetricDetail: Metric } = testLoader({
+    ...overrides,
+    "@tanstack/react-query": { useQuery: ({ queryFn }: { queryFn: () => unknown }) => { void queryFn(); return { data: undefined, isLoading: true }; } },
+    "@/lib/api-client": { api: { get: async (url: string) => { detailUrls.push(url); } } },
+  })("src/features/daily-work/performance-metric-detail.tsx") as { PerformanceMetricDetail: React.ComponentType<{ request: Record<string, unknown>; onClose: () => void }> };
+  hooks = []; cursor = 0;
+  renderToStaticMarkup(<Metric request={{ metric: "sales_planned", title: "Sales", from: "2026-10-20", to: "2026-10-21", officerIds: ["so1", "so3"], groupIds: ["g1", "g2"], isSO: false, isAdmin: true }} onClose={() => {}} />);
+  const q = new URLSearchParams(detailUrls[0]!.split("?")[1]);
+  assert.deepEqual(q.getAll("officerId"), ["so1", "so3"]);
+  assert.deepEqual(q.getAll("groupId"), ["g1", "g2"]);
+}
 
 console.log("performance-filter.test.tsx — all assertions passed");

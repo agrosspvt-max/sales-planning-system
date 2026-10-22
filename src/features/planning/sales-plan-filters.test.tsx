@@ -187,11 +187,11 @@ async function main() {
     // Admin — Monthly shows all three filters in the existing column order.
     let html = await draw(Role.SUPER_ADMIN, "admin", mode, { ...MONTHLY, ...sub });
     assert.deepEqual(filterButtons(html), ["Month", "Sales Officer", "State"], `1–3 (${mode})`);
-    assert.deepEqual(headerTexts(html).slice(0, 4), ["Season", "Month", "Sales Officer", "State"]);
+    assert.deepEqual(headerTexts(html).slice(0, 5), ["S.No", "Season", "Month", "Sales Officer", "State"]);
     // Admin — Seasonal / Yearly: Sales Officer + State (their tables have no Month column).
     html = await draw(Role.SUPER_ADMIN, "admin", mode, sub);
     assert.deepEqual(filterButtons(html), ["Sales Officer", "State"]);
-    assert.deepEqual(headerTexts(html).slice(0, 3), ["Season", "Sales Officer", "State"]);
+    assert.deepEqual(headerTexts(html).slice(0, 4), ["S.No", "Season", "Sales Officer", "State"]);
     // RM — Month + Sales Officer; State stays an ordinary header.
     html = await draw(Role.REGIONAL_MANAGER, "rm-1", mode, { ...MONTHLY, ...sub });
     assert.deepEqual(filterButtons(html), ["Month", "Sales Officer"], "4–6");

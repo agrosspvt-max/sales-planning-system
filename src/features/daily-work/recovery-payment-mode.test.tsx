@@ -182,7 +182,8 @@ const review = loadPresentation<{
   OthersSection: Props<{ title: string; text: string }>;
 }>("src/features/daily-work/team-performance-page.tsx", ["DealerSection", "AppointmentSection", "ConversionSection", "VisitsSection", "OthersSection"]);
 const { DealerSection, AppointmentSection, ConversionSection, VisitsSection, OthersSection } = review;
-const cellsOf = (html: string) => [...html.matchAll(/<tr\b[^>]*>(.*?)<\/tr>/g)].map((row) => [...row[1].matchAll(/<t[hd]\b[^>]*>(.*?)<\/t[hd]>/g)].map((c) => c[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()));
+// Compare the financial columns independently of the display-only ordinal (covered by table-numbering.test).
+const cellsOf = (html: string) => [...html.replace(/<(td|th)\b[^>]*data-serial-cell="true"[^>]*>.*?<\/\1>/g, "").matchAll(/<tr\b[^>]*>(.*?)<\/tr>/g)].map((row) => [...row[1].matchAll(/<t[hd]\b[^>]*>(.*?)<\/t[hd]>/g)].map((c) => c[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()));
 const render = (
   section: "SALES" | "RECOVERY",
   view: "PLAN" | "REPORT" = "PLAN",

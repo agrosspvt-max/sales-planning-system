@@ -370,7 +370,7 @@ function PlanSection({ title, showTitle, rows, isOfficer, loading, filterKeys, f
     <div className="space-y-2">
       {showTitle && <h3 className="text-sm font-semibold">{title}</h3>}
       <div className="rounded-lg border bg-background">
-        <Table>
+        <Table numbered>
           <TableHeader>
             <TableRow>
               <TableHead>Season</TableHead>

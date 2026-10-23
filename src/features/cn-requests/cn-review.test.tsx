@@ -135,7 +135,7 @@ assert(
 history = [{ ...current, status: "REJECTED", note: "Wrong product" }];
 html = dialog();
 assert(
-  html.includes("Rate Confirmation Rejected") &&
+  html.includes("Rate Denied") &&
     html.includes("Replace / Reassign") &&
     html.includes("Wrong product"),
 );
@@ -189,8 +189,16 @@ for (const value of [0, 0.01, 123.45, 9999999999.99]) assert(validCnReviewPrice(
 for (const value of [-1, NaN, Infinity, 1.001, null, "12"]) assert(!validCnReviewPrice(value));
 assert.equal(
   t(cnReviewStatusKey({ kind: "CN_APPROVAL", status: "REJECTED" })),
-  "CN Approval Rejected",
+  "CN Working Refused",
 );
+// The four dependency outcomes and the two review types use the new wording (stored codes are unchanged); pending stays Under Process.
+assert.deepEqual([
+  t(cnReviewStatusKey({ kind: "RATE_CONFIRMATION", status: "CONFIRMED" })), t(cnReviewStatusKey({ kind: "RATE_CONFIRMATION", status: "REJECTED" })),
+  t(cnReviewStatusKey({ kind: "CN_APPROVAL", status: "CONFIRMED" })), t(cnReviewStatusKey({ kind: "CN_APPROVAL", status: "REJECTED" })),
+  t(cnReviewStatusKey({ kind: "CN_APPROVAL", status: "PENDING" })),
+], ["Rate Confirmed", "Rate Denied", "CN Working Approved", "CN Working Refused", "Under Process"]);
+assert.deepEqual([t("cn_requests.processing.rate"), t("cn_requests.processing.cn")], ["Rate Request", "CN Working Approval"]);
+assert.ok(!Object.values(CN_REVIEW_LABELS).some((v) => /Price Confirmed|Rate Confirmation|CN Approval Rejected|^CN Approved$/.test(v)), "no old dependency wording is left in the defaults");
 const overrides = { "cn_requests.processing.tab": "Processing Queue" };
 assert.equal(resolveLabels(overrides)["cn_requests.processing.tab"], "Processing Queue");
 const catalog = labelCatalog(overrides);

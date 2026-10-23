@@ -1,5 +1,5 @@
 "use client";
-import { CnProcessingDialog } from "./cn-review-ui";
+import { CnBypassDialog, CnProcessingDialog } from "./cn-review-ui";
 import { cnReviewStatusKey, type CnReview } from "@/lib/cn-review";
 import { useAdminPermission } from "@/features/accounts/permission-ui";
 import { formatDMY } from "@/lib/date-format";
@@ -61,7 +61,7 @@ import { ColumnFilterHeader, type ColumnFilterOption } from "@/components/ui/col
 import { cnFilterParams, cnFilterValue, filterCnRequests, type CnFilterKey, type CnFilters } from "@/lib/cn-request-filters";
 
 interface CnRequest {
-  processingReview?: Pick<CnReview, "kind" | "status">;
+  processingReview?: Pick<CnReview, "kind" | "status"> & { id?: string };
   id: string; dealerId: string; partyName: string; cnType: string; amount: number | null; postedAmount: number | null; paymentStatus: string | null; paymentVerified: boolean; paymentOriginalAmount: number | null; paymentOutstandingAmount: number | null; paymentTrackingMode: string | null;
   officerId: string; employeeName: string; state: string | null; territory: string | null; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; expiryDate: string | null; graceDays: number | null; graceEndDate: string | null; policyStage: "WORKING" | "GRACE" | "EXPIRED" | null; policyCycle: number; cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; finalCn?: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; remarks: string | null; createdAt: string; days: number | null;
 }
@@ -161,6 +161,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     territory: useLabel("cn_requests.field.territory"),
     status: useLabel("cn_requests.field.status"),
     approval: useLabel("cn_requests.field.approval"),
+    cnStatus: useLabel("cn_requests.field.cn_status"),
     details: useLabel("cn_requests.field.details"),
     remarks: useLabel("cn_requests.field.remarks"),
     submittedAt: useLabel("cn_requests.view.submitted"),
@@ -208,8 +209,8 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   };
 
   const [section, setSection] = useState<"submitted-rejected" | "accepted">("submitted-rejected");
-  const [decisionView, setDecisionView] = useState<"submitted" | "rejected">("submitted");
-  const [acceptedView, setAcceptedView] = useState<"accepted-not-posted" | "posted-in-ledger" | "cn-near-expire" | "expired-cn" | "under-process">("accepted-not-posted");
+  const [decisionView, setDecisionView] = useState<"submitted" | "rejected" | "under-process">("submitted");
+  const [acceptedView, setAcceptedView] = useState<"accepted-not-posted" | "posted-in-ledger" | "cn-near-expire" | "expired-cn">("accepted-not-posted");
   const view: CnRequestView = section === "submitted-rejected" ? decisionView : acceptedView;
   const [filters, setFilters] = useState<CnFilters>({});
 
@@ -264,6 +265,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   const [acceptTarget, setAcceptTarget] = useState<{ request: CnRequest; status: CnAcceptanceStatus } | null>(null);
   const [acceptError, setAcceptError] = useState<string | null>(null);
   const [processingTarget, setProcessingTarget] = useState<CnRequest | null>(null);
+  const [bypassTarget, setBypassTarget] = useState<{ request: CnRequest; destination: CnAcceptanceStatus | "REJECTED" } | null>(null);
   const [processingDecision, setProcessingDecision] = useState<{ id: string; expectedReviewId: string; bypassReason: string } | null>(null);
   const [paymentTarget, setPaymentTarget] = useState<CnRequest | null>(null);
   const [reopenTarget, setReopenTarget] = useState<CnRequest | null>(null);
@@ -327,15 +329,30 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     (isManager && r.status === CN_REQUEST_STATUSES.SUBMITTED && r.officerId !== userId) ||
     (isAdmin && allowReject && r.status === CN_REQUEST_STATUSES.SUBMITTED);
   const canAccept = (r: CnRequest) => isAdmin && allowAccept && r.status === CN_REQUEST_STATUSES.SUBMITTED;
+  // Under Process: only administrators who may handle CNs get the CN Status dropdown; the server re-checks every transition.
+  const canDecideUnderProcess = (r: CnRequest) => isAdmin && r.status === "UNDER_PROCESS" && (allowAccept || allowReject);
+  // Same transition dialogs and server rules as the Review dialog's buttons. The mandatory bypass reason is asked first unless the latest review is CONFIRMED.
+  const chooseUnderProcessDestination = (r: CnRequest, destination: CnAcceptanceStatus | "REJECTED") => {
+    const review = r.processingReview;
+    if (!review?.id) { setProcessingTarget(r); return; }
+    const proceed = (bypassReason: string) => {
+      setProcessingDecision({ id: r.id, expectedReviewId: review.id!, bypassReason });
+      if (destination === "REJECTED") { setRejectError(null); setRejectTarget(r); }
+      else { setAcceptError(null); setAcceptTarget({ request: r, status: destination }); }
+    };
+    if (review.status === "CONFIRMED") proceed("");
+    else setBypassTarget({ request: r, destination });
+  };
   const showExpires = view === "accepted-not-posted" || view === "cn-near-expire" || view === "expired-cn";
-  // Amount and Payment Status are intentionally shown only in the Accepted section.
-  const showAmountPayment = section === "accepted";
+  // Amount and Payment Status are shown in the Accepted section and in Under Process (which sits in Submitted / Rejected but keeps its own columns).
+  const showAmount = section === "accepted";
+  const showAmountPayment = showAmount || view === "under-process"; // Payment Status; Under Process has no Amount column
   // Employee Name / State / Territory are redundant in the SO's own view (fixed by their profile).
   const showProfileColumns = !isOfficer;
   // Under Process combines its status, filter and review action in CN Update. Every viewer retains history access.
   const showStatus = view !== "under-process";
   const showApproval = view === "under-process" || (!isOfficer && section === "submitted-rejected");
-  const columnCount = 4 + (showStatus ? 1 : 0) + (showAmountPayment ? 2 : 0) + (showProfileColumns ? 3 : 0) + (showExpires ? 1 : 0) + (showApproval ? 1 : 0);
+  const columnCount = 4 + (showStatus ? 1 : 0) + (showAmount ? 1 : 0) + (showAmountPayment ? 1 : 0) + (view === "under-process" ? 1 : 0) + (showProfileColumns ? 3 : 0) + (showExpires ? 1 : 0) + (showApproval ? 1 : 0);
 
   const filterLabel = (row: CnRequest, field: CnFilterKey): string => {
     switch (field) {
@@ -398,6 +415,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
             items={[
               { value: "submitted", label: labels.submitted },
               { value: "rejected", label: labels.rejected },
+              { value: "under-process", label: t("cn_requests.processing.tab") },
             ]}
           />
           {exportButton}
@@ -408,11 +426,10 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
             value={acceptedView}
             onChange={(next) => { setAcceptedView(next); setFilters({}); }}
             items={[
-              { value: "under-process", label: t("cn_requests.processing.tab") },
               { value: "accepted-not-posted", label: labels.acceptedNotPosted },
-              { value: "posted-in-ledger", label: labels.postedInLedger },
               { value: "cn-near-expire", label: labels.inGrace },
               { value: "expired-cn", label: labels.expiredCn },
+              { value: "posted-in-ledger", label: labels.postedInLedger },
             ]}
           />
           {exportButton}
@@ -426,7 +443,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
             <TableRow>
               {filterHeader("party", labels.party)}
               {filterHeader("cnType", labels.cnType)}
-              {showAmountPayment && filterHeader("amount", labels.amount, "text-right")}
+              {showAmount && filterHeader("amount", labels.amount, "text-right")}
               {showAmountPayment && filterHeader("paymentStatus", labels.paymentStatus)}
               {showProfileColumns && filterHeader("employee", labels.employeeName)}
               {showProfileColumns && filterHeader("state", labels.state)}
@@ -435,6 +452,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
               {filterHeader("days", labels.colDays)}
               {showExpires && filterHeader("expiry", labels.expires)}
               {showApproval && (view === "under-process" ? filterHeader("status", labels.approval, "text-right") : <TableHead className="text-right">{labels.approval}</TableHead>)}
+              {view === "under-process" && <TableHead className="text-right">{labels.cnStatus}</TableHead>}
               <TableHead className="text-right">{labels.colAction}</TableHead>
             </TableRow>
           </TableHeader>
@@ -448,7 +466,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
                 <TableRow data-dealer-id={r.dealerId} key={r.id}>
                   <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.partyName} /></TableCell>
                   <TableCell>{cnTypeLabel(r.cnType, labels.cnTypeLabels)}</TableCell>
-                  {showAmountPayment && <TableCell className="text-right tabular-nums">{money(r.amount)}</TableCell>}
+                  {showAmount && <TableCell className="text-right tabular-nums">{money(r.amount)}</TableCell>}
                   {showAmountPayment && <TableCell>{r.paymentTrackingMode === "PAYMENT_V1" ? (
                     <PaymentStatusPill status={r.paymentStatus} verified={r.paymentVerified} labels={labels.paymentStatusLabels} onClick={() => setPaymentTarget(r)} />
                   ) : (r.paymentStatus ?? <span className="text-muted-foreground">—</span>)}</TableCell>}
@@ -480,13 +498,28 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
                       )}
                     </TableCell>
                   )}
+                  {view === "under-process" && (
+                    <TableCell className="text-right">
+                      {canDecideUnderProcess(r) ? (
+                        <div className="flex justify-end">
+                          <AcceptanceStatusAction
+                            labels={labels}
+                            disabled={actMut.isPending || acceptMut.isPending}
+                            hidePosted={!allowPost}
+                            onSelect={allowAccept ? (status) => chooseUnderProcessDestination(r, status) : undefined}
+                            onReject={allowReject ? () => chooseUnderProcessDestination(r, "REJECTED") : undefined}
+                          />
+                        </div>
+                      ) : <span className="text-xs text-muted-foreground">—</span>}
+                    </TableCell>
+                  )}
                   <TableCell className="text-right">
                     {view === "expired-cn" && isAdmin && allowAccept && (
                       <Button size="sm" variant="outline" className="mr-2" disabled={reopenMut.isPending} onClick={() => { setReopenError(null); setReopenTarget(r); }}>{labels.reopen.action}</Button>
                     )}
                     <CnActionMenu
                       request={r}
-                      section={section}
+                      section={view === "under-process" ? "accepted" : section} // Under Process keeps its CN Working download
                       view={view}
                       labels={labels}
                       onViewDetails={() => setDetail(r)}
@@ -501,11 +534,18 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
       </div>
 
       {graceTarget && <GrantCnGraceDialog request={graceTarget} onClose={() => setGraceTarget(null)} onChanged={() => { setGraceTarget(null); qc.invalidateQueries({ queryKey: ["cn-requests"] }); qc.invalidateQueries({ queryKey: ["cn-request-detail"] }); }} />}
-      {processingTarget && <CnProcessingDialog requestId={processingTarget.id} underProcess={processingTarget.status === "UNDER_PROCESS"} canHandle={isAdmin && (allowAccept || allowReject || allowPost)} canAccept={isAdmin && allowAccept} canPost={isAdmin && allowAccept && allowPost} canReject={isAdmin && allowReject} onClose={() => setProcessingTarget(null)} onDecision={(destination, expectedReviewId, bypassReason) => {
+      {processingTarget && <CnProcessingDialog requestId={processingTarget.id} onSent={() => { setSection("submitted-rejected"); setDecisionView("under-process"); setFilters({}); }} underProcess={processingTarget.status === "UNDER_PROCESS"} canHandle={isAdmin && (allowAccept || allowReject || allowPost)} canAccept={isAdmin && allowAccept} canPost={isAdmin && allowAccept && allowPost} canReject={isAdmin && allowReject} onClose={() => setProcessingTarget(null)} onDecision={(destination, expectedReviewId, bypassReason) => {
         setProcessingDecision({ id: processingTarget.id, expectedReviewId, bypassReason });
         if (destination === "REJECTED") { setRejectError(null); setRejectTarget(processingTarget); }
         else { setAcceptError(null); setAcceptTarget({ request: processingTarget, status: destination }); }
         setProcessingTarget(null);
+      }} />}
+      {bypassTarget && <CnBypassDialog onCancel={() => setBypassTarget(null)} onConfirm={(bypassReason) => {
+        const { request, destination } = bypassTarget;
+        setBypassTarget(null);
+        setProcessingDecision({ id: request.id, expectedReviewId: request.processingReview!.id!, bypassReason });
+        if (destination === "REJECTED") { setRejectError(null); setRejectTarget(request); }
+        else { setAcceptError(null); setAcceptTarget({ request, status: destination }); }
       }} />}
       {createOpen && <CreateRequestDialog role={role} onClose={() => setCreateOpen(false)} onCreated={() => { setCreateOpen(false); qc.invalidateQueries({ queryKey: ["cn-requests"] }); }} />}
       {detail && <CnRequestDetailDialog requestId={detail.id} initialRequest={detail} onClose={() => setDetail(null)} />}
@@ -738,9 +778,11 @@ function AcceptanceStatusAction({
   onSelect,
   onReject,
   onProcess,
+  hidePosted,
 }: {
   labels: CnWorkflowLabels;
   disabled: boolean;
+  hidePosted?: boolean;
   onSelect?: (status: CnAcceptanceStatus) => void;
   onReject?: () => void;
   onProcess?: () => void;
@@ -754,7 +796,7 @@ function AcceptanceStatusAction({
       placeholder={labels.selectAcceptanceStatus}
       options={[
         ...(onProcess ? [{ value: "__PROCESS__", label: processLabel }] : []),
-        ...(onSelect ? CN_ACCEPTANCE_STATUS_VALUES.map((status) => ({ value: status, label: acceptanceStatusText(status, labels) })) : []),
+        ...(onSelect ? CN_ACCEPTANCE_STATUS_VALUES.filter((status) => !(hidePosted && status !== "ACCEPTED_NOT_POSTED")).map((status) => ({ value: status, label: acceptanceStatusText(status, labels) })) : []),
         // Reject is the LAST option and reuses the existing rejection flow.
         ...(onReject ? [{ value: REJECT_OPTION_VALUE, label: labels.reject }] : []),
       ]}

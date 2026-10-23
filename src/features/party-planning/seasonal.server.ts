@@ -106,7 +106,7 @@ export async function listSeasonalSheets(ctx: AuthContext, filters: { seasonId?:
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-/** Create the caller's Seasonal Plan for a CHOSEN open season (one per owner and season). The season is validated, never assumed. */
+/** Create — or resume — the caller's Seasonal Plan for a CHOSEN open season (one per owner and season). The season is validated, never assumed. */
 export async function createSeasonalSheet(ctx: AuthContext, raw: unknown): Promise<SeasonalSheetDto> {
   assertSheetCreator(ctx);
   const parsed = z.object({ seasonId: z.string().min(1, "Select a season") }).safeParse(raw ?? {});
@@ -114,13 +114,25 @@ export async function createSeasonalSheet(ctx: AuthContext, raw: unknown): Promi
   const season = await getSeasonInfo(parsed.data.seasonId);
   if (!season) throw new ApiError(422, "Select a valid season");
   if (season.status !== "OPEN") throw new ApiError(409, "Seasonal Plans can only be created for an open season");
-  if (await prisma.seasonalPlanSheet.findUnique({ where: { ownerId_seasonId: { ownerId: ctx.userId, seasonId: season.id } }, select: { id: true } })) throw new ApiError(409, `You already have a Seasonal Plan for ${season.name} ${season.year}. Open it from the list.`);
-  const created = await prisma.$transaction(async (tx) => {
-    const sheet = await tx.seasonalPlanSheet.create({ data: { seasonId: season.id, ownerId: ctx.userId }, include: sheetInclude });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "seasonalPlanSheet", entityId: sheet.id, summary: `Seasonal Plan created · ${season.name} ${season.year}` }, tx);
-    return sheet;
-  });
-  return toSheetDto(ctx, await viewerOf(ctx), created);
+  // Create-or-RESUME: the caller's one sheet for this season (owner + season is unique) is returned if it exists — whatever it holds (drafts, submitted or approved
+  // entries are all kept) — so choosing a season never fails and never duplicates. Concurrent / repeated requests converge on the same row through the unique constraint.
+  const key = { ownerId_seasonId: { ownerId: ctx.userId, seasonId: season.id } };
+  const existing = await prisma.seasonalPlanSheet.findUnique({ where: key, include: sheetInclude });
+  if (existing) return toSheetDto(ctx, await viewerOf(ctx), existing);
+  try {
+    const created = await prisma.$transaction(async (tx) => {
+      const sheet = await tx.seasonalPlanSheet.create({ data: { seasonId: season.id, ownerId: ctx.userId }, include: sheetInclude });
+      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "seasonalPlanSheet", entityId: sheet.id, summary: `Seasonal Plan created · ${season.name} ${season.year}` }, tx);
+      return sheet;
+    });
+    return toSheetDto(ctx, await viewerOf(ctx), created);
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") { // lost the race: another request created it first
+      const winner = await prisma.seasonalPlanSheet.findUnique({ where: key, include: sheetInclude });
+      if (winner) return toSheetDto(ctx, await viewerOf(ctx), winner);
+    }
+    throw e;
+  }
 }
 
 /** Which row approval statuses belong to each lifecycle section (a plan's rows are shown per section; "older" shows everything, read-only). */

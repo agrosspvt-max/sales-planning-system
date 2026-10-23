@@ -30,7 +30,8 @@ const overrides = {
       return [hooks[i], (u: unknown) => { hooks[i] = typeof u === "function" ? (u as (v: unknown) => unknown)(hooks[i]) : u; }];
     },
   },
-  "@/features/labels/label-ui": { L: ({ k }: { k: LabelKey }) => <>{DEFAULT_LABELS[k]}</>, useLabel: (k: LabelKey) => DEFAULT_LABELS[k] },
+  "@/features/labels/label-ui": { L: ({ k }: { k: LabelKey }) => <>{DEFAULT_LABELS[k]}</>, useLabel: (k: LabelKey) => DEFAULT_LABELS[k],
+    LabelSectionHeaderRow: ({ leading = 0, sections }: { leading?: number; sections: { labelKey: LabelKey; span: number; tone: string; color?: string }[] }) => <tr data-section-row>{leading > 0 && <th colSpan={leading} />}{sections.map((x, i) => <th key={i} colSpan={x.span} data-tone={x.tone} data-color={x.color}>{DEFAULT_LABELS[x.labelKey]}</th>)}</tr> },
   "@/features/party-planning/party-planning-page": { PartyPlanModeLinks: () => null },
   "./party-planning-page": { PartyPlanModeLinks: () => null },
   "@/components/layout/page-header": { PageHeader: ({ title, subtitle }: { title: string; subtitle?: string }) => <h1>{title}<p>{subtitle}</p></h1> },
@@ -66,6 +67,17 @@ const render = (role: Role = Role.SALES_OFFICER, stage: string = "create") => {
   const html = renderToStaticMarkup(<SeasonalPlanDetailPage role={role} sheetId="sh1" stage={stage} />);
   hooks.length = cursor; // a component that is no longer rendered (the closed popup) loses its state, like a real unmount
   return html;
+};
+/** The grouped heading row must cover exactly the rendered columns (the automatic S.No column included) so bands, tints and headings line up. */
+const assertGroupedHeader = (html: string, groups: string[]) => {
+  const rows = [...html.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map((m) => m[1]!);
+  const grouped = rows.find((r) => r.includes("data-section-row") || groups.every((g) => r.includes(g)))!;
+  const heads = [...rows[0]!.matchAll(/<th([^>]*)>/g)].map((m) => Number(/colSpan="(\d+)"/.exec(m[1]!)?.[1] ?? 1)).reduce((a, b) => a + b, 0);
+  const columns = [...rows[1]!.matchAll(/<th[ >]/g)].length;
+  assert.equal(heads, columns, "group headings span exactly the rendered columns");
+  assert.ok(groups.every((g) => grouped.includes(g)), `groups: ${groups.join(", ")}`);
+  assert.ok(html.includes("<colgroup>"), "colgroup present");
+  assert.ok(html.includes('data-color="#FF3445"'), "the main planning-input group uses Recovery's red heading");
 };
 const click = (label: string) => { const b = buttons.filter((x) => String(x.children).includes(label)); assert.ok(b.length >= 1, `button "${label}"`); b[b.length - 1]!.onClick!(); };
 const count = (html: string, text: string) => html.split(text).length - 1;
@@ -121,7 +133,7 @@ async function main() {
   assert.ok(!html.includes("Season: Kharif") && !html.includes("Apr 2026 → Nov 2026"), "the redundant season banner is gone");
   assert.ok(!html.includes("Search market or party"), "the global search is gone");
   assert.ok(!inputs.some((i) => i.placeholder === "Search Market...") && selects.length === 0 && !html.includes("Search Market..."), "no Market search box and no Market Potential dropdown in the header");
-  assert.deepEqual([...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["S.No", "Market", "Type", "Market Potential", "Status", "Date", "Approval", "Action"], "plain headers: compact serial column first; the Market Potential column itself stays");
+  assert.deepEqual([...html.replace(/<tr data-section-row.*?<\/tr>/, "").matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["S.No", "Market", "Type", "Market Potential", "Status", "Date", "Approval", "Action"], "plain headers: compact serial column first; the Market Potential column itself stays (the group row sits above them)");
   for (const gone of ["My plans", "To review", "All plans"]) assert.ok(!html.includes(gone), `the old "${gone}" tab is gone`);
   assert.ok(!html.includes("No Seasonal Plans here yet."));
   assert.equal(buttons.filter((b) => String(b.children).includes("Add Market")).length, 1, "ONE Add Market button remains, at the bottom of the list");
@@ -146,6 +158,19 @@ async function main() {
   hooks = []; plans = [];
   for (const role of [Role.SALES_OFFICER, Role.REGIONAL_MANAGER]) { render(role); assert.equal(buttons.filter((b) => String(b.children).includes("Add Market")).length, 1, String(role)); }
   render(Role.SUPER_ADMIN); assert.equal(buttons.filter((b) => String(b.children).includes("Add Market")).length, 0, "Admin has no Add Market button");
+  { // Opened plan = compact Back + breadcrumbs; the notes that used to ride in the subtitle (closed season, another officer's plan) are kept.
+    const bar = (stage: string, h = render(Role.SALES_OFFICER, stage)) => h;
+    for (const stage of ["create", "submitted", "approved", "older"]) {
+      const h = bar(stage);
+      assert.ok(!h.includes("<h1") && !h.includes("data-mode") && h.includes('data-testid="plan-detail-bar"') && h.includes(`href="/planning/party/seasonal?stage=${stage}"`), `${stage}: no title / switches, Back keeps the stage`);
+      assert.ok(h.includes("Kharif 2026"), `${stage}: the season stays in the breadcrumbs`);
+    }
+    sheet = { ...sheet, seasonOpen: false };
+    assert.ok(bar("older").includes("no longer open") || bar("older").includes(DEFAULT_LABELS["party_planning.common.season_closed"]), "the closed-season note survives without the subtitle");
+    sheet = { ...sheet, seasonOpen: true, own: false, ownerName: "Officer Two" };
+    assert.ok(bar("submitted", render(Role.REGIONAL_MANAGER, "submitted")).includes("Officer Two"), "another officer's plan is still labelled");
+    sheet = { ...sheet, own: true, ownerName: "Officer One" };
+  }
   sheet = { ...sheet, seasonOpen: false }; render(); assert.equal(buttons.filter((b) => String(b.children).includes("Add Market")).length, 0, "a closed season's plan is read-only: no button");
   sheet = { ...sheet, seasonOpen: true, own: false, ownerName: "Officer Two" }; html = render(Role.REGIONAL_MANAGER);
   assert.equal(buttons.filter((b) => String(b.children).includes("Add Market")).length, 0, "someone else's plan: no Add Market");
@@ -199,6 +224,10 @@ async function main() {
   assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/seasonal-sheets/sh1/submit", body: {} }], "one batch submit for the plan");
   for (const st of ["submitted", "approved", "older"]) { html = render(Role.SALES_OFFICER, st); assert.deepEqual([buttons.filter((b) => String(b.children).includes("Add Market")).length, buttons.filter((b) => String(b.children).includes("Submit all")).length], [0, 0], `${st}: no workspace controls`); assert.ok(!html.includes("No Seasonal Plans here yet.")); }
   plans = []; assert.ok(render(Role.SALES_OFFICER, "approved").includes("No approved entries in this plan."));
+  // Recovery-style grouped header on every stage/role; the group row spans exactly the rendered columns (S.No included), in empty and populated states.
+  for (const [role, stage] of [[Role.SALES_OFFICER, "create"], [Role.SALES_OFFICER, "submitted"], [Role.REGIONAL_MANAGER, "approved"], [Role.SUPER_ADMIN, "older"]] as const) {
+    hooks.length = 0; assertGroupedHeader(render(role, stage), ["Market Details", "Progress", "Approval"]);
+  }
   console.log("seasonal-add-ui.test.tsx — all assertions passed");
 }
 main().catch((e) => { console.error(e); process.exit(1); });

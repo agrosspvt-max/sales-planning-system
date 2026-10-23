@@ -6,22 +6,23 @@ import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import { formatDMY, formatDateTimeDMY } from "@/lib/date-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Check, Plus, Send, X } from "lucide-react";
+import { Check, Pencil, Plus, Send, Trash2, X } from "lucide-react";
 import { api } from "@/lib/api-client";
-import { ROW_STATUS_LABEL, EMPTY_SENT_FORM, chooseSentAnswer, isLegacySentInfo, sentFormAnswered, sentFormBody, setSentNotSent, type SentForm, type Completeness, type PlanStage, type RowStatus, type StoredSentInfo } from "@/lib/monthly-plan";
+import { MAX_OPTIONS, TURNOVER_CATEGORIES, ROW_STATUS_LABEL, EMPTY_SENT_FORM, chooseSentAnswer, isLegacySentInfo, sentFormAnswered, sentFormBody, setSentNotSent, type SentForm, type Completeness, type PlanStage, type RowStatus, type StoredSentInfo } from "@/lib/monthly-plan";
 import { fill, fillNodes, useLabels } from "./party-labels";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
-import { PartyPlanModeLinks } from "./party-planning-page";
+import { SectionColgroup, type SectionTone } from "@/components/ui/table-group";
+import { PlanDetailBar } from "./plan-detail-bar";
 import { DealerDialog } from "@/features/sales-upload/create-dealer-dialog";
 
 /* ------------------------------------------- DTOs (mirror monthly.server.ts) ------------------------------------------- */
@@ -36,7 +37,7 @@ interface MonthlySheetDetail {
 }
 interface DocInfo { documents: boolean; checks: boolean; other: string | null }
 interface StatusEvent { id: string; dealerId: string | null; previousStatus: string; newStatus: string; previousLabel: string; newLabel: string; actorName: string; actorRole: string; remarks: string | null; sentInfo: StoredSentInfo | null; receivedInfo: DocInfo | null; createdAt: string }
-interface Option { id: string; optionNo: 1 | 2; partyName: string | null }
+interface Option { id: string; optionNo: number; partyName: string | null; turnoverCategory: string | null }
 interface DateChange { id: string; previousDate: string | null; newDate: string | null; byAdmin: boolean; automatic: boolean; actorName: string; actorRole: string; createdAt: string }
 interface Plan {
   id: string; monthLabel: string; monthKey: string; ownerId: string; ownerGroupId: string | null; appointedDealerId: string | null; appointedDealerName: string | null; ownerName: string; marketName: string; marketPotential: string | null; planDate: string | null; canManage: boolean; options: Option[];
@@ -89,6 +90,7 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
   const [adding, setAdding] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [drawerPlanId, setDrawerPlanId] = useState<string | null>(null);
+  const [editOptionsId, setEditOptionsId] = useState<string | null>(null);
   const [statusPlanId, setStatusPlanId] = useState<string | null>(null);
   const [timelinePlanId, setTimelinePlanId] = useState<string | null>(null);
   const [historyPlanId, setHistoryPlanId] = useState<string | null>(null);
@@ -98,7 +100,8 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
     planDate: useLabel("party_planning.monthly.col.plan_date"),
     empty: useLabel("party_planning.monthly.empty"),
   };
-  const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", crumbPlan: "party_planning.monthly.crumb_plan", subtitle: "party_planning.monthly.subtitle_detail", returnedBy: "party_planning.monthly.msg.returned_by",
+  const tt = useTurnoverText();
+  const T = useLabels({ editOptions: "party_planning.monthly.action.edit_options", editOptionsFor: "party_planning.monthly.aria.edit_options_for", back: "party_planning.nav.back", planning: "party_planning.crumb.planning", crumbCreate: "party_planning.crumb.create_new_plan", crumbView: "party_planning.crumb.view_plans", createView: "party_planning.crumb.create_view", crumbPlan: "party_planning.monthly.crumb_plan", returnedBy: "party_planning.monthly.msg.returned_by",
     closedNote: "party_planning.common.season_closed_note", status: "party_planning.monthly.col.status", history: "party_planning.common.history", partyOptionsFor: "party_planning.monthly.aria.party_options_for", changeStatus: "party_planning.monthly.aria.change_status",
     statusHistory: "party_planning.monthly.aria.status_history", daysFinal: "party_planning.monthly.tooltip.days_final", daysLive: "party_planning.monthly.tooltip.days_live", addMarket: "party_planning.action.add_market", submit: "party_planning.action.submit",
     approve: "party_planning.action.approve", reject: "party_planning.action.reject", emptySubmitted: "party_planning.monthly.empty_entries_submitted", emptyApproved: "party_planning.monthly.empty_entries_approved", emptyOlder: "party_planning.monthly.empty_entries_older" });
@@ -117,15 +120,21 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
   const plans = detail?.plans ?? [];
   const statusPlan = statusPlanId ? detail?.plans.find((p) => p.id === statusPlanId) : undefined;
   const timelinePlan = timelinePlanId ? detail?.plans.find((p) => p.id === timelinePlanId) : undefined;
+  const editOptionsPlan = editOptionsId ? detail?.plans.find((p) => p.id === editOptionsId) : undefined;
   const drawerPlan = drawerPlanId ? detail?.plans.find((p) => p.id === drawerPlanId) : undefined;
   const historyPlan = historyPlanId ? detail?.plans.find((p) => p.id === historyPlanId) : undefined;
   const canAdd = stage === "create" && canPlan && sheet?.own && sheet.canEdit; // the Create workspace: owner, season open — entries can be added at any time
 
+  // Subtle Recovery-style column tints (shared SectionColgroup + tones): S.No and Market stay neutral. There is NO grouped heading row above the column headings; presentation only, column order unchanged.
+  const sections: { span: number; tone: SectionTone }[] = [
+    { span: 1, tone: "amber" }, // Party Options
+    { span: 1, tone: "green" }, // Status
+    { span: 2, tone: "blue" }, // Conversion Date + Days
+  ];
   return (
     <div className="space-y-5">
-      <PageHeader crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: L.title }, { label: L.nav, href: "/planning/party/monthly" }, { label: detail ? `${detail.season.name} ${detail.season.year} · ${detail.month.label}` : T.crumbPlan }]} title={L.title}
-        subtitle={T.subtitle} />
-      <PartyPlanModeLinks mode="monthly" stage={stage} />
+      {/* Opened plan: compact Back + breadcrumbs only (the title, subtitle, mode switch and Seasonal | Monthly tabs stay on the lists). */}
+      <PlanDetailBar crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: L.title }, { label: L.nav, href: `/planning/party/monthly?stage=${stage}` }, { label: stage === "create" ? T.crumbCreate : T.crumbView, href: `/planning/party/monthly?stage=${stage}` }, { label: detail ? `${detail.season.name} ${detail.season.year} · ${detail.month.label}` : T.crumbPlan }]} backHref={`/planning/party/monthly?stage=${stage}`} backLabel={T.back} />
 
       {loadError && <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">{(loadError as Error).message}</div>}
 
@@ -140,7 +149,10 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
 
       <div className="overflow-auto rounded-lg border bg-background">
         <Table numbered>
-          <TableHeader><TableRow><TableHead>{L.market}</TableHead><TableHead>{L.partyOptions}</TableHead><TableHead>{T.status}</TableHead><TableHead>{L.planDate}</TableHead><TableHead className="w-20 text-right">{L.days}</TableHead></TableRow></TableHeader>
+          <SectionColgroup leading={2} sections={sections} />
+          <TableHeader>
+            <TableRow><TableHead>{L.market}</TableHead><TableHead>{L.partyOptions}</TableHead><TableHead>{T.status}</TableHead><TableHead>{L.planDate}</TableHead><TableHead className="w-20 text-right">{L.days}</TableHead></TableRow>
+          </TableHeader>
           <TableBody>
             {isLoading ? <TableRow><TableCell colSpan={5}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
               : plans.length === 0 ? <TableRow><TableCell colSpan={5} className="py-10 text-center text-muted-foreground">{stage === "create" ? L.empty : stage === "older" ? T.emptyOlder : stage === "submitted" ? T.emptySubmitted : T.emptyApproved}</TableCell></TableRow>
@@ -148,9 +160,12 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.marketName}</TableCell>
                     <TableCell className="p-1">
-                      <button className="w-full rounded px-2 py-1 text-left hover:bg-muted" onClick={() => setDrawerPlanId(p.id)} aria-label={fill(T.partyOptionsFor, { market: p.marketName })}>
-                        {p.options.map((o) => <div key={o.id} className="text-sm"><span className="text-muted-foreground">{o.optionNo}.</span> {o.partyName ?? dash}</div>)}
+                      <div className="flex items-start gap-1">
+                      <button className="min-w-0 flex-1 rounded px-2 py-1 text-left hover:bg-muted" onClick={() => setDrawerPlanId(p.id)} aria-label={fill(T.partyOptionsFor, { market: p.marketName })}>
+                        {p.options.map((o) => <div key={o.id} className="text-sm"><span className="text-muted-foreground">{o.optionNo}.</span> {o.partyName ?? dash}{o.partyName && <span className="text-muted-foreground"> · {turnoverShown(tt, o.turnoverCategory)}</span>}</div>)}
                       </button>
+                      {p.canEditEntry && <Button type="button" size="sm" variant="ghost" aria-label={fill(T.editOptionsFor, { market: p.marketName })} title={T.editOptions} onClick={() => setEditOptionsId(p.id)}><Pencil className="h-4 w-4" /></Button>}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
@@ -181,6 +196,7 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
       </div>
       {adding && detail && <AddMarketDialog sheetId={sheetId} detail={detail} labels={{ market: L.market, planDate: L.planDate }} onClose={() => setAdding(false)} onAdded={() => { setAdding(false); refresh(); }} />}
       {rejecting && <RejectSheetDialog pending={act.isPending} error={error} onCancel={() => setRejecting(false)} onConfirm={(reason) => act.mutate({ action: "reject", reason })} />}
+      {editOptionsPlan && <EditOptionsDialog plan={editOptionsPlan} onClose={() => setEditOptionsId(null)} onSaved={() => { setEditOptionsId(null); refresh(); }} />}
       {drawerPlan && <PartyOptionsDrawer plan={drawerPlan} onClose={() => setDrawerPlanId(null)} onShowTimeline={() => { setTimelinePlanId(drawerPlan.id); setDrawerPlanId(null); }} />}
       {statusPlan && <StatusDialog plan={statusPlan} onClose={() => setStatusPlanId(null)} onChanged={() => { setStatusPlanId(null); refresh(); }} />}
       {timelinePlan && <StatusTimelineDialog plan={timelinePlan} onClose={() => setTimelinePlanId(null)} />}
@@ -191,18 +207,70 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
 
 /* ============================== Add Market dialog + plan-level reject ============================== */
 
-/** Add one market row to THIS Monthly Plan: an approved Seasonal Plan market (never a new Market), Conversion Date, Option 1 (required) and Option 2. */
+/** Display wording for the stored turnover category codes (editable labels). The codes are what is saved and sent; the wording never is. */
+function useTurnoverText() {
+  const names: Record<string, string> = {
+    LT_50L: useLabel("party_planning.monthly.turnover.LT_50L"), "50L_TO_1CR": useLabel("party_planning.monthly.turnover.50L_TO_1CR"), "1CR_TO_2CR": useLabel("party_planning.monthly.turnover.1CR_TO_2CR"),
+    "2CR_TO_4CR": useLabel("party_planning.monthly.turnover.2CR_TO_4CR"), GT_4CR: useLabel("party_planning.monthly.turnover.GT_4CR"),
+  };
+  return { names, notRecorded: useLabel("party_planning.monthly.msg.turnover_not_recorded"), field: useLabel("party_planning.monthly.field.turnover"), placeholder: useLabel("party_planning.monthly.placeholder.select_turnover") };
+}
+/** "Not recorded" for a historical option whose turnover was never captured — never a guess. */
+const turnoverShown = (tt: ReturnType<typeof useTurnoverText>, code: string | null): string => (code ? tt.names[code] ?? code : tt.notRecorded);
+
+/* ------------------------------------------------ candidate party options (variable number, at least two complete) ------------------------------------------------ */
+
+/** One editable option row. `key` is a stable React key (so removing a row keeps the others' typing); `id` = an already saved option. */
+interface OptionRow { key: number; id?: string; party: string; turnover: string }
+let optionRowSeq = 0;
+const newOptionRow = (init: Partial<OptionRow> = {}): OptionRow => ({ key: ++optionRowSeq, party: "", turnover: "", ...init });
+const startRows = (): OptionRow[] => [newOptionRow(), newOptionRow()];
+const rowsPayload = (rows: OptionRow[]) => rows.map((r) => ({ ...(r.id ? { id: r.id } : {}), partyName: r.party, turnoverCategory: r.turnover }));
+/** Same rule as the server: every row present needs a party name and a turnover (a blank extra option must be completed or removed). Returns the first problem. */
+function firstOptionProblem(rows: OptionRow[], msg: { party: string; turnover: string }): string | null {
+  for (const [i, r] of rows.entries()) {
+    if (!r.party.trim()) return fill(msg.party, { option: i + 1 });
+    if (!r.turnover) return fill(msg.turnover, { option: i + 1 });
+  }
+  return null;
+}
+
+/** Party + its own Tentative Turnover per row, side by side (stacked on narrow screens), an Add Option button below, scrolling when there are many. */
+function OptionRowsEditor({ rows, setRows, removableFrom, onChange }: { rows: OptionRow[]; setRows: (rows: OptionRow[]) => void; removableFrom: number; onChange: () => void }) {
+  const tt = useTurnoverText();
+  const T = useLabels({ party: "party_planning.monthly.field.option_party", add: "party_planning.monthly.action.add_option", remove: "party_planning.monthly.action.remove_option" });
+  const patch = (key: number, change: Partial<OptionRow>) => { setRows(rows.map((r) => (r.key === key ? { ...r, ...change } : r))); onChange(); };
+  return (
+    <div className="space-y-2">
+      <div className="max-h-[40vh] space-y-3 overflow-y-auto pr-1" data-testid="option-rows">
+        {rows.map((r, i) => (
+          <div key={r.key} className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_13rem_auto]" data-option-row={i + 1}>
+            <div className="space-y-1.5"><Label>{fill(T.party, { n: i + 1 })} *</Label><Input maxLength={200} value={r.party} onChange={(e) => patch(r.key, { party: e.target.value })} /></div>
+            <div className="space-y-1.5"><Label>{tt.field} *</Label>
+              <NativeSelect aria-label={`${fill(T.party, { n: i + 1 })} — ${tt.field}`} value={r.turnover} placeholder={tt.placeholder} options={TURNOVER_CATEGORIES.map((c) => ({ value: c, label: tt.names[c]! }))} onChange={(e) => patch(r.key, { turnover: e.target.value })} /></div>
+            <div className="flex items-end">{rows.length > 2 && i >= removableFrom && <Button type="button" size="sm" variant="ghost" className="text-destructive" aria-label={fill(T.remove, { n: i + 1 })} title={fill(T.remove, { n: i + 1 })} onClick={() => { setRows(rows.filter((x) => x.key !== r.key)); onChange(); }}><Trash2 className="h-4 w-4" /></Button>}</div>
+          </div>
+        ))}
+      </div>
+      {rows.length < MAX_OPTIONS && <Button type="button" size="sm" variant="outline" onClick={() => { setRows([...rows, newOptionRow()]); onChange(); }}><Plus className="h-4 w-4" /> {T.add}</Button>}
+    </div>
+  );
+}
+
+/** Add one market row to THIS Monthly Plan: an approved Seasonal Plan market (never a new Market), Conversion Date and at least two complete party options. */
 function AddMarketDialog({ sheetId, detail, labels, onClose, onAdded }: { sheetId: string; detail: MonthlySheetDetail; labels: { market: string; planDate: string }; onClose: () => void; onAdded: () => void }) {
-  const [form, setForm] = useState({ seasonalPlanId: "", planDate: "", option1Party: "", option2Party: "" });
+  const [form, setForm] = useState({ seasonalPlanId: "", planDate: "" });
+  const [rows, setRows] = useState<OptionRow[]>(startRows);
   const [listOpen, setListOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const T = useLabels({ title: "party_planning.action.add_market", opt1: "party_planning.monthly.field.option1_party", opt2: "party_planning.monthly.field.option2_party", search: "party_planning.monthly.placeholder.search_market", none: "party_planning.monthly.placeholder.no_markets_left",
-    notFound: "party_planning.monthly.empty_no_markets_found", cancel: "party_planning.common.cancel", add: "party_planning.common.add" });
-  const add = useMutation({ mutationFn: () => api.post("/api/party-monthly-plans", { sheetId, ...form }), onSuccess: onAdded, onError: (e) => setError((e as Error).message) });
+  const T = useLabels({ title: "party_planning.action.add_market", search: "party_planning.monthly.placeholder.search_market", none: "party_planning.monthly.placeholder.no_markets_left",
+    notFound: "party_planning.monthly.empty_no_markets_found", partyRequired: "party_planning.monthly.error.option_party_required", turnoverRequired: "party_planning.monthly.error.turnover_required", cancel: "party_planning.common.cancel", add: "party_planning.common.add" });
+  // A failed save keeps EVERY entered value (the dialog stays open); Add is disabled while a save is running.
+  const add = useMutation({ mutationFn: () => api.post("/api/party-monthly-plans", { sheetId, ...form, options: rowsPayload(rows) }), onSuccess: onAdded, onError: (e) => setError((e as Error).message) });
   const marketOptions = detail.seasonalPlans.map((p) => ({ value: p.id, label: p.marketName }));
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg" onEscapeKeyDown={(e) => { if (listOpen) e.preventDefault(); /* Escape closes the market list first */ }}>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto" onEscapeKeyDown={(e) => { if (listOpen) e.preventDefault(); /* Escape closes the market list first */ }}>
         <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5"><Label>{labels.market} *</Label>
@@ -213,13 +281,42 @@ function AddMarketDialog({ sheetId, detail, labels, onClose, onAdded }: { sheetI
           <div className="space-y-1.5"><Label htmlFor="mp-plan-date">{labels.planDate}</Label>
             <DateInputDMY id="mp-plan-date" className="w-44" min={`${detail.month.key}-01`} max={monthEndIso(detail.month.key)} value={form.planDate} onChange={(v) => setForm({ ...form, planDate: v })} />
           </div>
-          <div className="space-y-1.5"><Label>{T.opt1} *</Label><Input maxLength={200} value={form.option1Party} onChange={(e) => setForm({ ...form, option1Party: e.target.value })} /></div>
-          <div className="space-y-1.5"><Label>{T.opt2}</Label><Input maxLength={200} value={form.option2Party} onChange={(e) => setForm({ ...form, option2Party: e.target.value })} /></div>
+          <OptionRowsEditor rows={rows} setRows={setRows} removableFrom={2} onChange={() => setError(null)} />
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{T.cancel}</Button>
-          <Button disabled={add.isPending || !form.seasonalPlanId || !form.option1Party.trim()} onClick={() => add.mutate()}>{T.add}</Button>
+          <Button disabled={add.isPending || !form.seasonalPlanId} onClick={() => {
+            const problem = firstOptionProblem(rows, { party: T.partyRequired, turnover: T.turnoverRequired });
+            if (problem) { setError(problem); return; }
+            add.mutate();
+          }}>{T.add}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Correct the party options of an existing Draft / Rejected entry (older drafts with fewer than two complete options are brought up to the rule here). */
+function EditOptionsDialog({ plan, onClose, onSaved }: { plan: Plan; onClose: () => void; onSaved: () => void }) {
+  const [rows, setRows] = useState<OptionRow[]>(() => {
+    const saved = plan.options.map((o) => newOptionRow({ id: o.id, party: o.partyName ?? "", turnover: o.turnoverCategory ?? "" }));
+    while (saved.length < 2) saved.push(newOptionRow());
+    return saved;
+  });
+  const [error, setError] = useState<string | null>(null);
+  const T = useLabels({ title: "party_planning.monthly.dialog.edit_options_title", partyRequired: "party_planning.monthly.error.option_party_required", turnoverRequired: "party_planning.monthly.error.turnover_required", cancel: "party_planning.common.cancel", save: "party_planning.common.save" });
+  const save = useMutation({ mutationFn: () => api.put(`/api/party-monthly-plans/${plan.id}`, { options: rowsPayload(rows) }), onSuccess: onSaved, onError: (e) => setError((e as Error).message) });
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+        <DialogHeader><DialogTitle>{T.title}</DialogTitle></DialogHeader>
+        <p className="text-sm text-muted-foreground">{plan.marketName}</p>
+        <OptionRowsEditor rows={rows} setRows={setRows} removableFrom={0} onChange={() => setError(null)} />
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>{T.cancel}</Button>
+          <Button disabled={save.isPending} onClick={() => { const problem = firstOptionProblem(rows, { party: T.partyRequired, turnover: T.turnoverRequired }); if (problem) { setError(problem); return; } save.mutate(); }}>{T.save}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -309,7 +406,8 @@ function DateHistoryDialog({ plan, onClose }: { plan: Plan; onClose: () => void 
 
 /** Right-side drawer: BOTH candidate parties (names only — they have no status of their own) and the row's single status with what was sent / received. */
 function PartyOptionsDrawer({ plan, onClose, onShowTimeline }: { plan: Plan; onClose: () => void; onShowTimeline: () => void }) {
-  const T = useLabels({ title: "party_planning.monthly.col.party_options", close: "party_planning.common.close", closeDrawer: "party_planning.monthly.aria.close_drawer", opt1: "party_planning.monthly.col.option1", opt2: "party_planning.monthly.col.option2",
+  const tt = useTurnoverText();
+  const T = useLabels({ title: "party_planning.monthly.col.party_options", close: "party_planning.common.close", closeDrawer: "party_planning.monthly.aria.close_drawer", optN: "party_planning.monthly.col.option_n",
     partyName: "party_planning.monthly.field.party_name", status: "party_planning.monthly.col.status", since: "party_planning.monthly.msg.since", sent: "party_planning.monthly.msg.sent_by_so", received: "party_planning.monthly.msg.received_by_admin",
     dealerCreated: "party_planning.monthly.msg.dealer_created", viewHistory: "party_planning.monthly.action.view_status_history", document: "party_planning.monthly.doc.document", check: "party_planning.monthly.doc.check", otherValue: "party_planning.monthly.doc.other_value" });
   const st = useStatusText();
@@ -324,7 +422,7 @@ function PartyOptionsDrawer({ plan, onClose, onShowTimeline }: { plan: Plan; onC
         </div>
         <div className="space-y-4 text-sm">
           {plan.options.map((o) => (
-            <section key={o.id} className="rounded-md border p-3"><h3 className="font-semibold">{o.optionNo === 1 ? T.opt1 : T.opt2}</h3><div>{T.partyName}: <b>{o.partyName ?? "—"}</b></div></section>
+            <section key={o.id} className="rounded-md border p-3"><h3 className="font-semibold">{fill(T.optN, { n: o.optionNo })}</h3><div>{T.partyName}: <b>{o.partyName ?? "—"}</b></div>{o.partyName && <div>{tt.field}: <b>{turnoverShown(tt, o.turnoverCategory)}</b></div>}</section>
           ))}
           <section className="space-y-1.5 rounded-md border p-3">
             <h3 className="font-semibold">{T.status}</h3>

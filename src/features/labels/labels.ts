@@ -167,6 +167,7 @@ export const DEFAULT_LABELS = {
   "cn_requests.field.territory": "Territory",
   "cn_requests.field.status": "Status",
   "cn_requests.field.approval": "Approval",
+  "cn_requests.field.cn_status": "CN Status",
   "cn_requests.field.details": "Details",
   "cn_requests.field.remarks": "Remarks",
   "cn_requests.create.title": "Create CN Request",
@@ -1008,8 +1009,6 @@ export const DEFAULT_LABELS = {
   "party_planning.monthly.col.plan_date": "Conversion Date",
   "party_planning.monthly.col.party_options": "Party Options",
   "party_planning.monthly.col.days": "Days",
-  "party_planning.monthly.col.option1": "Option 1",
-  "party_planning.monthly.col.option2": "Option 2",
   "party_planning.monthly.search": "Search market or party",
   "party_planning.monthly.empty": "No Monthly Plans here yet.",
   // ---- State Catalogue → Districts (District master) ----
@@ -1086,7 +1085,6 @@ export const DEFAULT_LABELS = {
   "party_planning.common.requested_by": "Requested by",
   "party_planning.common.decision": "Decision",
   "party_planning.common.closed": "(closed)",
-  "party_planning.common.plan_exists": "(plan exists)",
   "party_planning.common.season_closed": "Season closed — read-only.",
   "party_planning.common.season_closed_note": "(season closed — read-only)",
   "party_planning.common.no_open_seasons": "No open seasons",
@@ -1514,7 +1512,6 @@ export const DEFAULT_LABELS = {
   "party_planning.territory.import.status_conflict": "Conflict",
   // Seasonal Planning
   "party_planning.seasonal.subtitle_list": "Your Seasonal Plans — one per season. Open a plan to add its markets.",
-  "party_planning.seasonal.subtitle_detail": "Add the markets in which you will develop a party this season, then submit them for approval.",
   "party_planning.seasonal.subtitle_officer": " Officer: {name}.",
   "party_planning.seasonal.crumb_plan": "Seasonal Plan",
   "party_planning.seasonal.action.create_plan": "Create Seasonal Plan",
@@ -1523,7 +1520,7 @@ export const DEFAULT_LABELS = {
   "party_planning.seasonal.msg.to_review": "{count} to review",
   "party_planning.seasonal.type.existing": "Existing",
   "party_planning.seasonal.type.new": "New",
-  "party_planning.seasonal.empty_create": "No Seasonal Plans in progress. Use Create Seasonal Plan to start one.",
+  "party_planning.seasonal.empty_create": "No Seasonal Plans with unfinished markets. Use Create Seasonal Plan to start or continue one.",
   "party_planning.seasonal.empty_submitted": "No submitted Seasonal Plans here yet.",
   "party_planning.seasonal.empty_approved": "No approved Seasonal Plans here yet.",
   "party_planning.seasonal.empty_older": "No older Seasonal Plans here yet.",
@@ -1538,7 +1535,6 @@ export const DEFAULT_LABELS = {
   "party_planning.seasonal.dialog.edit_title": "Edit Seasonal Plan",
   // Monthly Planning
   "party_planning.monthly.subtitle_list": "Your Monthly Plans — one per season month. Open a plan to plan the parties for each market.",
-  "party_planning.monthly.subtitle_detail": "Plan the parties you are considering for each of your approved seasonal markets this month.",
   "party_planning.monthly.crumb_plan": "Monthly Plan",
   "party_planning.monthly.action.create_plan": "Create Monthly Plan",
   "party_planning.monthly.action.set_date": "Set date",
@@ -1572,14 +1568,12 @@ export const DEFAULT_LABELS = {
   "party_planning.monthly.badge.status_change": "Status change",
   "party_planning.monthly.badge.admin": "Admin",
   "party_planning.monthly.badge.sales_officer": "Sales Officer",
-  "party_planning.monthly.field.option1_party": "Option 1 Party",
-  "party_planning.monthly.field.option2_party": "Option 2 Party",
   "party_planning.monthly.field.party_name": "Party Name",
   "party_planning.monthly.field.remarks_optional": "Remarks (optional)",
   "party_planning.monthly.placeholder.select_month": "Select a month…",
   "party_planning.monthly.placeholder.search_market": "Search or select a market…",
   "party_planning.monthly.placeholder.no_markets_left": "No approved markets left for this month",
-  "party_planning.monthly.empty_create": "No Monthly Plans in progress. Use Create Monthly Plan to start one.",
+  "party_planning.monthly.empty_create": "No Monthly Plans with unfinished markets. Use Create Monthly Plan to start or continue one.",
   "party_planning.monthly.empty_submitted": "No submitted Monthly Plans here yet.",
   "party_planning.monthly.empty_approved": "No approved Monthly Plans here yet.",
   "party_planning.monthly.empty_older": "No older Monthly Plans here yet.",
@@ -2362,6 +2356,49 @@ export const DEFAULT_LABELS = {
   "accounts.permission.merge": "Merge / Unmerge",
   "accounts.permission.export": "Export",
   "accounts.permission.transfer": "Transfer",
+  "party_planning.nav.create_new_plan": "Create New Plan",
+  "party_planning.nav.view_plans": "View Plans",
+  "party_planning.nav.mode_aria": "Plan mode",
+  "party_planning.crumb.create_new_plan": "Create New Plan",
+  "party_planning.crumb.view_plans": "View Plans",
+  "party_planning.seasonal.subtitle_list_view": "Seasonal Plans by lifecycle section — Submitted, Approved or Older Plans. Open a plan to see its markets.",
+  "party_planning.monthly.subtitle_list_view": "Monthly Plans by lifecycle section — Submitted, Approved or Older Plans. Open a plan to see its parties.",
+  "party_planning.seasonal.msg.continue_existing": "(continue)",
+  "party_planning.monthly.field.turnover": "Tentative Turnover",
+  "party_planning.monthly.placeholder.select_turnover": "Select Turnover…",
+  "party_planning.monthly.turnover.LT_50L": "Less than 50 Lakh",
+  "party_planning.monthly.turnover.50L_TO_1CR": "50 Lakh to 1 CR",
+  "party_planning.monthly.turnover.1CR_TO_2CR": "1 CR to 2 CR",
+  "party_planning.monthly.turnover.2CR_TO_4CR": "2 CR to 4 CR",
+  "party_planning.monthly.turnover.GT_4CR": "4 CR+",
+  "party_planning.monthly.msg.turnover_not_recorded": "Not recorded",
+  "party_planning.monthly.error.turnover_required": "Option {option}: Tentative Turnover is required.",
+  "party_planning.monthly.error.turnover_invalid": "Option {option}: choose one of the listed Tentative Turnover values.",
+  "party_planning.monthly.error.turnover_without_party": "Option {option}: enter the party before choosing a Tentative Turnover.",
+  "party_planning.monthly.msg.continue_existing": "(reopen)",
+  "party_planning.monthly.msg.no_current_match": "No season with approved markets covers the current month. Choose a season and month.",
+  "party_planning.monthly.error.save_busy": "The market could not be saved because the database is busy. Your entries are kept — please try Add again.",
+  "party_planning.monthly.error.saved_reload": "The market was saved, but the plan could not be refreshed. Reload the page to see it.",
+  "party_planning.section.market_details": "Market Details",
+  "party_planning.section.progress": "Progress",
+  "party_planning.section.approval": "Approval",
+  "party_planning.nav.back": "Back",
+  "party_planning.monthly.col.option_n": "Option {n}",
+  "party_planning.monthly.field.option_party": "Option {n} Party",
+  "party_planning.monthly.action.add_option": "Add Option",
+  "party_planning.monthly.action.remove_option": "Remove Option {n}",
+  "party_planning.monthly.action.edit_options": "Edit Options",
+  "party_planning.monthly.dialog.edit_options_title": "Edit Party Options",
+  "party_planning.monthly.error.option_party_required": "Option {option}: enter the party name.",
+  "party_planning.monthly.error.option_party_long": "Option {option}: the party name can be at most 200 characters.",
+  "party_planning.monthly.error.options_min": "A market needs at least two complete party options (party name and Tentative Turnover).",
+  "party_planning.monthly.error.options_too_many": "A market can have at most {max} party options.",
+  "party_planning.monthly.error.option_number_invalid": "Option {option}: the option number must be a whole number from 1 to {max}.",
+  "party_planning.monthly.error.option_number_duplicate": "Option numbers must not repeat.",
+  "party_planning.monthly.error.option_unknown": "One of the party options does not belong to this entry.",
+  "party_planning.monthly.error.option_locked": "A party option that already has history cannot be removed.",
+  "party_planning.monthly.error.submit_options": "Every market needs at least two complete party options (party name and Tentative Turnover) before submitting.",
+  "party_planning.monthly.aria.edit_options_for": "Edit party options for {market}",
 } as const;
 
 export type LabelKey = keyof typeof DEFAULT_LABELS;
@@ -2430,8 +2467,9 @@ export function labelMeta(key: LabelKey): LabelMeta {
   }
   if (key.startsWith("scheme_upload.")) return { module: "Scheme Upload", group: "View Buttons" };
   if (/^party_planning\.(.*\.)?col\./.test(key) || key.startsWith("party_planning.territory.import.col_")) return { module: "Party Planning", group: "Table Columns" };
+  if (key.startsWith("party_planning.section.")) return { module: "Party Planning", group: "Sections" };
   if (key.startsWith("party_planning.nav.") || key.startsWith("party_planning.view.") || key.startsWith("party_planning.stage.") || key.startsWith("party_planning.crumb.") || key.startsWith("party_planning.territory.view.")) return { module: "Party Planning", group: "Navigation / Flip Buttons" };
-  if (/^party_planning\.(.*\.)?(field|dialog|msg|validation|placeholder|aria|doc|import|history|tooltip|badge|legacy|error|unavailable)\./.test(key) || /^party_planning\.(.*\.)?(empty|empty_[a-z_]+|subtitle[a-z_]*)$/.test(key)) return { module: "Party Planning", group: "Form Fields" };
+  if (/^party_planning\.(.*\.)?(field|dialog|msg|validation|placeholder|aria|doc|import|history|tooltip|badge|legacy|error|unavailable|turnover)\./.test(key) || /^party_planning\.(.*\.)?(empty|empty_[a-z_]+|subtitle[a-z_]*)$/.test(key)) return { module: "Party Planning", group: "Form Fields" };
   if (key.startsWith("party_planning.")) return { module: "Party Planning", group: "View Buttons" };
   if (key.startsWith("state_catalogue.")) return { module: "State Catalogue", group: /\.col\./.test(key) ? "Table Columns" : /\.(msg|preview|empty|loading|search|count)/.test(key) ? "Form Fields" : "View Buttons" };
   if (key.startsWith("settings.recovery.")) return { module: "Recovery Settings", group: "Form Fields" };

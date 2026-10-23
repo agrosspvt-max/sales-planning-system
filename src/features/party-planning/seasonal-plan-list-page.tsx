@@ -17,6 +17,7 @@ import { useLabel } from "@/features/labels/label-ui";
 import { PartyPlanModeLinks } from "./party-planning-page";
 import { OpenButton, SheetStatusBadge, dateTimeText, stageCount, stageStatusLabel } from "./plan-list-parts";
 import { sheetInStage, type PlanStage } from "@/lib/monthly-plan";
+import { useRouter } from "next/navigation";
 import { fill, useLabels } from "./party-labels";
 
 interface Sheet { id: string; seasonId: string; seasonName: string; seasonOpen: boolean; ownerName: string; status: string; itemCount: number; pendingCount: number; needsMyReview: number; updatedAt: string; own: boolean; counts: { create: number; submitted: number; approved: number } }
@@ -28,23 +29,26 @@ interface SeasonChoice { id: string; name: string; year: number; period: string 
  */
 export function SeasonalPlanListPage({ role, stage = "create" }: { role: Role; stage?: PlanStage }) {
   const qc = useQueryClient();
+  const router = useRouter();
   const canPlan = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
   const [creating, setCreating] = useState(false);
   const title = useLabel("party_planning.title");
   const nav = useLabel("party_planning.nav.seasonal");
-  const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.seasonal.subtitle_list", createPlan: "party_planning.seasonal.action.create_plan",
+  const T = useLabels({ planning: "party_planning.crumb.planning", crumbCreate: "party_planning.crumb.create_new_plan", crumbView: "party_planning.crumb.view_plans", subtitleView: "party_planning.seasonal.subtitle_list_view", createView: "party_planning.crumb.create_view", subtitle: "party_planning.seasonal.subtitle_list", createPlan: "party_planning.seasonal.action.create_plan",
     season: "party_planning.common.season", officer: "party_planning.common.officer", status: "party_planning.seasonal.col.status", markets: "party_planning.common.markets", lastSaved: "party_planning.common.last_saved", open: "party_planning.common.open",
     closed: "party_planning.common.closed", toReview: "party_planning.seasonal.msg.to_review", emptyCreate: "party_planning.seasonal.empty_create", emptyOlder: "party_planning.seasonal.empty_older", emptySubmitted: "party_planning.seasonal.empty_submitted", emptyApproved: "party_planning.seasonal.empty_approved" });
 
   const { data: everyInScope, isLoading } = useQuery<Sheet[]>({ queryKey: ["seasonal-sheets"], queryFn: () => api.get<Sheet[]>("/api/seasonal-sheets") });
   // ONE row per logical plan (owner + season): Create always lists it while the season is open (entries can be added at any time); Submitted / Approved list it while it holds such entries; a closed season → Older Plans.
-  const all = everyInScope?.filter((s) => sheetInStage(s.counts, s.seasonOpen, stage));
+  // Create lists UNFINISHED work only: an open season with at least one editable (Draft / Rejected) market. Empty sheets and sheets whose entries are all submitted or approved are hidden
+  // here (never deleted) — they stay under Submitted / Approved. Monthly Planning keeps its own rule (sheetInStage is unchanged).
+  const all = everyInScope?.filter((s) => stage === "create" ? s.seasonOpen && s.counts.create > 0 : sheetInStage(s.counts, s.seasonOpen, stage));
   const showOwner = !canPlan || (all ?? []).some((s) => !s.own);
 
   return (
     <div className="space-y-5">
-      <PageHeader crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: title }, { label: nav }]} title={title}
-        subtitle={T.subtitle} />
+      <PageHeader crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: title }, { label: nav }, { label: stage === "create" ? T.crumbCreate : T.crumbView }]} title={title}
+        subtitle={stage === "create" ? T.subtitle : T.subtitleView} />
       <PartyPlanModeLinks mode="seasonal" stage={stage}
         actions={stage === "create" && (canPlan || isAdministrativeRole(role)) ? <Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> {T.createPlan}</Button> : undefined} />
 
@@ -69,20 +73,20 @@ export function SeasonalPlanListPage({ role, stage = "create" }: { role: Role; s
           </TableBody>
         </Table>
       </div>
-      {creating && <CreateDialog onClose={() => setCreating(false)} onCreated={() => { setCreating(false); qc.invalidateQueries({ queryKey: ["seasonal-sheets"] }); }} />}
+      {creating && <CreateDialog onClose={() => setCreating(false)} onCreated={(id) => { setCreating(false); qc.invalidateQueries({ queryKey: ["seasonal-sheets"] }); router.push(`/planning/party/seasonal/${id}?stage=create`); }} />}
     </div>
   );
 }
 
-/** Create Seasonal Plan: pick an OPEN season (the Seasons module's rule — all of them, nothing hard-coded). The plan then appears in the list. */
-function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+/** Create Seasonal Plan: pick an OPEN season (the Seasons module's rule — all of them, nothing hard-coded). The season's editor opens at once; the season joins the list only once it holds an unfinished market. */
+function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (sheetId: string) => void }) {
   const [seasonId, setSeasonId] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const T = useLabels({ title: "party_planning.seasonal.action.create_plan", season: "party_planning.common.season", noOpen: "party_planning.common.no_open_seasons", select: "party_planning.common.select_season", exists: "party_planning.common.plan_exists", cancel: "party_planning.common.cancel", create: "party_planning.common.create" });
+  const T = useLabels({ title: "party_planning.seasonal.action.create_plan", season: "party_planning.common.season", noOpen: "party_planning.common.no_open_seasons", select: "party_planning.common.select_season", exists: "party_planning.seasonal.msg.continue_existing", cancel: "party_planning.common.cancel", create: "party_planning.common.create" });
   const { data } = useQuery<{ seasons: SeasonChoice[] }>({ queryKey: ["seasonal-sheet-options"], queryFn: () => api.get("/api/seasonal-sheets/options") });
   const seasons = data?.seasons ?? [];
   const chosen = seasons.find((s) => s.id === seasonId);
-  const create = useMutation({ mutationFn: () => api.post("/api/seasonal-sheets", { seasonId }), onSuccess: onCreated, onError: (e) => setError((e as Error).message) });
+  const create = useMutation({ mutationFn: () => api.post<{ id: string }>("/api/seasonal-sheets", { seasonId }), onSuccess: (sheet) => onCreated(sheet.id), onError: (e) => setError((e as Error).message) });
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-md">

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { Plus } from "lucide-react";
@@ -15,12 +16,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
 import { PartyPlanModeLinks } from "./party-planning-page";
-import type { PlanStage } from "@/lib/monthly-plan";
+import { defaultMonthlySelection, monthIdForKey, type PlanStage } from "@/lib/monthly-plan";
 import { fill, useLabels } from "./party-labels";
 import { OpenButton, SheetStatusBadge, dateTimeText, stageCount, stageStatusLabel } from "./plan-list-parts";
 
 interface Sheet { id: string; seasonId: string; seasonName: string; seasonOpen: boolean; monthLabel: string; ownerName: string; status: string; counts: { create: number; submitted: number; approved: number; pendingRm: number; rejected: number }; submittedAt: string | null; itemCount: number; needsMyAction: number; updatedAt: string; own: boolean }
-interface MonthChoice { id: string; label: string }
+interface MonthChoice { id: string; label: string; key: string }
 interface SeasonChoice { id: string; name: string; year: number; period: string | null; months: MonthChoice[]; eligibleCount: number; takenMonthIds: string[] }
 
 /**
@@ -29,11 +30,12 @@ interface SeasonChoice { id: string; name: string; year: number; period: string 
  */
 export function MonthlyPlanListPage({ role, stage = "create" }: { role: Role; stage?: PlanStage }) {
   const qc = useQueryClient();
+  const router = useRouter();
   const canPlan = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
   const [creating, setCreating] = useState(false);
   const title = useLabel("party_planning.title");
   const nav = useLabel("party_planning.nav.monthly");
-  const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", subtitle: "party_planning.monthly.subtitle_list", createPlan: "party_planning.monthly.action.create_plan",
+  const T = useLabels({ planning: "party_planning.crumb.planning", crumbCreate: "party_planning.crumb.create_new_plan", crumbView: "party_planning.crumb.view_plans", subtitleView: "party_planning.monthly.subtitle_list_view", createView: "party_planning.crumb.create_view", subtitle: "party_planning.monthly.subtitle_list", createPlan: "party_planning.monthly.action.create_plan",
     season: "party_planning.common.season", month: "party_planning.monthly.col.month", officer: "party_planning.common.officer", overall: "party_planning.monthly.col.overall_status", markets: "party_planning.common.markets", lastSaved: "party_planning.common.last_saved",
     submittedLastSaved: "party_planning.monthly.col.submitted_last_saved", open: "party_planning.common.open", closed: "party_planning.common.closed", toAction: "party_planning.monthly.msg.to_action",
     emptyCreate: "party_planning.monthly.empty_create", emptyOlder: "party_planning.monthly.empty_older", emptySubmitted: "party_planning.monthly.empty_submitted", emptyApproved: "party_planning.monthly.empty_approved" });
@@ -43,8 +45,8 @@ export function MonthlyPlanListPage({ role, stage = "create" }: { role: Role; st
 
   return (
     <div className="space-y-5">
-      <PageHeader crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: title }, { label: nav }]} title={title}
-        subtitle={T.subtitle} />
+      <PageHeader crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: title }, { label: nav }, { label: stage === "create" ? T.crumbCreate : T.crumbView }]} title={title}
+        subtitle={stage === "create" ? T.subtitle : T.subtitleView} />
       <PartyPlanModeLinks mode="monthly" stage={stage}
         actions={stage === "create" && (canPlan || isAdministrativeRole(role)) ? <Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> {T.createPlan}</Button> : undefined} />
 
@@ -70,23 +72,35 @@ export function MonthlyPlanListPage({ role, stage = "create" }: { role: Role; st
           </TableBody>
         </Table>
       </div>
-      {creating && <CreateDialog onClose={() => setCreating(false)} onCreated={() => { setCreating(false); qc.invalidateQueries({ queryKey: ["party-monthly-sheets"] }); qc.invalidateQueries({ queryKey: ["party-monthly-sheet-options"] }); }} />}
+      {creating && <CreateDialog onClose={() => setCreating(false)} onCreated={(id) => { setCreating(false); qc.invalidateQueries({ queryKey: ["party-monthly-sheets"] }); qc.invalidateQueries({ queryKey: ["party-monthly-sheet-options"] }); router.push(`/planning/party/monthly/${id}?stage=create`); }} />}
     </div>
   );
 }
 
-/** Create Monthly Plan: an OPEN season, then one of ITS months (calendar order). A season without an approved Seasonal Plan market is explained, not silently accepted. */
-function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [seasonId, setSeasonId] = useState("");
-  const [monthId, setMonthId] = useState("");
+/**
+ * Create Monthly Plan: an OPEN season, then one of ITS months (calendar order), pre-selected with the running calendar month of the one season that has approved markets (suggestions only —
+ * both stay changeable and the user still clicks Create). Create opens the month's editor at once; an existing month is reopened. A season without an approved Seasonal Plan market is explained.
+ */
+function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (sheetId: string) => void }) {
+  // null = the user has not touched the field yet, so the suggested default (computed ONCE, when the options first arrive) applies.
+  const [pickedSeason, setSeasonId] = useState<string | null>(null);
+  const [pickedMonth, setMonthId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const T = useLabels({ title: "party_planning.monthly.action.create_plan", season: "party_planning.common.season", month: "party_planning.monthly.col.month", noOpen: "party_planning.common.no_open_seasons", select: "party_planning.common.select_season",
-    selectMonth: "party_planning.monthly.placeholder.select_month", exists: "party_planning.common.plan_exists", noMarkets: "party_planning.monthly.msg.no_approved_markets", cancel: "party_planning.common.cancel", create: "party_planning.common.create" });
-  const { data } = useQuery<{ seasons: SeasonChoice[] }>({ queryKey: ["party-monthly-sheet-options"], queryFn: () => api.get("/api/party-monthly-sheets/options") });
+    selectMonth: "party_planning.monthly.placeholder.select_month", exists: "party_planning.monthly.msg.continue_existing", noCurrent: "party_planning.monthly.msg.no_current_match", noMarkets: "party_planning.monthly.msg.no_approved_markets", cancel: "party_planning.common.cancel", create: "party_planning.common.create" });
+  const { data } = useQuery<{ seasons: SeasonChoice[]; currentMonthKey: string }>({ queryKey: ["party-monthly-sheet-options"], queryFn: () => api.get("/api/party-monthly-sheets/options") });
+  // Defaults are computed ONCE, when the options first arrive; a background refetch never overwrites what the user has chosen.
+  const suggested = useRef<{ seasonId: string; monthId: string; noMatch: boolean } | null>(null);
+  if (data && !suggested.current) {
+    suggested.current = { ...defaultMonthlySelection(data.seasons, data.currentMonthKey), noMatch: !data.seasons.some((s) => s.eligibleCount > 0 && monthIdForKey(s.months, data.currentMonthKey)) };
+  }
+  const seasonId = pickedSeason ?? suggested.current?.seasonId ?? "";
+  const monthId = pickedMonth ?? suggested.current?.monthId ?? "";
+  const noMatch = suggested.current?.noMatch ?? false;
   const seasons = data?.seasons ?? [];
   const chosen = seasons.find((s) => s.id === seasonId);
   const noMarkets = chosen != null && chosen.eligibleCount === 0;
-  const create = useMutation({ mutationFn: () => api.post("/api/party-monthly-sheets", { seasonId, seasonMonthId: monthId }), onSuccess: onCreated, onError: (e) => setError((e as Error).message) });
+  const create = useMutation({ mutationFn: () => api.post<{ id: string }>("/api/party-monthly-sheets", { seasonId, seasonMonthId: monthId }), onSuccess: (sheet) => onCreated(sheet.id), onError: (e) => setError((e as Error).message) });
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-md">
@@ -94,13 +108,14 @@ function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
         <div className="space-y-3">
           <div className="space-y-1.5"><Label>{T.season} *</Label>
             <NativeSelect value={seasonId} placeholder={data && seasons.length === 0 ? T.noOpen : T.select}
-              options={seasons.map((s) => ({ value: s.id, label: `${s.name} ${s.year}` }))} onChange={(e) => { setSeasonId(e.target.value); setMonthId(""); setError(null); }} />
+              options={seasons.map((s) => ({ value: s.id, label: `${s.name} ${s.year}` }))} onChange={(e) => { const next = seasons.find((s) => s.id === e.target.value); setSeasonId(e.target.value); setMonthId(next && data ? monthIdForKey(next.months, data.currentMonthKey) : ""); setError(null); }} />
             {chosen?.period && <p className="text-xs text-muted-foreground">{chosen.period}</p>}
           </div>
           <div className="space-y-1.5"><Label>{T.month} *</Label>
             <NativeSelect value={monthId} disabled={!chosen} placeholder={T.selectMonth}
               options={(chosen?.months ?? []).map((m) => ({ value: m.id, label: m.label + (chosen!.takenMonthIds.includes(m.id) ? ` ${T.exists}` : "") }))} onChange={(e) => { setMonthId(e.target.value); setError(null); }} />
           </div>
+          {noMatch && !seasonId && <p className="text-sm text-muted-foreground">{T.noCurrent}</p>}
           {noMarkets && <p className="text-sm text-destructive">{fill(T.noMarkets, { season: `${chosen!.name} ${chosen!.year}` })}</p>}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>

@@ -138,6 +138,7 @@ export function CnProcessingDialog({
   canReject,
   onClose,
   onDecision,
+  onSent,
 }: {
   requestId: string;
   underProcess: boolean;
@@ -146,6 +147,8 @@ export function CnProcessingDialog({
   canPost: boolean;
   canReject: boolean;
   onClose: () => void;
+  /** Called after a review request was sent (the CN is then Under Process): lets the list select the Submitted / Rejected group and the Under Process tab. */
+  onSent?: () => void;
   onDecision: (
     destination: CnAcceptanceStatus | "REJECTED",
     expectedReviewId: string,
@@ -197,6 +200,7 @@ export function CnProcessingDialog({
     },
     onSuccess: () => {
       changed();
+      onSent?.();
       onClose();
     },
   });
@@ -495,6 +499,30 @@ export function CnReviewResponseDialog({
                 : "cn_requests.processing.approve",
             )}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Asks for the mandatory reason before a handler moves an Under Process CN on while its latest dependency review is pending or refused. */
+export function CnBypassDialog({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: (bypassReason: string) => void }) {
+  const t = useLabelResolver();
+  const [reason, setReason] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>{t("cn_requests.processing.bypass_title")}</DialogTitle></DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="cn-status-bypass">{t("cn_requests.processing.bypass")} *</Label>
+          <Textarea id="cn-status-bypass" maxLength={2000} value={reason} onChange={(e) => setReason(e.target.value)} />
+          <p className="text-xs text-muted-foreground">{t("cn_requests.processing.bypass_hint")}</p>
+          {problem && <p className="text-sm text-destructive" role="alert">{problem}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>{t("cn_requests.action.cancel")}</Button>
+          <Button onClick={() => { if (!reason.trim()) setProblem(t("cn_requests.processing.error.bypass")); else onConfirm(reason.trim()); }}>{t("cn_requests.processing.bypass_continue")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

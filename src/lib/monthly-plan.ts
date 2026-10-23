@@ -16,8 +16,10 @@
 
 export const ROW_STATUSES = ["NONE", "DOC_NOT_SENT", "DOC_SENT", "DOC_RECEIVED", "SD_BOUNCE", "APPOINTED", "REJECTED"] as const;
 export type RowStatus = (typeof ROW_STATUSES)[number];
-export const OPTION_NUMBERS = [1, 2] as const;
-export type OptionNo = (typeof OPTION_NUMBERS)[number];
+/** A market entry carries a VARIABLE number of candidate party options: at least MIN_OPTIONS complete ones, at most MAX_OPTIONS (also the database CHECK). */
+export const MIN_OPTIONS = 2;
+export const MAX_OPTIONS = 10;
+export type OptionNo = number;
 
 export const ROW_STATUS_LABEL: Record<RowStatus, string> = {
   NONE: "Pending", DOC_NOT_SENT: "Document Not Sent", DOC_SENT: "Doc Send By SO", DOC_RECEIVED: "Doc Received", SD_BOUNCE: "SD Bounce", APPOINTED: "Appointed", REJECTED: "Rejected",
@@ -144,6 +146,80 @@ export function validatePartyName(value: unknown, required: boolean): string | n
   return name.length > 200 ? "Party Name can be at most 200 characters." : null;
 }
 export const cleanParty = (value: unknown): string | null => text(value) || null;
+
+/* ------------------------------------------------ Create dialog defaults ------------------------------------------------ */
+
+export interface DefaultableSeason { id: string; eligibleCount: number; months: readonly { id: string; key: string }[] }
+/** The month of a season whose stored calendar identity (YYYY-MM) is the running month — by identity only, never by position, name or the season's year. "" when the season does not contain it. */
+export const monthIdForKey = (months: readonly { id: string; key: string }[], currentMonthKey: string): string => months.find((m) => m.key === currentMonthKey)?.id ?? "";
+/**
+ * Suggested Season + Month for Create Monthly Plan: the season that has approved Seasonal Party Planning markets for the caller AND contains the running calendar month. Only when exactly
+ * ONE season qualifies is it chosen — with several (overlapping seasons) there is no authoritative "current season", so nothing is picked for the user. An existing sheet for the month
+ * does not disqualify it (Create then reopens it).
+ */
+export function defaultMonthlySelection(seasons: readonly DefaultableSeason[], currentMonthKey: string): { seasonId: string; monthId: string } {
+  const matches = seasons.filter((s) => s.eligibleCount > 0 && monthIdForKey(s.months, currentMonthKey));
+  return matches.length === 1 ? { seasonId: matches[0]!.id, monthId: monthIdForKey(matches[0]!.months, currentMonthKey) } : { seasonId: "", monthId: "" };
+}
+
+/* ------------------------------------------------ tentative turnover (per candidate party option) ------------------------------------------------ */
+
+/** Stable stored codes, in display order. The wording shown for each is an editable label; these are TURNOVER CATEGORIES, not amounts, and carry no period. */
+export const TURNOVER_CATEGORIES = ["LT_50L", "50L_TO_1CR", "1CR_TO_2CR", "2CR_TO_4CR", "GT_4CR"] as const;
+export type TurnoverCategory = (typeof TURNOVER_CATEGORIES)[number];
+export const isTurnoverCategory = (value: unknown): value is TurnoverCategory => typeof value === "string" && (TURNOVER_CATEGORIES as readonly string[]).includes(value);
+export const cleanTurnover = (value: unknown): string | null => text(value) || null;
+/**
+ * The rule for ONE option's RESULTING (stored) values: a populated party needs a valid turnover; an unused option must have none. Returns a problem code or null.
+ * (Callers apply it to the values the row will hold after the change, so partial updates are checked correctly.)
+ */
+export function turnoverProblem(party: string | null, turnover: string | null): "required" | "invalid" | "without_party" | null {
+  if (!party) return turnover ? "without_party" : null;
+  if (!turnover) return "required";
+  return isTurnoverCategory(turnover) ? null : "invalid";
+}
+
+/** One option as the client sends it / as it will be stored. `id` = an already persisted option; `optionNo` is assigned by the server for new ones. */
+export interface OptionInput { id?: string; optionNo?: number; partyName: unknown; turnoverCategory: unknown }
+export interface CleanOption { id: string | null; optionNo: number | null; party: string | null; turnover: string | null }
+export type OptionsProblem =
+  | { code: "not_array" | "too_few" | "too_many" }
+  | { code: "party_required" | "party_long" | "turnover_required" | "turnover_invalid" | "number_invalid" | "number_duplicate" | "id_duplicate"; index: number };
+/**
+ * Validate a COMPLETE options collection (never a fragment): 2..10 options, each with a trimmed party name (≤ 200) and an allowed turnover category, whole unique option numbers
+ * when given. Returns the cleaned list, or the first problem with the (1-based) row it concerns.
+ */
+export function validateOptions(input: unknown): { ok: true; value: CleanOption[] } | { ok: false; problem: OptionsProblem } {
+  if (!Array.isArray(input)) return { ok: false, problem: { code: "not_array" } };
+  if (input.length > MAX_OPTIONS) return { ok: false, problem: { code: "too_many" } };
+  if (input.length < MIN_OPTIONS) return { ok: false, problem: { code: "too_few" } };
+  const out: CleanOption[] = [];
+  const nos = new Set<number>(), ids = new Set<string>();
+  for (const [i, raw] of input.entries()) {
+    const row = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const index = i + 1;
+    const party = cleanParty(row.partyName);
+    if (!party) return { ok: false, problem: { code: "party_required", index } };
+    if (party.length > 200) return { ok: false, problem: { code: "party_long", index } };
+    const turnover = cleanTurnover(row.turnoverCategory);
+    if (!turnover) return { ok: false, problem: { code: "turnover_required", index } };
+    if (!isTurnoverCategory(turnover)) return { ok: false, problem: { code: "turnover_invalid", index } };
+    let optionNo: number | null = null;
+    if (row.optionNo !== undefined && row.optionNo !== null && row.optionNo !== "") {
+      if (typeof row.optionNo !== "number" || !Number.isInteger(row.optionNo) || row.optionNo < 1 || row.optionNo > MAX_OPTIONS) return { ok: false, problem: { code: "number_invalid", index } };
+      if (nos.has(row.optionNo)) return { ok: false, problem: { code: "number_duplicate", index } };
+      nos.add(row.optionNo); optionNo = row.optionNo;
+    }
+    const id = typeof row.id === "string" && row.id ? row.id : null;
+    if (id) { if (ids.has(id)) return { ok: false, problem: { code: "id_duplicate", index } }; ids.add(id); }
+    out.push({ id, optionNo, party, turnover });
+  }
+  return { ok: true, value: out };
+}
+/** Is a STORED entry's option set complete (used when it is submitted)? Blank legacy placeholders and a single populated option are incomplete. */
+export function optionsComplete(options: readonly { partyName: string | null; turnoverCategory: string | null }[]): boolean {
+  return options.length >= MIN_OPTIONS && options.every((o) => !!o.partyName?.trim() && turnoverProblem(o.partyName, o.turnoverCategory ?? null) === null);
+}
 
 /* ------------------------------------------------ month / date ------------------------------------------------ */
 

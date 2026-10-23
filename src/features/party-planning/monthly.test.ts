@@ -87,7 +87,8 @@ function makeDb() {
       findMany: async ({ where }: Row) => t.sheets.filter((r) => matches(r, where)).map(sheetView),
     },
     partyMonthlyPlan: {
-      create: async ({ data }: Row) => { const row = { id: `mp${++seq}`, opStatus: "NONE", opStatusChangedAt: null, appointedDealerId: null, approvalStatus: "DRAFT", submittedAt: null, rmDecidedById: null, rmDecidedAt: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null, ...data, createdAt: tick(), updatedAt: tick() }; t.plans.push(row); return { ...row }; },
+      // (nested `options: { create: [...] }` writes are supported — the service creates the entry and both options in one statement)
+      create: async ({ data: { options, ...data } }: Row) => { const row = { id: `mp${++seq}`, opStatus: "NONE", opStatusChangedAt: null, appointedDealerId: null, approvalStatus: "DRAFT", submittedAt: null, rmDecidedById: null, rmDecidedAt: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null, ...data, createdAt: tick(), updatedAt: tick() }; t.plans.push(row); for (const o of (options?.create ?? []) as Row[]) t.options.push({ id: `op${++seq}`, sentInfo: null, sentById: null, sentAt: null, receivedInfo: null, receivedById: null, receivedAt: null, actualPartyName: null, actualAppointedOn: null, rejectionReason: null, statusChangedAt: new Date(), updatedAt: tick(), monthlyPlanId: row.id, ...o }); return { ...row }; },
       updateMany: async ({ where, data }: Row) => { t.onClaim?.(); t.onClaim = null; const rows = t.plans.filter((p) => matches(p, where)); rows.forEach((r) => Object.assign(r, data, { updatedAt: tick() })); return { count: rows.length }; },
       findUnique: async ({ where }: Row) => { const p = t.plans.find((x) => x.id === where.id); return p ? planView(p) : null; },
       findFirst: async ({ where }: Row) => { const p = t.plans.find((x) => matches(x, where)); return p ? { ...p } : null; },
@@ -140,6 +141,20 @@ function loadService() {
     "@/features/seasons/service.server": { listSeasons: async (_search: string, activeOnly: boolean) => db.t.seasons.filter((s) => !activeOnly || s.status === "OPEN").map((s) => ({ id: s.id })) },
   });
   const service = load("src/features/party-planning/monthly.server.ts") as typeof import("./monthly.server");
+  // Every populated party option now needs its Tentative Turnover. The long-standing scenarios below are about OTHER behaviour, so their rows get a turnover by default; the turnover rules
+  // themselves are tested explicitly (and without defaults) in the "tentative turnover" section.
+  const rawCreate = service.createMonthlyPlan;
+  (service as { createMonthlyPlan: typeof rawCreate }).createMonthlyPlan = (ctx, body) => {
+    const b = (body ?? {}) as Row;
+    if (b.options !== undefined) return rawCreate(ctx, b);
+    // Long-standing scenarios pass option1Party / option2Party; they are about OTHER behaviour, so they become the structured list (two complete options, default turnovers).
+    // The option rules themselves are tested explicitly in the "party options" section and in the real-database suite.
+    const { option1Party, option2Party, option1Turnover, option2Turnover, ...rest } = b;
+    return rawCreate(ctx, { ...rest, options: [
+      { partyName: option1Party, turnoverCategory: option1Turnover ?? "LT_50L" },
+      { partyName: String(option2Party ?? "").trim() ? option2Party : "Second party", turnoverCategory: option2Turnover ?? "GT_4CR" },
+    ] });
+  };
   TABLES.set(service, db.t);
   return { service, ...db };
 }
@@ -149,6 +164,9 @@ const SO1 = ctxOf("so1"), SO2 = ctxOf("so2"), SO3 = ctxOf("so3"), RM1 = ctxOf("r
 async function status(fn: () => Promise<unknown>): Promise<number> { try { await fn(); return 0; } catch (e) { return (e as { status?: number }).status ?? -1; } }
 const DOCS = { documentStatus: "COMPLETE", chequeStatus: "COMPLETE", other: "GST certificate" }; // a valid "Doc Send By SO" answer (Complete / Incomplete)
 const SENT = { documentStatus: "COMPLETE", chequeStatus: "INCOMPLETE" };
+/** The structured options list of an entry with some party names replaced (by option number) — what the edit dialog sends. */
+const optsWith = (dto: { options: { id: string; optionNo: number; partyName: string | null; turnoverCategory: string | null }[] }, names: Record<number, string>) =>
+  dto.options.map((o) => ({ id: o.id, partyName: names[o.optionNo] ?? o.partyName, turnoverCategory: o.turnoverCategory }));
 const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 type Svc = ReturnType<typeof loadService>["service"];
 const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
@@ -192,7 +210,7 @@ async function main() {
     await sheetOf(service, SO1, "s-kharif", "sm-april"); await sheetOf(service, SO1, "s-rabi", "sm-r-nov");
     assert.deepEqual((await service.listMonthlySheets(SO1)).map((s) => s.monthLabel), ["November 2026", "June 2026", "April 2026"], "plans of different seasons AND months coexist in the list (newest month first)");
     assert.deepEqual(plain(await service.getMonthlyOptions(SO1)).seasons[0]!.takenMonthIds.sort(), ["sm-april", "sm-june"], "the dialog flags months that already have a plan");
-    assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-june" })), 409, "one Monthly Plan per month");
+    assert.equal(plain(await service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-june" })).id, (await service.listMonthlySheets(SO1)).find((x) => x.monthLabel === "June 2026")!.id, "create-or-resume: choosing a month that has a plan reopens THAT plan (one per owner and month)");
     assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-r-nov" })), 422, "a month of ANOTHER season is refused");
     assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-december" })), 422, "a month outside the season is refused");
     assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-old", seasonMonthId: "sm-old-jun" })), 409, "a CLOSED season cannot be chosen");
@@ -201,7 +219,7 @@ async function main() {
     assert.equal(await status(() => service.createMonthlySheet(SO3, { seasonId: "s-kharif", seasonMonthId: "sm-june" })), 422, "no approved Seasonal Plan market in that season → nothing to plan (the dialog explains it)");
     const adm = plain(await service.createMonthlySheet(ADMIN, { seasonId: "s-kharif", seasonMonthId: "sm-july" }));
     assert.deepEqual([adm.ownerId, adm.ownerName, adm.own, adm.status, adm.monthLabel], ["admin", "Admin", true, "Draft", "July 2026"], "Admin creates a Monthly Plan in their own right (no SO borrowed)");
-    assert.equal(await status(() => service.createMonthlySheet(ADMIN, { seasonId: "s-kharif", seasonMonthId: "sm-july" })), 409, "one per month");
+    assert.equal(plain(await service.createMonthlySheet(ADMIN, { seasonId: "s-kharif", seasonMonthId: "sm-july" })).id, adm.id, "one per month: a repeat resumes the same plan");
     assert.equal(await status(() => service.createMonthlySheet(ADMIN, { seasonId: "s-kharif", seasonMonthId: "sm-r-nov" })), 422, "Admin's month must belong to the chosen season");
     assert.equal(await status(() => service.createMonthlySheet({ ...ADMIN, role: Role.CUSTOM_ADMIN, permissions: {} } as unknown as AuthContext, { seasonId: "s-kharif", seasonMonthId: "sm-august" })), 403, "a custom admin without Party Planning manage cannot create");
     assert.ok((await service.listMonthlySheets(ADMIN)).some((s) => s.id === adm.id), "Admin's own plan appears in Admin's list");
@@ -212,7 +230,11 @@ async function main() {
     const spoof = plain(await service.createMonthlySheet(SO2, { seasonId: "s-kharif", seasonMonthId: "sm-july", ownerId: "so1", status: "Completed", itemCount: 5 }));
     assert.deepEqual([spoof.ownerId, spoof.status, spoof.itemCount], ["so2", "Draft", 0], "owner / status cannot be spoofed");
     const source = readFileSync("src/features/party-planning/monthly.server.ts", "utf8");
-    assert.ok(!/getCurrentSeason|getCurrentOpenSeason|currentOpenSeason|currentBusinessDate\(\)\.slice/.test(source), "no 'current season / month' resolution");
+    assert.ok(!/getCurrentSeason|getCurrentOpenSeason|currentOpenSeason/.test(source), "no 'current season' resolution");
+    // The running month is only a SUGGESTION handed to the Create dialog (getMonthlyOptions); creating or loading a plan never derives anything from "today".
+    assert.equal(source.match(/currentBusinessDate\(\)\.slice/g)?.length, 1, "the running month is computed in exactly one place");
+    const fnBody = (name: string) => source.slice(source.indexOf(`export async function ${name}`), source.indexOf("\nexport ", source.indexOf(`export async function ${name}`) + 10));
+    for (const fn of ["createMonthlySheet", "getMonthlySheet", "createMonthlyPlan"]) assert.ok(!fnBody(fn).includes("currentMonthKey"), `${fn} does not use the running month`);
     assert.equal(t.sheets.length, 5);
   }
 
@@ -247,7 +269,7 @@ async function main() {
     assert.equal(await status(() => service.createMonthlyPlan(SO1, { sheetId: rabi.id, seasonalPlanId: "sp-so1", option1Party: "P" })), 409, "a Kharif market cannot be planned in a Rabi plan");
     assert.equal(await status(() => service.createMonthlyPlan(SO1, { sheetId: rabi.id, seasonalPlanId: "sp-so1-rabi", planDate: "2026-11-20", option1Party: "R" })), 0);
     // spoofing: owner, market, potential, season, month, status are ignored
-    const spoof = plain(await service.createMonthlyPlan(SO1, { sheetId: june.id, seasonalPlanId: "sp-so1-new", option1Party: "P", ownerId: "so2", marketId: "m-unseasonal", marketName: "Fake", marketPotential: "C", seasonId: "s-rabi", seasonMonthId: "sm-april", status: "APPOINTED", options: [{ optionNo: 1, status: "APPOINTED" }] }));
+    const spoof = plain(await service.createMonthlyPlan(SO1, { sheetId: june.id, seasonalPlanId: "sp-so1-new", option1Party: "P", ownerId: "so2", marketId: "m-unseasonal", marketName: "Fake", marketPotential: "C", seasonId: "s-rabi", seasonMonthId: "sm-april", status: "APPOINTED" }));
     assert.deepEqual([spoof.ownerId, spoof.marketId, spoof.marketName, spoof.marketPotential, spoof.seasonId, spoof.seasonMonthId, spoof.opStatus], ["so1", "m-new", "Bareli", "A", "s-kharif", "sm-june", "NONE"], "owner / market / potential / season / month / status cannot be spoofed");
     // list status follows the options
     assert.equal(plain((await service.listMonthlySheets(SO1)).find((s) => s.id === june.id)!).status, "In Progress");
@@ -293,7 +315,7 @@ async function main() {
     assert.equal(sent.dateChangeCount, 0, "automatic changes are not counted as the SO's manual edits");
     assert.equal(sent.canEditDate, false, "once the workflow has begun the date is no longer edited by hand");
     assert.equal(await status(() => service.updateMonthlyPlan(SO1, plan.id, { planDate: "2026-06-18" })), 409);
-    assert.equal(await status(() => service.updateMonthlyPlan(SO1, plan.id, { option1Party: "switch" })), 409, "candidate names are frozen once the workflow has begun");
+    assert.equal(await status(() => service.updateMonthlyPlan(SO1, plan.id, { options: [{ partyName: "switch", turnoverCategory: "LT_50L" }, { partyName: "b", turnoverCategory: "LT_50L" }] })), 409, "candidate names are frozen once the workflow has begun");
     // authorization along the way
     assert.equal(await status(() => move(service, SO1, plan, { to: "DOC_RECEIVED", received: { documents: true } })), 403, "the SO cannot record 'received'");
     assert.equal(await status(() => move(service, RM1, plan, { to: "DOC_RECEIVED", received: { documents: true } })), 403, "an RM cannot take the Admin step on a team plan");
@@ -406,7 +428,7 @@ async function main() {
   {
     const { service, t } = loadService();
     const plan = plain(await planFor(service));
-    const renamed = plain(await service.updateMonthlyPlan(SO1, plan.id, { option2Party: "New B", planDate: "2026-06-20", ownerId: "so2", opStatus: "APPOINTED" }));
+    const renamed = plain(await service.updateMonthlyPlan(SO1, plan.id, { options: optsWith(plan, { 2: "New B" }), planDate: "2026-06-20", ownerId: "so2", opStatus: "APPOINTED" }));
     assert.deepEqual([renamed.options[1]!.partyName, renamed.planDate, renamed.ownerId, renamed.opStatus, renamed.dateChangeCount], ["New B", "2026-06-20", "so1", "NONE", 1], "name + date edits work before the workflow; status cannot be spoofed");
     assert.equal(await status(() => service.updateMonthlyPlan(SO1, plan.id, { planDate: "2026-07-20" })), 422, "plan date stays inside the month");
     assert.equal(await status(() => service.updateMonthlyPlan(SO2, plan.id, { planDate: "2026-06-20" })), 404);
@@ -432,17 +454,18 @@ async function main() {
     const add = (sp: string, extra: Row = {}) => service.createMonthlyPlan(SO1, { sheetId: so.id, seasonalPlanId: sp, planDate: "2026-06-15", option1Party: `Party ${sp}`, ...extra });
     // 1) the workspace exists from creation and is the ONLY plan for this owner + month
     assert.deepEqual([so.counts.create, so.counts.submitted, so.counts.approved, so.canEdit, so.canSubmit], [0, 0, 0, true, false], "a new plan: an empty, editable workspace");
-    assert.deepEqual([await stageOf(SO1, "create"), await stageOf(SO1, "submitted"), await stageOf(SO1, "approved")], [[so.id], [], []]);
-    assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-june" })), 409, "no second workspace for the same owner + month");
+    assert.deepEqual([await stageOf(SO1, "create"), await stageOf(SO1, "submitted"), await stageOf(SO1, "approved")], [[], [], []], "Create lists UNFINISHED work only: an empty sheet is not listed (it is kept, not deleted)");
+    assert.equal(plain(await service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-june" })).id, so.id, "no second workspace for the same owner + month: choosing it again resumes the same one");
     assert.equal(await status(() => service.submitMonthlySheet(SO1, so.id)), 409, "nothing to submit yet");
     // 2) first batch
     const a = plain(await add("sp-so1"));
+    assert.deepEqual(await stageOf(SO1, "create"), [so.id], "a saved draft makes the month appear in Create");
     assert.equal(plain((await service.getMonthlySheet(SO1, so.id)).sheet).canSubmit, true);
     for (const who of [SO2, RM1, ADMIN]) assert.ok([403, 404].includes(await status(() => service.submitMonthlySheet(who, so.id))), "only the owner submits");
     const s1 = plain(await service.submitMonthlySheet(SO1, so.id));
     assert.deepEqual([s1.counts.create, s1.counts.submitted, s1.counts.approved, s1.canSubmit, s1.canEdit], [0, 1, 0, false, true], "the batch left the editable workspace; the workspace stays open for more");
     assert.equal(row(a.id).approvalStatus, "PENDING_RM", "an SO with an RM goes to RM review — NOT approved by submitting");
-    assert.deepEqual([await stageOf(SO1, "create"), await stageOf(SO1, "submitted"), await stageOf(SO1, "approved")], [[so.id], [so.id], []], "Create still lists the plan, Submitted now lists it too — still ONE plan");
+    assert.deepEqual([await stageOf(SO1, "create"), await stageOf(SO1, "submitted"), await stageOf(SO1, "approved")], [[], [so.id], []], "everything submitted → the month leaves Create and sits under Submitted (still ONE plan)");
     const stamp = row(a.id).submittedAt;
     // views per section
     const view = async (ctx: AuthContext, stage: string) => plain(await service.getMonthlySheet(ctx, so.id, stage)).plans.map((p) => p.id);
@@ -458,7 +481,7 @@ async function main() {
     // 3) second batch accumulates in the SAME plan; earlier entry untouched; retry duplicates nothing
     const b = plain(await add("sp-so1-new"));
     assert.equal(await status(() => add("sp-so1-new")), 409, "the same market cannot be added twice for the month");
-    assert.equal(await status(() => service.updateMonthlyPlan(SO1, a.id, { option1Party: "rewrite history" })), 409, "a submitted entry can no longer be edited");
+    assert.equal(await status(() => service.updateMonthlyPlan(SO1, a.id, { options: [{ partyName: "rewrite history", turnoverCategory: "LT_50L" }, { partyName: "b", turnoverCategory: "LT_50L" }] })), 409, "a submitted entry can no longer be edited");
     const s2 = plain(await service.submitMonthlySheet(SO1, so.id));
     assert.deepEqual([s2.counts.create, s2.counts.submitted], [0, 2]);
     assert.equal(String(row(a.id).submittedAt), String(stamp), "the earlier entry keeps its own submission record");
@@ -479,7 +502,7 @@ async function main() {
     const done = plain(await service.actOnMonthlySheet(ADMIN, so.id, { action: "approve" }));
     assert.deepEqual([done.counts.submitted, done.counts.approved, row(a.id).approvalStatus, row(b.id).approvalStatus], [0, 2, "APPROVED", "APPROVED"]);
     assert.equal(await status(() => service.actOnMonthlySheet(ADMIN, so.id, { action: "approve" })), 409, "an approval retry duplicates / re-approves nothing");
-    assert.deepEqual([await stageOf(SO1, "create"), await stageOf(SO1, "submitted"), await stageOf(SO1, "approved"), await stageOf(RM1, "approved"), await stageOf(ADMIN, "approved")], [[so.id], [], [so.id], [so.id], [so.id]], "Approved lists the one logical plan");
+    assert.deepEqual([await stageOf(SO1, "create"), await stageOf(SO1, "submitted"), await stageOf(SO1, "approved"), await stageOf(RM1, "approved"), await stageOf(ADMIN, "approved")], [[], [], [so.id], [so.id], [so.id]], "Approved lists the one logical plan; nothing editable remains, so Create does not");
     const decided = row(a.id).adminDecidedAt;
     // 5) a LATER batch accumulates in Approved; it is NOT auto-approved just because the plan has approved entries
     // (the two Kharif markets are used in June, so the next batches are planned in July — the same logic, another month)
@@ -513,7 +536,7 @@ async function main() {
     const view = plain(await service.getMonthlySheet(SO1, so.id, "create"));
     assert.deepEqual([view.plans.map((p) => p.id), view.plans[0]!.rejectionReason, view.plans[0]!.canEditEntry, view.sheet.rejectionReason], [[b.id], "Wrong party", true, "Wrong party"], "back in Create, editable, with the reason");
     assert.deepEqual(plain(await service.getMonthlySheet(SO1, so.id, "approved")).plans.map((p) => p.id), [a.id], "the approved entry stays in Approved");
-    await service.updateMonthlyPlan(SO1, b.id, { option1Party: "B fixed" });
+    await service.updateMonthlyPlan(SO1, b.id, { options: optsWith(plain(b), { 1: "B fixed" }) });
     assert.equal(plain(await service.submitMonthlySheet(SO1, so.id)).counts.submitted, 1, "resubmitted through the same path");
     assert.equal(row(b.id).rejectionReason, null);
     // status workflow needs an APPROVED entry, not an approved plan
@@ -538,10 +561,11 @@ async function main() {
     const { service } = loadService();
     const adm = plain(await service.createMonthlySheet(ADMIN, { seasonId: "s-kharif", seasonMonthId: "sm-july" }));
     assert.deepEqual([adm.canEdit, adm.own], [true, true]);
-    assert.ok(ids(await service.listMonthlySheets(ADMIN, { stage: "create" })).includes(adm.id), "Admin sees their own plan in Create");
+    assert.ok(!ids(await service.listMonthlySheets(ADMIN, { stage: "create" })).includes(adm.id), "an empty plan (the Admin has no market rows of their own) is not unfinished work, so it is not in Create — nor deleted");
     assert.equal(await status(() => service.submitMonthlySheet(ADMIN, adm.id)), 403, "submission stays SO/RM (Admin has no Seasonal market rows of their own)");
     const so = await sheetOf(service, SO1);
-    assert.ok(ids(await service.listMonthlySheets(ADMIN, { stage: "create" })).includes(so.id), "…and every officer's workspace");
+    await planFor(service, {}, SO1);
+    assert.ok(ids(await service.listMonthlySheets(ADMIN, { stage: "create" })).includes(so.id), "Admin sees every officer's unfinished workspace");
     assert.deepEqual(ids(await service.listMonthlySheets(SO1, { stage: "create" })), [so.id], "an SO still sees only their own");
     assert.ok(!ids(await service.listMonthlySheets(RM1, { stage: "create" })).includes(adm.id), "an RM does not see the Admin's plan");
   }

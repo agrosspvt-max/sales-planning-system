@@ -48,58 +48,54 @@ const fmtDate = (s: string | null) => (s ? formatSchemeDate(s) : "—");
 // "create" is the legacy appointment-planning page (/planning/party): it is no longer a navigation item, so no primary item is active there.
 type PartyMode = "seasonal" | "monthly" | "create" | "view";
 
-// PRIMARY navigation. "Planning" opens the Seasonal tab (/planning/party/seasonal) and stays active for both of its tabs.
-const PRIMARY_LINKS: { key: "planning" | "view"; href: string; labelKey: LabelKey }[] = [
-  { key: "planning", href: "/planning/party/seasonal", labelKey: "party_planning.nav.planning" },
-  { key: "view", href: "/planning/party/view", labelKey: "party_planning.nav.view" },
-];
-// SECONDARY navigation inside Planning (route-based, so a refresh or Back/Forward keeps the section).
+// SECONDARY navigation (route-based, so a refresh or Back/Forward keeps the section). Create New Plan = stage "create"; View Plans = Submitted | Approved | Older Plans.
 const STAGE_LABEL_KEY: Record<PlanStage, LabelKey> = { create: "party_planning.stage.create", submitted: "party_planning.stage.submitted", approved: "party_planning.stage.approved", older: "party_planning.stage.older" };
+const VIEW_STAGES = PLAN_STAGES.filter((s) => s !== "create");
 const PLANNING_TABS: { key: "seasonal" | "monthly"; href: string; labelKey: LabelKey }[] = [
   { key: "seasonal", href: "/planning/party/seasonal", labelKey: "party_planning.nav.seasonal_tab" },
   { key: "monthly", href: "/planning/party/monthly", labelKey: "party_planning.nav.monthly_tab" },
 ];
 
 /**
- * Party Planning navigation: [Planning | View]. Under Planning, the Sales Planning-style underline tabs [Seasonal | Monthly] are shown.
- * Territory Mapping is a standalone Create/View Plans module (/planning/territory-mapping) and no longer part of this navigation.
+ * Party Planning navigation — the same hierarchy and look as Sales Planning:
+ *   [Create New Plan | View Plans]  (derived from the stage: "create" → Create New Plan; submitted / approved / older → View Plans)
+ *   View Plans only: a "Plan Type" box with [Submitted | Approved | Older Plans]
+ *   Underlined [Seasonal | Monthly] with the creation action (Create New Plan only) at the right.
+ * The type (Seasonal / Monthly) and the lifecycle section live in the URL, so they survive the switch, a refresh, Back / Forward and opening a plan.
+ * The legacy appointment pages (mode "create" / "view") render only the main switch, with neither side active; their routes are unchanged.
  */
 export function PartyPlanModeLinks({ mode, stage = "create", actions, children }: { mode: PartyMode; stage?: PlanStage; actions?: React.ReactNode; children?: React.ReactNode }) {
-  const primary = mode === "seasonal" || mode === "monthly" ? "planning" : mode;
+  const sheetMode = mode === "seasonal" || mode === "monthly";
+  const type = sheetMode ? mode : "seasonal";
+  const isCreate = sheetMode && stage === "create";
+  const isView = sheetMode && stage !== "create";
+  const modeAria = useLabel("party_planning.nav.mode_aria");
   const planLifecycleAria = useLabel("party_planning.nav.plan_lifecycle_aria");
+  const pill = (active: boolean) => `rounded px-3 py-1.5 font-medium ${active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`;
   return (
     <div className="space-y-3">
-      {/* Row 1 — main navigation. Each switch sits in its own block row (as Sales Planning does) so they never share a line. */}
-      <div className="flex flex-wrap items-center gap-3"><div className="inline-flex flex-wrap rounded-md border bg-background p-0.5 text-sm">
-        {PRIMARY_LINKS.map((m) => (
-          <Link
-            key={m.key}
-            href={m.href}
-            className={`rounded px-3 py-1.5 font-medium ${primary === m.key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-          >
-            <L k={m.labelKey} />
-          </Link>
-        ))}
+      {/* Level 1 — Create New Plan | View Plans (each side is its own route; the selected Seasonal / Monthly type is kept). */}
+      <div className="flex flex-wrap items-center gap-3"><div className="inline-flex flex-wrap rounded-md border bg-background p-0.5 text-sm" role="group" aria-label={modeAria}>
+        <Link href={`/planning/party/${type}?stage=create`} aria-current={isCreate ? "page" : undefined} className={pill(isCreate)}><L k="party_planning.nav.create_new_plan" /></Link>
+        <Link href={`/planning/party/${type}?stage=submitted`} aria-current={isView ? "page" : undefined} className={pill(isView)}><L k="party_planning.nav.view_plans" /></Link>
       </div></div>
-      {primary === "planning" && (
-        <>
-          {/* Plan lifecycle — route state (?stage=), so the section survives refresh and Back / Forward. Same boxed segmented style as the primary switch. */}
-          {/* Row 2 — the labelled "Plan Type" container (same markup as Sales Planning → View Plans) holding the lifecycle switch; Row 3 — Seasonal | Monthly. */}
-          <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+      {isView && (
+        // Level 2 (View Plans only) — the labelled "Plan Type" container, same markup as Sales Planning → View Plans.
+        <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"><L k="party_planning.nav.plan_type" /></div>
-          <div className="flex flex-wrap items-center gap-3"><div className="inline-flex flex-wrap rounded-md border bg-background p-0.5 text-sm" aria-label={planLifecycleAria}>
-            {PLAN_STAGES.map((s) => (
-              <Link key={s} href={`/planning/party/${mode}?stage=${s}`} aria-current={stage === s ? "page" : undefined}
-                className={`rounded px-3 py-1.5 font-medium ${stage === s ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}><L k={STAGE_LABEL_KEY[s]} /></Link>
+          <div className="flex flex-wrap items-center gap-3"><div className="inline-flex flex-wrap rounded-md border bg-background p-0.5 text-sm" role="group" aria-label={planLifecycleAria}>
+            {VIEW_STAGES.map((s) => (
+              <Link key={s} href={`/planning/party/${type}?stage=${s}`} aria-current={stage === s ? "page" : undefined} className={pill(stage === s)}><L k={STAGE_LABEL_KEY[s]} /></Link>
             ))}
           </div></div>
-          </div>
-          {/* Row 3 — Seasonal | Monthly on the left; an optional page action (e.g. Create Seasonal Plan) at the far right of the SAME row (wraps below on small screens). */}
-          <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-2 [&>div:first-child]:min-w-0 [&>div:first-child]:flex-1">
-            <UnderlineTabs active={mode} tabs={PLANNING_TABS.map((t) => ({ key: t.key, href: `${t.href}?stage=${stage}`, label: <L k={t.labelKey} /> }))} />
-            {actions}
-          </div>
-        </>
+        </div>
+      )}
+      {sheetMode && (
+        // Level 3 — Seasonal | Monthly (shared underline tabs); creation actions only under Create New Plan, at the far right of the same row.
+        <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-2 [&>div:first-child]:min-w-0 [&>div:first-child]:flex-1">
+          <UnderlineTabs active={mode} tabs={PLANNING_TABS.map((t) => ({ key: t.key, href: `${t.href}?stage=${stage}`, label: <L k={t.labelKey} /> }))} />
+          {isCreate ? actions : null}
+        </div>
       )}
       {children}
     </div>

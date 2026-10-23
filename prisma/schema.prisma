@@ -2194,8 +2194,10 @@ model PartyMonthlyStatusEvent {
 model PartyMonthlyOption {
   id                String              @id @default(cuid())
   monthlyPlanId     String
-  optionNo          Int // 1 | 2
+  optionNo          Int // 1..10 (unique per entry); an entry needs at least two complete options
   partyName         String? // tentative candidate party
+  /// Tentative turnover CATEGORY of this candidate party (stable code; NULL = not recorded, e.g. every historical row). Per option, never per market or plan.
+  turnoverCategory  String?
   status            String              @default("PENDING")
   sentInfo          Json?
   sentById          String?
@@ -2683,9 +2685,9 @@ model CnExpiryEvent {
   actor              User?     @relation("CnExpiryEventActor", fields: [actorId], references: [id])
 
   /// True for effective expiry dates that already include explicitly granted grace. Old events retain their original semantics.
-  expiryIncludesGrace Boolean  @default(false)
-  sequence           Int       @default(0)
-  requestKey         String?   @unique
+  expiryIncludesGrace Boolean @default(false)
+  sequence            Int     @default(0)
+  requestKey          String? @unique
 
   @@unique([cnRequestId, cycleNo, kind, sequence])
   @@index([cnRequestId, effectiveAt])

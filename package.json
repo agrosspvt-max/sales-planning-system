@@ -47,6 +47,8 @@
     "test:accounts:http": "node --import tsx src/features/accounts/accounts.http.integration.ts",
     "test:retailers:db": "node --import tsx src/features/party-planning/retailer.integration.ts",
     "test:cn-expiry:db": "node --import tsx src/features/cn-requests/cn-expiry.integration.ts",
+    "test:seasonal-create:db": "node --import tsx src/features/party-planning/seasonal-create-resume.integration.ts",
+    "test:monthly-create:db": "node --import tsx src/features/party-planning/monthly-create-resume.integration.ts",
     "test:cn-timeline": "node --import tsx src/features/cn-requests/cn-timeline.test.tsx",
     "test:cn-processing:db": "node --import tsx src/features/cn-requests/cn-review.integration.ts",
     "test:cn-processing": "node --import tsx src/features/cn-requests/cn-review.test.tsx",

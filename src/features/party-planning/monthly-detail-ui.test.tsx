@@ -10,9 +10,12 @@ const hooks: unknown[] = [];
 let cursor = 0;
 let invalidations = 0;
 const posts: { url: string; body: unknown }[] = [];
-let buttons: { children?: React.ReactNode; onClick?: () => void; disabled?: boolean }[] = [];
+let buttons: { "aria-label"?: string; children?: React.ReactNode; onClick?: () => void; disabled?: boolean }[] = [];
 let inputs: { placeholder?: string; value?: string; type?: string; onChange?: (e: { target: { value: string } }) => void }[] = [];
 let combos: { ariaLabel: string; placeholder?: string; emptyText?: string; value: string; options: { value: string; label: string }[]; onChange: (v: string) => void }[] = [];
+type Sel = { "aria-label"?: string; value: string; placeholder?: string; disabled?: boolean; options: { value: string; label: string }[]; onChange: (e: { target: { value: string } }) => void };
+let selects: Sel[] = [];
+let failPost = false;
 let plans: unknown[] = [];
 let sheet: Record<string, unknown> = {};
 const SEASONAL_PLANS = [{ id: "sp1", marketName: "Pipariya", marketPotential: "B", type: "Existing" }, { id: "sp2", marketName: "Bareli", marketPotential: "A", type: "New" }];
@@ -23,7 +26,9 @@ const dp = (): Record<string, any> => dealerProps as Record<string, any>;
 /* eslint-enable @typescript-eslint/no-explicit-any */
 const overrides = {
   react: { ...React, useState: (initial: unknown) => { const i = cursor++; if (!(i in hooks)) hooks[i] = typeof initial === "function" ? (initial as () => unknown)() : initial; return [hooks[i], (u: unknown) => { hooks[i] = typeof u === "function" ? (u as (v: unknown) => unknown)(hooks[i]) : u; }]; } },
-  "@/features/labels/label-ui": { L: ({ k }: { k: LabelKey }) => <>{DEFAULT_LABELS[k]}</>, useLabel: (k: LabelKey) => DEFAULT_LABELS[k] },
+  "@/features/labels/label-ui": { L: ({ k }: { k: LabelKey }) => <>{DEFAULT_LABELS[k]}</>, useLabel: (k: LabelKey) => DEFAULT_LABELS[k],
+    LabelSectionHeaderRow: ({ leading = 0, sections }: { leading?: number; sections: { labelKey: LabelKey; span: number; tone: string; color?: string }[] }) => <tr data-section-row>{leading > 0 && <th colSpan={leading} />}{sections.map((x, i) => <th key={i} colSpan={x.span} data-tone={x.tone} data-color={x.color}>{DEFAULT_LABELS[x.labelKey]}</th>)}</tr> },
+  "@/components/ui/select": { NativeSelect: (p: Sel) => { selects.push(p); return <select aria-label={p["aria-label"]} />; } },
   "./party-planning-page": { PartyPlanModeLinks: ({ mode, stage }: { mode: string; stage?: string }) => <nav data-mode={mode} data-stage={stage} /> },
   "@/components/layout/page-header": { PageHeader: ({ title, subtitle }: { title: string; subtitle?: string }) => <h1>{title}<p>{subtitle}</p></h1> },
   "@tanstack/react-query": {
@@ -31,8 +36,8 @@ const overrides = {
     useQueryClient: () => ({ invalidateQueries: () => { invalidations += 1; } }),
     useMutation: (o: { mutationFn: (v?: unknown) => Promise<unknown>; onSuccess?: () => void; onError?: (e: unknown) => void }) => ({ isPending: false, mutate: (v?: unknown) => { void o.mutationFn(v).then(() => o.onSuccess?.(), (e) => o.onError?.(e)); } }),
   },
-  "@/lib/api-client": { api: { get: async () => ({}), put: async () => ({}), post: async (url: string, body: unknown) => { posts.push({ url, body }); return {}; } } },
-  "@/components/ui/button": { Button: (p: { children?: React.ReactNode; onClick?: () => void; disabled?: boolean }) => { buttons.push(p); return <button>{p.children}</button>; } },
+  "@/lib/api-client": { api: { get: async () => ({}), put: async (url: string, body: unknown) => { posts.push({ url, body }); return {}; }, post: async (url: string, body: unknown) => { posts.push({ url, body }); if (failPost) throw new Error("The market could not be saved because the database is busy."); return {}; } } },
+  "@/components/ui/button": { Button: (p: { children?: React.ReactNode; onClick?: () => void; disabled?: boolean; "aria-label"?: string }) => { buttons.push(p); return <button aria-label={p["aria-label"]}>{p.children}</button>; } },
   "@/components/ui/date-input-dmy": { DateInputDMY: (p: { value: string; onChange: (v: string) => void }) => { inputs.push({ ...p, type: "date", onChange: (e: { target: { value: string } }) => p.onChange(e.target.value) } as (typeof inputs)[number]); return <input type="text" defaultValue={p.value} />; } }, // the shared DD/MM/YYYY field (ISO inside)
   "@/components/ui/input": { Input: (p: (typeof inputs)[number]) => { inputs.push(p); return <input placeholder={p.placeholder} defaultValue={p.value} type={p.type} />; } },
   "@/features/sales-upload/create-dealer-dialog": { DealerDialog: (p: Record<string, unknown>) => { dealerProps = p; return <div data-dealer-dialog />; } },
@@ -43,7 +48,18 @@ const overrides = {
   },
 };
 const { MonthlyPlanDetailPage, StatusDialog, StatusTimelineDialog } = testLoader(overrides)("src/features/party-planning/monthly-planning-page.tsx") as { MonthlyPlanDetailPage: React.ComponentType<{ role: Role; sheetId: string; stage?: string }>; StatusDialog: React.ComponentType<{ plan: never; onClose: () => void; onChanged: () => void }>; StatusTimelineDialog: React.ComponentType<{ plan: never; onClose: () => void }> };
-const render = (role: Role = Role.SALES_OFFICER, stage: string = "create") => { cursor = 0; buttons = []; inputs = []; combos = []; const html = renderToStaticMarkup(<MonthlyPlanDetailPage role={role} sheetId="ms1" stage={stage} />); hooks.length = cursor; return html; };
+const render = (role: Role = Role.SALES_OFFICER, stage: string = "create") => { cursor = 0; buttons = []; inputs = []; combos = []; selects = []; const html = renderToStaticMarkup(<MonthlyPlanDetailPage role={role} sheetId="ms1" stage={stage} />); hooks.length = cursor; return html; };
+/** Monthly keeps the subtle column tints but NO grouped heading row: one header row only, and the colgroup covers exactly the rendered columns (S.No included). */
+const assertPlainHeader = (html: string) => {
+  assert.ok(!html.includes("data-section-row") && !/Party Options<\/th><th[^>]*>Progress|>Progress</.test(html), "no grouped heading row");
+  const head = /<thead[^>]*>(.*?)<\/thead>/.exec(html)![1]!;
+  assert.equal((head.match(/<tr/g) ?? []).length, 1, "a single header row — nothing above the column headings");
+  const columns = (head.match(/<th[ >]/g) ?? []).length;
+  const cols = [...html.matchAll(/<col span="(\d+)"([^>]*)\/>/g)];
+  assert.equal(cols.reduce((n, m) => n + Number(m[1]), 0), columns, "column tints line up with the rendered columns");
+  assert.ok(cols.some((m) => /bg-amber-50/.test(m[2]!)) && cols.some((m) => /bg-green-50/.test(m[2]!)) && cols.some((m) => /bg-blue-50/.test(m[2]!)), "the subtle body colours remain");
+  assert.ok(!/#FF3445/.test(html), "no red heading background");
+};
 const click = (label: string) => { const b = buttons.filter((x) => String(x.children).includes(label)); assert.ok(b.length >= 1, `button "${label}"`); b[b.length - 1]!.onClick!(); };
 const count = (label: string) => buttons.filter((b) => String(b.children).includes(label)).length;
 const base = { id: "ms1", seasonOpen: true, own: true, status: "Draft", counts: { create: 1, submitted: 0, approved: 0, pendingRm: 0, pendingAdmin: 0, rejected: 0 }, submittedAt: null, rejectionStage: null, rejectionReason: null, canEdit: true, canSubmit: false, canReview: false };
@@ -58,7 +74,9 @@ async function main() {
   assert.ok(!html.includes("Season:") && !html.includes("Month:") && !html.includes("Apr 2026 → Nov 2026") && !html.includes("Officer One"), "the season / month / officer banner is gone");
   assert.ok(!html.includes("Search market or party") && !html.includes("All statuses"), "search and status filter are gone");
   assert.ok(!html.includes("Add Monthly Plan") && !html.includes("Option 1 Party *") && !html.includes("Select a market"), "the always-visible entry form is gone");
-  assert.ok(html.includes('data-stage="create"') && html.includes('data-mode="monthly"'));
+  // Opened plan = compact Back + breadcrumbs only: no title/subtitle header, no mode switch, no Seasonal | Monthly tabs.
+  assert.ok(!html.includes("<h1") && !html.includes("data-mode") && !html.includes("data-stage") && !html.includes("Party Planning</h1>"), "no large title, subtitle or navigation switches");
+  assert.ok(html.includes('data-testid="plan-detail-bar"') && html.includes('href="/planning/party/monthly?stage=create"') && html.includes("Kharif 2026 · June 2026"), "Back to the Create list; the season + month stay in the breadcrumbs");
   assert.equal(count("Add Market"), 1);
   const footerEmpty = /<div class="flex flex-wrap items-center justify-between gap-2 border-t p-2"><div><button>[^]*?Add Market<\/button><\/div>/.exec(html);
   assert.ok(footerEmpty, "Add Market: first child of the footer row, left-aligned (not centered in the empty state)");
@@ -66,7 +84,7 @@ async function main() {
   // populated: the SAME footer row
   plans = [PLAN]; html = render();
   assert.ok(/border-t p-2"><div><button>[^]*?Add Market<\/button><\/div>/.test(html), "same position with rows");
-  assert.deepEqual([...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["S.No", "Market", "Party Options", "Status", "Conversion Date", "Days"]);
+  assert.deepEqual([...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]), ["S.No", "Market", "Party Options", "Status", "Conversion Date", "Days"], "column headings and their order are unchanged (the group row sits above them)");
   assert.ok(html.includes("Party A") && html.includes("Party B") && html.includes("Pipariya"));
   // Add Market dialog: market (searchable), Conversion Date, Option 1 required, Option 2 optional → POST → stays in Create
   click("Add Market"); html = render();
@@ -79,9 +97,44 @@ async function main() {
   combos.at(-1)!.onChange("sp2"); render();
   assert.equal(combos.at(-1)!.value, "sp2", "the selection is a market record id");
   const field = (i: number, value: string) => { const text = inputs.filter((x) => !x.type && x.placeholder !== "Search market…"); (i < 0 ? inputs.filter((x) => x.type === "date").at(-1)! : text[i]!).onChange!({ target: { value } }); render(); };
+  assert.ok(html.includes("Option 1 Party *") && html.includes("Option 2 Party *") && !html.includes("Option 3 Party"), "two mandatory option rows to start with");
+  const addBtn = () => buttons.filter((b) => String(b.children).includes("Add Option")).at(-1)!;
+  const removeBtns = () => buttons.filter((b) => b["aria-label"]?.startsWith("Remove Option"));
+  assert.equal(removeBtns().length, 0, "the two required rows cannot be removed");
   field(-1, "2026-06-20"); field(0, "Party One"); field(1, "Party Two");
+  const turnoverSel = (n: number) => selects.filter((x) => x["aria-label"]?.includes("Tentative Turnover"))[n - 1]!;
+  const rowsNow = () => selects.filter((x) => x["aria-label"]?.includes("Tentative Turnover")).length;
+  assert.equal(JSON.stringify([turnoverSel(1).placeholder, turnoverSel(1).value, turnoverSel(2).value]), JSON.stringify(["Select Turnover…", "", ""]), "nothing is preselected");
+  assert.equal(JSON.stringify(turnoverSel(1).options.map((o) => o.label)), JSON.stringify(["Less than 50 Lakh", "50 Lakh to 1 CR", "1 CR to 2 CR", "2 CR to 4 CR", "4 CR+"]));
+  assert.equal(JSON.stringify(turnoverSel(1).options.map((o) => o.value)), JSON.stringify(["LT_50L", "50L_TO_1CR", "1CR_TO_2CR", "2CR_TO_4CR", "GT_4CR"]), "stable stored codes, not wording");
+  const addClick = async () => { buttons.filter((b) => String(b.children) === "Add").at(-1)!.onClick!(); await tick(); return render(); };
+  assert.ok((await addClick()).includes("Option 1: Tentative Turnover is required.") && posts.length === 0, "a missing turnover blocks the save");
+  turnoverSel(1).onChange({ target: { value: "50L_TO_1CR" } }); render();
+  assert.ok((await addClick()).includes("Option 2: Tentative Turnover is required.") && posts.length === 0, "every option needs its own turnover — Option 2 is mandatory too");
+  turnoverSel(2).onChange({ target: { value: "GT_4CR" } }); render();
+  // Add Option → Option 3 (party + turnover); an empty extra option must be completed or removed; removing keeps the other rows' entries.
+  addBtn().onClick!(); let h = render();
+  assert.ok(h.includes("Option 3 Party *") && rowsNow() === 3 && removeBtns().length === 1, "Add Option adds a party-and-turnover pair, removable");
+  assert.ok((await addClick()).includes("Option 3: enter the party name.") && posts.length === 0, "a blank extra option blocks the save");
+  field(2, "Party Three"); turnoverSel(3).onChange({ target: { value: "1CR_TO_2CR" } }); render();
+  addBtn().onClick!(); h = render();
+  assert.ok(h.includes("Option 4 Party *") && removeBtns().length === 2);
+  field(3, "Party Four"); turnoverSel(4).onChange({ target: { value: "LT_50L" } }); render();
+  removeBtns()[0]!.onClick!(); h = render(); // remove Option 3 (the first removable): Option 4 becomes Option 3 and nothing else is lost
+  assert.equal(rowsNow(), 3); assert.ok(h.includes("Party One") && h.includes("Party Two") && h.includes("Party Four") && !h.includes("Party Three"), "removal keeps the other rows' names");
+  assert.equal(JSON.stringify([turnoverSel(1).value, turnoverSel(2).value, turnoverSel(3).value]), JSON.stringify(["50L_TO_1CR", "GT_4CR", "LT_50L"]), "…and their turnover selections");
+  // A failed save (e.g. the busy / timeout message): the message is shown, EVERY entered value is kept, the dialog stays open and Add is available again.
+  failPost = true; invalidations = 0;
+  const failedHtml = await addClick();
+  assert.ok(failedHtml.includes("database is busy"), "a useful message is shown");
+  assert.equal(JSON.stringify([turnoverSel(1).value, turnoverSel(2).value, turnoverSel(3).value, combos.at(-1)!.value]), JSON.stringify(["50L_TO_1CR", "GT_4CR", "LT_50L", "sp2"]), "turnover choices and market are retained");
+  assert.ok(failedHtml.includes("Party One") && failedHtml.includes("Party Two") && failedHtml.includes("Party Four") && failedHtml.includes("2026-06-20"), "party names and date are retained");
+  assert.equal(invalidations, 0, "a failed save does not close the dialog or refresh as if it succeeded");
+  assert.equal(buttons.filter((b) => String(b.children) === "Add").at(-1)!.disabled, false, "Add is usable again after the failure");
+  failPost = false; posts.length = 0;
   buttons.filter((b) => String(b.children) === "Add").at(-1)!.onClick!(); await tick();
-  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/party-monthly-plans", body: { sheetId: "ms1", seasonalPlanId: "sp2", planDate: "2026-06-20", option1Party: "Party One", option2Party: "Party Two" } }], "persisted through the existing endpoint, for THIS plan");
+  assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/party-monthly-plans", body: { sheetId: "ms1", seasonalPlanId: "sp2", planDate: "2026-06-20", options: [
+    { partyName: "Party One", turnoverCategory: "50L_TO_1CR" }, { partyName: "Party Two", turnoverCategory: "GT_4CR" }, { partyName: "Party Four", turnoverCategory: "LT_50L" }] } }], "a structured options array — one entry per option, each with its OWN turnover");
   assert.ok(invalidations >= 1 && !render().includes("data-dialog"), "closes and refreshes; the user stays in Create");
   // Submit
   sheet = { ...base, canSubmit: true }; html = render();
@@ -93,7 +146,7 @@ async function main() {
     sheet = { ...base, canEdit: false, canSubmit: false, seasonOpen: stage !== "older" };
     plans = []; html = render(Role.SALES_OFFICER, stage);
     assert.equal(count("Add Market"), 0, `${stage}: no Add Market`); assert.equal(count("Submit"), 0); assert.ok(!html.includes("Add Monthly Plan"));
-    assert.ok(html.includes(`data-stage="${stage}"`) && html.includes(">Days</th>") && html.includes(text), `${stage}: the same table, section-specific empty text`);
+    assert.ok(html.includes(`href="/planning/party/monthly?stage=${stage}"`) && !html.includes("data-mode") && html.includes(">Days</th>") && html.includes(text), `${stage}: the same table, section-specific empty text`);
     plans = [PLAN]; html = render(Role.SALES_OFFICER, stage); assert.ok(html.includes("Party A"));
   }
   sheet = { ...base, seasonOpen: false, canEdit: false }; assert.ok(render(Role.SALES_OFFICER, "older").includes("season closed"), "older plans are marked read-only");
@@ -228,6 +281,34 @@ async function main() {
     { id: "n2", previousStatus: "DOC_NOT_SENT", newStatus: "DOC_SENT", previousLabel: "Document Not Sent", newLabel: "Doc Send By SO", actorName: "Officer One", actorRole: "SALES_OFFICER", remarks: null, sentInfo: { documentStatus: "INCOMPLETE", chequeStatus: "COMPLETE", documentNotSent: false, other: null }, receivedInfo: null, createdAt: "2026-10-10T10:00:00.000Z" },
   ] } as never} onClose={() => {}} />);
   assert.ok(tl2.includes("Pending → Document Not Sent") && tl2.includes("Document Not Sent → Doc Send By SO") && tl2.includes('data-testid="sent-not-sent"') && tl2.includes('data-testid="sent-document">Incomplete<') && tl2.includes('data-testid="sent-cheque">Complete<'), "timeline shows the special answer and the later Complete / Incomplete answers");
+  // Editing the options of an existing editable entry (older drafts reach the two-complete-options rule here); non-editable entries have no edit control.
+  {
+    const legacyOpts = [{ id: "o1", optionNo: 1, partyName: "Party A", turnoverCategory: null }, { id: "o2", optionNo: 2, partyName: null, turnoverCategory: null }];
+    hooks.length = 0; posts.length = 0; plans = [{ ...PLAN, canEditEntry: true, options: legacyOpts }];
+    let h = render();
+    assert.ok(h.includes('aria-label="Edit party options for Pipariya"') && h.includes("Not recorded"), "an editable entry offers Edit Options; the missing turnover reads Not recorded");
+    buttons.find((b) => b["aria-label"] === "Edit party options for Pipariya")!.onClick!(); h = render();
+    assert.ok(h.includes("Edit Party Options") && h.includes("Option 1 Party *") && h.includes("Option 2 Party *"), "the saved rows (incl. the blank legacy slot) are shown");
+    const save = () => buttons.filter((b) => String(b.children) === "Save").at(-1)!;
+    save().onClick!(); await tick(); h = render();
+    assert.ok(h.includes("Option 1: Tentative Turnover is required.") && posts.length === 0, "an older incomplete draft cannot be saved until it is complete");
+    selects.filter((x) => x["aria-label"]?.includes("Tentative Turnover"))[0]!.onChange({ target: { value: "LT_50L" } }); render();
+    inputs.filter((x) => !x.type && x.placeholder !== "Search market…")[1]!.onChange!({ target: { value: "Party B" } }); render();
+    selects.filter((x) => x["aria-label"]?.includes("Tentative Turnover"))[1]!.onChange({ target: { value: "GT_4CR" } }); render();
+    save().onClick!(); await tick();
+    assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/party-monthly-plans/p1", body: { options: [{ id: "o1", partyName: "Party A", turnoverCategory: "LT_50L" }, { id: "o2", partyName: "Party B", turnoverCategory: "GT_4CR" }] } }].map((x) => x), "persisted options keep their ids");
+    hooks.length = 0; plans = [{ ...PLAN, canEditEntry: false, options: legacyOpts }];
+    assert.ok(!render().includes("Edit party options for"), "submitted / in-workflow entries cannot be edited");
+    // three options display in the table, ordered, each with its turnover
+    plans = [{ ...PLAN, options: [option(1, "Party A"), option(2, "Party B"), option(3, "Party C")] }]; hooks.length = 0;
+    assert.ok(/Party A[^]*Party B[^]*Party C/.test(render()), "every option is displayed");
+  }
+  // Plain single header row (with the subtle column tints) on every stage/role.
+  hooks.length = 0; plans = [PLAN];
+  for (const [role, stage] of [[Role.SALES_OFFICER, "create"], [Role.SALES_OFFICER, "submitted"], [Role.REGIONAL_MANAGER, "approved"], [Role.SUPER_ADMIN, "older"]] as const) {
+    hooks.length = 0; assertPlainHeader(render(role, stage));
+  }
+  hooks.length = 0; plans = []; assertPlainHeader(render()); // the empty state keeps the same header
   console.log("monthly-detail-ui.test.tsx — all assertions passed");
 }
 main().catch((e) => { console.error(e); process.exit(1); });

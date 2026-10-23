@@ -135,14 +135,14 @@ async function main() {
     const rabi = plain(await sheetFor(service, SO1, "s-rabi"));
     assert.equal(rabi.seasonId, "s-rabi", "a second season gets its own plan");
     assert.deepEqual(plain(await service.getSeasonalOptions(SO1)).seasons.map((s) => s.hasPlan), [true, true], "the dialog flags seasons that already have a plan");
-    assert.equal(await status(() => sheetFor(service, SO1, "s-kharif")), 409, "one Seasonal Plan per season");
+    assert.equal(plain(await sheetFor(service, SO1, "s-kharif")).id, kharif.id, "create-or-resume: choosing a season that already has a plan returns the SAME plan (one per owner and season)");
     assert.equal(await status(() => sheetFor(service, SO2, "s-kharif")), 0, "another officer may have their own for the same season");
     assert.equal(await status(() => sheetFor(service, SO1, "s-old")), 409, "a CLOSED season cannot be chosen");
     assert.equal(await status(() => sheetFor(service, SO1, "s-nope")), 422, "an unknown season is refused");
     assert.equal(await status(() => service.createSeasonalSheet(SO1, {})), 422);
     const adminSheet = plain(await sheetFor(service, ADMIN));
     assert.deepEqual([adminSheet.ownerId, adminSheet.ownerName, adminSheet.own, adminSheet.status], ["admin", "Admin", true, "Draft"], "Admin creates a plan in their own right (owner = the Admin user, no SO borrowed)");
-    assert.equal(await status(() => sheetFor(service, ADMIN)), 409, "…one per season, like everyone");
+    assert.equal(plain(await sheetFor(service, ADMIN)).id, adminSheet.id, "…one per season, like everyone (a repeat resumes it)");
     assert.equal(await status(() => service.createSeasonalSheet({ ...ADMIN, role: Role.CUSTOM_ADMIN, permissions: {} } as unknown as AuthContext, { seasonId: "s-rabi" })), 403, "a custom admin without Party Planning manage cannot create");
     const spoof = plain(await service.createSeasonalSheet(RM1, { seasonId: "s-kharif", ownerId: "so3", status: "Approved", itemCount: 9 }));
     assert.deepEqual([spoof.ownerId, spoof.status, spoof.itemCount], ["rm1", "Draft", 0], "owner / status cannot be spoofed");
@@ -204,7 +204,8 @@ async function main() {
     const stage = async (ctx: AuthContext, st: string) => plain(await service.getSeasonalSheet(ctx, sheet.id, "", st)).plans.map((p) => p.id);
     assert.deepEqual(plain((await service.listSeasonalSheets(SO1))[0]!).counts, { create: 0, submitted: 0, approved: 0 }, "a new plan: an empty workspace");
     assert.equal(await status(() => service.submitSeasonalSheet(SO1, sheet.id)), 409, "nothing to submit yet");
-    assert.equal(await status(() => sheetFor(service, SO1, "s-kharif")), 409, "no second workspace for the same owner + season");
+    assert.equal(plain(await sheetFor(service, SO1, "s-kharif")).id, sheet.id, "no second workspace for the same owner + season: choosing the season again resumes the same one");
+    assert.equal((await service.listSeasonalSheets(SO1)).length, 1, "…and nothing was duplicated");
     // batch 1
     const a = await addRow(service, SO1, sheet.id, "m-exist"), b = await addRow(service, SO1, sheet.id, "m-new");
     assert.deepEqual(await stage(SO1, "create"), [b.id, a.id].sort((x, y) => (rowOf(y).createdAt as Date).getTime() - (rowOf(x).createdAt as Date).getTime()), "Create shows the editable entries");

@@ -380,7 +380,7 @@ async function paymentVerifiedMap(ids: string[]): Promise<Map<string, boolean>> 
   return new Map(rows.map((r) => [r.id, r.paymentVerified]));
 }
 
-export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Promise<(CnRequestRow & { processingReview?: { kind: string; status: string } })[]> {
+export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Promise<(CnRequestRow & { processingReview?: { id: string; kind: string; status: string } })[]> {
   const scope = await getOfficerScope(ctx);
   // Stage changes that are already due are applied (with their true effective times) before anything is listed, so every CN is in exactly one tab.
   await reconcileDueCnRequests(scope.all ? null : scope.ids);
@@ -420,9 +420,9 @@ export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Pr
     orderBy: { createdAt: "desc" },
   })) as unknown as RawRow[];
   const verified = await paymentVerifiedMap(rows.map((r) => r.id));
-  const reviewMap = new Map<string, { kind: string; status: string }>();
+  const reviewMap = new Map<string, { id: string; kind: string; status: string }>();
   if (view === "under-process" && rows.length) {
-    const reviews = await prisma.cnReviewAttempt.findMany({ where: { cnRequestId: { in: rows.map(r => r.id) } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], distinct: ["cnRequestId"], select: { cnRequestId: true, kind: true, status: true } });
+    const reviews = await prisma.cnReviewAttempt.findMany({ where: { cnRequestId: { in: rows.map(r => r.id) } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], distinct: ["cnRequestId"], select: { id: true, cnRequestId: true, kind: true, status: true } });
     for (const review of reviews) reviewMap.set(review.cnRequestId, review);
   }
   return withDealerDisplayNames(rows.map((r) => ({ ...toRow({ ...r, paymentVerified: verified.get(r.id) ?? false }), ...(reviewMap.has(r.id) ? { processingReview: reviewMap.get(r.id) } : {}) })));

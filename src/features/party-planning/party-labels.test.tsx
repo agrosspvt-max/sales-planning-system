@@ -11,9 +11,9 @@ const pages = ["party-planning-page", "seasonal-planning-page", "seasonal-plan-l
 
 // 1. Every label key referenced by a page exists in the registry (no raw-key fallbacks), and all are catalogued under Party Planning.
 const referenced = new Set<string>();
-for (const f of pages) for (const m of readFileSync(`${dir}/${f}.tsx`, "utf8").matchAll(/"(party_planning\.[a-z0-9_.]+)"/g)) referenced.add(m[1]!);
+for (const f of pages) for (const m of readFileSync(`${dir}/${f}.tsx`, "utf8").matchAll(/"(party_planning\.[A-Za-z0-9_.]+)"/g)) referenced.add(m[1]!);
 // server-side messages (labeledError) are labels too
-for (const f of ["territory.server", "retailer.server"]) for (const m of readFileSync(`${dir}/${f}.ts`, "utf8").matchAll(/"(party_planning\.[a-z0-9_.]+)"/g)) referenced.add(m[1]!);
+for (const f of ["territory.server", "retailer.server", "monthly.server"]) for (const m of readFileSync(`${dir}/${f}.ts`, "utf8").matchAll(/"(party_planning\.[A-Za-z0-9_.]+)"/g)) referenced.add(m[1]!);
 assert.ok(referenced.size > 250, `pages reference the label registry (${referenced.size} keys)`);
 for (const k of referenced) assert.ok(k in DEFAULT_LABELS, `key registered: ${k}`);
 const catalog = labelCatalog({});
@@ -26,7 +26,7 @@ for (const k of referenced) {
 const all = Object.keys(DEFAULT_LABELS).filter((k) => k.startsWith("party_planning."));
 const used = new Set([...referenced, "party_planning.title"]);
 // legacy keys that the legacy pages build dynamically
-for (const k of all) assert.ok(used.has(k) || /^party_planning\.(col|action|view|territory\.(tab|action|field|col|search|all_markets|unmapped|empty$)|seasonal\.(col|empty$)|monthly\.(col|search|empty$))/.test(k) || /^party_planning\.(nav|view)\./.test(k), `unused Party Planning key: ${k}`);
+for (const k of all) assert.ok(used.has(k) || /^party_planning\.(col|action|view|territory\.(tab|action|field|col|search|all_markets|unmapped|empty$)|seasonal\.(col|empty$)|monthly\.(col|search|empty$|error\.(turnover_|option_)))/.test(k) || /^party_planning\.(nav|view)\./.test(k), `unused Party Planning key: ${k}`);
 
 // 2. Saved overrides appear; blank / unknown overrides fall back to the default English text (never blank, never a raw key).
 const ov = resolveLabels({ "party_planning.status.awaiting_rm": "Waiting for RM", "party_planning.common.open": "  ", "party_planning.nope": "x", "party_planning.stage.older": "Archive" });
@@ -62,11 +62,14 @@ assert.ok(renderToStaticMarkup(<parts.OpenButton href="/x" />).includes(">Open<"
 
 const navHtml = (stage = "create") => renderToStaticMarkup(<nav.PartyPlanModeLinks mode="seasonal" stage={stage} />);
 let html = navHtml();
-for (const t of ["Plan Type", "Create", "Submitted", "Approved", "Older Plans", "Seasonal", "Monthly", "Planning", "View"]) assert.ok(html.includes(`>${t}<`), `default nav text: ${t}`);
-assert.ok(html.includes('aria-label="Plan lifecycle"'));
-custom = { "party_planning.nav.plan_type": "Plan Kind", "party_planning.stage.older": "Archive", "party_planning.nav.plan_lifecycle_aria": "Lifecycle", "party_planning.nav.seasonal_tab": "Season Wise" };
-html = navHtml();
-assert.ok(html.includes(">Plan Kind<") && html.includes(">Archive<") && html.includes('aria-label="Lifecycle"') && html.includes(">Season Wise<") && !html.includes(">Older Plans<"), "custom navigation labels (incl. aria) replace the defaults");
+for (const t of ["Create New Plan", "View Plans", "Seasonal", "Monthly"]) assert.ok(html.includes(`>${t}<`), `default nav text: ${t}`);
+assert.ok(!html.includes("Plan Type"), "no lifecycle box under Create New Plan");
+html = navHtml("submitted");
+for (const t of ["Plan Type", "Submitted", "Approved", "Older Plans"]) assert.ok(html.includes(`>${t}<`), `default nav text: ${t}`);
+assert.ok(html.includes('aria-label="Plan lifecycle"') && html.includes('aria-label="Plan mode"'));
+custom = { "party_planning.nav.plan_type": "Plan Kind", "party_planning.stage.older": "Archive", "party_planning.nav.plan_lifecycle_aria": "Lifecycle", "party_planning.nav.seasonal_tab": "Season Wise", "party_planning.nav.create_new_plan": "Start Plan", "party_planning.nav.view_plans": "Browse Plans", "party_planning.nav.mode_aria": "Mode" };
+html = navHtml("submitted");
+assert.ok(html.includes(">Plan Kind<") && html.includes(">Archive<") && html.includes('aria-label="Lifecycle"') && html.includes(">Season Wise<") && !html.includes(">Older Plans<") && html.includes(">Start Plan<") && html.includes(">Browse Plans<") && html.includes('aria-label="Mode"'), "custom navigation labels (incl. aria) replace the defaults");
 assert.ok(html.includes("?stage=older"), "routes are unchanged by labels");
 custom = {};
 

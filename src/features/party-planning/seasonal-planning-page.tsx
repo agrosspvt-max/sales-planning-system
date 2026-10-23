@@ -15,11 +15,11 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useLabel } from "@/features/labels/label-ui";
-import { PartyPlanModeLinks } from "./party-planning-page";
+import { LabelSectionHeaderRow, useLabel, type LabelSection } from "@/features/labels/label-ui";
+import { SectionColgroup } from "@/components/ui/table-group";
+import { PlanDetailBar } from "./plan-detail-bar";
 import { fill, useLabels } from "./party-labels";
 
 /* ------------------------------------------- DTOs (mirror seasonal.server.ts) ------------------------------------------- */
@@ -102,7 +102,7 @@ export function SeasonalPlanDetailPage({ role, sheetId, stage = "create" }: { ro
     approval: useLabel("party_planning.seasonal.col.approval"), action: useLabel("party_planning.seasonal.col.action"),
     empty: useLabel("party_planning.seasonal.empty"),
   };
-  const T = useLabels({ planning: "party_planning.crumb.planning", createView: "party_planning.crumb.create_view", crumbPlan: "party_planning.seasonal.crumb_plan", subtitle: "party_planning.seasonal.subtitle_detail", subtitleOfficer: "party_planning.seasonal.subtitle_officer",
+  const T = useLabels({ back: "party_planning.nav.back", planning: "party_planning.crumb.planning", crumbCreate: "party_planning.crumb.create_new_plan", crumbView: "party_planning.crumb.view_plans", createView: "party_planning.crumb.create_view", crumbPlan: "party_planning.seasonal.crumb_plan", subtitleOfficer: "party_planning.seasonal.subtitle_officer",
     seasonClosed: "party_planning.common.season_closed", existing: "party_planning.seasonal.type.existing", newType: "party_planning.seasonal.type.new", pending: "party_planning.status.pending", appointed: "party_planning.status.appointed",
     DRAFT: "party_planning.status.draft", PENDING_RM: "party_planning.status.awaiting_rm", PENDING_ADMIN: "party_planning.status.awaiting_admin", APPROVED: "party_planning.status.approved", REJECTED: "party_planning.status.rejected",
     rejectedBy: "party_planning.common.rejected_by", decidedRm: "party_planning.common.decided_rm", decidedAdmin: "party_planning.common.decided_admin", submit: "party_planning.action.submit", approve: "party_planning.action.approve", reject: "party_planning.action.reject",
@@ -128,26 +128,33 @@ export function SeasonalPlanDetailPage({ role, sheetId, stage = "create" }: { ro
   const addMarketButton = stage === "create" && canPlan && sheet?.own && sheet.seasonOpen ? <Button variant="outline" size="sm" className="mt-2" onClick={() => setAdding(true)}><Plus className="h-4 w-4" /> {T.addMarket}</Button> : null;
   const busy = submit.isPending || remove.isPending || act.isPending;
 
+  // Recovery Planning's grouped-header look (shared SectionColgroup + LabelSectionHeaderRow + tone tints): S.No and Market stay neutral; presentation only, column order unchanged.
+  const sections: LabelSection[] = [
+    { labelKey: "party_planning.section.market_details", span: 2, tone: "amber", color: "#FF3445" },
+    { labelKey: "party_planning.section.progress", span: 2, tone: "green" },
+    { labelKey: "party_planning.section.approval", span: 2, tone: "purple" },
+  ];
   return (
     <div className="space-y-5">
-      <PageHeader
-        crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: L.title }, { label: L.nav, href: "/planning/party/seasonal" }, { label: detail ? detail.season.name + " " + detail.season.year : T.crumbPlan }]}
-        title={L.title}
-        subtitle={`${T.subtitle}${sheet && !sheet.own ? fill(T.subtitleOfficer, { name: sheet.ownerName }) : ""}${sheet && !sheet.seasonOpen ? ` ${T.seasonClosed}` : ""}`}
-      />
-      <PartyPlanModeLinks mode="seasonal" stage={stage} />
+      {/* Opened plan: compact Back + breadcrumbs only (the title, subtitle, mode switch and Seasonal | Monthly tabs stay on the lists). */}
+      <PlanDetailBar crumbs={[{ label: T.planning }, { label: T.createView, href: "/planning/create" }, { label: L.title }, { label: L.nav, href: `/planning/party/seasonal?stage=${stage}` }, { label: stage === "create" ? T.crumbCreate : T.crumbView, href: `/planning/party/seasonal?stage=${stage}` }, { label: detail ? detail.season.name + " " + detail.season.year : T.crumbPlan }]} backHref={`/planning/party/seasonal?stage=${stage}`} backLabel={T.back}
+        notes={[sheet && !sheet.own ? fill(T.subtitleOfficer, { name: sheet.ownerName }) : "", sheet && !sheet.seasonOpen ? T.seasonClosed : ""]} />
 
       {loadError && <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">{(loadError as Error).message}</div>}
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       <div className="overflow-auto rounded-lg border bg-background">
         <Table numbered>
-          <TableHeader><TableRow>
+          <SectionColgroup leading={2} sections={sections} />
+          <TableHeader>
+            <LabelSectionHeaderRow leading={2} sections={sections} />
+            <TableRow>
             <TableHead>{L.market}</TableHead>
             <TableHead>{L.type}</TableHead>
             <TableHead>{L.potential}</TableHead><TableHead>{L.status}</TableHead><TableHead>{L.date}</TableHead>
             <TableHead>{L.approval}</TableHead><TableHead className="text-right">{L.action}</TableHead>
-          </TableRow></TableHeader>
+          </TableRow>
+          </TableHeader>
           <TableBody>
             {isLoading ? <TableRow><TableCell colSpan={7}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
               : (plans?.length ?? 0) === 0 ? <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">{stage === "create" ? L.empty : stage === "older" ? T.emptyOlder : stage === "submitted" ? T.emptySubmitted : T.emptyApproved}</TableCell></TableRow>

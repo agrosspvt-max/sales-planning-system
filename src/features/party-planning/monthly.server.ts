@@ -9,10 +9,11 @@ import { hasAdminPermission, isAdministrativeRole, assertAdminPermission } from 
 import { getSeasonInfo, listOpenSeasonInfos, type MonthOption, type SeasonInfo } from "./season-info.server";
 import { identity, monthLabel } from "@/lib/season-calendar";
 import { currentBusinessDate } from "@/lib/daily-work";
+import { labeledError } from "@/features/labels/labeled-error";
 import { createDealerForOfficer } from "@/features/planning/monthly-plan.server";
 import { applyAppointment, derivedType, isEditable, reviewTransition, shownMarketPotential, shownMarketSource, submitTarget } from "@/lib/seasonal-plan";
 import {
-  APPROVAL_LABEL, ADMIN_PENDING_STATUSES, OPTION_NUMBERS, STAGE_ROW_STATUSES, sheetInStage, type PlanStage, type StageCounts, conversionDays, summarizeDateHistory, ROW_STATUS_LABEL, TRANSITIONS, adminActionFor, cleanParty, displayRowStatus, isRowStatus, monthKey, monthlySheetStatus, parseTransition, transitionActor, validatePartyName, validatePlanDate,
+  APPROVAL_LABEL, validateOptions, optionsComplete, MAX_OPTIONS, ADMIN_PENDING_STATUSES, STAGE_ROW_STATUSES, sheetInStage, type PlanStage, type StageCounts, conversionDays, summarizeDateHistory, ROW_STATUS_LABEL, TRANSITIONS, adminActionFor, displayRowStatus, isRowStatus, monthKey, monthlySheetStatus, parseTransition, transitionActor, validatePlanDate,
   type DocInfo, type StoredSentInfo, type TransitionInput, type MonthlySheetStatus, type OptionNo, type RowStatus,
 } from "@/lib/monthly-plan";
 
@@ -103,17 +104,27 @@ export interface MonthlySeasonOption extends SeasonInfo { eligibleCount: number;
  * The create dialog's choices: every OPEN season with its months in calendar order, how many APPROVED Seasonal Plan markets the caller has in it
  * (a Monthly Plan needs at least one — otherwise the dialog explains why it cannot be created), and the months they already have a plan for.
  */
-export async function getMonthlyOptions(ctx: AuthContext): Promise<{ seasons: MonthlySeasonOption[] }> {
+export async function getMonthlyOptions(ctx: AuthContext): Promise<{ seasons: MonthlySeasonOption[]; currentMonthKey: string }> {
   assertReader(ctx);
   const seasons = await listOpenSeasonInfos();
-  if (!planner(ctx) && !isAdministrativeRole(ctx.role)) return { seasons: seasons.map((s) => ({ ...s, eligibleCount: 0, takenMonthIds: [] })) };
+  // The running calendar month in the application's business time zone (Asia/Kolkata) as YYYY-MM — compared with each SeasonMonth's stored calendar identity, never with its position or name.
+  const currentMonthKey = currentBusinessDate().slice(0, 7);
+  if (!planner(ctx) && !isAdministrativeRole(ctx.role)) return { seasons: seasons.map((s) => ({ ...s, eligibleCount: 0, takenMonthIds: [] })), currentMonthKey };
   const [approved, taken] = await Promise.all([
     // An officer's markets are their own; Admin has no Seasonal Plan of their own, so the dependency is the season's approved markets system-wide.
     prisma.seasonalPlan.findMany({ where: { ...(planner(ctx) ? { ownerId: ctx.userId } : {}), approvalStatus: "APPROVED", seasonId: { in: seasons.map((s) => s.id) } }, select: { seasonId: true } }),
     prisma.partyMonthlySheet.findMany({ where: { ownerId: ctx.userId }, select: { seasonMonthId: true } }),
   ]);
   const takenIds = new Set(taken.map((t) => t.seasonMonthId));
-  return { seasons: seasons.map((s) => ({ ...s, eligibleCount: approved.filter((a) => a.seasonId === s.id).length, takenMonthIds: s.months.filter((m) => takenIds.has(m.id)).map((m) => m.id) })) };
+  return { seasons: seasons.map((s) => ({ ...s, eligibleCount: approved.filter((a) => a.seasonId === s.id).length, takenMonthIds: s.months.filter((m) => takenIds.has(m.id)).map((m) => m.id) })), currentMonthKey };
+}
+
+/**
+ * Lifecycle membership for the Monthly lists. Create shows UNFINISHED work only: an open season with at least one editable (Draft / Rejected) entry — an empty sheet, or one whose
+ * entries are all submitted / approved, is hidden (never deleted; it stays under Submitted / Approved). Every other section keeps the shared rule.
+ */
+function monthlyInStage(counts: StageCounts, seasonOpen: boolean, stage: PlanStage): boolean {
+  return stage === "create" ? seasonOpen && counts.create > 0 : sheetInStage(counts, seasonOpen, stage);
 }
 
 /** The Monthly Plans the caller may see, across ALL seasons and months. `needsAction` narrows to those with something the caller can act on now. */
@@ -121,11 +132,11 @@ export async function listMonthlySheets(ctx: AuthContext, filters: { seasonId?: 
   assertReader(ctx);
   const scope = await getOfficerScope(ctx);
   const rows = await prisma.partyMonthlySheet.findMany({ where: { ...(filters.seasonId ? { seasonId: filters.seasonId } : {}), ...(scope.all ? {} : { ownerId: { in: scope.ids } }) }, include: sheetInclude, take: 1000 });
-  return rows.map((r) => toSheetDto(ctx, r, scope.ids)).filter((d) => !filters.stage || sheetInStage(d.counts, d.seasonOpen, filters.stage)).filter((d) => !filters.needsAction || d.needsMyAction > 0)
+  return rows.map((r) => toSheetDto(ctx, r, scope.ids)).filter((d) => !filters.stage || monthlyInStage(d.counts, d.seasonOpen, filters.stage)).filter((d) => !filters.needsAction || d.needsMyAction > 0)
     .sort((a, b) => b.monthKey.localeCompare(a.monthKey) || b.updatedAt.localeCompare(a.updatedAt));
 }
 
-/** Create the caller's Monthly Plan for a CHOSEN open season and one of ITS months. Needs an approved Seasonal Plan market in that season. */
+/** Create — or resume — the caller's Monthly Plan for a CHOSEN open season and one of ITS months. Needs an approved Seasonal Plan market in that season. */
 export async function createMonthlySheet(ctx: AuthContext, raw: unknown): Promise<MonthlySheetDto> {
   assertSheetCreator(ctx);
   const parsed = z.object({ seasonId: z.string().min(1, "Select a season"), seasonMonthId: z.string().min(1, "Select a month") }).safeParse(raw ?? {});
@@ -137,13 +148,24 @@ export async function createMonthlySheet(ctx: AuthContext, raw: unknown): Promis
   if (!month) throw new ApiError(422, "Select a month of the chosen season");
   const eligible = await prisma.seasonalPlan.count({ where: { ...(planner(ctx) ? { ownerId: ctx.userId } : {}), seasonId: season.id, approvalStatus: "APPROVED" } });
   if (eligible === 0) throw new ApiError(422, `${planner(ctx) ? "You have" : "There is"} no approved Seasonal Plan market in ${season.name} ${season.year}, so there is nothing to plan monthly. Get a Seasonal Plan approved first.`);
-  if (await prisma.partyMonthlySheet.findUnique({ where: { ownerId_seasonMonthId: { ownerId: ctx.userId, seasonMonthId: month.id } }, select: { id: true } })) throw new ApiError(409, `You already have a Monthly Plan for ${month.label}. Open it from the list.`);
-  const created = await prisma.$transaction(async (tx) => {
-    const sheet = await tx.partyMonthlySheet.create({ data: { seasonId: season.id, seasonMonthId: month.id, ownerId: ctx.userId }, include: sheetInclude });
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "partyMonthlySheet", entityId: sheet.id, summary: `Monthly Plan created · ${season.name} ${season.year} · ${month.label}` }, tx);
-    return sheet;
-  });
-  return toSheetDto(ctx, created, [ctx.userId]);
+  // Create-or-RESUME: the caller's one sheet for this month (owner + SeasonMonth is unique) is returned if it exists, whatever it holds. Concurrent / repeated requests converge on one row.
+  const key = { ownerId_seasonMonthId: { ownerId: ctx.userId, seasonMonthId: month.id } };
+  const existing = await prisma.partyMonthlySheet.findUnique({ where: key, include: sheetInclude });
+  if (existing) return toSheetDto(ctx, existing, [ctx.userId]);
+  try {
+    const created = await prisma.$transaction(async (tx) => {
+      const sheet = await tx.partyMonthlySheet.create({ data: { seasonId: season.id, seasonMonthId: month.id, ownerId: ctx.userId }, include: sheetInclude });
+      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "partyMonthlySheet", entityId: sheet.id, summary: `Monthly Plan created · ${season.name} ${season.year} · ${month.label}` }, tx);
+      return sheet;
+    });
+    return toSheetDto(ctx, created, [ctx.userId]);
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") { // lost the race: another request created it first
+      const winner = await prisma.partyMonthlySheet.findUnique({ where: key, include: sheetInclude });
+      if (winner) return toSheetDto(ctx, winner, [ctx.userId]);
+    }
+    throw e;
+  }
 }
 
 export interface EligibleSeasonalPlan { id: string; marketName: string; marketPotential: string | null; type: "Existing" | "New" | null }
@@ -176,7 +198,7 @@ export async function getMonthlySheet(ctx: AuthContext, id: string, stage?: stri
 /* ------------------------------------------------ DTO ------------------------------------------------ */
 
 /** Option 1 / Option 2 are only candidate party names — no status, no timeline of their own. */
-export interface OptionDto { id: string; optionNo: OptionNo; partyName: string | null }
+export interface OptionDto { id: string; optionNo: OptionNo; partyName: string | null; /** stable category code; null = not recorded (every historical row) */ turnoverCategory: string | null }
 export interface StatusEventDto { id: string; dealerId: string | null; previousStatus: string; newStatus: string; previousLabel: string; newLabel: string; actorName: string; actorRole: string; remarks: string | null; sentInfo: StoredSentInfo | null; receivedInfo: DocInfo | null; createdAt: string }
 export interface MonthlyPlanDto {
   id: string; sheetId: string; seasonalPlanId: string; seasonId: string; seasonMonthId: string; monthLabel: string; monthKey: string;
@@ -236,7 +258,7 @@ async function toDtos(ctx: AuthContext, rows: PlanRow[], teamIds: readonly strin
       appointedDealerId: r.appointedDealerId ?? null, appointedDealerName: r.appointedDealer?.name ?? null,
       marketId: r.marketId, marketName: r.marketNameAtPlanning, marketPotential: r.marketPotentialAtPlanning,
       planDate: planDay, createdAt: r.createdAt.toISOString(), canManage: own && open,
-      options: r.options.map((o) => ({ id: o.id, optionNo: o.optionNo as OptionNo, partyName: o.partyName })),
+      options: r.options.map((o) => ({ id: o.id, optionNo: o.optionNo as OptionNo, partyName: o.partyName, turnoverCategory: o.turnoverCategory ?? null })),
       opStatus, statusLabel: displayRowStatus(opStatus, r.approvalStatus),
       approvalStatus: r.approvalStatus, approvalLabel: APPROVAL_LABEL[r.approvalStatus] ?? r.approvalStatus, rejectionStage: r.rejectionStage, rejectionReason: r.rejectionReason,
       canEditEntry: own && open && isEditable(r.approvalStatus) && opStatus === "NONE", canReview: open && canReviewEntry(ctx, r, teamIds), statusChangedAt: r.opStatusChangedAt?.toISOString() ?? null, allowedStatuses,
@@ -251,8 +273,20 @@ async function toDtos(ctx: AuthContext, rows: PlanRow[], teamIds: readonly strin
 /* ------------------------------------------------ create / edit (owner) ------------------------------------------------ */
 
 // Only these fields are read from the browser; everything else (owner, season, market, potential, status…) is ignored.
-const createInput = z.object({ sheetId: z.string().min(1, "Open a Monthly Plan first"), seasonalPlanId: z.string().min(1, "Select a market"), planDate: z.unknown().optional(), option1Party: z.unknown(), option2Party: z.unknown().optional() });
-const updateInput = z.object({ planDate: z.unknown().optional(), option1Party: z.unknown().optional(), option2Party: z.unknown().optional() });
+// Only these fields are read from the browser; everything else (owner, season, market, potential, status…) is ignored. `options` is the COMPLETE structured list of candidate parties.
+const createInput = z.object({ sheetId: z.string().min(1, "Open a Monthly Plan first"), seasonalPlanId: z.string().min(1, "Select a market"), planDate: z.unknown().optional(), options: z.unknown() });
+const updateInput = z.object({ planDate: z.unknown().optional(), options: z.unknown().optional() });
+/** Throws the labelled 422 for the first problem of an options collection. */
+function assertOptions(raw: unknown): ReturnType<typeof validateOptions> & { ok: true } {
+  const result = validateOptions(raw);
+  if (result.ok) return result;
+  const p = result.problem;
+  if ("index" in p) {
+    const key = ({ party_required: "option_party_required", party_long: "option_party_long", turnover_required: "turnover_required", turnover_invalid: "turnover_invalid", number_invalid: "option_number_invalid", number_duplicate: "option_number_duplicate", id_duplicate: "option_number_duplicate" } as const)[p.code];
+    throw labeledError(422, `party_planning.monthly.error.${key}` as const, { option: p.index, max: MAX_OPTIONS });
+  }
+  throw labeledError(422, p.code === "too_many" ? "party_planning.monthly.error.options_too_many" : "party_planning.monthly.error.options_min", { max: MAX_OPTIONS });
+}
 
 async function actorOf(ctx: AuthContext): Promise<{ name: string; role: string }> {
   const user = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { name: true } });
@@ -279,22 +313,48 @@ export async function createMonthlyPlan(ctx: AuthContext, raw: unknown): Promise
 
   const dateProblem = validatePlanDate(parsed.data.planDate, month);
   if (dateProblem) throw new ApiError(422, dateProblem);
-  const p1 = validatePartyName(parsed.data.option1Party, true) ?? null; if (p1) throw new ApiError(422, `Option 1: ${p1}`);
-  const p2 = validatePartyName(parsed.data.option2Party, false); if (p2) throw new ApiError(422, `Option 2: ${p2}`);
+  // The complete options collection: at least two, each with a party name and its own turnover. New options are numbered in the order given (1, 2, 3 …) unless numbers were supplied.
+  const checked = assertOptions(parsed.data.options).value;
+  const optionRows = checked.map((o, i) => ({ optionNo: o.optionNo ?? i + 1, partyName: o.party!, turnoverCategory: o.turnover!, status: "PENDING" }));
+  if (new Set(optionRows.map((o) => o.optionNo)).size !== optionRows.length) throw labeledError(422, "party_planning.monthly.error.option_number_duplicate");
   if (await prisma.partyMonthlyPlan.findFirst({ where: { seasonalPlanId: sp.id, seasonMonthId: month.id }, select: { id: true } })) throw new ApiError(409, "This market is already planned for that month");
 
   const potential = shownMarketPotential(sp, sp.market);
   const planDate = parsed.data.planDate ? String(parsed.data.planDate) : null;
-  const parties: Record<OptionNo, string | null> = { 1: cleanParty(parsed.data.option1Party), 2: cleanParty(parsed.data.option2Party) };
-  const created = await prisma.$transaction(async (tx) => {
-    const plan = await tx.partyMonthlyPlan.create({ data: { sheetId: sheet.id, seasonalPlanId: sp.id, seasonId: sheet.seasonId, seasonMonthId: month.id, ownerId: ctx.userId, marketId: sp.marketId, marketNameAtPlanning: sp.market.name, marketPotentialAtPlanning: potential, planDate: planDate ? new Date(`${planDate}T00:00:00.000Z`) : null } });
-    for (const optionNo of OPTION_NUMBERS) {
-      await tx.partyMonthlyOption.create({ data: { monthlyPlanId: plan.id, optionNo, partyName: parties[optionNo], status: "PENDING" } }); // a candidate name only
+  // ONE short write transaction: the entry, BOTH party options (with their own turnover) as a nested write, and the audit record — atomic, so a failure leaves nothing behind.
+  // Everything else (re-reading the entry, building the response) happens AFTER commit. The bounded timeout follows the other write transactions on the remote database; it is not global.
+  let planId: string;
+  try {
+    planId = await prisma.$transaction(async (tx) => {
+      const plan = await tx.partyMonthlyPlan.create({
+        data: {
+          sheetId: sheet.id, seasonalPlanId: sp.id, seasonId: sheet.seasonId, seasonMonthId: month.id, ownerId: ctx.userId, marketId: sp.marketId, marketNameAtPlanning: sp.market.name, marketPotentialAtPlanning: potential,
+          planDate: planDate ? new Date(`${planDate}T00:00:00.000Z`) : null,
+          options: { create: optionRows }, // ALL options in the same nested write — one round trip, atomic with the entry and the audit record
+        },
+        select: { id: true },
+      });
+      await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "partyMonthlyPlan", entityId: plan.id, summary: `Monthly Plan market added · ${monthLabel(month)} · ${sp.market.name}` }, tx);
+      return plan.id;
+    }, { timeout: 15_000, maxWait: 10_000 });
+  } catch (e) {
+    // A concurrent identical save lost the unique (Seasonal market + month) race: the same clear conflict as the pre-check. Nothing was written by this request.
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw new ApiError(409, "This market is already planned for that month");
+    // The transaction closed (P2028) or no connection was available (P2024): the write was rolled back / never started. It is NOT retried automatically — the user retries, and the unique rule keeps that safe.
+    if (e instanceof Prisma.PrismaClientKnownRequestError && (e.code === "P2028" || e.code === "P2024")) {
+      console.error("[monthly-plan] save did not complete", { code: e.code, sheetId: sheet.id, seasonalPlanId: sp.id, ownerId: ctx.userId });
+      throw labeledError(503, "party_planning.monthly.error.save_busy");
     }
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "partyMonthlyPlan", entityId: plan.id, summary: `Monthly Plan market added · ${monthLabel(month)} · ${sp.market.name}` }, tx);
-    return (await tx.partyMonthlyPlan.findUnique({ where: { id: plan.id }, include }))!;
-  });
-  return (await toDtos(ctx, [created]))[0]!;
+    throw e;
+  }
+  // After commit: if loading the result fails, the entry IS saved — never re-run the write; the caller reloads the plan instead.
+  try {
+    const created = await prisma.partyMonthlyPlan.findUnique({ where: { id: planId }, include });
+    return (await toDtos(ctx, [created!]))[0]!;
+  } catch (e) {
+    console.error("[monthly-plan] entry saved but could not be read back", { planId, error: (e as { code?: string })?.code ?? "unknown" });
+    throw labeledError(503, "party_planning.monthly.error.saved_reload");
+  }
 }
 
 async function ownPlan(ctx: AuthContext, id: string): Promise<PlanRow> {
@@ -303,7 +363,7 @@ async function ownPlan(ctx: AuthContext, id: string): Promise<PlanRow> {
   return plan;
 }
 
-/** Owner edits: the tentative plan date (inside the month) and a candidate party name while that option is still Pending. */
+/** Owner edits: the tentative plan date (inside the month) and — while the entry is a Draft / Rejected one — the COMPLETE list of candidate party options. */
 export async function updateMonthlyPlan(ctx: AuthContext, id: string, raw: unknown): Promise<MonthlyPlanDto> {
   assertPlanner(ctx);
   const plan = await ownPlan(ctx, id);
@@ -311,7 +371,7 @@ export async function updateMonthlyPlan(ctx: AuthContext, id: string, raw: unkno
   const parsed = updateInput.safeParse(raw ?? {});
   if (!parsed.success) throw new ApiError(422, "Invalid update");
   const d = parsed.data;
-  if (d.planDate === undefined && d.option1Party === undefined && d.option2Party === undefined) throw new ApiError(422, "Nothing to update");
+  if (d.planDate === undefined && d.options === undefined) throw new ApiError(422, "Nothing to update");
   let planDate: Date | null | undefined;
   if (d.planDate !== undefined) {
     if (plan.opStatus !== "NONE") throw new ApiError(409, "The Conversion Date is now set automatically by each status change");
@@ -319,14 +379,27 @@ export async function updateMonthlyPlan(ctx: AuthContext, id: string, raw: unkno
     if (problem) throw new ApiError(422, problem);
     planDate = d.planDate ? new Date(`${String(d.planDate)}T00:00:00.000Z`) : null;
   }
-  const renames: { option: PlanRow["options"][number]; to: string | null }[] = [];
-  for (const [no, value] of [[1, d.option1Party], [2, d.option2Party]] as const) {
-    if (value === undefined) continue;
-    const option = plan.options.find((o) => o.optionNo === no)!;
+  // Candidate party options. The request carries the COMPLETE resulting list (validated as a whole: at least two complete options), not a fragment. Persisted options keep their id and number;
+  // only changed ones are updated, options left out are removed (only while the entry is an editable draft with no history on them), new ones get the next free numbers.
+  let optionWrites: { updates: { id: string; party: string; turnover: string }[]; creates: { optionNo: number; partyName: string; turnoverCategory: string; status: string }[]; deletes: string[] } | undefined;
+  if (d.options !== undefined) {
     if (plan.opStatus !== "NONE" || !isEditable(plan.approvalStatus)) throw new ApiError(409, "The candidate parties can only change while the entry is a draft (before it is submitted / its status workflow begins)");
-    const problem = validatePartyName(value, no === 1); if (problem) throw new ApiError(422, `Option ${no}: ${problem}`);
-    const to = cleanParty(value);
-    if (to !== option.partyName) renames.push({ option, to });
+    const checked = assertOptions(d.options).value;
+    const stored = new Map(plan.options.map((o) => [o.id, o]));
+    const kept = checked.filter((o) => o.id);
+    if (kept.some((o) => !stored.has(o.id!))) throw labeledError(422, "party_planning.monthly.error.option_unknown");
+    const keptIds = new Set(kept.map((o) => o.id!));
+    const deletes = plan.options.filter((o) => !keptIds.has(o.id)).map((o) => o.id);
+    if (deletes.length && await prisma.partyMonthlyEvent.count({ where: { optionId: { in: deletes } } }) > 0) throw labeledError(409, "party_planning.monthly.error.option_locked");
+    const used = new Set(plan.options.filter((o) => keptIds.has(o.id)).map((o) => o.optionNo));
+    const fresh = checked.filter((o) => !o.id);
+    for (const o of fresh) if (o.optionNo != null) { if (used.has(o.optionNo)) throw labeledError(422, "party_planning.monthly.error.option_number_duplicate"); used.add(o.optionNo); }
+    const nextFree = () => { for (let n = 1; n <= MAX_OPTIONS; n++) if (!used.has(n)) { used.add(n); return n; } throw labeledError(422, "party_planning.monthly.error.options_too_many", { max: MAX_OPTIONS }); };
+    optionWrites = {
+      deletes,
+      updates: kept.filter((o) => { const cur = stored.get(o.id!)!; return cur.partyName !== o.party || (cur.turnoverCategory ?? null) !== o.turnover; }).map((o) => ({ id: o.id!, party: o.party!, turnover: o.turnover! })),
+      creates: fresh.map((o) => ({ optionNo: o.optionNo ?? nextFree(), partyName: o.party!, turnoverCategory: o.turnover!, status: "PENDING" })),
+    };
   }
   const actor = await actorOf(ctx);
   const dateChanged = planDate !== undefined && dayOf(planDate) !== dayOf(plan.planDate);
@@ -334,12 +407,14 @@ export async function updateMonthlyPlan(ctx: AuthContext, id: string, raw: unkno
     if (planDate !== undefined) await tx.partyMonthlyPlan.update({ where: { id }, data: { planDate } });
     // Every hand edit of the Conversion Date by the SO is kept (the grey counter = how many).
     if (dateChanged) await tx.partyMonthlyDateChange.create({ data: { monthlyPlanId: id, previousDate: plan.planDate, newDate: planDate ?? null, byAdmin: false, automatic: false, actorId: ctx.userId, actorName: actor.name, actorRole: actor.role } });
-    for (const { option, to } of renames) {
-      await tx.partyMonthlyOption.update({ where: { id: option.id }, data: { partyName: to } });
+    if (optionWrites) {
+      if (optionWrites.deletes.length) await tx.partyMonthlyOption.deleteMany({ where: { id: { in: optionWrites.deletes }, monthlyPlanId: id } });
+      for (const u of optionWrites.updates) await tx.partyMonthlyOption.update({ where: { id: u.id }, data: { partyName: u.party, turnoverCategory: u.turnover } });
+      if (optionWrites.creates.length) await tx.partyMonthlyOption.createMany({ data: optionWrites.creates.map((c) => ({ ...c, monthlyPlanId: id })) });
     }
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "partyMonthlyPlan", entityId: id, summary: `Monthly Plan edited · ${plan.marketNameAtPlanning}` }, tx);
     return (await tx.partyMonthlyPlan.findUnique({ where: { id }, include }))!;
-  });
+  }, { timeout: 15_000, maxWait: 10_000 });
   return (await toDtos(ctx, [updated]))[0]!;
 }
 
@@ -363,9 +438,10 @@ export async function submitMonthlySheet(ctx: AuthContext, id: string): Promise<
   if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
   const rmId = ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId) : null;
   const updated = await prisma.$transaction(async (tx) => {
-    const rows = await tx.partyMonthlyPlan.findMany({ where: { sheetId: id, ownerId: ctx.userId, approvalStatus: { in: ["DRAFT", "REJECTED"] } }, select: { id: true, approvalStatus: true, options: { select: { optionNo: true, partyName: true } } } });
+    const rows = await tx.partyMonthlyPlan.findMany({ where: { sheetId: id, ownerId: ctx.userId, approvalStatus: { in: ["DRAFT", "REJECTED"] } }, select: { id: true, approvalStatus: true, options: { select: { optionNo: true, partyName: true, turnoverCategory: true } } } });
     if (rows.length === 0) throw new ApiError(409, "There is nothing new to submit");
-    if (rows.some((r) => !r.options.some((o) => o.optionNo === 1 && o.partyName))) throw new ApiError(422, "Every market needs an Option 1 party before submitting");
+    // Revalidated here so a direct API call cannot bypass it: every entry needs at least two COMPLETE options (party + Tentative Turnover) — legacy drafts included, once corrected.
+    if (rows.some((r) => !optionsComplete(r.options))) throw labeledError(422, "party_planning.monthly.error.submit_options");
     const now = new Date();
     let n = 0;
     for (const row of rows) {

@@ -13,6 +13,7 @@ const posts: { url: string; body: unknown }[] = [];
 const gets: string[] = [];
 let invalidations = 0;
 let seasonalSheets: unknown[] = [];
+const pushed: string[] = [];
 let monthlySheets: unknown[] = [];
 let seasonalOptions: unknown = { seasons: [] };
 let monthlyOptions: unknown = { seasons: [] };
@@ -43,9 +44,10 @@ const overrides = {
       return { data: undefined };
     },
     useQueryClient: () => ({ invalidateQueries: () => { invalidations += 1; } }),
-    useMutation: (o: { mutationFn: () => Promise<unknown>; onSuccess?: () => void; onError?: (e: unknown) => void }) => ({ isPending: false, mutate: () => { void o.mutationFn().then(() => o.onSuccess?.(), (e) => o.onError?.(e)); } }),
+    useMutation: (o: { mutationFn: () => Promise<unknown>; onSuccess?: (r?: never) => void; onError?: (e: unknown) => void }) => ({ isPending: false, mutate: () => { void o.mutationFn().then((r) => o.onSuccess?.(r as never), (e) => o.onError?.(e)); } }),
   },
-  "@/lib/api-client": { api: { get: async (url: string) => { gets.push(url); return []; }, post: async (url: string, body: unknown) => { posts.push({ url, body }); return {}; } } },
+  "next/navigation": { useRouter: () => ({ push: (href: string) => { pushed.push(href); } }) },
+  "@/lib/api-client": { api: { get: async (url: string) => { gets.push(url); return []; }, post: async (url: string, body: unknown) => { posts.push({ url, body }); return { id: "new-sheet" }; } } },
   "@/components/ui/button": { Button: (p: { children?: React.ReactNode; onClick?: () => void; disabled?: boolean }) => { buttons.push(p); return <button>{p.children}</button>; } },
   "@/components/ui/select": { NativeSelect: (p: (typeof selects)[number]) => { selects.push(p); return <select data-placeholder={p.placeholder} />; } },
   "@/components/ui/dialog": {
@@ -96,13 +98,13 @@ async function main() {
   seasonalSheets = [{ ...SEASONAL[0], own: false, ownerName: "Officer Two", needsMyReview: 1, status: "Pending Approval", counts: { create: 0, submitted: 1, approved: 0 } }];
   html = render(SeasonalPlanListPage, Role.REGIONAL_MANAGER, "submitted");
   assert.ok(html.includes(">Officer</th>") && html.includes("Officer Two") && html.includes("1 to review"));
-  seasonalSheets = [{ ...(seasonalSheets[0] as object), status: "Draft" }];
+  seasonalSheets = [{ ...(seasonalSheets[0] as object), status: "Draft", counts: { create: 1, submitted: 0, approved: 0 } }];
   html = render(SeasonalPlanListPage, Role.SUPER_ADMIN);
   assert.equal(buttons.filter((b) => String(b.children).includes("Create Seasonal Plan")).length, 1, "Admin gets Create Seasonal Plan (the backend creates it as Admin, in their own right)");
   assert.ok(html.includes("Officer Two"), "Admin sees other officers' plans with the Officer column");
   for (const role of [Role.SUPER_ADMIN, Role.REGIONAL_MANAGER, Role.SALES_OFFICER]) { html = render(SeasonalPlanListPage, role); assert.ok(!html.includes("Needs my review") && !html.includes("All seasons") && !html.includes("<label>Season</label>"), "the Season filter row (and review checkbox) is gone"); }
   seasonalSheets = [];
-  assert.ok(render(SeasonalPlanListPage).includes("No Seasonal Plans in progress."));
+  assert.ok(render(SeasonalPlanListPage).includes("No Seasonal Plans with unfinished markets.") && buttons.some((b) => String(b.children).includes("Create Seasonal Plan")), "no draft work: empty state, Create Seasonal Plan still available");
 
   // Create: a dialog asking for the season (every OPEN season, nothing pre-selected), then POST { seasonId } and back to the list.
   seasonalOptions = { seasons: [{ id: "s-kharif", name: "Kharif", year: 2026, period: "Apr 2026 → Nov 2026", hasPlan: false }, { id: "s-rabi", name: "Rabi", year: 2026, period: "Nov 2026 → Mar 2027", hasPlan: true }, { id: "s-zaid", name: "Zaid", year: 2026, period: "Mar 2026 → Jun 2026", hasPlan: false }] };
@@ -111,7 +113,7 @@ async function main() {
   html = render(SeasonalPlanListPage);
   assert.ok(html.includes("data-dialog") && html.includes("Create Seasonal Plan") && html.includes("Season *"));
   const seasonSelect = selects.find((s) => s.placeholder === "Select a season…")!;
-  assert.deepEqual(seasonSelect.options.map((o) => o.label), ["Kharif 2026", "Rabi 2026 (plan exists)", "Zaid 2026"], "all OPEN seasons come from the Seasons module — none hard-coded, none auto-chosen");
+  assert.deepEqual(seasonSelect.options.map((o) => o.label), ["Kharif 2026", "Rabi 2026 (continue)", "Zaid 2026"], "all OPEN seasons come from the Seasons module — none hard-coded, none auto-chosen");
   assert.equal(seasonSelect.value, "", "no season is pre-selected");
   assert.ok(buttons.filter((b) => String(b.children).includes("Create") && !String(b.children).includes("Seasonal")).at(-1)!.disabled, "Create stays disabled until a season is chosen");
   click("Cancel"); html = render(SeasonalPlanListPage);
@@ -123,6 +125,7 @@ async function main() {
   assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/seasonal-sheets", body: { seasonId: "s-zaid" } }], "the CHOSEN season is sent — never a current season");
   assert.ok(invalidations >= 1, "the list refreshes");
   assert.ok(!render(SeasonalPlanListPage).includes("data-dialog"), "the dialog closes after creating");
+  assert.deepEqual(pushed, ["/planning/party/seasonal/new-sheet?stage=create"], "Create opens the selected season's editor immediately, in the create stage");
 
   /* ---------------- lifecycle sections (Seasonal list: filtered by plan status; closed season → Older) ---------------- */
   {
@@ -130,12 +133,13 @@ async function main() {
     const mk = (id: string, counts: { create: number; submitted: number; approved: number }, seasonOpen = true) => ({ ...SEASONAL[0], id, counts, seasonOpen, seasonName: id, itemCount: counts.create + counts.submitted + counts.approved });
     seasonalSheets = [mk("EMPTY", { create: 0, submitted: 0, approved: 0 }), mk("MIXED", { create: 1, submitted: 2, approved: 3 }), mk("SUB", { create: 0, submitted: 1, approved: 0 }), mk("OLD", { create: 0, submitted: 0, approved: 2 }, false), mk("OLD2", { create: 4, submitted: 0, approved: 0 }, false)];
     const shown = (stage: string) => links(render(SeasonalPlanListPage, Role.SALES_OFFICER, stage)).filter(([, t]) => t === "Open").map(([h]) => h.split("/").pop()!.split("?")[0]);
-    assert.deepEqual(shown("create"), ["EMPTY", "MIXED", "SUB"], "Create is a persistent workspace: every open-season plan stays, even after submissions");
+    assert.deepEqual(shown("create"), ["MIXED"], "Create lists only open seasons with editable entries — empty and fully submitted/approved sheets are hidden (not deleted)");
+    assert.ok(!render(SeasonalPlanListPage, Role.SALES_OFFICER, "create").includes("Ready for new markets"), "no persistent 'Ready for new markets' row");
     assert.deepEqual(shown("submitted"), ["MIXED", "SUB"], "Submitted: the plan appears ONCE, however many batches");
     assert.deepEqual(shown("approved"), ["MIXED"], "Approved: only a plan holding approved entries");
     assert.deepEqual(shown("older"), ["OLD", "OLD2"], "closed seasons → Older Plans");
     const counts = (stage: string) => [...render(SeasonalPlanListPage, Role.SALES_OFFICER, stage).matchAll(/tabular-nums">(\d+)</g)].map((m) => Number(m[1]));
-    assert.deepEqual([counts("create"), counts("submitted"), counts("approved"), counts("older")], [[0, 1, 0], [2, 1], [3], [2, 4]], "the Markets column counts the entries of THAT section");
+    assert.deepEqual([counts("create"), counts("submitted"), counts("approved"), counts("older")], [[1], [2, 1], [3], [2, 4]], "the Markets column counts the entries of THAT section");
     assert.ok(render(SeasonalPlanListPage, Role.SALES_OFFICER, "submitted").includes("/planning/party/seasonal/MIXED?stage=submitted"), "Open keeps the section, so Back / detail land in the right place");
     render(SeasonalPlanListPage, Role.SALES_OFFICER, "submitted"); assert.equal(buttons.filter((b) => String(b.children).includes("Create Seasonal Plan")).length, 0, "Create button only in Create");
     assert.ok(render(SeasonalPlanListPage, Role.SALES_OFFICER, "older").includes('data-stage="older"'), "the nav is told which section is active");
@@ -157,25 +161,27 @@ async function main() {
   assert.equal(buttons.filter((b) => String(b.children).includes("Create Monthly Plan")).length, 1);
   render(MonthlyPlanListPage, Role.SUPER_ADMIN); assert.equal(buttons.filter((b) => String(b.children).includes("Create Monthly Plan")).length, 1, "Admin gets Create Monthly Plan");
   render(MonthlyPlanListPage, Role.CUSTOM_ADMIN); assert.equal(buttons.filter((b) => String(b.children).includes("Create Monthly Plan")).length, 1);
-  monthlySheets = []; assert.ok(render(MonthlyPlanListPage).includes("No Monthly Plans in progress."));
+  monthlySheets = []; assert.ok(render(MonthlyPlanListPage).includes("No Monthly Plans with unfinished markets.") && buttons.some((b) => String(b.children).includes("Create Monthly Plan")), "no unfinished work: empty state, Create still available");
 
   // Create: Season → Month (that season's months, calendar order), explained when there is no approved market, then POST { seasonId, seasonMonthId }.
-  monthlyOptions = { seasons: [
-    { id: "s-kharif", name: "Kharif", year: 2026, period: "Apr 2026 → Nov 2026", eligibleCount: 2, takenMonthIds: ["sm-june"], months: [{ id: "sm-april", label: "April 2026" }, { id: "sm-may", label: "May 2026" }, { id: "sm-june", label: "June 2026" }] },
-    { id: "s-rabi", name: "Rabi", year: 2026, period: "Nov 2026 → Mar 2027", eligibleCount: 0, months: [{ id: "sm-r-nov", label: "November 2026" }], takenMonthIds: [] },
-  ] };
+  const SEASONS = [
+    { id: "s-kharif", name: "Kharif", year: 2026, period: "Apr 2026 → Nov 2026", eligibleCount: 2, takenMonthIds: ["sm-june"], months: [{ id: "sm-april", label: "April 2026", key: "2026-04" }, { id: "sm-may", label: "May 2026", key: "2026-05" }, { id: "sm-june", label: "June 2026", key: "2026-06" }] },
+    { id: "s-rabi", name: "Rabi", year: 2026, period: "Nov 2026 → Mar 2027", eligibleCount: 0, months: [{ id: "sm-r-nov", label: "November 2026", key: "2026-11" }], takenMonthIds: [] },
+  ];
+  monthlyOptions = { seasons: SEASONS, currentMonthKey: "2026-09" }; // no season covers September → nothing is suggested
   render(MonthlyPlanListPage); click("Create Monthly Plan");
   html = render(MonthlyPlanListPage);
   assert.ok(html.includes("Season *") && html.includes("Month *"));
   assert.deepEqual(selects.find((s) => s.placeholder === "Select a season…")!.options.map((o) => o.label), ["Kharif 2026", "Rabi 2026"], "every OPEN season is a choice");
   assert.equal(selects.find((s) => s.placeholder === "Select a month…")!.disabled, true, "Month waits for a Season");
   selects.find((s) => s.placeholder === "Select a season…")!.onChange!({ target: { value: "s-kharif" } }); html = render(MonthlyPlanListPage);
-  assert.deepEqual(selects.find((s) => s.placeholder === "Select a month…")!.options.map((o) => o.label), ["April 2026", "May 2026", "June 2026 (plan exists)"], "the months of the CHOSEN season");
+  assert.deepEqual(selects.find((s) => s.placeholder === "Select a month…")!.options.map((o) => o.label), ["April 2026", "May 2026", "June 2026 (reopen)"], "the months of the CHOSEN season");
   selects.find((s) => s.placeholder === "Select a month…")!.onChange!({ target: { value: "sm-may" } }); render(MonthlyPlanListPage);
   assert.equal(buttons.filter((b) => String(b.children) === "Create").at(-1)!.disabled, false);
   buttons.filter((b) => String(b.children) === "Create").at(-1)!.onClick!(); await tick();
   assert.deepEqual(JSON.parse(JSON.stringify(posts)), [{ url: "/api/party-monthly-sheets", body: { seasonId: "s-kharif", seasonMonthId: "sm-may" } }], "the chosen Season + Month are sent");
   assert.ok(!render(MonthlyPlanListPage).includes("data-dialog") && invalidations >= 1, "closes and refreshes");
+  assert.deepEqual(pushed.at(-1), "/planning/party/monthly/new-sheet?stage=create", "Create opens the month's editor immediately, in the create stage");
   // A season with no approved Seasonal Plan market: explained, Create disabled — never silently creating an invalid plan.
   click("Create Monthly Plan"); render(MonthlyPlanListPage);
   selects.find((s) => s.placeholder === "Select a season…")!.onChange!({ target: { value: "s-rabi" } }); html = render(MonthlyPlanListPage);
@@ -183,12 +189,37 @@ async function main() {
   selects.find((s) => s.placeholder === "Select a month…")!.onChange!({ target: { value: "sm-r-nov" } }); render(MonthlyPlanListPage);
   assert.equal(buttons.filter((b) => String(b.children) === "Create").at(-1)!.disabled, true, "Create is disabled without an eligible market");
 
+  // Defaults: the running calendar month of the ONE season that has approved markets is suggested; both stay changeable; a refetch never overwrites a manual choice.
+  const sel = (ph: string) => selects.find((x) => x.placeholder === ph)!;
+  monthlyOptions = { seasons: SEASONS, currentMonthKey: "2026-05" }; posts.length = 0; hooks = [];
+  render(MonthlyPlanListPage); click("Create Monthly Plan"); render(MonthlyPlanListPage); html = render(MonthlyPlanListPage);
+  assert.deepEqual([sel("Select a season…").value, sel("Select a month…").value], ["s-kharif", "sm-may"], "season + running month are pre-selected (by calendar identity)");
+  assert.equal(posts.length, 0, "a default is only a suggestion — nothing is created until the user clicks Create");
+  sel("Select a month…").onChange!({ target: { value: "sm-april" } }); render(MonthlyPlanListPage);
+  monthlyOptions = { seasons: SEASONS.map((x) => ({ ...x })), currentMonthKey: "2026-05" }; html = render(MonthlyPlanListPage);
+  assert.equal(sel("Select a month…").value, "sm-april", "a background refetch does not overwrite the user's choice");
+  sel("Select a season…").onChange!({ target: { value: "s-rabi" } }); render(MonthlyPlanListPage);
+  assert.equal(sel("Select a month…").value, "", "changing Season: the current month is selected only if it belongs to that season");
+  sel("Select a season…").onChange!({ target: { value: "s-kharif" } }); render(MonthlyPlanListPage);
+  assert.equal(sel("Select a month…").value, "sm-may", "…and is selected again when it does");
+  // A month that already has a plan (Create then reopens it) still qualifies; overlapping seasons → nothing arbitrary; none → explanation.
+  hooks = []; monthlyOptions = { seasons: [{ ...SEASONS[0]!, takenMonthIds: ["sm-may"] }, SEASONS[1]!], currentMonthKey: "2026-05" };
+  render(MonthlyPlanListPage); click("Create Monthly Plan"); render(MonthlyPlanListPage); render(MonthlyPlanListPage);
+  assert.equal(sel("Select a month…").value, "sm-may", "an existing plan does not disqualify the default");
+  hooks = []; monthlyOptions = { seasons: [SEASONS[0]!, { ...SEASONS[1]!, eligibleCount: 1, months: [{ id: "sm-r-may", label: "May 2026", key: "2026-05" }] }], currentMonthKey: "2026-05" };
+  render(MonthlyPlanListPage); click("Create Monthly Plan"); render(MonthlyPlanListPage); html = render(MonthlyPlanListPage);
+  assert.deepEqual([sel("Select a season…").value, sel("Select a month…").value], ["", ""], "two qualifying seasons: left for explicit selection");
+  hooks = []; monthlyOptions = { seasons: SEASONS, currentMonthKey: "2027-09" };
+  render(MonthlyPlanListPage); click("Create Monthly Plan"); render(MonthlyPlanListPage); html = render(MonthlyPlanListPage);
+  assert.ok(html.includes("No season with approved markets covers the current month") && sel("Select a season…").value === "", "no eligible season: placeholder + explanation");
+  hooks = []; monthlyOptions = { seasons: SEASONS, currentMonthKey: "2026-09" };
+
   /* ---------------- Monthly sections: labels / counts / Open keep the section ---------------- */
   {
     const m = (id: string, counts: Record<string, number>) => ({ ...MONTHLY[0], id, counts: { create: 0, submitted: 0, approved: 0, pendingRm: 0, rejected: 0, ...counts }, itemCount: 9 });
     monthlySheets = [m("A", { create: 0 }), m("B", { create: 2, rejected: 1 }), m("C", { submitted: 3, pendingRm: 3 }), m("D", { submitted: 1, pendingRm: 0 }), m("E", { approved: 4 })];
     const page = (stage: string) => render(MonthlyPlanListPage, Role.SALES_OFFICER, stage);
-    assert.ok(page("create").includes("Ready for new markets") && page("create").includes("Needs changes"), "Create labels: empty workspace / rejected entries");
+    assert.ok(page("create").includes("Needs changes"), "Create labels: rejected entries need changes");
     assert.ok(page("submitted").includes("Awaiting RM review") && page("submitted").includes("Awaiting Admin review"));
     assert.ok(page("approved").includes("Approved") && page("approved").includes(">4<"), "Markets = entries of THAT section (4), not the plan total (9)");
     assert.ok(page("submitted").includes("/planning/party/monthly/C?stage=submitted"));

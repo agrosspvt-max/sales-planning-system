@@ -625,7 +625,7 @@ async function main() {
   /* ---- UI wiring: Territory Mapping is an ADDITION inside Party Planning; the appointment workflow is untouched ---- */
   {
     const page = readFileSync("src/features/party-planning/party-planning-page.tsx", "utf8");
-    assert.ok(!page.includes('href: "/planning/party/territory"') && !page.includes('labelKey: "party_planning.nav.create_plan"') && page.includes('{ key: "view", href: "/planning/party/view"'), "Planning | View; Territory Mapping left the Party Planning nav; no Create Plan item");
+    assert.ok(!page.includes('href: "/planning/party/territory"') && !page.includes('labelKey: "party_planning.nav.create_plan"') && page.includes('party_planning.nav.create_new_plan') && page.includes('party_planning.nav.view_plans'), "Create New Plan | View Plans; Territory Mapping left the Party Planning nav; no separate Create lifecycle option");
     assert.ok(page.includes("export function PartyCreatePlanPage") && page.includes("export function PartyViewPage") && page.includes("/api/party-plans/save-draft"), "the appointment plan pages are still there");
     const ui = readFileSync("src/features/party-planning/territory-mapping-page.tsx", "utf8");
     for (const needle of ['"party_planning.territory.tab_existing"', '"party_planning.territory.tab_add_market"', "/api/territory-mapping/import/preview", "/api/territory-mapping/import/commit", "party_planning.territory.action.send_request"]) assert.ok(ui.includes(needle), needle);

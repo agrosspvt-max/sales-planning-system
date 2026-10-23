@@ -40,6 +40,7 @@ const load = testLoader({
   "@/components/ui/column-filter-header": { ColumnFilterHeader: (p: { label: string; options: { value: string; label: string }[] }) => { filterOptions[p.label] = p.options; return <th>{p.label}</th>; } },
   "@/components/ui/input": { Input: (p: { "aria-label"?: string; value: string; onChange: (e: { target: { value: string } }) => void }) => { if (p["aria-label"]) inputs[p["aria-label"]] = p; return <input value={p.value} readOnly />; } },
   "@/components/ui/dropdown-menu": { DropdownMenu: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DropdownMenuTrigger: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DropdownMenuContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DropdownMenuItem: ({ children, onSelect }: { children: React.ReactNode; onSelect: () => void }) => { if (typeof children === "string") menu[children] = onSelect; return <div>{children}</div>; } },
+  "@/components/ui/textarea": { Textarea: (p: { id?: string; value: string; onChange: (e: { target: { value: string } }) => void }) => { if (p.id) inputs[p.id] = p; return <textarea value={p.value} readOnly />; } },
   "@/components/ui/select": { NativeSelect: (p: Sel) => { selects.push(p); return <select aria-label={p["aria-label"]} />; } },
   "@/components/ui/date-input-dmy": { DateInputDMY: (p: DateProps) => { dates.push(p); return <input data-date={p["aria-label"]} value={p.value} readOnly />; } },
   "@/components/ui/dialog": { Dialog: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DialogContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DialogHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, DialogTitle: ({ children }: { children: React.ReactNode }) => <h2>{children}</h2>, DialogFooter: ({ children }: { children: React.ReactNode }) => <div>{children}</div> },
@@ -59,11 +60,20 @@ const render = (role: Role = Role.SUPER_ADMIN) => { cursor = 0; navs = []; selec
 const same = (a: unknown, b: unknown, why: string) => assert.equal(JSON.stringify(a), JSON.stringify(b), why);
 const tabs = () => navs.find((n) => n.items.some((i) => i.value === "accepted-not-posted"))!;
 
+// ---- Submitted / Rejected tabs: Submitted, Rejected, Under Process (Under Process is no longer under Accepted)
+render();
+const decisionTabs = navs.find((n) => n.items.some((i) => i.value === "under-process"))!;
+same(decisionTabs.items.map((i) => i.value), ["submitted", "rejected", "under-process"], "Submitted, Rejected, Under Process");
+same(decisionTabs.items.at(-1)!.label, L["cn_requests.processing.tab"], "Under Process label comes from Labels");
+decisionTabs.onChange("under-process"); render();
+assert.ok(!navs.some((n) => n.items.some((i) => i.value === "accepted-not-posted")), "Accepted tabs are not shown in the Submitted / Rejected group");
+for (const r of [Role.SALES_OFFICER, Role.REGIONAL_MANAGER]) { render(r); navs.find((n) => n.items.some((i) => i.value === "under-process"))!.onChange("under-process"); render(r); assert.ok(urls.at(-1)!.endsWith("view=under-process"), "Under Process is requested by its fixed id for " + r); }
+
 // ---- four Accepted tabs, in order, with editable labels
 let html = render();
 navs[0]!.onChange("accepted"); html = render();
-same(tabs().items.map((i) => i.value), ["under-process", "accepted-not-posted", "posted-in-ledger", "cn-near-expire", "expired-cn"], "CN Working Shared, Posted in Ledger, CN in Grace, Expired CN");
-same(tabs().items.map((i) => i.label), [L["cn_requests.processing.tab"], L["cn_requests.view.accepted_not_posted"], L["cn_requests.view.posted_in_ledger"], L["cn_requests.view.cn_in_grace"], L["cn_requests.view.expired"]], "labels come from the labels system");
+same(tabs().items.map((i) => i.value), ["accepted-not-posted", "cn-near-expire", "expired-cn", "posted-in-ledger"], "CN Working Shared, CN Near Expire, Expired CN, Posted in Ledger");
+same(tabs().items.map((i) => i.label), [L["cn_requests.view.accepted_not_posted"], L["cn_requests.view.cn_in_grace"], L["cn_requests.view.expired"], L["cn_requests.view.posted_in_ledger"]], "labels come from the labels system");
 assert.ok(html.includes(L["cn_requests.col.expires"]) && !html.includes(L["cn_requests.col.grace_ends"]), "Working Shared shows Expires only");
 assert.ok(!html.includes(L["cn_requests.reopen.action"]), "no Reopen action outside the Expired tab");
 
@@ -124,8 +134,8 @@ assert.ok(!html.includes(L["cn_requests.acceptance.grace_days"]) && html.include
 hooks.length = 0; rows = [row("x2", { policyStage: "EXPIRED" })];
 Object.assign(edited, { "cn_requests.view.expired": "Lapsed CN", "cn_requests.view.cn_in_grace": "Extension Period", "cn_requests.reopen.action": "Revive CN", "cn_requests.reopen.title": "Revive Lapsed CN", "cn_requests.reopen.authorized_by": "Authorised By Whom", "cn_requests.acceptance.grace_days": "Extension (Days)", "cn_requests.col.grace_ends": "Extension Ends" });
 render(); navs[0]!.onChange("accepted"); render();
-same(tabs().items.map((i) => i.value), ["under-process", "accepted-not-posted", "posted-in-ledger", "cn-near-expire", "expired-cn"], "identifiers are unchanged by an edit");
-same(tabs().items.slice(-2).map((i) => i.label), ["Extension Period", "Lapsed CN"], "the edited tab wording is shown");
+same(tabs().items.map((i) => i.value), ["accepted-not-posted", "cn-near-expire", "expired-cn", "posted-in-ledger"], "identifiers are unchanged by an edit");
+same(tabs().items.slice(1, 3).map((i) => i.label), ["Extension Period", "Lapsed CN"], "the edited tab wording is shown");
 tabs().onChange("expired-cn"); html = render();
 assert.ok(urls.at(-1)!.endsWith("view=expired-cn"), "the data is still requested by the fixed view id, not by the label");
 assert.ok(html.includes("Lapsed CN") && !html.includes("Extension Ends") && html.includes("Revive CN") && !html.includes("Expired CN"), "badge, column heading and action use the edited wording");
@@ -158,3 +168,43 @@ hooks.length = 0;
 render(Role.SALES_OFFICER); navs[0]!.onChange("accepted"); render(Role.SALES_OFFICER);
 assert.ok(!menu[L["cn_requests.grace.action"]!], "SO cannot grant grace");
 console.log("Manual grace row menu, form, preview, categorical filter and permissions passed");
+
+// ---- Under Process: CN Status column (after Process Status, before Action), no Amount, existing dialogs + mandatory bypass reason
+const UP = (over: Record<string, unknown> = {}) => row("u1", { status: "UNDER_PROCESS", policyStage: null, expiryDate: null, processingReview: { id: "rv1", kind: "RATE_CONFIRMATION", status: "PENDING" }, ...over });
+const openUnderProcess = (role: Role = Role.SUPER_ADMIN) => { hooks.length = 0; render(role); navs.find((n) => n.items.some((i) => i.value === "under-process"))!.onChange("under-process"); return render(role); };
+const cnStatusSelect = () => selects.find((s) => s["aria-label"] === L["cn_requests.acceptance.status"]);
+rows = [UP()]; html = openUnderProcess();
+const th = [...html.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]);
+assert.ok(!th.includes(L["cn_requests.task.amount"]!) && !filterOptions[L["cn_requests.task.amount"]!], "Under Process has no Amount header or filter");
+assert.ok(th.includes(L["cn_requests.field.payment_status"]!), "Payment Status stays");
+assert.ok(th.indexOf(L["cn_requests.field.cn_status"]!) === th.indexOf(L["cn_requests.field.approval"]!) + 1 || html.indexOf(L["cn_requests.field.cn_status"]!) > html.indexOf(L["cn_requests.field.approval"]!), "CN Status follows Process Status");
+assert.ok(html.indexOf(L["cn_requests.field.cn_status"]!) < html.indexOf(L["cn_requests.col.action"] ?? "Action"), "CN Status precedes Action");
+same(cnStatusSelect()!.options.map((o) => o.value), ["ACCEPTED_NOT_POSTED", "POSTED_IN_LEDGER", "__REJECT__"], "CN Working Shared, Posted in Ledger, Reject (no Under Process)");
+// pending review: the bypass reason is mandatory first
+cnStatusSelect()!.onChange({ target: { value: "ACCEPTED_NOT_POSTED" } }); html = render();
+assert.ok(html.includes(L["cn_requests.processing.bypass_title"]!) && !html.includes(L["cn_requests.acceptance.title"]!), "bypass reason is asked before the Accept form");
+clicks[L["cn_requests.processing.bypass_continue"]!]!(); html = render();
+assert.ok(html.includes(L["cn_requests.processing.error.bypass"]!) && !html.includes(L["cn_requests.acceptance.title"]!), "empty bypass reason is refused");
+inputs["cn-status-bypass"]!.onChange({ target: { value: "Handled offline" } }); render();
+clicks[L["cn_requests.processing.bypass_continue"]!]!(); html = render();
+assert.ok(html.includes(L["cn_requests.acceptance.title"]!) && !html.includes(L["cn_requests.processing.bypass_title"]!), "the existing Accept form opens after the reason");
+// cancelling the bypass dialog changes nothing
+html = openUnderProcess(); cnStatusSelect()!.onChange({ target: { value: "POSTED_IN_LEDGER" } }); html = render(); clicks[L["cn_requests.action.cancel"]!]!(); html = render();
+assert.ok(!html.includes(L["cn_requests.processing.bypass_title"]!) && !html.includes(L["cn_requests.acceptance.title"]!), "cancel closes without opening anything");
+// refused review: still allowed with a reason; Reject opens the existing rejection form
+rows = [UP({ processingReview: { id: "rv2", kind: "CN_APPROVAL", status: "REJECTED" } })]; html = openUnderProcess();
+cnStatusSelect()!.onChange({ target: { value: "__REJECT__" } }); html = render();
+assert.ok(html.includes(L["cn_requests.processing.bypass_title"]!), "a refused review still needs the bypass reason");
+inputs["cn-status-bypass"]!.onChange({ target: { value: "Not needed" } }); render(); clicks[L["cn_requests.processing.bypass_continue"]!]!(); html = render();
+assert.ok(html.includes(L["cn_requests.rejection.title"]!) && !html.includes(L["cn_requests.processing.bypass_title"]!), "the existing rejection form opens");
+// confirmed review: straight to the existing form, no bypass
+rows = [UP({ processingReview: { id: "rv3", kind: "RATE_CONFIRMATION", status: "CONFIRMED" } })]; html = openUnderProcess();
+cnStatusSelect()!.onChange({ target: { value: "POSTED_IN_LEDGER" } }); html = render();
+assert.ok(html.includes(L["cn_requests.acceptance.title"]!) && !html.includes(L["cn_requests.processing.bypass_title"]!), "no bypass reason when the review is confirmed");
+// no handling permission: no dropdown
+rows = [UP()]; html = openUnderProcess(Role.SALES_OFFICER);
+assert.ok(!cnStatusSelect(), "Sales Officers get no CN Status dropdown");
+// other sections keep their Amount column
+hooks.length = 0; rows = [row("w1")]; render(); navs[0]!.onChange("accepted"); render();
+assert.ok(filterOptions[L["cn_requests.task.amount"]!] !== undefined, "Accepted still has Amount");
+console.log("Under Process CN Status dropdown, bypass reason, cancel, permissions and Amount removal passed");

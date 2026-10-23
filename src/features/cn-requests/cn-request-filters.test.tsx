@@ -85,15 +85,15 @@ console.log("cn-request-filters.test.tsx — all assertions passed");
 for (const role of [Role.SUPER_ADMIN, Role.CUSTOM_ADMIN, Role.SALES_OFFICER, Role.REGIONAL_MANAGER]) {
   hooks.length = 0; allowActions = role !== Role.CUSTOM_ADMIN;
   rows = [{ ...data[0]!, status: "UNDER_PROCESS", processingReview: { kind: "RATE_CONFIRMATION", status: "CONFIRMED" } }];
-  render(role); navs[0]!.onChange("accepted"); render(role); navs[1]!.onChange("under-process"); html = render(role);
+  render(role); navs[1]!.onChange("under-process"); html = render(role);
   assert.ok(!headers.some(h => h.label === label("cn_requests.field.status")), `${role}: no separate CN Status column`);
-  assert.equal((html.match(/>Price Confirmed<\/button>/g) ?? []).length, 1, `${role}: one review button per row`);
+  assert.equal((html.match(/>Rate Confirmed<\/button>/g) ?? []).length, 1, `${role}: one review button per row`);
   assert.ok(html.includes("text-success") && !html.includes("Open Review"), "confirmed status is inside a green button");
   const update = headers.find(h => h.options.some(o => o.value === "RATE_CONFIRMATION:CONFIRMED"))!;
   assert.ok(update?.searchable, "CN Update preserves the searchable status filter");
   update.onChange(["RATE_CONFIRMATION:CONFIRMED"]); html = render(role);
   same(shown(html), ["d1"], "status filtering still returns the matching row");
-  clicks["Price Confirmed"]!(); html = render(role);
+  clicks["Rate Confirmed"]!(); html = render(role);
   assert.ok(html.includes('data-open-review="r1"'), "Open Review opens the same request");
   const handler = role === Role.SUPER_ADMIN;
   assert.ok(html.includes(`data-can-handle="${handler}"`), "read-only viewers retain history access without gaining decision permissions");
@@ -104,8 +104,8 @@ console.log("Under Process combined review column, status filter and role-safe a
 for (const kind of ["RATE_CONFIRMATION", "CN_APPROVAL"]) {
   hooks.length = 0; allowActions = true;
   rows = [{ ...data[0]!, status: "UNDER_PROCESS", processingReview: { kind, status: "REJECTED" } }];
-  render(); navs[0]!.onChange("accepted"); render(); navs[1]!.onChange("under-process"); html = render();
-  const rejectedLabel = kind === "RATE_CONFIRMATION" ? "Rate Confirmation Rejected" : "CN Approval Rejected";
+  render(); navs[1]!.onChange("under-process"); html = render();
+  const rejectedLabel = kind === "RATE_CONFIRMATION" ? "Rate Denied" : "CN Working Refused";
   assert.ok(html.includes(`data-variant="destructive">${rejectedLabel}</button>`), "rejected outcome is the red button label");
   clicks[rejectedLabel]!(); html = render();
   assert.ok(html.includes('data-open-review="r1"'), "red outcome button still opens the review");

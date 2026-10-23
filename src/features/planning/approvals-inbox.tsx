@@ -6,11 +6,11 @@ import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { api } from "@/lib/api-client";
-import { formatDate } from "@/lib/utils";
+import { cn, formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,8 +18,17 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "./status-badge";
 import type { InboxItem, PlanStatus } from "./types";
-import { useLabel } from "@/features/labels/label-ui";
+import { useLabel, useLabelResolver } from "@/features/labels/label-ui";
 import { DealerTagRequests } from "@/features/dealer-tags/dealer-tag-requests";
+import { CnReviewInbox } from "@/features/cn-requests/cn-review-ui";
+import { MyApprovals } from "./my-approvals";
+import { APPROVAL_LABELS } from "./approval-labels";
+
+/** A cached label provider from an earlier page must not leave newly added controls empty. */
+function useApprovalLabels() {
+  const resolve = useLabelResolver();
+  return (key: keyof typeof APPROVAL_LABELS) => resolve(key) || APPROVAL_LABELS[key];
+}
 
 interface MonthlyInboxItem {
   id: string;
@@ -39,18 +48,50 @@ interface ExtensionRequest {
 }
 
 export function ApprovalsInbox({ role, userId }: { role: Role; userId: string }) {
+  const t = useApprovalLabels();
+  const useApprovals = useAdminPermission("approvals");
   const useSales = useAdminPermission("salesPlanning");
   const useRecovery = useAdminPermission("recoveryPlanning");
   const useCn = useAdminPermission("cnRequests");
   const useTags = useAdminPermission("dealerTags");
+  const isOfficer = role === Role.SALES_OFFICER;
+  const canReview = !isOfficer && useApprovals;
+  const canSales = isOfficer || (canReview && useSales);
+  const canRecovery = isOfficer || (canReview && useRecovery);
+  const canCn = canReview && useCn;
+  const canTags = isOfficer || (canReview && useTags);
+  const canExtensions = canReview && isAdministrativeRole(role) && useSales;
+  const categories = [
+    ...(canSales ? [{ value: "sales", label: t("approvals.category.sales") }] : []),
+    ...(canRecovery ? [{ value: "recovery", label: t("approvals.category.recovery") }] : []),
+    { value: "cn", label: t("approvals.category.cn") },
+    ...(canTags || canExtensions ? [{ value: "other", label: t("approvals.category.other") }] : []),
+  ];
+  const [requestedCategory, setCategory] = useState("sales");
+  const category = categories.some((c) => c.value === requestedCategory) ? requestedCategory : categories[0].value;
+  const [requestedCnView, setCnView] = useState("requests");
+  const cnView = canCn ? requestedCnView : "dependency";
   const { data, isLoading } = useQuery<InboxItem[]>({
     queryKey: ["approvals"],
     queryFn: () => api.get<InboxItem[]>("/api/planning/approvals"),
+    enabled: category === "sales" && canReview && useSales,
   });
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Approvals" subtitle="Plans awaiting your review, oldest first." />
+      <PageHeader title={t("approvals.title")} subtitle={t(isOfficer ? "approvals.subtitle.own" : "approvals.subtitle.review")} />
+
+      <div role="group" aria-label={t("approvals.category.label")} className="inline-flex max-w-full flex-wrap rounded-md border bg-background p-0.5 text-sm">
+        {categories.map((c) => (
+          <button key={c.value} type="button" aria-pressed={category === c.value} onClick={() => setCategory(c.value)} className={cn("rounded px-3 py-1.5 font-medium", category === c.value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
+            {c.label}
+          </button>
+        ))}
+      </div>
+
+      {category === "sales" && (isOfficer ? <MyApprovals category="sales" /> : <div className="space-y-5">
+      <div className="space-y-2">
+      <h3 className="text-sm font-semibold">{t("approvals.sales.seasonal")}</h3>
 
       <div className="rounded-lg border bg-background">
         <Table numbered>
@@ -102,12 +143,23 @@ export function ApprovalsInbox({ role, userId }: { role: Role; userId: string })
           </TableBody>
         </Table>
       </div>
-
-      {useSales && <MonthlyApprovals role={role} />}
-      {useRecovery && <RecoveryApprovals role={role} />}
-      {useCn && <CnRequestApprovals role={role} userId={userId} />}
-      {useTags && <DealerTagRequests pendingOnly />}
-      {isAdministrativeRole(role) && useSales && <MonthExtensionReview />}
+      </div>
+      <MonthlyApprovals role={role} />
+      </div>)}
+      {category === "recovery" && (isOfficer ? <MyApprovals category="recovery" /> : <RecoveryApprovals role={role} />)}
+      {category === "cn" && (
+        <div className="space-y-4">
+          <div role="group" aria-label={t("approvals.cn.label")} className="flex w-fit max-w-full flex-wrap gap-1 border-b">
+            {canCn && <button type="button" aria-pressed={cnView === "requests"} onClick={() => setCnView("requests")} className={cn("border-b-2 px-3 py-2 text-sm font-medium transition-colors", cnView === "requests" ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{t("approvals.cn.requests")}</button>}
+            <button type="button" aria-pressed={cnView === "dependency"} onClick={() => setCnView("dependency")} className={cn("border-b-2 px-3 py-2 text-sm font-medium transition-colors", cnView === "dependency" ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{t("approvals.cn.dependency")}</button>
+          </div>
+          {cnView === "requests" ? <CnRequestApprovals role={role} userId={userId} /> : <CnReviewInbox />}
+        </div>
+      )}
+      {category === "other" && (isOfficer ? <MyApprovals category="other" /> : <>
+        {canTags && <DealerTagRequests pendingOnly />}
+        {canExtensions && <MonthExtensionReview />}
+      </>)}
     </div>
   );
 }
@@ -118,6 +170,7 @@ export function ApprovalsInbox({ role, userId }: { role: Role; userId: string })
  * hidden from Admin just because RM has not yet acted on it.
  */
 function RecoveryApprovals({ role }: { role: Role }) {
+  const empty = useApprovalLabels()("approvals.empty.recovery");
   const { data, isLoading } = useQuery<{ id: string; seasonName: string; monthName: string; officerName: string; status: PlanStatus }[]>({
     queryKey: ["recovery-plans", "PENDING_RM,PENDING_ADMIN"],
     queryFn: () => api.get("/api/recovery/plans?status=PENDING_RM,PENDING_ADMIN"),
@@ -132,7 +185,7 @@ function RecoveryApprovals({ role }: { role: Role }) {
     [data, role],
   );
   if (isLoading) return <Skeleton className="h-16 w-full" />;
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return <p className="text-sm text-muted-foreground">{empty}</p>;
   return (
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">Recovery plans awaiting review</h3>
@@ -224,6 +277,7 @@ function MonthlyApprovals({ role }: { role: Role }) {
 
 /** Legacy requests remain visible and declinable; canonical Add Months replaces free-text approval. */
 function MonthExtensionReview() {
+  const empty = useApprovalLabels()("approvals.empty.extensions");
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<ExtensionRequest[]>({
     queryKey: ["month-extensions", "PENDING"],
@@ -235,7 +289,7 @@ function MonthExtensionReview() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["month-extensions", "PENDING"] }),
   });
   if (isLoading) return <Skeleton className="h-16 w-full" />;
-  if ((data?.length ?? 0) === 0) return null;
+  if ((data?.length ?? 0) === 0) return <p className="text-sm text-muted-foreground">{empty}</p>;
   return (
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">Legacy month extension requests</h3>
@@ -287,6 +341,7 @@ function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
   const acceptLabel = useLabel("cn_requests.action.accept");
   const rejectLabel = useLabel("cn_requests.action.reject");
   const submittedLabel = useLabel("cn_requests.view.submitted");
+  const empty = useApprovalLabels()("approvals.empty.cn");
   const { data, isLoading } = useQuery<CnInboxItem[]>({ queryKey: ["cn-requests", "submitted"], queryFn: () => api.get<CnInboxItem[]>("/api/cn-requests?view=submitted") });
   const actMut = useMutation({
     mutationFn: (v: { id: string; action: "accept" | "reject" }) => api.post(`/api/cn-requests/${v.id}/act`, { action: v.action }),
@@ -302,7 +357,7 @@ function CnRequestApprovals({ role, userId }: { role: Role; userId: string }) {
   );
   if (!isAdmin && !isManager) return null;
   if (isLoading) return <Skeleton className="h-16 w-full" />;
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return <p className="text-sm text-muted-foreground">{empty}</p>;
   return (
     <div className="space-y-2">
       <h3 className="text-sm font-semibold">CN Requests awaiting {isAdmin ? "approval" : "your review"}</h3>

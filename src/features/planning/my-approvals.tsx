@@ -8,7 +8,6 @@ import { formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { PageHeader } from "@/components/layout/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "./status-badge";
 import type { PlanStatus } from "./types";
@@ -40,27 +39,29 @@ const time = (s: string | null) => (s ? new Date(s).getTime() : 0);
  * Approved / Rejected / Returned). This mirrors what Admin/RM see for the officer; opening a plan that is
  * under approval or approved shows a locked (view-only) plan, enforced server-side by `canEdit`.
  */
-export function MyApprovals() {
+export function MyApprovals({ category = "sales" }: { category?: "sales" | "recovery" | "other" }) {
   // Each list is already scoped server-side to the logged-in officer's ownership and returns every status.
-  const seasonalQ = useQuery<SeasonalPlan[]>({ queryKey: ["plans", "mine"], queryFn: () => api.get<SeasonalPlan[]>("/api/planning/season-plans?mine=true") });
-  const monthlyQ = useQuery<MonthlyPlan[]>({ queryKey: ["monthly-plans", "mine"], queryFn: () => api.get<MonthlyPlan[]>("/api/planning/monthly-plans") });
-  const recoveryQ = useQuery<RecoveryPlan[]>({ queryKey: ["recovery-plans", "mine"], queryFn: () => api.get<RecoveryPlan[]>("/api/recovery/plans?mine=true") });
+  const seasonalQ = useQuery<SeasonalPlan[]>({ queryKey: ["plans", "mine"], queryFn: () => api.get<SeasonalPlan[]>("/api/planning/season-plans?mine=true"), enabled: category === "sales" });
+  const monthlyQ = useQuery<MonthlyPlan[]>({ queryKey: ["monthly-plans", "mine"], queryFn: () => api.get<MonthlyPlan[]>("/api/planning/monthly-plans"), enabled: category === "sales" });
+  const recoveryQ = useQuery<RecoveryPlan[]>({ queryKey: ["recovery-plans", "mine"], queryFn: () => api.get<RecoveryPlan[]>("/api/recovery/plans?mine=true"), enabled: category === "recovery" });
 
-  const isLoading = seasonalQ.isLoading || monthlyQ.isLoading || recoveryQ.isLoading;
+  const isLoading = category === "sales" ? seasonalQ.isLoading || monthlyQ.isLoading : recoveryQ.isLoading;
 
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [];
-    for (const p of seasonalQ.data ?? []) out.push({ key: `s-${p.id}`, href: `/planning/${p.id}`, kind: "Seasonal", seasonName: p.seasonName, monthName: null, status: p.status, date: p.submittedAt ?? null });
-    for (const p of monthlyQ.data ?? []) out.push({ key: `m-${p.id}`, href: `/planning/monthly/${p.id}`, kind: "Monthly", seasonName: p.seasonName, monthName: p.monthName, status: p.status, date: p.submittedAt ?? null });
-    for (const p of recoveryQ.data ?? []) out.push({ key: `r-${p.id}`, href: `/planning/recovery/${p.id}`, kind: "Recovery", seasonName: p.seasonName, monthName: p.monthName, status: p.status, date: null });
+    if (category === "sales") {
+      for (const p of seasonalQ.data ?? []) out.push({ key: `s-${p.id}`, href: `/planning/${p.id}`, kind: "Seasonal", seasonName: p.seasonName, monthName: null, status: p.status, date: p.submittedAt ?? null });
+      for (const p of monthlyQ.data ?? []) out.push({ key: `m-${p.id}`, href: `/planning/monthly/${p.id}`, kind: "Monthly", seasonName: p.seasonName, monthName: p.monthName, status: p.status, date: p.submittedAt ?? null });
+    }
+    if (category === "recovery") for (const p of recoveryQ.data ?? []) out.push({ key: `r-${p.id}`, href: `/planning/recovery/${p.id}`, kind: "Recovery", seasonName: p.seasonName, monthName: p.monthName, status: p.status, date: null });
     // Newest first: submitted date when known, else fall back to last-updated so undated rows still sort.
     return out.sort((a, b) => (time(b.date) - time(a.date)));
-  }, [seasonalQ.data, monthlyQ.data, recoveryQ.data]);
+  }, [category, seasonalQ.data, monthlyQ.data, recoveryQ.data]);
+
+  if (category === "other") return <DealerTagRequests />;
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Approvals" subtitle="Your plans and their approval status. Submitted plans are read-only until reviewed." />
-
       <div className="rounded-lg border bg-background">
         <Table numbered>
           <TableHeader>
@@ -100,7 +101,6 @@ export function MyApprovals() {
           </TableBody>
         </Table>
       </div>
-      <DealerTagRequests />
     </div>
   );
 }

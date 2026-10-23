@@ -1,4 +1,5 @@
 import { CN_REVIEW_LABELS } from "@/lib/cn-review";
+import { APPROVAL_LABELS } from "@/features/planning/approval-labels";
 /**
  * Central Label Dictionary for planning grids (section titles + column headers ONLY — never data).
  * Every planning screen reads labels from here via `useLabel(key)`, so an admin override applied to a
@@ -10,6 +11,7 @@ import { CN_REVIEW_LABELS } from "@/lib/cn-review";
  */
 export const DEFAULT_LABELS = {
   ...CN_REVIEW_LABELS,
+  ...APPROVAL_LABELS,
   "historical_daybook.tab": "Historical Daybook",
   "historical_daybook.file": "Day Book Excel file",
   "historical_daybook.analyze": "Analyze",
@@ -2397,6 +2399,7 @@ const SCHEME_PLANNING_META: Partial<Record<LabelKey, LabelMeta>> = {} as Partial
 
 /** Classify any key into { module, group } — explicit Scheme Planning metadata first, else by prefix. */
 export function labelMeta(key: LabelKey): LabelMeta {
+  if (key.startsWith("approvals.")) return { module: "Approvals", group: /^approvals\.(category|cn)\./.test(key) ? "Navigation / Flip Buttons" : "Sections" };
   if (key.startsWith("historical_daybook.")) return { module: "Historical Daybook", group: key.endsWith(".date") || key.endsWith(".voucher") || key.endsWith(".decision") ? "Table Columns" : "View Buttons" };
   // Performance → Requests / Performance / late reports (kept under one understandable module instead of the Daily Work lump).
   if (/^daily_work\.(late|performance|team)\./.test(key)) return { module: "Performance", group: /\.col\./.test(key) ? "Table Columns" : /\.(filter|error|validation|invalid|loading|empty|detail)/.test(key) ? "Form Fields" : "View Buttons" };

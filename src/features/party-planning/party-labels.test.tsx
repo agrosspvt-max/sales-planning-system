@@ -7,11 +7,13 @@ import { DEFAULT_LABELS, labelCatalog, resolveLabels, type LabelKey } from "@/fe
 import { testLoader } from "@/features/dealer-tags/test-loader";
 
 const dir = "src/features/party-planning";
-const pages = ["party-planning-page", "seasonal-planning-page", "seasonal-plan-list-page", "monthly-planning-page", "monthly-plan-list-page", "plan-list-parts", "territory-mapping-page", "dealer-status-requests", "retailer-mapping"];
+const pages = ["party-planning-page", "seasonal-planning-page", "seasonal-plan-list-page", "monthly-planning-page", "monthly-plan-list-page", "plan-list-parts", "territory-mapping-page", "dealer-status-requests", "retailer-mapping", "party-planning-unavailable-view"];
 
 // 1. Every label key referenced by a page exists in the registry (no raw-key fallbacks), and all are catalogued under Party Planning.
 const referenced = new Set<string>();
 for (const f of pages) for (const m of readFileSync(`${dir}/${f}.tsx`, "utf8").matchAll(/"(party_planning\.[a-z0-9_.]+)"/g)) referenced.add(m[1]!);
+// server-side messages (labeledError) are labels too
+for (const f of ["territory.server", "retailer.server"]) for (const m of readFileSync(`${dir}/${f}.ts`, "utf8").matchAll(/"(party_planning\.[a-z0-9_.]+)"/g)) referenced.add(m[1]!);
 assert.ok(referenced.size > 250, `pages reference the label registry (${referenced.size} keys)`);
 for (const k of referenced) assert.ok(k in DEFAULT_LABELS, `key registered: ${k}`);
 const catalog = labelCatalog({});

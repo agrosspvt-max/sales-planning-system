@@ -658,10 +658,10 @@ export function AddMarket({ role }: { role: Role }) {
                       </TableCell>
                       {view === "review" && (
                         <TableCell className="text-right">
-                          <div className="flex justify-end gap-1">
+                          {(role === Role.REGIONAL_MANAGER ? r.status === "PENDING_RM" : r.status === "PENDING_ADMIN") ? <div className="flex justify-end gap-1">
                             <Button size="sm" variant="outline" disabled={act.isPending} onClick={() => act.mutate({ id: r.id, action: "approve" })}><Check className="h-4 w-4" /> {T.approve}</Button>
                             <Button size="sm" variant="ghost" className="text-destructive" disabled={act.isPending} onClick={() => setRejecting(r)}><X className="h-4 w-4" /> {T.reject}</Button>
-                          </div>
+                          </div> : <span className="text-muted-foreground">{dash}</span>}
                         </TableCell>
                       )}
                     </TableRow>

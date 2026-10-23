@@ -12,10 +12,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       auth,
       id,
       {
+        expectedReviewId: String(form.get("expectedReviewId") ?? "") || undefined,
+        bypassReason: String(form.get("bypassReason") ?? "") || undefined,
         status: String(form.get("status") ?? ""),
         reason: String(form.get("reason") ?? "") || undefined,
         acceptanceReasonDetails: String(form.get("acceptanceReasonDetails") ?? "") || undefined,
-        cnExpiryDays: String(form.get("cnExpiryDays") ?? "") || undefined,
+        cnExpiryDate: String(form.get("cnExpiryDate") ?? "") || undefined,
         postedAmount: String(form.get("postedAmount") ?? "") || undefined,
         outstandingAmount: String(form.get("outstandingAmount") ?? "") || undefined,
       },

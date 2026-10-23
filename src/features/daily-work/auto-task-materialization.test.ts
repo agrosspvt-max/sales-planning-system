@@ -87,6 +87,7 @@ function loadService() {
   const localRequire = createRequire(import.meta.url);
   const mocks: Record<string, unknown> = {
     "server-only": {},
+    "@/features/cn-requests/cn-expiry.server": { reconcileDueCnRequestsTx: async () => 0 }, // own suite: cn-requests/cn-expiry.integration.ts
     "@/lib/prisma": { prisma: {} },
     "@/lib/http": { ApiError: class extends Error { constructor(public status: number, message: string) { super(message); } } },
     "@/lib/audit": { writeAudit: async () => undefined },
@@ -211,7 +212,13 @@ async function main() {
     assert.equal(g.entries.find((e) => e.officerId === "so-1")?.todaysPlan, 2_000, "SO's row is unaffected by the RM task");
   }
 
-  console.log("auto-task-materialization.test.ts — all assertions passed");
+  // An Expired CN never yields an Auto Task: the stage change that is due is applied first, then Expired CNs are excluded by the claiming query itself.
+{
+  const source = readFileSync(resolve("src/features/daily-work/auto-task-materialization.server.ts"), "utf8");
+  assert.ok(source.includes("reconcileDueCnRequestsTx(tx, [officerId])"), "due Grace / Expired transitions are applied before tasks are claimed");
+  assert.ok(source.includes(`c."cnPolicyStage" IS DISTINCT FROM 'EXPIRED'`), "an Expired CN's task is never materialized into Daily Work");
+}
+console.log("auto-task-materialization.test.ts — all assertions passed");
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

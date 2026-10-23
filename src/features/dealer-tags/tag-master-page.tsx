@@ -16,34 +16,33 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import type { TagDefinition } from "./types";
-const config: ResourceClientConfig = {
+import { useLabel } from "@/features/labels/label-ui";
+type MasterLabels = { module: string; singular: string; search: string; tagName: string; markerType: string; marker: string; markerHelp: string; active: string };
+/** The resource form's text comes from the Labels system (resolved by the page); keys and field names stay fixed. */
+const buildConfig = (L: MasterLabels): ResourceClientConfig => ({
   key: "dealerTags",
-  label: "Dealer Tags",
-  singular: "Dealer Tag",
+  label: L.module,
+  singular: L.singular,
   softDelete: true,
-  searchPlaceholder: "Search tags…",
+  searchPlaceholder: L.search,
   columns: [],
   fields: [
-    { name: "name", label: "Tag Name", type: "text", required: true },
-    {
-      name: "markerType",
-      label: "Marker Type",
-      type: "select",
-      optionsKey: "markerTypes",
-      required: true,
-    },
-    {
-      name: "marker",
-      label: "Marker",
-      type: "text",
-      required: true,
-      helpText: "Text: 1–8 letters/numbers, such as FP. Symbol: an emoji or symbol, such as ⭐.",
-    },
-    { name: "isActive", label: "Active", type: "switch", defaultValue: "true" },
+    { name: "name", label: L.tagName, type: "text", required: true },
+    { name: "markerType", label: L.markerType, type: "select", optionsKey: "markerTypes", required: true },
+    { name: "marker", label: L.marker, type: "text", required: true, helpText: L.markerHelp },
+    { name: "isActive", label: L.active, type: "switch", defaultValue: "true" },
   ],
-};
+});
 export function TagMasterPage() {
   const qc = useQueryClient();
+  const L = {
+    title: useLabel("dealer_tags.master.title"), subtitle: useLabel("dealer_tags.master.subtitle"), module: useLabel("dealer_tags.master.module"), singular: useLabel("dealer_tags.master.singular"),
+    search: useLabel("dealer_tags.master.search"), tagName: useLabel("dealer_tags.master.tag_name"), marker: useLabel("dealer_tags.master.marker"), markerType: useLabel("dealer_tags.master.marker_type"),
+    type: useLabel("dealer_tags.master.type"), markerHelp: useLabel("dealer_tags.master.marker_help"), typeText: useLabel("dealer_tags.master.type_text"), typeTextShort: useLabel("dealer_tags.master.type_text_short"),
+    typeSymbol: useLabel("dealer_tags.master.type_symbol"), edit: useLabel("dealer_tags.master.edit"), add: useLabel("dealer_tags.action.add_tag"), status: useLabel("dealer_tags.col.status"),
+    active: useLabel("dealer_tags.status.active"), inactive: useLabel("dealer_tags.status.inactive"), action: useLabel("dealer_tags.requests.col.action"),
+  };
+  const config = buildConfig(L);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<TagDefinition | null>(null);
   const { data, error } = useQuery<TagDefinition[]>({
@@ -59,8 +58,8 @@ export function TagMasterPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title="Tag Master"
-        subtitle="Global dealer markers. Inactive tags retain assignments and history."
+        title={L.title}
+        subtitle={L.subtitle}
         actions={
           <Button
             onClick={() => {
@@ -68,7 +67,7 @@ export function TagMasterPage() {
               setOpen(true);
             }}
           >
-            Add Tag
+            {L.add}
           </Button>
         }
       />
@@ -76,11 +75,11 @@ export function TagMasterPage() {
       <Table numbered>
         <TableHeader>
           <TableRow>
-            <TableHead>Tag Name</TableHead>
-            <TableHead>Marker</TableHead>
-            <TableHead>Type</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Action</TableHead>
+            <TableHead>{L.tagName}</TableHead>
+            <TableHead>{L.marker}</TableHead>
+            <TableHead>{L.type}</TableHead>
+            <TableHead>{L.status}</TableHead>
+            <TableHead>{L.action}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -88,8 +87,8 @@ export function TagMasterPage() {
             <TableRow key={t.id}>
               <TableCell>{t.name}</TableCell>
               <TableCell>{t.marker}</TableCell>
-              <TableCell>{t.markerType === "TEXT" ? "Text" : "Symbol / Emoji"}</TableCell>
-              <TableCell>{t.isActive ? "Active" : "Inactive"}</TableCell>
+              <TableCell>{t.markerType === "TEXT" ? L.typeTextShort : L.typeSymbol}</TableCell>
+              <TableCell>{t.isActive ? L.active : L.inactive}</TableCell>
               <TableCell>
                 <Button
                   size="sm"
@@ -99,7 +98,7 @@ export function TagMasterPage() {
                     setOpen(true);
                   }}
                 >
-                  Edit
+                  {L.edit}
                 </Button>
               </TableCell>
             </TableRow>
@@ -114,8 +113,8 @@ export function TagMasterPage() {
         onSubmit={save}
         optionOverrides={{
           markerTypes: [
-            { value: "TEXT", label: "Text / Initials" },
-            { value: "SYMBOL", label: "Symbol / Emoji" },
+            { value: "TEXT", label: L.typeText },
+            { value: "SYMBOL", label: L.typeSymbol },
           ],
         }}
       />

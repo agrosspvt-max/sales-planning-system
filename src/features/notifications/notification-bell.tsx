@@ -8,6 +8,7 @@ import { Bell } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { useLabel } from "@/features/labels/label-ui";
 
 export interface NotificationItem {
   id: string;
@@ -37,6 +38,7 @@ function hrefFor(n: NotificationItem): string | null {
 
 export function NotificationBell() {
   const qc = useQueryClient();
+  const L = { title: useLabel("notifications.ui.title"), markAll: useLabel("notifications.ui.mark_all_read"), empty: useLabel("notifications.ui.empty"), viewAll: useLabel("notifications.ui.view_all") };
   const [open, setOpen] = useState(false);
 
   const { data } = useQuery<Feed>({
@@ -62,7 +64,8 @@ export function NotificationBell() {
       <Button
         variant="ghost"
         size="icon"
-        title="Notifications"
+        title={L.title}
+        aria-label={L.title}
         onClick={() => setOpen((o) => !o)}
         className="relative"
       >
@@ -79,20 +82,20 @@ export function NotificationBell() {
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className="absolute right-0 z-50 mt-2 w-80 rounded-md border bg-popover shadow-lg">
             <div className="flex items-center justify-between border-b px-3 py-2">
-              <span className="text-sm font-semibold">Notifications</span>
+              <span className="text-sm font-semibold">{L.title}</span>
               {unread > 0 && (
                 <button
                   className="text-xs text-primary hover:underline"
                   onClick={() => readAll.mutate()}
                 >
-                  Mark all read
+                  {L.markAll}
                 </button>
               )}
             </div>
             <div className="max-h-96 overflow-auto">
               {items.length === 0 ? (
                 <p className="px-3 py-8 text-center text-sm text-muted-foreground">
-                  No notifications.
+                  {L.empty}
                 </p>
               ) : (
                 items.map((n) => {
@@ -133,7 +136,7 @@ export function NotificationBell() {
               className="block border-t px-3 py-2 text-center text-xs text-primary hover:underline"
               onClick={() => setOpen(false)}
             >
-              View all
+              {L.viewAll}
             </Link>
           </div>
         </>

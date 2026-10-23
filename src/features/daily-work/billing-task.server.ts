@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { labeledError } from "@/features/labels/labeled-error";
 import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { getCurrentOwnerByDealer, getOfficerScope } from "@/lib/scope";
@@ -66,7 +67,7 @@ export async function materializeDueBillingTasksInTransaction(
     const contribution = new Prisma.Decimal(task.amount);
     if (!contribution.isPositive()) continue;
     const entryId = await ensureTaskRow(tx, { officerId, dealerId: task.dealerId, workDate, batchId: day.currentBatchId, section: "RECOVERY", kind: "BE", sourceId: task.id });
-    if (!entryId) throw new ApiError(409, "The current Recovery plan changed while Billing Exception tasks were being added.");
+    if (!entryId) throw labeledError(409, "daily_work.error.recovery_plan_changed_billing");
     // Claim FIRST (atomic, idempotent): only the winner sets the amount. The owner is (re)written here, i.e. BEFORE the task enters Daily Work.
     const claimed = await tx.$executeRaw(Prisma.sql`
       UPDATE "BillingExceptionTask"
@@ -132,7 +133,7 @@ export const BILLING_CONTRIBUTION_UNION = Prisma.sql`
 
 async function loadLocked(tx: Prisma.TransactionClient, id: string) {
   const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "BillingExceptionTask" WHERE "id" = ${id} FOR UPDATE`);
-  if (locked.length === 0) throw new ApiError(404, "Task not found");
+  if (locked.length === 0) throw labeledError(404, "daily_work.error.task_not_found");
   return tx.billingExceptionTask.findUniqueOrThrow({ where: { id } });
 }
 
@@ -152,7 +153,7 @@ export async function rescheduleBillingTask(ctx: AuthContext, id: string, rawDat
   if (taskDate <= workDate) throw new ApiError(422, L["daily_work.billing_tasks.error.after_today"]);
 
   const peek = await prisma.billingExceptionTask.findUnique({ where: { id }, select: { id: true, officerId: true, dealerId: true, dailyWorkEntryId: true } });
-  if (!peek) throw new ApiError(404, "Task not found");
+  if (!peek) throw labeledError(404, "daily_work.error.task_not_found");
   const [owner] = await effectiveBillingTaskOwners([peek]);
   let allowed = owner === ctx.userId;
   if (!allowed && ctx.role === Role.REGIONAL_MANAGER) { const scope = await getOfficerScope(ctx); allowed = scope.all || scope.ids.includes(owner!); }
@@ -203,7 +204,7 @@ export async function getBillingTaskDetail(ctx: AuthContext, id: string): Promis
   });
   // Viewers: the effective owner, a Regional Manager over that owner's team, an administrative account with Last Payment Report read — anyone else sees "missing".
   const ownerId = task ? (await effectiveBillingTaskOwners([task]))[0]! : null;
-  if (!task || !ownerId || !(await canViewBillingTask(ctx, ownerId))) throw new ApiError(404, "Task not found");
+  if (!task || !ownerId || !(await canViewBillingTask(ctx, ownerId))) throw labeledError(404, "daily_work.error.task_not_found");
   const ownerName = ownerId === task.officerId ? task.officer.name : ((await prisma.user.findUnique({ where: { id: ownerId }, select: { name: true } }))?.name ?? task.officer.name);
   const today = currentBusinessDate();
   const name = (await loadDealerAliasNameMap([task.dealerId])).get(task.dealerId) ?? (await prisma.dealer.findUnique({ where: { id: task.dealerId }, select: { name: true } }))?.name ?? "—";

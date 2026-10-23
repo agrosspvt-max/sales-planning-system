@@ -17,7 +17,8 @@ let selection: { value: string[]; onChange: (v: string[]) => void };
 let fail = false, created = false;
 const request = { id: "r1", retailerName: "Ram", firmName: "Shop", phone: "0123456789", dealers: [{ id: "d1", name: "Alpha Dealer" }, { id: "d2", name: "Beta Dealer" }], requestedById: "so1", requestedByName: "Officer", requestedByTerritory: "North", createdAt: "2026-10-21T04:00:00Z", status: "PENDING", decidedByName: null, decidedAt: null, rejectionReason: null, retailerId: null };
 let requestRows = [request];
-const label = (k: string) => (DEFAULT_LABELS as Record<string, string>)[k] ?? k;
+const edited: Record<string, string> = {}; // administrator-edited wording (Labels screen)
+const label = (k: string) => edited[k] ?? (DEFAULT_LABELS as Record<string, string>)[k] ?? k;
 const text = (node: React.ReactNode): string => typeof node === "string" ? node : Array.isArray(node) ? node.map(text).join("") : React.isValidElement<{ children?: React.ReactNode }>(node) ? text(node.props.children) : "";
 const state = (initial: unknown) => { const i = cursor++; if (!(i in hooks)) hooks[i] = typeof initial === "function" ? (initial as () => unknown)() : initial; const set = (v: unknown) => { hooks[i] = typeof v === "function" ? (v as (old: unknown) => unknown)(hooks[i]) : v; }; setters[i] = set; return [hooks[i], set]; };
 const overrides = {
@@ -111,6 +112,24 @@ async function main() {
   button("Add Retailer").onClick!(); html = render(rmPage);
   assert.ok(html.includes("Add Retailer Dialog Open"), "tab-row action opens the mapping form");
   assert.deepEqual(filterSearchableOptions([{ value: "a", label: "Alpha Dealer" }, { value: "b", label: "Beta Dealer" }], "aLPha").map((o) => o.value), ["a"]);
+
+  // Labels: editing the wording changes only the wording — tab keys, request statuses, endpoints and the decision payload stay the same.
+  Object.assign(edited, { "party_planning.retailer.title": "Shop Mapping", "party_planning.retailer.add": "Add Shop", "party_planning.retailer.name": "Shop Contact", "party_planning.retailer.reject": "Decline",
+    "party_planning.retailer.view.requested": "Submitted", "party_planning.retailer.retailer_requests": "Shop Requests" });
+  hooks.length = 0; navs.length = 0; render(<root.TerritoryMappingPage role={Role.REGIONAL_MANAGER} />);
+  assert.ok(navs[0]!.tabs.some((t) => t.key === "retailer" && t.label === "Shop Mapping"), "the Retailer Mapping tab shows the edited label under the same key");
+  hooks.length = 0; calls.length = 0; requestRows = [request];
+  html = render(<ui.AddRetailerDialog onClose={() => undefined} onCreated={() => undefined} />);
+  assert.ok(html.includes("Add Shop") && html.includes("Shop Contact") && !html.includes("Retailer Name"), "form uses the edited wording");
+  button("Submit Request").onClick!(); html = render(<ui.AddRetailerDialog onClose={() => undefined} onCreated={() => undefined} />);
+  assert.ok(html.includes("Enter the Retailer Name."), "validation behaviour and its (unedited) message are unchanged");
+  hooks.length = 0; html = render(<ui.RetailerRequestsTab />);
+  assert.ok(html.includes("Decline") && !buttons.some((b) => text(b.children) === "Reject"), "review action uses the edited wording");
+  buttons.find((b) => text(b.children) === "Decline")!.onClick!(); render(<ui.RetailerRequestsTab />);
+  inputs["retailer-rejection"]!.onChange({ target: { value: "Wrong shop" } }); render(<ui.RetailerRequestsTab />);
+  buttons.filter((b) => text(b.children) === "Decline").at(-1)!.onClick!(); await tick();
+  assert.equal(JSON.stringify(calls.filter((c) => c.url.endsWith("/decide")).at(-1)!.body), JSON.stringify({ action: "reject", reason: "Wrong shop" }), "the API still receives the fixed action id, never the label text");
+  for (const k of Object.keys(edited)) delete edited[k];
   console.log("retailer-ui.test.tsx — form, retry, validation, review and navigation passed");
 }
 main().catch((e) => { console.error(e); process.exitCode = 1; });

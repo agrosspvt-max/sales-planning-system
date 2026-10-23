@@ -102,7 +102,7 @@ export function moduleForPage(path: string): AdminModule | null {
 }
 export function mayEnterPage(identity: PermissionIdentity, path: string): boolean {
   if (identity.role !== Role.CUSTOM_ADMIN) return true;
-  if (path === "/account") return true; // Own password, no administrative grant.
+  if (path === "/account" || path === "/planning/approvals") return true; // Own password, no administrative grant.
   if (["/planning/create", "/planning/view"].includes(path)) {
     return ["salesPlanning", "recoveryPlanning", "schemePlanning", "partyPlanning"].some(m => hasAdminPermission(identity, m as AdminModule));
   }

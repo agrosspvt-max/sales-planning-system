@@ -320,7 +320,7 @@ function OwnerDailyWorkPage() {
       <DailyWorkFieldset legend={dailyTaskTitle}>
         {/* Day actions live in the Plan Type fieldset; Daily Task starts directly with its content. */}
         {/* Yesterday's report that was never submitted before its deadline: informational only, it no longer blocks today's plan. */}
-        {previousMissed && (
+        {previousMissed && !outstanding && (
           <p role="status" className="rounded-lg border border-dashed px-4 py-2 text-sm text-muted-foreground">{previousMissed}: {missedText.replace("{deadline}", formatDateTimeDMY(todayStatus?.previousReport?.deadline))}</p>
         )}
         {view === DailyWorkView.REPORT && activeDate !== workDate && (
@@ -339,8 +339,8 @@ function OwnerDailyWorkPage() {
           </div>
         )}
 
-        {view === DailyWorkView.PLAN && outstanding && (
-          <OutstandingReportPanel outstanding={outstanding} onOpenReport={() => setView(DailyWorkView.REPORT)} onChanged={() => qc.invalidateQueries({ queryKey: ["daily-work-status"] })} />
+        {outstanding && (
+          <OutstandingReportPanel outstanding={outstanding} onOpenReport={view === DailyWorkView.PLAN ? () => setView(DailyWorkView.REPORT) : undefined} onChanged={() => qc.invalidateQueries({ queryKey: ["daily-work-status"] })} />
         )}
         {/* Remount when the authoritative business date changes so today's editor re-seeds cleanly. */}
         <div className={cn(
@@ -378,9 +378,10 @@ function OwnerDailyWorkPage() {
  */
 function SectionStatusIcon({ status }: { status?: SectionStatusValue }) {
   const noPlanLabel = useLabel("daily_work.action.no_plan");
+  const filledLabel = useLabel("daily_work.status.filled");
   return (
     <span className="flex h-3.5 items-center justify-center">
-      {status === "FILLED" ? <Check className="h-3.5 w-3.5 text-success" aria-label="Filled" />
+      {status === "FILLED" ? <Check className="h-3.5 w-3.5 text-success" aria-label={filledLabel} />
         : status === "NO_PLAN" ? <Ban className="h-3.5 w-3.5 text-noplan" aria-label={noPlanLabel} />
           : null}
     </span>

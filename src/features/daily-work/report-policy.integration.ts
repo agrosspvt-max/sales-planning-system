@@ -6,6 +6,7 @@
  *   BILLING_TASK_TEST_URL=postgresql://localhost:5432/billing_task_test npm run test:report-policy:db
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { PrismaClient, Role, type Prisma } from "@prisma/client";
 import * as realDailyWork from "@/lib/daily-work";
 import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
@@ -60,7 +61,7 @@ const noPlan = async (c: AuthContext, date: string, sections: string[]) => { for
 const rowOf = async (c: AuthContext, section: "SALES" | "RECOVERY", date: string, dealerId: string) => (await svc.getDailyWork(c, section, date, undefined, "REPORT")).dealers.find((d) => d.dealerId === dealerId)!;
 const unitOf = (r: { tasks?: { unitType: string; unitId: string }[] }) => r.tasks![0]!;
 const post = (c: AuthContext, section: "SALES" | "RECOVERY", date: string, r: { entryId: string; tasks?: { unitType: string; unitId: string }[] }, f: Record<string, unknown>) =>
-  svc.enterTaskOutcomes(c, { section, workDate: date, entries: [{ entryId: r.entryId, units: [{ unitType: unitOf(r).unitType, unitId: unitOf(r).unitId, ...f }] }] });
+  svc.enterTaskOutcomes(c, { section, workDate: date, entries: [{ entryId: r.entryId, ...(section === "RECOVERY" ? { paymentMode: "CASH" } : {}), units: [{ unitType: unitOf(r).unitType, unitId: unitOf(r).unitId, ...f }] }] });
 const counts = async () => ({
   outcomes: await prisma.dailyTaskOutcome.count(), committed: await prisma.dailyTaskOutcome.count({ where: { state: "COMMITTED" } }), calendar: await prisma.calendarEntry.count(),
   events: await prisma.taskRescheduleEvent.count(), receipts: await prisma.dealerPaymentReceipt.count(), exceptions: await prisma.billingException.count(), tasks: await prisma.billingExceptionTask.count(),
@@ -235,6 +236,44 @@ async function main() {
   assert.equal(await code(submit(SO2, "2026-10-25")), 422);
   at("2026-10-27", "10:00:00");
   await plan(SO2, "2026-10-27", "C"); // a missed pre-rollout report never blocks (previous behaviour)
+
+  /* ---- 7. audited production gap: one post-rollout Recovery plan missing its policy ---- */
+  const SURESH = ctx("suresh", Role.SALES_OFFICER);
+  await prisma.user.create({ data: { id: SURESH.userId, username: "so_suresh", name: "Suresh Verma", role: Role.SALES_OFFICER, groupId: "g1", passwordHash: "x" } });
+  await prisma.dealer.create({ data: { id: "S", name: "Suresh Recovery Dealer" } });
+  await prisma.dealerAssignment.create({ data: { dealerId: "S", officerId: SURESH.userId, effectiveFrom: new Date("2024-01-01") } });
+  await prisma.$executeRaw`UPDATE "DailyReportRollout" SET "effectiveAt" = ${new Date("2026-10-19T10:49:19.771Z")} WHERE "id" = 'SO_MIDNIGHT'`;
+  at("2026-10-22", "10:38:26.380");
+  await svc.saveDailyWork(SURESH, { section: "RECOVERY", workDate: "2026-10-22", rows: [{ dealerId: "S", todaysPlan: 500, entryType: "REGULAR" }] });
+  await noPlan(SURESH, "2026-10-22", ["SALES", ...ALL]);
+  await svc.submitDailyWorkDay(SURESH, { workDate: "2026-10-22" });
+  // Reproduce only the audited missing metadata, not any deleted plan or report.
+  await prisma.dailyReportPolicy.deleteMany({ where: { officerId: SURESH.userId } });
+  await prisma.dailyWorkEntry.updateMany({ where: { officerId: SURESH.userId, planSubmittedAt: { not: null } }, data: { planSubmittedAt: new Date("2026-10-22T05:08:26.380Z") } });
+  at("2026-10-23", "11:29:00");
+  const broken = await svc.getDailyStatus(SURESH, "2026-10-23");
+  same([broken.previousReport.state, broken.outstandingReport], ["PENDING", null], "the missing policy reproduces the blocked-plan/no-request screenshot");
+  const beforePolicies = await prisma.dailyReportPolicy.findMany({ orderBy: { id: "asc" } });
+  const beforeEntries = await prisma.dailyWorkEntry.findMany({ where: { officerId: SURESH.userId }, orderBy: { id: "asc" } });
+  const beforeDay = await prisma.dailyWorkDay.findMany({ where: { officerId: SURESH.userId } });
+  const repair = readFileSync("prisma/migrations/20261029000000_repair_suresh_report_policy/migration.sql", "utf8");
+  assert.equal(await prisma.$executeRawUnsafe(repair), 1, "restore only the confirmed missing policy");
+  assert.equal(await prisma.$executeRawUnsafe(repair), 0, "rerunning the repair is harmless");
+  same(await prisma.dailyReportPolicy.findMany({ where: { officerId: { not: SURESH.userId } }, orderBy: { id: "asc" } }), beforePolicies, "existing policies, including legacy/RM absences, are preserved");
+  same(await prisma.dailyWorkEntry.findMany({ where: { officerId: SURESH.userId }, orderBy: { id: "asc" } }), beforeEntries, "all saved planning/report values are preserved");
+  same(await prisma.dailyWorkDay.findMany({ where: { officerId: SURESH.userId } }), beforeDay, "the repair does not finalize or unlock the report");
+  const fixed = await svc.getDailyStatus(SURESH, "2026-10-23");
+  same([fixed.outstandingReport?.date, fixed.outstandingReport?.canRequest, fixed.canSubmit], ["2026-10-22", true, false]);
+  assert.equal(ist(fixed.outstandingReport!.deadline), "2026-10-23 00:00:00");
+  assert.equal((await rowsReport(SURESH, "2026-10-22")).length, 0, "Sales is empty because the plan is Recovery only");
+  const late = await req(SURESH, "2026-10-22", REASON);
+  const recovery = (await svc.getDailyWork(SURESH, "RECOVERY", "2026-10-22", undefined, "REPORT")).dealers[0]!;
+  assert.equal(await code(post(SURESH, "RECOVERY", "2026-10-22", recovery, { outcome: "COMPLETED", actualAmount: 500 })), 422, "a pending request does not reopen reporting");
+  await decide(ADMIN, late.id, { action: "approve" });
+  await post(SURESH, "RECOVERY", "2026-10-22", recovery, { outcome: "COMPLETED", actualAmount: 500 });
+  await submit(SURESH, "2026-10-22");
+  assert.equal((await svc.getDailyStatus(SURESH, "2026-10-23")).outstandingReport, null, "submission after approval clears the next-plan block");
+  assert.equal((await prisma.lateReportRequest.findUniqueOrThrow({ where: { id: late.id } })).status, "COMPLETED");
   console.log("report-policy.integration.ts — all scenarios passed");
 }
 const myLate = (c: AuthContext, date: string) => svc.getDailyStatus(c, date).then((s) => s.lateRequests);

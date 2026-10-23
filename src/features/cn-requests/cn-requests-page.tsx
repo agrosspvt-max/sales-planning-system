@@ -1,4 +1,6 @@
 "use client";
+import { CnProcessingDialog } from "./cn-review-ui";
+import { cnReviewStatusKey, type CnReview } from "@/lib/cn-review";
 import { useAdminPermission } from "@/features/accounts/permission-ui";
 import { formatDMY } from "@/lib/date-format";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
@@ -23,7 +25,9 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { PillNav, UnderlineTabs } from "@/features/planning/plan-list-ui";
-import { useLabel } from "@/features/labels/label-ui";
+import { DateInputDMY } from "@/components/ui/date-input-dmy";
+import { CN_DEFAULT_GRACE_DAYS, addCnDays, parseCnGraceDays } from "@/lib/cn-expiry";
+import { useLabel, useLabelResolver } from "@/features/labels/label-ui";
 import {
   buildCreateCnRequestPayload,
   CN_ACCEPTANCE_REASON_VALUES,
@@ -34,7 +38,9 @@ import {
   CN_WORKING_MAX_BYTES,
   CN_WORKING_PDF_MIME,
   CN_WORKING_XLSX_MIME,
+  cnAcceptanceNeedsExpiry,
   cnActionMenuItems,
+  cnRequestBusinessDateKey,
   cnRequestCurrentDisplayStatus,
   cnTypeLabel,
   formatCnRequestDays,
@@ -55,8 +61,9 @@ import { ColumnFilterHeader, type ColumnFilterOption } from "@/components/ui/col
 import { cnFilterParams, cnFilterValue, filterCnRequests, type CnFilterKey, type CnFilters } from "@/lib/cn-request-filters";
 
 interface CnRequest {
+  processingReview?: Pick<CnReview, "kind" | "status">;
   id: string; dealerId: string; partyName: string; cnType: string; amount: number | null; postedAmount: number | null; paymentStatus: string | null; paymentVerified: boolean; paymentOriginalAmount: number | null; paymentOutstandingAmount: number | null; paymentTrackingMode: string | null;
-  officerId: string; employeeName: string; state: string | null; territory: string | null; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; cnExpiryDays: number | null; expiryDate: string | null; cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; finalCn?: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; remarks: string | null; createdAt: string; days: number | null;
+  officerId: string; employeeName: string; state: string | null; territory: string | null; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; expiryDate: string | null; graceDays: number | null; graceEndDate: string | null; policyStage: "WORKING" | "GRACE" | "EXPIRED" | null; policyCycle: number; cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; finalCn?: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; remarks: string | null; createdAt: string; days: number | null;
 }
 interface DealerOpt { id: string; name: string }
 interface OfficerOpt { id: string; name: string }
@@ -73,6 +80,8 @@ const businessDate = (s: string) => formatDMY(s);
  * role server-side; the columns and layout are identical for every role.
  */
 export function CnRequestsPage({ role, userId }: { role: Role; userId: string }) {
+  const t = useLabelResolver();
+  const allowPost = useAdminPermission("cnRequests", "post");
   const allowAccept = useAdminPermission("cnRequests", "approve");
   const allowReject = useAdminPermission("cnRequests", "reject");
   const qc = useQueryClient();
@@ -120,6 +129,13 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     confirm: useLabel("cn_requests.acceptance.confirm"),
     cnExpiryDays: useLabel("cn_requests.acceptance.expiry_days"),
     expires: useLabel("cn_requests.col.expires"),
+    graceEnds: useLabel("cn_requests.col.grace_ends"), inGrace: useLabel("cn_requests.view.cn_in_grace"), expiredCn: useLabel("cn_requests.view.expired"),
+    graceDays: useLabel("cn_requests.acceptance.grace_days"), graceEndsOn: useLabel("cn_requests.acceptance.grace_ends_on"), expiryHelp: useLabel("cn_requests.acceptance.expiry_help"),
+    reopen: {
+      action: useLabel("cn_requests.reopen.action"), title: useLabel("cn_requests.reopen.title"), newExpiry: useLabel("cn_requests.reopen.new_expiry"), graceDays: useLabel("cn_requests.reopen.grace_days"),
+      reason: useLabel("cn_requests.reopen.reason"), authorizedBy: useLabel("cn_requests.reopen.authorized_by"), confirm: useLabel("cn_requests.reopen.confirm"), confirming: useLabel("cn_requests.reopen.confirming"),
+      reasonRequired: useLabel("cn_requests.validation.reopen_reason_required"), authorizerRequired: useLabel("cn_requests.validation.reopen_authorizer_required"),
+    },
     postedAmount: useLabel("cn_requests.acceptance.posted_amount"),
     outstandingAmount: useLabel("cn_requests.payment.outstanding_amount"),
     colDays: useLabel("cn_requests.col.days"),
@@ -172,6 +188,7 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
       detailsRequired: useLabel("cn_requests.validation.other_reason_required"),
       expiryRequired: useLabel("cn_requests.validation.expiry_required"),
       expiryInvalid: useLabel("cn_requests.validation.expiry_invalid"),
+      expiryPast: useLabel("cn_requests.validation.expiry_past"), graceRequired: useLabel("cn_requests.validation.grace_required"), graceInvalid: useLabel("cn_requests.validation.grace_invalid"),
       postedAmountRequired: useLabel("cn_requests.validation.posted_amount_required"),
       postedAmountInvalid: useLabel("cn_requests.validation.posted_amount_invalid"),
       outstandingRequired: useLabel("cn_requests.validation.outstanding_required"),
@@ -192,12 +209,13 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
 
   const [section, setSection] = useState<"submitted-rejected" | "accepted">("submitted-rejected");
   const [decisionView, setDecisionView] = useState<"submitted" | "rejected">("submitted");
-  const [acceptedView, setAcceptedView] = useState<"accepted-not-posted" | "posted-in-ledger">("accepted-not-posted");
+  const [acceptedView, setAcceptedView] = useState<"accepted-not-posted" | "posted-in-ledger" | "cn-near-expire" | "expired-cn" | "under-process">("accepted-not-posted");
   const view: CnRequestView = section === "submitted-rejected" ? decisionView : acceptedView;
   const [filters, setFilters] = useState<CnFilters>({});
 
   const { data: rows, isLoading } = useQuery<CnRequest[]>({
     queryKey: ["cn-requests", view],
+    refetchInterval: view === "under-process" ? 15000 : false,
     queryFn: () => api.get<CnRequest[]>(`/api/cn-requests?view=${encodeURIComponent(view)}`),
   });
   const filteredRows = filterCnRequests(rows ?? [], filters);
@@ -245,11 +263,24 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   const [rejectError, setRejectError] = useState<string | null>(null);
   const [acceptTarget, setAcceptTarget] = useState<{ request: CnRequest; status: CnAcceptanceStatus } | null>(null);
   const [acceptError, setAcceptError] = useState<string | null>(null);
+  const [processingTarget, setProcessingTarget] = useState<CnRequest | null>(null);
+  const [processingDecision, setProcessingDecision] = useState<{ id: string; expectedReviewId: string; bypassReason: string } | null>(null);
   const [paymentTarget, setPaymentTarget] = useState<CnRequest | null>(null);
+  const [reopenTarget, setReopenTarget] = useState<CnRequest | null>(null);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  const reopenMut = useMutation({
+    mutationFn: (v: { id: string; expiryDate: string; reason: string; authorizedBy: string; fromCycle: number }) =>
+      api.post(`/api/cn-requests/${v.id}/reopen`, { expiryDate: v.expiryDate, reason: v.reason, authorizedBy: v.authorizedBy, fromCycle: v.fromCycle }),
+    onSuccess: () => { setReopenTarget(null); setReopenError(null); qc.invalidateQueries({ queryKey: ["cn-requests"] }); },
+    onError: (e) => setReopenError((e as Error).message),
+  });
+
+  const [graceTarget, setGraceTarget] = useState<CnRequest | null>(null);
 
   const actMut = useMutation({
     mutationFn: (v: { id: string; action: "reject"; reason?: CnRejectionReason; rejectionReasonDetails?: string }) =>
       api.post(`/api/cn-requests/${v.id}/act`, {
+        ...(processingDecision?.id === v.id ? processingDecision : {}),
         action: v.action,
         reason: v.reason,
         rejectionReasonDetails: v.rejectionReasonDetails,
@@ -267,12 +298,14 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
   });
 
   const acceptMut = useMutation({
-    mutationFn: async (value: { id: string; status: CnAcceptanceStatus; reason?: CnAcceptanceReason; acceptanceReasonDetails?: string; cnExpiryDays?: number; postedAmount?: number; outstandingAmount?: number; file?: File }) => {
+    mutationFn: async (value: { id: string; status: CnAcceptanceStatus; reason?: CnAcceptanceReason; acceptanceReasonDetails?: string; cnExpiryDate?: string; graceDays?: number; postedAmount?: number; outstandingAmount?: number; file?: File }) => {
       const form = new FormData();
       form.append("status", value.status);
+      if (processingDecision?.id === value.id) { form.set("expectedReviewId", processingDecision.expectedReviewId); form.set("bypassReason", processingDecision.bypassReason); }
       if (value.reason) form.append("reason", value.reason);
       if (value.acceptanceReasonDetails) form.append("acceptanceReasonDetails", value.acceptanceReasonDetails);
-      if (value.cnExpiryDays != null) form.append("cnExpiryDays", String(value.cnExpiryDays));
+      if (value.cnExpiryDate) form.append("cnExpiryDate", value.cnExpiryDate);
+      if (value.graceDays != null) form.append("graceDays", String(value.graceDays));
       if (value.postedAmount != null) form.append("postedAmount", String(value.postedAmount));
       if (value.outstandingAmount != null) form.append("outstandingAmount", String(value.outstandingAmount));
       if (value.file) form.append("file", value.file);
@@ -294,14 +327,15 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
     (isManager && r.status === CN_REQUEST_STATUSES.SUBMITTED && r.officerId !== userId) ||
     (isAdmin && allowReject && r.status === CN_REQUEST_STATUSES.SUBMITTED);
   const canAccept = (r: CnRequest) => isAdmin && allowAccept && r.status === CN_REQUEST_STATUSES.SUBMITTED;
-  const showExpires = view === "accepted-not-posted";
+  const showExpires = view === "accepted-not-posted" || view === "cn-near-expire" || view === "expired-cn";
   // Amount and Payment Status are intentionally shown only in the Accepted section.
   const showAmountPayment = section === "accepted";
   // Employee Name / State / Territory are redundant in the SO's own view (fixed by their profile).
   const showProfileColumns = !isOfficer;
-  // Approval remains a Submitted / Rejected workflow column; Accepted rows are completed through Payment Status.
-  const showApproval = !isOfficer && section === "submitted-rejected";
-  const columnCount = 5 + (showAmountPayment ? 2 : 0) + (showProfileColumns ? 3 : 0) + (showExpires ? 1 : 0) + (showApproval ? 1 : 0);
+  // Under Process combines its status, filter and review action in CN Update. Every viewer retains history access.
+  const showStatus = view !== "under-process";
+  const showApproval = view === "under-process" || (!isOfficer && section === "submitted-rejected");
+  const columnCount = 4 + (showStatus ? 1 : 0) + (showAmountPayment ? 2 : 0) + (showProfileColumns ? 3 : 0) + (showExpires ? 1 : 0) + (showApproval ? 1 : 0);
 
   const filterLabel = (row: CnRequest, field: CnFilterKey): string => {
     switch (field) {
@@ -313,10 +347,10 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
       case "state": return row.state ?? "—";
       case "territory": return row.territory ?? "—";
       case "days": return formatCnRequestDays(row.days, labels);
-      case "expiry": return row.expiryDate ? businessDate(row.expiryDate) : "—";
+      case "expiry": return (row.graceDays ?? 0) > 0 ? t("cn_requests.grace.given") : t("cn_requests.grace.without");
       case "status": {
         const value = cnFilterValue(row, field);
-        return value === "SUBMITTED" ? labels.submitted : value === "REJECTED" ? labels.rejected
+        return row.status === "UNDER_PROCESS" ? (row.processingReview ? t(cnReviewStatusKey(row.processingReview)) : t("cn_requests.processing.tab")) : value === "SUBMITTED" ? labels.submitted : value === "REJECTED" ? labels.rejected
           : value === "ACCEPTED_NOT_POSTED" ? labels.acceptedNotPosted : value === "RETURNED_FROM_LEDGER" ? labels.returnedFromLedger : labels.postedInLedger;
       }
     }
@@ -374,8 +408,11 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
             value={acceptedView}
             onChange={(next) => { setAcceptedView(next); setFilters({}); }}
             items={[
+              { value: "under-process", label: t("cn_requests.processing.tab") },
               { value: "accepted-not-posted", label: labels.acceptedNotPosted },
               { value: "posted-in-ledger", label: labels.postedInLedger },
+              { value: "cn-near-expire", label: labels.inGrace },
+              { value: "expired-cn", label: labels.expiredCn },
             ]}
           />
           {exportButton}
@@ -394,10 +431,10 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
               {showProfileColumns && filterHeader("employee", labels.employeeName)}
               {showProfileColumns && filterHeader("state", labels.state)}
               {showProfileColumns && filterHeader("territory", labels.territory)}
-              {filterHeader("status", labels.status)}
+              {showStatus && filterHeader("status", labels.status)}
               {filterHeader("days", labels.colDays)}
               {showExpires && filterHeader("expiry", labels.expires)}
-              {showApproval && <TableHead className="text-right">{labels.approval}</TableHead>}
+              {showApproval && (view === "under-process" ? filterHeader("status", labels.approval, "text-right") : <TableHead className="text-right">{labels.approval}</TableHead>)}
               <TableHead className="text-right">{labels.colAction}</TableHead>
             </TableRow>
           </TableHeader>
@@ -418,18 +455,24 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
                   {showProfileColumns && <TableCell>{r.employeeName}</TableCell>}
                   {showProfileColumns && <TableCell>{r.state ? <Badge variant="secondary">{r.state}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>}
                   {showProfileColumns && <TableCell>{r.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>}
-                  <TableCell><RequestStatusBadge status={r.status} paymentStatus={r.paymentStatus} labels={labels} /></TableCell>
+                  {showStatus && <TableCell><RequestStatusBadge status={r.status} paymentStatus={r.paymentStatus} policyStage={view === "cn-near-expire" ? "GRACE" : r.policyStage} labels={labels} /></TableCell>}
                   <TableCell className="whitespace-nowrap text-muted-foreground">{formatCnRequestDays(r.days, labels)}</TableCell>
-                  {showExpires && <TableCell className="whitespace-nowrap">{r.expiryDate ? businessDate(r.expiryDate) : "—"}</TableCell>}
+                  {showExpires && <TableCell className="whitespace-nowrap">{r.expiryDate ? businessDate(r.expiryDate) : "—"}{(r.graceDays ?? 0) > 0 && <span className="block text-xs text-muted-foreground">{t("cn_requests.grace.annotation").replace("{days}", String(r.graceDays))}</span>}</TableCell>}
                   {showApproval && (
                     <TableCell className="text-right">
-                      {(canAccept(r) || canReject(r)) ? (
+                      {r.status === "UNDER_PROCESS" ? <Button
+                        variant={r.processingReview?.status === "REJECTED" ? "destructive" : "outline"}
+                        className={r.processingReview?.status === "CONFIRMED" ? "border-transparent bg-success text-success-foreground hover:bg-success/90 hover:text-success-foreground" : undefined}
+                        size="sm"
+                        onClick={() => setProcessingTarget(r)}
+                      >{r.processingReview ? t(cnReviewStatusKey(r.processingReview)) : t("cn_requests.processing.pending")}</Button> : (canAccept(r) || canReject(r) || (isAdmin && allowPost && r.status === "SUBMITTED")) ? (
                         <div className="flex justify-end">
                           <AcceptanceStatusAction
                             labels={labels}
+                            onProcess={isAdmin && (allowAccept || allowReject || allowPost) && r.status === "SUBMITTED" ? () => setProcessingTarget(r) : undefined}
                             disabled={actMut.isPending || acceptMut.isPending}
-                            onSelect={canAccept(r) ? (status) => { setAcceptError(null); setAcceptTarget({ request: r, status }); } : undefined}
-                            onReject={canReject(r) ? () => { setRejectError(null); setRejectTarget(r); } : undefined}
+                            onSelect={canAccept(r) ? (status) => { setProcessingDecision(null); setAcceptError(null); setAcceptTarget({ request: r, status }); } : undefined}
+                            onReject={canReject(r) ? () => { setProcessingDecision(null); setRejectError(null); setRejectTarget(r); } : undefined}
                           />
                         </div>
                       ) : (
@@ -438,12 +481,16 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
                     </TableCell>
                   )}
                   <TableCell className="text-right">
+                    {view === "expired-cn" && isAdmin && allowAccept && (
+                      <Button size="sm" variant="outline" className="mr-2" disabled={reopenMut.isPending} onClick={() => { setReopenError(null); setReopenTarget(r); }}>{labels.reopen.action}</Button>
+                    )}
                     <CnActionMenu
                       request={r}
                       section={section}
                       view={view}
                       labels={labels}
                       onViewDetails={() => setDetail(r)}
+                      onGrantGrace={isAdmin && allowAccept && (view === "accepted-not-posted" || view === "cn-near-expire") && r.policyStage !== "EXPIRED" && !!r.policyStage && !!r.expiryDate && (r.paymentOutstandingAmount ?? 0) > 0 ? () => setGraceTarget(r) : undefined}
                     />
                   </TableCell>
                 </TableRow>
@@ -453,9 +500,26 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
         </Table>
       </div>
 
+      {graceTarget && <GrantCnGraceDialog request={graceTarget} onClose={() => setGraceTarget(null)} onChanged={() => { setGraceTarget(null); qc.invalidateQueries({ queryKey: ["cn-requests"] }); qc.invalidateQueries({ queryKey: ["cn-request-detail"] }); }} />}
+      {processingTarget && <CnProcessingDialog requestId={processingTarget.id} underProcess={processingTarget.status === "UNDER_PROCESS"} canHandle={isAdmin && (allowAccept || allowReject || allowPost)} canAccept={isAdmin && allowAccept} canPost={isAdmin && allowAccept && allowPost} canReject={isAdmin && allowReject} onClose={() => setProcessingTarget(null)} onDecision={(destination, expectedReviewId, bypassReason) => {
+        setProcessingDecision({ id: processingTarget.id, expectedReviewId, bypassReason });
+        if (destination === "REJECTED") { setRejectError(null); setRejectTarget(processingTarget); }
+        else { setAcceptError(null); setAcceptTarget({ request: processingTarget, status: destination }); }
+        setProcessingTarget(null);
+      }} />}
       {createOpen && <CreateRequestDialog role={role} onClose={() => setCreateOpen(false)} onCreated={() => { setCreateOpen(false); qc.invalidateQueries({ queryKey: ["cn-requests"] }); }} />}
       {detail && <CnRequestDetailDialog requestId={detail.id} initialRequest={detail} onClose={() => setDetail(null)} />}
       {paymentTarget && <CnPaymentDialog requestId={paymentTarget.id} onClose={() => setPaymentTarget(null)} onChanged={() => qc.invalidateQueries({ queryKey: ["cn-requests"] })} />}
+      {reopenTarget && (
+        <ReopenCnDialog
+          labels={labels}
+          request={reopenTarget}
+          pending={reopenMut.isPending}
+          serverError={reopenError}
+          onClose={() => { setReopenTarget(null); setReopenError(null); }}
+          onConfirm={(value) => reopenMut.mutate({ id: reopenTarget.id, fromCycle: reopenTarget.policyCycle, ...value })}
+        />
+      )}
       {rejectTarget && (
         <RejectRequestDialog
           labels={labels}
@@ -475,12 +539,13 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
           requestId={acceptTarget.request.id}
           existingDocument={acceptTarget.request.cnWorking}
           onClose={() => { setAcceptTarget(null); setAcceptError(null); }}
-          onConfirm={(status, reason, acceptanceReasonDetails, cnExpiryDays, postedAmount, outstandingAmount, file) => acceptMut.mutate({
+          onConfirm={(status, reason, acceptanceReasonDetails, cnExpiryDate, graceDays, postedAmount, outstandingAmount, file) => acceptMut.mutate({
             id: acceptTarget.request.id,
             status,
             reason,
             acceptanceReasonDetails,
-            cnExpiryDays,
+            cnExpiryDate,
+            graceDays,
             postedAmount,
             outstandingAmount,
             file,
@@ -638,14 +703,16 @@ type CnWorkflowLabels = {
   acceptanceTitle: string; acceptanceStatus: string; selectAcceptanceStatus: string;
   acceptanceNotPosted: string; acceptancePosted: string; acceptanceReason: string;
   selectAcceptanceReason: string; paymentPending: string; cnWorking: string; chooseFile: string;
-  selected: string; view: string; download: string; confirm: string; cnExpiryDays: string; expires: string; postedAmount: string; outstandingAmount: string;
+  selected: string; view: string; download: string; confirm: string; cnExpiryDays: string; expires: string; graceEnds: string; inGrace: string; expiredCn: string; graceDays: string; graceEndsOn: string; expiryHelp: string;
+  reopen: { action: string; title: string; newExpiry: string; graceDays: string; reason: string; authorizedBy: string; confirm: string; confirming: string; reasonRequired: string; authorizerRequired: string };
+  postedAmount: string; outstandingAmount: string;
   cancel: string; close: string; party: string; cnType: string; approxAmount: string; paymentStatus: string;
   employeeName: string; state: string; territory: string; status: string; details: string; remarks: string; submittedAt: string; detailTitle: string;
   cnTypeLabels: { priceDifference: string; freight: string; scheme: string; demo: string; damageExpiry: string; other: string };
   paymentStatusLabels: { pending: string; notPaid: string; partialPaid: string; paid: string };
   acceptanceFileHelp: string; confirming: string;
   validation: {
-    statusRequired: string; reasonRequired: string; detailsRequired: string; expiryRequired: string; expiryInvalid: string;
+    statusRequired: string; reasonRequired: string; detailsRequired: string; expiryRequired: string; expiryInvalid: string; expiryPast: string; graceRequired: string; graceInvalid: string;
     postedAmountRequired: string; postedAmountInvalid: string; outstandingRequired: string; outstandingInvalid: string;
     workingRequired: string; workingTooLarge: string; workingFileType: string;
     rejectionReasonRequired: string; rejectionDetailsRequired: string; acceptanceFailed: string;
@@ -670,12 +737,15 @@ function AcceptanceStatusAction({
   disabled,
   onSelect,
   onReject,
+  onProcess,
 }: {
   labels: CnWorkflowLabels;
   disabled: boolean;
   onSelect?: (status: CnAcceptanceStatus) => void;
   onReject?: () => void;
+  onProcess?: () => void;
 }) {
+  const processLabel = useLabel("cn_requests.processing.tab");
   return (
     <NativeSelect
       className="h-8 min-w-52"
@@ -683,6 +753,7 @@ function AcceptanceStatusAction({
       disabled={disabled}
       placeholder={labels.selectAcceptanceStatus}
       options={[
+        ...(onProcess ? [{ value: "__PROCESS__", label: processLabel }] : []),
         ...(onSelect ? CN_ACCEPTANCE_STATUS_VALUES.map((status) => ({ value: status, label: acceptanceStatusText(status, labels) })) : []),
         // Reject is the LAST option and reuses the existing rejection flow.
         ...(onReject ? [{ value: REJECT_OPTION_VALUE, label: labels.reject }] : []),
@@ -691,7 +762,8 @@ function AcceptanceStatusAction({
       onChange={(event) => {
         const value = event.target.value;
         if (!value) return;
-        if (value === REJECT_OPTION_VALUE) onReject?.();
+        if (value === "__PROCESS__") onProcess?.();
+        else if (value === REJECT_OPTION_VALUE) onReject?.();
         else onSelect?.(value as CnAcceptanceStatus);
       }}
     />
@@ -717,12 +789,14 @@ function AcceptRequestDialog({
   requestId: string;
   existingDocument: CnRequest["cnWorking"];
   onClose: () => void;
-  onConfirm: (status: CnAcceptanceStatus, reason: CnAcceptanceReason | undefined, acceptanceReasonDetails: string | undefined, cnExpiryDays: number | undefined, postedAmount: number | undefined, outstandingAmount: number | undefined, file: File | undefined) => void;
+  onConfirm: (status: CnAcceptanceStatus, reason: CnAcceptanceReason | undefined, acceptanceReasonDetails: string | undefined, cnExpiryDate: string | undefined, graceDays: number | undefined, postedAmount: number | undefined, outstandingAmount: number | undefined, file: File | undefined) => void;
 }) {
   const [status, setStatus] = useState<CnAcceptanceStatus | "">(initialStatus);
   const [reason, setReason] = useState<CnAcceptanceReason | "">("");
   const [otherReason, setOtherReason] = useState("");
-  const [expiryDays, setExpiryDays] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
+  const todayKey = cnRequestBusinessDateKey(new Date()) ?? "";
+  const needsExpiry = cnAcceptanceNeedsExpiry(status, reason);
   const [postedAmount, setPostedAmount] = useState("");
   const [outstandingAmount, setOutstandingAmount] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -730,7 +804,7 @@ function AcceptRequestDialog({
 
   const submit = () => {
     const error = validateCnAcceptance(
-      { status, reason, acceptanceReasonDetails: otherReason, expiryDays, postedAmount, outstandingAmount, hasFile: !!file || !!existingDocument },
+      { status, reason, acceptanceReasonDetails: otherReason, expiryDate, todayKey, postedAmount, outstandingAmount, hasFile: !!file || !!existingDocument },
       labels.validation,
     );
     if (error) {
@@ -755,7 +829,8 @@ function AcceptRequestDialog({
       status as CnAcceptanceStatus,
       status === "ACCEPTED_NOT_POSTED" ? reason as CnAcceptanceReason : undefined,
       status === "ACCEPTED_NOT_POSTED" && reason === "OTHER" ? otherReason.trim() : undefined,
-      status === "ACCEPTED_NOT_POSTED" ? Number(expiryDays) : undefined,
+      needsExpiry ? expiryDate : undefined,
+      undefined,
       status === "POSTED_IN_LEDGER" ? Number(postedAmount) : undefined,
       status === "ACCEPTED_NOT_POSTED" && reason === "PAYMENT_PENDING" ? Number(outstandingAmount) : undefined,
       file ?? undefined,
@@ -778,7 +853,7 @@ function AcceptRequestDialog({
               onChange={(event) => {
                 const next = event.target.value as CnAcceptanceStatus | "";
                 setStatus(next);
-                if (next === "POSTED_IN_LEDGER") { setReason(""); setOtherReason(""); setExpiryDays(""); setOutstandingAmount(""); }
+                if (next === "POSTED_IN_LEDGER") { setReason(""); setOtherReason(""); setOutstandingAmount(""); }
                 else setPostedAmount("");
                 setValidationError(null);
               }}
@@ -808,17 +883,12 @@ function AcceptRequestDialog({
               <Input type="number" min="0.01" step="0.01" value={outstandingAmount} onChange={(event) => { setOutstandingAmount(event.target.value); setValidationError(null); }} required />
             </div>
           )}
-          {status === "ACCEPTED_NOT_POSTED" && (
+          {needsExpiry && (
             <div className="space-y-1.5">
               <Label>{labels.cnExpiryDays} *</Label>
-              <Input
-                type="number"
-                min={1}
-                step={1}
-                value={expiryDays}
-                onChange={(event) => { setExpiryDays(event.target.value); setValidationError(null); }}
-                required
-              />
+              <DateInputDMY value={expiryDate} min={todayKey} required aria-label={labels.cnExpiryDays} onChange={(iso) => { setExpiryDate(iso); setValidationError(null); }} />
+              <p className="text-xs text-muted-foreground">{labels.expiryHelp}</p>
+
             </div>
           )}
           {status === "POSTED_IN_LEDGER" && (
@@ -868,6 +938,53 @@ function AcceptRequestDialog({
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={pending}>{labels.cancel}</Button>
           <Button onClick={submit} disabled={pending}>{pending ? labels.confirming : labels.confirm}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Admin reopen starts a fresh expiry cycle without grace, with a mandatory reason and authorizing person. */
+function ReopenCnDialog({ labels, request, pending, serverError, onClose, onConfirm }: {
+  labels: CnWorkflowLabels; request: CnRequest; pending: boolean; serverError: string | null; onClose: () => void;
+  onConfirm: (value: { expiryDate: string; reason: string; authorizedBy: string }) => void;
+}) {
+  const [expiryDate, setExpiryDate] = useState("");
+  const [reason, setReason] = useState("");
+  const [authorizedBy, setAuthorizedBy] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const todayKey = cnRequestBusinessDateKey(new Date()) ?? "";
+  const submit = () => {
+    if (!expiryDate) return setError(labels.validation.expiryRequired);
+    if (expiryDate < todayKey) return setError(labels.validation.expiryPast);
+    if (!reason.trim()) return setError(labels.reopen.reasonRequired);
+    if (!authorizedBy.trim()) return setError(labels.reopen.authorizerRequired);
+    setError(null);
+    onConfirm({ expiryDate, reason: reason.trim(), authorizedBy: authorizedBy.trim() });
+  };
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>{labels.reopen.title}</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">{request.partyName}</p>
+          <div className="space-y-1.5">
+            <Label>{labels.reopen.newExpiry} *</Label>
+            <DateInputDMY value={expiryDate} min={todayKey} required aria-label={labels.reopen.newExpiry} onChange={(iso) => { setExpiryDate(iso); setError(null); }} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>{labels.reopen.reason} *</Label>
+            <Textarea value={reason} maxLength={500} rows={3} required onChange={(event) => { setReason(event.target.value); setError(null); }} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>{labels.reopen.authorizedBy} *</Label>
+            <Input value={authorizedBy} maxLength={120} required onChange={(event) => { setAuthorizedBy(event.target.value); setError(null); }} />
+          </div>
+          {(error || serverError) && <p className="text-sm text-destructive">{error ?? serverError}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={pending}>{labels.cancel}</Button>
+          <Button onClick={submit} disabled={pending}>{pending ? labels.reopen.confirming : labels.reopen.confirm}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -958,8 +1075,12 @@ function RejectRequestDialog({
   );
 }
 
-function RequestStatusBadge({ status, paymentStatus, labels }: { status: string; paymentStatus: string | null; labels: CnWorkflowLabels }) {
+function RequestStatusBadge({ status, paymentStatus, policyStage, labels }: { status: string; paymentStatus: string | null; policyStage?: string | null; labels: CnWorkflowLabels }) {
   const displayStatus = cnRequestCurrentDisplayStatus(status, paymentStatus);
+  // Grace / Expired are stages of a CN that is not yet (or no longer) posted; a posted, verified-paid CN keeps its Posted label.
+  if ((policyStage === "GRACE" || policyStage === "EXPIRED") && displayStatus !== "POSTED_IN_LEDGER") {
+    return <Badge variant={policyStage === "EXPIRED" ? "destructive" : "muted"}>{policyStage === "EXPIRED" ? labels.expiredCn : labels.inGrace}</Badge>;
+  }
   const text = displayStatus === "SUBMITTED" ? labels.submitted
     : displayStatus === "REJECTED" ? labels.rejected
       : displayStatus === "ACCEPTED_NOT_POSTED" ? labels.acceptedNotPosted
@@ -991,13 +1112,15 @@ function PaymentStatusPill({ status, verified, labels, onClick }: { status: stri
  * There is no manual Post in Ledger action: a CN reaches Posted in Ledger only through "Accepted, Posted in Ledger" at
  * acceptance or through Payment Status → Verify Payment → Paid.
  */
-function CnActionMenu({ request, section, view, labels, onViewDetails }: {
+function CnActionMenu({ request, section, view, labels, onViewDetails, onGrantGrace }: {
   request: CnRequest;
   section: "submitted-rejected" | "accepted";
   view: CnRequestView;
   labels: { viewDetails: string; downloadCnWorkaround: string; downloadCn: string; downloadFinalCn: string; colAction: string };
   onViewDetails: () => void;
+  onGrantGrace?: () => void;
 }) {
+  const graceAction = useLabel("cn_requests.grace.action");
   const items = cnActionMenuItems({ section, view, hasWorking: request.cnWorking != null, hasFinalCn: request.finalCn != null });
   const labelFor: Record<string, string> = {
     "cn_requests.action.view_details": labels.viewDetails,
@@ -1019,6 +1142,7 @@ function CnActionMenu({ request, section, view, labels, onViewDetails }: {
         <Button size="sm" variant="ghost" title={labels.colAction}><MoreVertical className="h-4 w-4" /></Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent>
+        {onGrantGrace && <DropdownMenuItem onSelect={onGrantGrace}>{graceAction}</DropdownMenuItem>}
         {items.map((item) =>
           item.id === "VIEW_DETAILS" ? (
             <DropdownMenuItem key={item.id} onSelect={onViewDetails}><Eye className="h-4 w-4" /> {labelFor[item.labelKey]}</DropdownMenuItem>
@@ -1029,4 +1153,32 @@ function CnActionMenu({ request, section, view, labels, onViewDetails }: {
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** Grace is an explicit change to the effective expiry date. One request key survives retries. */
+function GrantCnGraceDialog({ request, onClose, onChanged }: { request: CnRequest; onClose: () => void; onChanged: () => void }) {
+  const t = useLabelResolver();
+  const [days, setDays] = useState(String(CN_DEFAULT_GRACE_DAYS));
+  const [requestKey] = useState(() => crypto.randomUUID());
+  const [error, setError] = useState<string | null>(null);
+  const parsed = parseCnGraceDays(days);
+  const next = request.expiryDate && parsed ? addCnDays(request.expiryDate, parsed) : null;
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/api/cn-requests/${request.id}/grace`, { days: parsed, requestKey, fromExpiry: request.expiryDate, fromCycle: request.policyCycle }),
+    onSuccess: onChanged,
+    onError: (e) => setError((e as Error).message),
+  });
+  return <Dialog open onOpenChange={open => !open && !mutation.isPending && onClose()}><DialogContent>
+    <DialogHeader><DialogTitle>{t("cn_requests.grace.title")}</DialogTitle></DialogHeader>
+    <div className="space-y-3">
+      <p>{t("cn_requests.col.expires")}: {request.expiryDate ? businessDate(request.expiryDate) : "—"}</p>
+      <Label>{t("cn_requests.grace.days")} *</Label>
+      <Input type="number" min={1} max={365} step={1} value={days} disabled={mutation.isPending} aria-label={t("cn_requests.grace.days")} onChange={e => { setDays(e.target.value); setError(null); }} />
+      {next && <p>{t("cn_requests.grace.new_expiry")}: {businessDate(next)}</p>}
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    </div>
+    <DialogFooter><Button variant="outline" disabled={mutation.isPending} onClick={onClose}>{t("cn_requests.action.cancel")}</Button>
+      <Button disabled={mutation.isPending} onClick={() => { if (!parsed) setError(t("cn_requests.grace.invalid")); else mutation.mutate(); }}>{t("cn_requests.grace.confirm")}</Button>
+    </DialogFooter>
+  </DialogContent></Dialog>;
 }

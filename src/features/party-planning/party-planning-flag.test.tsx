@@ -3,6 +3,7 @@
  * and never touches Territory Mapping, Sales / Recovery / Scheme Planning, permissions or data.
  */
 import assert from "node:assert/strict";
+import { DEFAULT_LABELS } from "@/features/labels/labels";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import React from "react";
@@ -89,6 +90,7 @@ const apiChecks = (async () => {
       "@/components/ui/card": { Card: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, CardContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, CardHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, CardTitle: ({ children }: { children: React.ReactNode }) => <h3>{children}</h3> },
       "@/components/ui/badge": { Badge: ({ children }: { children: React.ReactNode }) => <span>{children}</span> },
       "@/components/ui/button": { Button: ({ children }: { children: React.ReactNode }) => <button>{children}</button> },
+      "@/features/labels/label-ui": { useLabel: (k: string) => (DEFAULT_LABELS as Record<string, string>)[k] ?? k },
     })("src/features/party-planning/party-planning-unavailable.tsx") as { partyPlanningGate: () => React.ReactNode | null };
     process.env.PARTY_PLANNING_ENABLED = "true";
     assert.equal(partyPlanningGate(), null, "enabled: no unavailable screen on /planning/party/*");

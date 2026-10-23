@@ -1,6 +1,6 @@
 "use client";
+import { CnReviewHistory } from "./cn-review-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
-import { formatDateTimeDMY } from "@/lib/date-format";
 
 import { useQuery } from "@tanstack/react-query";
 import { Download, Eye } from "lucide-react";
@@ -34,7 +34,6 @@ const STATUS_VARIANT: Record<string, "secondary" | "default" | "success" | "dest
   SUBMITTED: "secondary", ACCEPTED_NOT_POSTED: "default", POSTED_IN_LEDGER: "success", RETURNED_FROM_LEDGER: "destructive", REJECTED: "destructive",
 };
 const money = (value: number | null) => value == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(value))}`;
-const dateTime = (value: string) => formatDateTimeDMY(value);
 
 /** Shared CN Request details dialog used by both CN Requests and Daily Work. */
 export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
@@ -50,12 +49,13 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
     staleTime: 0,
   });
   const L = {
+    underProcess: useLabel("cn_requests.processing.tab"),
     title: useLabel("cn_requests.detail.title"), close: useLabel("cn_requests.action.close"),
     party: useLabel("cn_requests.task.party"), cnType: useLabel("cn_requests.field.cn_type"),
     postedAmount: useLabel("cn_requests.acceptance.posted_amount"), approxAmount: useLabel("cn_requests.field.approx_amount"),
     paymentStatus: useLabel("cn_requests.field.payment_status"), employeeName: useLabel("cn_requests.field.employee_name"),
     state: useLabel("cn_requests.field.state"), territory: useLabel("cn_requests.field.territory"),
-    status: useLabel("cn_requests.field.status"), submittedAt: useLabel("cn_requests.view.submitted"),
+    status: useLabel("cn_requests.field.status"),
     details: useLabel("cn_requests.field.details"), acceptanceReason: useLabel("cn_requests.acceptance.reason"),
     paymentPending: useLabel("cn_requests.acceptance.payment_pending"), other: useLabel("cn_requests.rejection.other"),
     otherReason: useLabel("cn_requests.rejection.other_reason"), cnWorking: useLabel("cn_requests.acceptance.cn_working"),
@@ -82,7 +82,7 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
   );
   const statusBadge = request ? (() => {
     const current = cnRequestCurrentDisplayStatus(request.status, request.paymentStatus);
-    const text = current === "SUBMITTED" ? L.submitted : current === "REJECTED" ? L.rejected
+    const text = current === "UNDER_PROCESS" ? L.underProcess : current === "SUBMITTED" ? L.submitted : current === "REJECTED" ? L.rejected
       : current === "ACCEPTED_NOT_POSTED" ? L.acceptedNotPosted : current === "RETURNED_FROM_LEDGER" ? L.returnedFromLedger : L.postedInLedger;
     return <Badge variant={STATUS_VARIANT[current] ?? "muted"}>{text}</Badge>;
   })() : null;
@@ -109,7 +109,6 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
             <Row label={L.state} value={request.state ?? "—"} />
             <Row label={L.territory} value={request.territory ?? "—"} />
             <Row label={L.status} value={statusBadge} />
-            <Row label={L.submittedAt} value={dateTime(request.createdAt)} />
             {request.details && <Row label={L.details} value={request.details} />}
             {request.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED && acceptanceReason && <Row label={L.acceptanceReason} value={acceptanceReason} />}
             {request.status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED && request.acceptanceReasonDetails && <Row label={L.otherReason} value={request.acceptanceReasonDetails} />}
@@ -130,6 +129,7 @@ export function CnRequestDetailDialog({ requestId, initialRequest, onClose }: {
             {rejectionReason && <Row label={L.reason} value={rejectionReason} />}
             {request.rejectionReasonDetails && <Row label={L.otherReason} value={request.rejectionReasonDetails} />}
             {request.remarks && <Row label={L.remarks} value={request.remarks} />}
+            <CnReviewHistory requestId={request.id} />
             </div>
             <CnTimeline entries={request.timeline} submittedAt={request.createdAt} />
           </div>

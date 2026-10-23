@@ -4,6 +4,8 @@ import { Prisma } from "@prisma/client";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { cnRequestExpiryDateKey, isCnSundayDateKey } from "@/lib/cn-request";
+import { cnTaskWindowEnd, effectiveCnStage } from "@/lib/cn-expiry";
+import { currentBusinessDate } from "@/lib/daily-work";
 import { recordTaskReschedule, type TaskSourceType } from "@/features/tasks/task-history.server";
 import {
   OUTCOME_UNIT_TYPES, outcomeUnitIsAuto, outcomeUnitSource, rowActualFromOutcomes, sanitizeOutcomeFields, validateOutcome, roundMoney,
@@ -23,7 +25,8 @@ const SOURCE_TYPE: Record<Exclude<OutcomeUnitType, "MANUAL_ROW">, TaskSourceType
 const RANK: Record<OutcomeUnitType, number> = { BILLING_EXCEPTION: 0, CN_PAYMENT: 1, CN_LEGACY: 2, CALENDAR_ENTRY: 3, MANUAL_ROW: 4 };
 
 export interface EntryFacts { id: string; officerId: string; workDate: string; section: string; dealerId: string | null; todaysPlan: number; todaysActual: number | null; entryType: string; schemeId: string | null }
-export interface DateRule { maxDate: string | null; noSunday: boolean }
+/** `blocked`: the CN is Expired — its task can be neither rescheduled nor abandoned (that would bypass the expiry) until an Admin reopens the CN. */
+export interface DateRule { maxDate: string | null; noSunday: boolean; blocked?: boolean }
 export interface TaskUnitDto {
   unitType: OutcomeUnitType; unitId: string; type: "MANUAL" | "AUTO"; source: "BILLING_EXCEPTION" | "CN_REQUEST" | null; plannedAmount: number;
   outcome: TaskOutcome | null; actualAmount: number | null; nextDate: string | null; reason: string | null; reasonCode: AbandonReasonCode | null; state: "DRAFT" | "COMMITTED";
@@ -68,18 +71,30 @@ async function liveUnits(db: DailyWorkDb, entries: readonly EntryFacts[]): Promi
   return out;
 }
 
-/** CN tasks follow the CN rules for their date: never a Sunday, never after the CN's expiry. */
-async function dateRules(db: DailyWorkDb, units: readonly { unitType: OutcomeUnitType; unitId: string }[]): Promise<Map<string, DateRule>> {
+/** CN tasks follow the CN rules for their date: never a Sunday, never after the end of the CN's current permitted window (expiry, or grace once the expiry date has passed); Expired CNs are blocked. */
+export async function dateRules(db: DailyWorkDb, units: readonly { unitType: OutcomeUnitType; unitId: string }[]): Promise<Map<string, DateRule>> {
   const rules = new Map<string, DateRule>();
   const cnEvents = units.filter((u) => u.unitType === "CN_PAYMENT").map((u) => u.unitId), cnLegacy = units.filter((u) => u.unitType === "CN_LEGACY").map((u) => u.unitId);
   const queries: Prisma.Sql[] = [];
-  if (cnEvents.length) queries.push(Prisma.sql`SELECT e."id", c."acceptedAt", c."cnExpiryDays" AS "days", 'CN_PAYMENT' AS "unitType" FROM "CnPaymentEvent" e JOIN "CnRequest" c ON c."id" = e."cnRequestId" WHERE e."id" IN (${ids(cnEvents)})`);
-  if (cnLegacy.length) queries.push(Prisma.sql`SELECT c."id", c."acceptedAt", c."cnExpiryDays" AS "days", 'CN_LEGACY' AS "unitType" FROM "CnRequest" c WHERE c."id" IN (${ids(cnLegacy)})`);
+  const cols = Prisma.sql`c."acceptedAt", c."cnExpiryDays" AS "days", c."cnExpiryDate"::text AS "expiry", c."cnGraceDays" AS "grace", c."cnPolicyStage" AS "stage", (c."paymentTrackingMode" = 'PAYMENT_V1' AND COALESCE(c."paymentOutstandingAmount", 0) > 0) AS "awaiting"`;
+  if (cnEvents.length) queries.push(Prisma.sql`SELECT e."id", ${cols}, 'CN_PAYMENT' AS "unitType" FROM "CnPaymentEvent" e JOIN "CnRequest" c ON c."id" = e."cnRequestId" WHERE e."id" IN (${ids(cnEvents)})`);
+  if (cnLegacy.length) queries.push(Prisma.sql`SELECT c."id", ${cols}, 'CN_LEGACY' AS "unitType" FROM "CnRequest" c WHERE c."id" IN (${ids(cnLegacy)})`);
   if (queries.length) {
-    const rows = await db.$queryRaw<{ id: string; acceptedAt: Date | null; days: number | null; unitType: string }[]>(Prisma.sql`${Prisma.join(queries, " UNION ALL ")}`);
-    for (const r of rows) rules.set(`${r.unitType}:${r.id}`, { maxDate: r.acceptedAt && r.days != null ? cnRequestExpiryDateKey(r.acceptedAt, r.days) : null, noSunday: true });
+    const rows = await db.$queryRaw<{ id: string; acceptedAt: Date | null; days: number | null; expiry: string | null; grace: number | null; stage: string | null; awaiting: boolean; unitType: string }[]>(Prisma.sql`${Prisma.join(queries, " UNION ALL ")}`);
+    const now = new Date(), today = currentBusinessDate();
+    for (const r of rows) {
+      const expiry = r.expiry ?? (r.acceptedAt && r.days != null ? cnRequestExpiryDateKey(r.acceptedAt, r.days) : null);
+      const state = { cnExpiryDate: expiry, cnGraceDays: r.grace, cnPolicyStage: r.stage };
+      const stage = effectiveCnStage(state, r.awaiting, now);
+      const blocked = stage === "EXPIRED";
+      rules.set(`${r.unitType}:${r.id}`, { maxDate: blocked ? null : cnTaskWindowEnd({ ...state, cnPolicyStage: stage }, today), noSunday: true, blocked });
+    }
   }
   return rules;
+}
+/** An Expired CN's task can only be left as it is: reschedule and abandon are refused (reopen the CN first). */
+export function expiredRuleError(rule: DateRule | null | undefined, outcome: string | null | undefined): "cn_expired" | null {
+  return rule?.blocked && (outcome === "RESCHEDULED" || outcome === "ABANDONED") ? "cn_expired" : null;
 }
 export function dateRuleError(rule: DateRule | null | undefined, date: string): OutcomeError | "date_cn_rule" | null {
   if (!rule) return null;
@@ -141,7 +156,7 @@ export async function rescheduledEntryIds(db: DailyWorkDb, entries: readonly { i
 
 /* ------------------------------------------------ draft write ------------------------------------------------ */
 
-export function outcomeMessage(L: Labels, code: OutcomeError | "date_cn_rule" | "unit_unknown" | "row_legacy" | "unit_committed"): string {
+export function outcomeMessage(L: Labels, code: OutcomeError | "date_cn_rule" | "cn_expired" | "unit_unknown" | "row_legacy" | "unit_committed"): string {
   return L[`daily_work.outcome.error.${code}`] ?? code;
 }
 
@@ -177,7 +192,7 @@ export async function writeOutcomeDraftBatch(tx: Prisma.TransactionClient, draft
     writes.set(row.id, row);
   }
   // Only date-bearing reschedules need CN rules, fetched once for the whole request.
-  const rules = await dateRules(tx, drafts.flatMap((d) => d.inputs.filter((i) => i.outcome === "RESCHEDULED" && i.nextDate).map((i) => ({ unitType: i.unitType as OutcomeUnitType, unitId: i.unitId }))));
+  const rules = await dateRules(tx, drafts.flatMap((d) => d.inputs.filter((i) => (i.outcome === "RESCHEDULED" && i.nextDate) || i.outcome === "ABANDONED").map((i) => ({ unitType: i.unitType as OutcomeUnitType, unitId: i.unitId }))));
   let changed = 0;
   const paymentModes = new Map<string, string | null>();
   for (const { entry, inputs, paymentMode } of drafts) {
@@ -190,6 +205,8 @@ export async function writeOutcomeDraftBatch(tx: Prisma.TransactionClient, draft
       const clean = sanitizeOutcomeFields(input, entry.section); // the category must be one permitted for THIS task's section
       if (!clean.ok) throw new ApiError(422, outcomeMessage(L, clean.error));
       const f = clean.value;
+      const expiredRule = expiredRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.outcome);
+      if (expiredRule) throw new ApiError(422, outcomeMessage(L, expiredRule));
       if (f.outcome === "RESCHEDULED" && f.nextDate !== null) {
         if (f.nextDate <= today) throw new ApiError(422, outcomeMessage(L, "date_not_future"));
         const rule = dateRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.nextDate);
@@ -244,7 +261,7 @@ export async function commitTaskOutcomes(tx: Prisma.TransactionClient, ctx: Auth
   const facts = await tx.$queryRaw<{ id: string; dealerId: string | null; entryType: string; schemeId: string | null }[]>(Prisma.sql`SELECT "id", "dealerId", "entryType", "schemeId" FROM "DailyWorkEntry" WHERE "id" IN (${ids(entryIds)})`);
   for (const row of rows) {
     const f: OutcomeFields = { outcome: row.outcome, actualAmount: row.actualAmount == null ? null : Number(row.actualAmount), nextDate: row.nextDate, reason: row.reason, reasonCode: row.reasonCode };
-    const err = validateOutcome(f, today) ?? (f.outcome === "RESCHEDULED" && f.nextDate ? dateRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.nextDate) : null);
+    const err = validateOutcome(f, today) ?? expiredRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.outcome) ?? (f.outcome === "RESCHEDULED" && f.nextDate ? dateRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.nextDate) : null);
     if (err) throw new ApiError(422, outcomeMessage(L, err));
     let continuedAs: { type: string; id: string } | null = null;
     if (f.outcome === "RESCHEDULED") continuedAs = await reschedule(tx, ctx, row, f.nextDate!, facts.find((x) => x.id === row.entryId)!, L);

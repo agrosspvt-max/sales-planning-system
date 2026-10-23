@@ -93,7 +93,7 @@ export function TaskOutcomeCell({ units, section, rowLabel, today, disabled, onC
               <NativeSelect
                 className={cn("h-8 w-full sm:w-56 sm:shrink-0", u.outcome === "ABANDONED" && "border-destructive font-medium text-destructive")}
                 aria-label={L.aria.replace("{task}", taskName)} disabled={disabled || committed} value={u.outcome} placeholder={L.select}
-                options={[{ value: "COMPLETED", label: L.completed }, { value: "RESCHEDULED", label: L.rescheduled }, { value: "ABANDONED", label: L.abandon, className: "text-destructive" }]}
+                options={u.dateRule?.blocked && (u.outcome === "" || u.outcome === "COMPLETED") ? [{ value: "COMPLETED", label: L.completed }] /* Expired CN: only Completed (no change to the CN) until an Admin reopens it */ : [{ value: "COMPLETED", label: L.completed }, { value: "RESCHEDULED", label: L.rescheduled }, { value: "ABANDONED", label: L.abandon, className: "text-destructive" }]}
                 onChange={(e) => {
                   const outcome = isTaskOutcome(e.target.value) ? e.target.value : "";
                   // Leaving Completed clears the amount (never kept, sent or replaced by 0); leaving Abandon clears the abandonment-only fields.

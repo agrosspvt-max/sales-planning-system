@@ -1,5 +1,5 @@
+import { cnProcessingEvents, finishCnReviewTx, lockCnReviewTx } from "./cn-review.server";
 import "server-only";
-import { actorDisplayName } from "@/features/accounts/identity";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { assertAdminPermission } from "@/features/accounts/permissions";
 import { hasAdminPermission } from "@/features/accounts/permissions";
@@ -39,7 +39,7 @@ import {
   cnRequestExpiryDateKey,
   cnTaskKindForReason,
   cnTaskAmount,
-  isCnTaskDateWithinExpiry,
+  cnAcceptanceNeedsExpiry,
   isCnBusinessDateKey,
   isCnSundayDateKey,
   nextCnWorkingDateKey,
@@ -52,6 +52,10 @@ import {
   type CnTaskDto,
 } from "@/lib/cn-request";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
+import { addCnDays, cnExpiryDateProblem, cnTaskWindowEnd, isCnTaskDateAllowed, type CnPolicyState } from "@/lib/cn-expiry";
+import {
+  assertCnNotExpiredTx, enterGraceNowTx, isCnExpiredNow, reconcileCnExpiry, reconcileDueCnRequests, recordCnPolicySetTx, startReturnedCycleTx,
+} from "./cn-expiry.server";
 
 /**
  * DISPLAY-only: replace each row's shown party name with the dealer's alias name when one exists. The dealer id
@@ -84,6 +88,7 @@ function cnSchemas(L: ResolvedLabels) {
       .trim().min(1, L["cn_requests.validation.details_required"]).max(1000),
   });
   const act = z.object({
+    expectedReviewId: z.string().optional(), bypassReason: z.string().max(2000).optional(),
     action: z.literal("reject"),
     reason: z.enum(CN_REJECTION_REASON_VALUES, { errorMap: () => ({ message: L["cn_requests.validation.rejection_reason_required"] }) }).optional(),
     rejectionReasonDetails: z.string().max(500).optional(),
@@ -92,22 +97,32 @@ function cnSchemas(L: ResolvedLabels) {
     else if (value.reason === "OTHER" && !value.rejectionReasonDetails?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["rejectionReasonDetails"], message: L["cn_requests.validation.other_reason_required"] });
   });
   const acceptance = z.object({
+    expectedReviewId: z.string().optional(), bypassReason: z.string().max(2000).optional(),
     status: z.enum(CN_ACCEPTANCE_STATUS_VALUES, { errorMap: () => ({ message: L["cn_requests.validation.acceptance_status_required"] }) }),
     reason: z.enum(CN_ACCEPTANCE_REASON_VALUES, { errorMap: () => ({ message: L["cn_requests.validation.acceptance_reason_required"] }) }).optional(),
     acceptanceReasonDetails: z.string().max(500).optional(),
-    cnExpiryDays: z.preprocess((value) => value === "" || value == null ? undefined : value,
-      z.coerce.number({ invalid_type_error: L["cn_requests.validation.expiry_invalid"] }).int(L["cn_requests.validation.expiry_invalid"]).positive(L["cn_requests.validation.expiry_invalid"]).max(2_147_483_647, L["cn_requests.validation.expiry_invalid"]).optional()),
+    cnExpiryDate: z.preprocess((value) => value === "" || value == null ? undefined : value, z.string({ invalid_type_error: L["cn_requests.validation.expiry_invalid"] }).optional()),
+    graceDays: z.preprocess((value) => value === "" || value == null ? undefined : value, z.union([z.string(), z.number()]).optional()),
     postedAmount: z.preprocess((value) => value === "" || value == null ? undefined : value,
       z.coerce.number({ invalid_type_error: L["cn_requests.validation.posted_amount_invalid"] }).finite(L["cn_requests.validation.posted_amount_invalid"]).positive(L["cn_requests.validation.posted_amount_invalid"]).optional()),
     outstandingAmount: z.preprocess((value) => value === "" || value == null ? undefined : value,
       z.coerce.number({ invalid_type_error: L["cn_requests.validation.outstanding_invalid"] }).finite(L["cn_requests.validation.outstanding_invalid"]).positive(L["cn_requests.validation.outstanding_invalid"]).optional()),
   }).superRefine((value, ctx) => {
+    // Expiry and grace start only with a Payment Pending CN Working Shared acceptance (reason "Other" is not governed).
+    const checkExpiry = () => {
+      if (!cnAcceptanceNeedsExpiry(value.status, value.reason ?? "")) return;
+      const problem = value.cnExpiryDate == null ? "required" : cnExpiryDateProblem(value.cnExpiryDate, cnRequestBusinessDateKey(new Date())!);
+      if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["cnExpiryDate"], message: problem === "required" ? L["cn_requests.validation.expiry_required"] : problem === "past" ? L["cn_requests.validation.expiry_past"] : L["cn_requests.validation.expiry_invalid"] });
+    };
     if (value.status === "ACCEPTED_NOT_POSTED") {
       if (!value.reason) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reason"], message: L["cn_requests.validation.acceptance_reason_required"] });
       else if (value.reason === "OTHER" && !value.acceptanceReasonDetails?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["acceptanceReasonDetails"], message: L["cn_requests.validation.other_reason_required"] });
-      if (value.cnExpiryDays == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["cnExpiryDays"], message: L["cn_requests.validation.expiry_required"] });
+      checkExpiry();
       if (value.reason === "PAYMENT_PENDING" && value.outstandingAmount == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["outstandingAmount"], message: L["cn_requests.validation.outstanding_required"] });
-    } else if (value.postedAmount == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["postedAmount"], message: L["cn_requests.validation.posted_amount_required"] });
+    } else {
+      if (value.postedAmount == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["postedAmount"], message: L["cn_requests.validation.posted_amount_required"] });
+      checkExpiry();
+    }
   });
   return { create, act, acceptance };
 }
@@ -180,8 +195,11 @@ export interface CnRequestRow {
   rejectionReasonDetails: string | null;
   acceptanceReason: string | null;
   acceptanceReasonDetails: string | null;
-  cnExpiryDays: number | null;
-  expiryDate: string | null;
+  expiryDate: string | null; // the CN's calendar expiry (IST), valid through the end of the day; legacy rows keep their exact derived deadline
+  graceDays: number | null;
+  graceEndDate: string | null;
+  policyStage: "WORKING" | "GRACE" | "EXPIRED" | null; // persisted expiry stage; null = not governed (exempt / legacy)
+  policyCycle: number;
   cnWorking: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null;
   finalCn: { fileName: string; mimeType: string; fileSize: number; uploadedAt: string | null } | null; // null until Paid is verified
   remarks: string | null;
@@ -190,11 +208,18 @@ export interface CnRequestRow {
 }
 
 type RawRow = {
-  id: string; dealerId: string; cnType: string; amount: unknown; postedAmount: unknown; paymentStatus: string | null; paymentOriginalAmount: unknown; paymentOutstandingAmount: unknown; paymentTrackingMode: string | null; paymentVerified?: boolean; officerId: string; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; cnExpiryDays: number | null; cnWorkingFileName: string | null; cnWorkingMimeType: string | null; cnWorkingFileSize: number | null; cnWorkingUploadedAt: Date | null; finalCnFileName?: string | null; finalCnMimeType?: string | null; finalCnFileSize?: number | null; finalCnUploadedAt?: Date | null; remarks: string | null; createdAt: Date;
+  id: string; dealerId: string; cnType: string; amount: unknown; postedAmount: unknown; paymentStatus: string | null; paymentOriginalAmount: unknown; paymentOutstandingAmount: unknown; paymentTrackingMode: string | null; paymentVerified?: boolean; officerId: string; status: string; details: string | null; rejectionReason: string | null; rejectionReasonDetails: string | null; acceptanceReason: string | null; acceptanceReasonDetails: string | null; cnExpiryDays: number | null; cnExpiryDate: Date | null; cnGraceDays: number | null; cnPolicyStage: string | null; cnPolicyCycle: number; cnWorkingFileName: string | null; cnWorkingMimeType: string | null; cnWorkingFileSize: number | null; cnWorkingUploadedAt: Date | null; finalCnFileName?: string | null; finalCnMimeType?: string | null; finalCnFileSize?: number | null; finalCnUploadedAt?: Date | null; remarks: string | null; createdAt: Date;
   acceptedAt: Date | null; rejectedAt: Date | null; postedAt: Date | null;
   dealer: { name: string };
   officer: { name: string; territory: string | null; group: { name: string } | null };
 };
+/** The CN's calendar expiry date. Rows created before the date field keep the exact legacy deadline (acceptance date = Day 1), derived on read when never backfilled. */
+function expiryDateOf(r: { cnExpiryDate?: Date | string | null; acceptedAt: Date | null; cnExpiryDays?: number | null }): string | null {
+  if (r.cnExpiryDate) return typeof r.cnExpiryDate === "string" ? r.cnExpiryDate.slice(0, 10) : r.cnExpiryDate.toISOString().slice(0, 10);
+  return r.acceptedAt ? cnRequestExpiryDateKey(r.acceptedAt, r.cnExpiryDays) : null;
+}
+const policyStateOf = (r: { cnExpiryDate?: Date | string | null; acceptedAt: Date | null; cnExpiryDays?: number | null; cnGraceDays?: number | null; cnPolicyStage?: string | null }): CnPolicyState =>
+  ({ cnExpiryDate: expiryDateOf(r), cnGraceDays: r.cnGraceDays ?? null, cnPolicyStage: r.cnPolicyStage ?? null });
 function toRow(r: RawRow): CnRequestRow {
   const approximateAmount = num(r.amount);
   const postedAmount = num(r.postedAmount);
@@ -220,8 +245,11 @@ function toRow(r: RawRow): CnRequestRow {
     rejectionReasonDetails: r.rejectionReasonDetails ?? null,
     acceptanceReason: r.acceptanceReason ?? null,
     acceptanceReasonDetails: r.acceptanceReasonDetails ?? null,
-    cnExpiryDays: r.cnExpiryDays ?? null,
-    expiryDate: r.acceptedAt ? cnRequestExpiryDateKey(r.acceptedAt, r.cnExpiryDays) : null,
+    expiryDate: expiryDateOf(r),
+    graceDays: r.cnGraceDays ?? null,
+    graceEndDate: expiryDateOf(r) && r.cnGraceDays ? expiryDateOf(r)! : null,
+    policyStage: r.cnPolicyStage === "WORKING" || r.cnPolicyStage === "GRACE" || r.cnPolicyStage === "EXPIRED" ? r.cnPolicyStage : null,
+    policyCycle: r.cnPolicyCycle ?? 0,
     cnWorking: r.cnWorkingFileName && r.cnWorkingMimeType && r.cnWorkingFileSize != null ? {
       fileName: r.cnWorkingFileName,
       mimeType: r.cnWorkingMimeType,
@@ -242,7 +270,7 @@ function toRow(r: RawRow): CnRequestRow {
 const ROW_SELECT = {
   id: true, dealerId: true, cnType: true, amount: true, postedAmount: true, paymentStatus: true, paymentOriginalAmount: true, paymentOutstandingAmount: true, paymentTrackingMode: true, officerId: true, status: true,
   details: true, rejectionReason: true, rejectionReasonDetails: true, acceptanceReason: true,
-  acceptanceReasonDetails: true, cnExpiryDays: true, cnWorkingFileName: true, cnWorkingMimeType: true, cnWorkingFileSize: true,
+  acceptanceReasonDetails: true, cnExpiryDays: true, cnExpiryDate: true, cnGraceDays: true, cnPolicyStage: true, cnPolicyCycle: true, cnWorkingFileName: true, cnWorkingMimeType: true, cnWorkingFileSize: true,
   cnWorkingUploadedAt: true, finalCnFileName: true, finalCnMimeType: true, finalCnFileSize: true, finalCnUploadedAt: true,
   remarks: true, createdAt: true, acceptedAt: true, rejectedAt: true, postedAt: true,
   dealer: { select: { name: true } },
@@ -352,12 +380,19 @@ async function paymentVerifiedMap(ids: string[]): Promise<Map<string, boolean>> 
   return new Map(rows.map((r) => [r.id, r.paymentVerified]));
 }
 
-export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Promise<CnRequestRow[]> {
+export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Promise<(CnRequestRow & { processingReview?: { kind: string; status: string } })[]> {
   const scope = await getOfficerScope(ctx);
+  // Stage changes that are already due are applied (with their true effective times) before anything is listed, so every CN is in exactly one tab.
+  await reconcileDueCnRequests(scope.all ? null : scope.ids);
+  const today = cnRequestBusinessDateKey(new Date())!;
+  const nearExpiryWhere: Prisma.CnRequestWhereInput = { cnExpiryDate: { not: null }, OR: [
+    { cnGraceDays: { gt: 0 } },
+    { cnExpiryDate: { gte: new Date(`${today}T00:00:00Z`), lte: new Date(`${addCnDays(today, 4)}T00:00:00Z`) } },
+  ] };
   let viewWhere: Prisma.CnRequestWhereInput = {};
-  if (view === "submitted" || view === "rejected") {
+  if (view === "submitted" || view === "rejected" || view === "under-process") {
     viewWhere = { status: { in: [...CN_REQUEST_VIEW_STATUSES[view]] } };
-  } else if (view === "accepted-not-posted" || view === "posted-in-ledger") {
+  } else if (view === "accepted-not-posted" || view === "posted-in-ledger" || view === "cn-in-grace" || view === "cn-near-expire" || view === "expired-cn") {
     const acceptedStatuses = [
       ...CN_REQUEST_VIEW_STATUSES["accepted-not-posted"],
       ...CN_REQUEST_VIEW_STATUSES["posted-in-ledger"],
@@ -366,7 +401,17 @@ export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Pr
       status: { in: acceptedStatuses },
       ...(view === "posted-in-ledger"
         ? { paymentStatus: "Paid", paymentVerified: true }
-        : { OR: [{ paymentStatus: null }, { paymentStatus: { not: "Paid" } }, { paymentVerified: false }] }),
+        : {
+          AND: [
+            { OR: [{ paymentStatus: null }, { paymentStatus: { not: "Paid" } }, { paymentVerified: false }] },
+            view === "expired-cn" ? { cnPolicyStage: "EXPIRED" } : {
+              AND: [
+                { OR: [{ cnPolicyStage: null }, { cnPolicyStage: { not: "EXPIRED" } }] },
+                ...((view === "cn-in-grace" || view === "cn-near-expire") ? [nearExpiryWhere] : [{ NOT: nearExpiryWhere }]),
+              ],
+            },
+          ],
+        }),
     };
   }
   const rows = (await prisma.cnRequest.findMany({
@@ -375,7 +420,12 @@ export async function listCnRequests(ctx: AuthContext, view?: CnRequestView): Pr
     orderBy: { createdAt: "desc" },
   })) as unknown as RawRow[];
   const verified = await paymentVerifiedMap(rows.map((r) => r.id));
-  return withDealerDisplayNames(rows.map((r) => toRow({ ...r, paymentVerified: verified.get(r.id) ?? false })));
+  const reviewMap = new Map<string, { kind: string; status: string }>();
+  if (view === "under-process" && rows.length) {
+    const reviews = await prisma.cnReviewAttempt.findMany({ where: { cnRequestId: { in: rows.map(r => r.id) } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], distinct: ["cnRequestId"], select: { cnRequestId: true, kind: true, status: true } });
+    for (const review of reviews) reviewMap.set(review.cnRequestId, review);
+  }
+  return withDealerDisplayNames(rows.map((r) => ({ ...toRow({ ...r, paymentVerified: verified.get(r.id) ?? false }), ...(reviewMap.has(r.id) ? { processingReview: reviewMap.get(r.id) } : {}) })));
 }
 
 /**
@@ -393,15 +443,17 @@ export async function listCnRequestsForExport(ctx: AuthContext, view: CnRequestV
   });
 }
 
-/** Display the identifiable login account, with a designation only when it was saved at the action. */
-function timelineAccount(user: { name: string; username?: string }, designation?: string | null): string {
-  return actorDisplayName(user.username ? `${user.name} (@${user.username})` : user.name, designation);
+/** CN presentation uses names only; actor IDs and title-at-action remain in the underlying history. */
+function timelineAccount(user: { name: string; username?: string }, _designation?: string | null): string {
+  return user.name;
 }
 
 export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequestRow & { timeline: CnTimelineEntry[] }> {
   const L = await getResolvedLabels();
+  await reconcileCnExpiry(id).catch(() => undefined); // a stage change that is already due is recorded (at its real effective time) before the CN is shown
   const r = await prisma.cnRequest.findUnique({ where: { id }, select: {
     ...ROW_SELECT,
+    expiryEvents: { orderBy: [{ effectiveAt: "asc" }, { id: "asc" }], select: { id: true, kind: true, cycleNo: true, effectiveAt: true, processedAt: true, expiryIncludesGrace: true, actorDesignation: true, expiryDate: true, previousExpiryDate: true, graceDays: true, reason: true, authorizedBy: true, note: true, actor: { select: { name: true, username: true } } } },
     actedByRmId: true, actedByAdminId: true, cnWorkingUploadedById: true, finalCnUploadedById: true,
     paymentEvents: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: {
       id: true, source: true, requestKey: true, createdAt: true, status: true, amountPaid: true, outstandingAfter: true,
@@ -430,14 +482,19 @@ export async function getCnRequest(ctx: AuthContext, id: string): Promise<CnRequ
     return user ? timelineAccount(user) : undefined;
   };
   const row = toRow({ ...r, paymentVerified: (await paymentVerifiedMap([id])).get(id) ?? false });
-  const timeline = buildCnTimeline({ ...r, actors: {
+  const processingEvents = await cnProcessingEvents(id);
+  const timeline = buildCnTimeline({ ...r, processingEvents: processingEvents.map(e => ({ id: e.id, kind: e.kind, occurredAt: e.createdAt.toISOString(), actor: e.actorName, details: e.details })), actors: {
     // The CREATE audit identifies the actual submitter, including an RM submitting for an SO.
     SUBMITTED: submission ? timelineAccount(submission.user, submission.actorDesignation) : undefined,
     WORKING_SHARED: recordedAccount(r.cnWorkingUploadedById, working, r.paymentEvents.find((event) => event.source === "ACCEPTANCE")),
     REJECTED: recordedAccount(r.actedByRmId ?? r.actedByAdminId, rejection),
     POSTED_IN_LEDGER: recordedAccount(r.actedByAdminId, posting, paymentAt(r.postedAt)),
     FINAL_CN_SHARED: recordedAccount(r.finalCnUploadedById, undefined, paymentAt(r.finalCnUploadedAt)),
-  }, payments: r.paymentEvents.map((event) => ({
+  }, expiryEvents: r.expiryEvents.map((event) => ({
+    ...event, kind: event.kind as "POLICY_SET" | "ENTERED_GRACE" | "EXPIRED" | "REOPENED" | "RETURNED",
+    // Manual actions show the real signed-in account (delegated Accounts Officers included); automatic transitions have none and render as System.
+    actor: event.actor ? timelineAccount(event.actor, event.actorDesignation) : null,
+  })), payments: r.paymentEvents.map((event) => ({
     ...event, actor: timelineAccount(event.recordedBy, event.actorDesignation), amountPaid: num(event.amountPaid), outstandingAfter: Number(event.outstandingAfter),
   })) });
   return { ...(await withDealerDisplayNames([row]))[0], timeline };
@@ -473,9 +530,17 @@ export async function actOnCnRequest(ctx: AuthContext, id: string, raw: unknown)
   }
 
   if (isAdministrativeRole(ctx.role)) {
-    if (r.status !== CN_REQUEST_STATUSES.SUBMITTED) throw new ApiError(409, L["cn_requests.error.submitted_reject_only"]);
+    if (r.status !== CN_REQUEST_STATUSES.SUBMITTED && r.status !== "UNDER_PROCESS") throw new ApiError(409, L["cn_requests.error.submitted_reject_only"]);
     const transitionAt = new Date();
-    await prisma.cnRequest.update({ where: { id }, data: { status: CN_REQUEST_STATUSES.REJECTED, actedByAdminId: ctx.userId, rejectedAt: transitionAt, ...rejectionData } });
+    await prisma.$transaction(async tx => {
+      if (r.status === "UNDER_PROCESS") {
+        const locked = await lockCnReviewTx(tx, id);
+        if (locked.status !== "UNDER_PROCESS") throw new ApiError(409, L["cn_requests.error.request_changed"]);
+        await finishCnReviewTx(tx, ctx, id, parsed.data.expectedReviewId, parsed.data.bypassReason, CN_REQUEST_STATUSES.REJECTED);
+      }
+      const changed = await tx.cnRequest.updateMany({ where: { id, status: r.status }, data: { status: CN_REQUEST_STATUSES.REJECTED, actedByAdminId: ctx.userId, rejectedAt: transitionAt, ...rejectionData } });
+      if (!changed.count) throw new ApiError(409, L["cn_requests.error.request_changed"]);
+    });
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "cnRequest", entityId: id, summary: `CN Request rejected by ${ctx.designation ?? "Super Admin"} (Reason: ${reason})` });
     return { status: CN_REQUEST_STATUSES.REJECTED };
   }
@@ -489,10 +554,10 @@ function businessDateValue(value: Date, errorMessage: string): Date {
   return new Date(`${key}T00:00:00.000Z`);
 }
 
-function isOpenCnTaskDate(taskDate: string, acceptedAt: Date, expiryDays: number): boolean {
+/** THE task-date rule for every CN scheduling entry point (payment follow-ups, reschedules, verification overrides): the permitted window of the CN's current stage, never a Sunday. */
+function isOpenCnTaskDate(taskDate: string, acceptedAt: Date | null, state: CnPolicyState): boolean {
   const today = currentBusinessDate();
-  const expiryDate = cnRequestExpiryDateKey(acceptedAt, expiryDays);
-  return !!today && !!expiryDate && today <= expiryDate && isCnTaskDateWithinExpiry(taskDate, acceptedAt, expiryDays);
+  return !!today && isCnTaskDateAllowed(taskDate, acceptedAt, state, today);
 }
 
 type CnPostingRequest = {
@@ -589,7 +654,11 @@ export async function acceptCnRequest(
   } : {};
   const paymentPending = isNotPosted && acceptanceReason === "PAYMENT_PENDING";
   const defaultTaskDate = paymentPending ? nextCnWorkingDateKey(transitionAt) : null;
-  if (paymentPending && (!defaultTaskDate || !isCnTaskDateWithinExpiry(defaultTaskDate, transitionAt, parsed.data.cnExpiryDays!))) {
+  const needsExpiry = cnAcceptanceNeedsExpiry(parsed.data.status, parsed.data.reason ?? "");
+  const expiryDate = needsExpiry ? parsed.data.cnExpiryDate! : null;
+  const graceDays = needsExpiry ? 0 : null;
+  // The first follow-up task (next working day) must fit the Working Shared window; otherwise say so instead of creating an unschedulable task.
+  if (paymentPending && (!defaultTaskDate || !isCnTaskDateAllowed(defaultTaskDate, transitionAt, { cnExpiryDate: expiryDate, cnGraceDays: graceDays, cnPolicyStage: "WORKING" }, cnRequestBusinessDateKey(transitionAt)!))) {
     throw new ApiError(422, L["cn_requests.validation.default_task_date_unavailable"]);
   }
   const documentName = await prisma.$transaction(async (tx) => {
@@ -600,7 +669,9 @@ export async function acceptCnRequest(
     if (!request) throw new ApiError(404, L["cn_requests.error.not_found"]);
     // Only a SUBMITTED request can be accepted here. There is no standalone "post" of an already-accepted CN: Posted in
     // Ledger is reached only by direct acceptance (below) or by Payment Status → Verify Payment → Paid (verifyCnPayment).
-    const acceptingSubmitted = request.status === CN_REQUEST_STATUSES.SUBMITTED;
+    const fromProcessing = request.status === "UNDER_PROCESS";
+    if (fromProcessing) await lockCnReviewTx(tx, id);
+    const acceptingSubmitted = request.status === CN_REQUEST_STATUSES.SUBMITTED || fromProcessing;
     if (acceptingSubmitted) assertAdminPermission(ctx, "cnRequests", "approve");
     if (!isNotPosted) assertAdminPermission(ctx, "cnRequests", "post");
     if (!acceptingSubmitted) {
@@ -615,7 +686,11 @@ export async function acceptCnRequest(
       status: parsed.data.status,
       acceptanceReason,
       acceptanceReasonDetails,
-      cnExpiryDays: isNotPosted ? parsed.data.cnExpiryDays! : null,
+      // Only CN Working Shared starts expiry/grace. A direct posting is already Paid and never enters the policy.
+      cnExpiryDate: expiryDate ? new Date(`${expiryDate}T00:00:00.000Z`) : null,
+      cnGraceDays: graceDays,
+      cnPolicyStage: paymentPending ? "WORKING" : null,
+      cnPolicyCycle: needsExpiry ? 1 : 0,
       postedAmount: isNotPosted ? null : parsed.data.postedAmount!,
       paymentStatus: paymentPending ? "Pending" : directPosted ? paymentStatusLabel("PAID") : undefined,
       paymentOriginalAmount: paymentPending ? parsed.data.outstandingAmount! : directPosted ? parsed.data.postedAmount! : undefined,
@@ -630,6 +705,8 @@ export async function acceptCnRequest(
     const transition = await tx.cnRequest.updateMany({ where: { id, status: request.status }, data: transitionData });
     if (transition.count === 0) throw new ApiError(409, L["cn_requests.error.request_changed"]);
 
+    if (fromProcessing) await finishCnReviewTx(tx, ctx, id, parsed.data.expectedReviewId, parsed.data.bypassReason, parsed.data.status);
+    if (needsExpiry) await recordCnPolicySetTx(tx, ctx, id, { expiryDate: expiryDate!, graceDays: graceDays!, at: transitionAt });
     if (paymentPending) {
       const created = await tx.cnPaymentEvent.create({
         data: {
@@ -677,7 +754,7 @@ export async function acceptCnRequest(
     action: "UPDATE",
     entity: "cnRequest",
     entityId: id,
-    summary: `CN Request ${isNotPosted ? "accepted, not posted" : "accepted, posted in ledger"}${reasonSummary}${paymentPending ? `; Outstanding Amount: ${parsed.data.outstandingAmount}` : ""}${isNotPosted ? `; CN Expiry: ${parsed.data.cnExpiryDays} days` : `; Posted Amount: ${parsed.data.postedAmount}; Payment Status: Paid (verified)`}; CN working: ${documentName}`,
+    summary: `CN Request ${isNotPosted ? "accepted, not posted" : "accepted, posted in ledger"}${reasonSummary}${paymentPending ? `; Outstanding Amount: ${parsed.data.outstandingAmount}` : ""}${needsExpiry ? `; CN Expiry: ${expiryDate}; Grace: ${graceDays} days` : ""}${isNotPosted ? "" : `; Posted Amount: ${parsed.data.postedAmount}; Payment Status: Paid (verified)`}; CN working: ${documentName}`,
   });
   return { status: parsed.data.status };
 }
@@ -750,6 +827,11 @@ export interface CnPaymentDetailDto {
   originalOutstandingAmount: number | null;
   currentOutstandingAmount: number | null;
   expiryDate: string | null;
+  graceDays: number | null;
+  graceEndDate: string | null;
+  policyStage: "WORKING" | "GRACE" | "EXPIRED" | null;
+  policyCycle: number;
+  followUpWindowEnd: string | null; // last date a follow-up task may be scheduled for in the CN's current stage
   canUpdate: boolean; // SO may report a payment on the active SCHEDULED task
   canVerify: boolean; // Admin may verify/override the current payment status
   paymentVerified: boolean; // true = Admin-verified (green); false = SO-reported/unverified (gray)
@@ -789,12 +871,13 @@ async function assertCnPaymentAccess(ctx: AuthContext, officerId: string, L: Res
 
 export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<CnPaymentDetailDto> {
   const L = await getResolvedLabels();
+  await reconcileCnExpiry(id).catch(() => undefined); // an overdue stage change is applied (with its real effective time) before the state is shown
   const request = await prisma.cnRequest.findUnique({
     where: { id },
     select: {
       id: true, dealerId: true, officerId: true, status: true, cnType: true, details: true, paymentStatus: true,
       paymentOriginalAmount: true, paymentOutstandingAmount: true, paymentTrackingMode: true,
-      acceptedAt: true, cnExpiryDays: true, dealer: { select: { name: true } },
+      acceptedAt: true, cnExpiryDays: true, cnExpiryDate: true, cnGraceDays: true, cnPolicyStage: true, cnPolicyCycle: true, dealer: { select: { name: true } },
       paymentEvents: { orderBy: [{ eventDate: "asc" }, { createdAt: "asc" }], include: { recordedBy: { select: { name: true } } } },
     },
   });
@@ -809,7 +892,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
     outstandingBefore: Number(event.outstandingBefore),
     outstandingAfter: Number(event.outstandingAfter),
     source: event.source,
-    recordedBy: actorDisplayName(event.recordedBy.name, event.actorDesignation),
+    recordedBy: event.recordedBy.name,
     createdAt: event.createdAt.toISOString(),
   }));
   const tasks = request.paymentEvents.filter((event) => event.taskStatus && event.taskAmount != null).map((event) => ({
@@ -822,6 +905,7 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
   }));
   const activeTask = [...request.paymentEvents].reverse().find((event) => event.taskStatus === "UNSCHEDULED" || event.taskStatus === "SCHEDULED");
   const isAdmin = isAdministrativeRole(ctx.role);
+  const expired = request.cnPolicyStage === "EXPIRED";
   const outstanding = num(request.paymentOutstandingAmount);
   const [verifiedRow] = await prisma.$queryRaw<{ paymentVerified: boolean }[]>(
     Prisma.sql`SELECT "paymentVerified" FROM "CnRequest" WHERE "id" = ${id}`,
@@ -836,10 +920,15 @@ export async function getCnPaymentDetail(ctx: AuthContext, id: string): Promise<
     paymentStatus: request.paymentStatus,
     originalOutstandingAmount: num(request.paymentOriginalAmount),
     currentOutstandingAmount: outstanding,
-    expiryDate: request.acceptedAt ? cnRequestExpiryDateKey(request.acceptedAt, request.cnExpiryDays) : null,
-    // SO reports a payment on the active SCHEDULED task; Admin verifies once the SO has reported a status.
-    canUpdate: canReportCnPayment(ctx, request.officerId) && activeTask?.taskStatus === "SCHEDULED",
-    canVerify: isAdmin && hasAdminPermission(ctx, "cnRequests", "verifyPayment") && request.paymentStatus != null && request.paymentStatus !== "Pending",
+    expiryDate: expiryDateOf(request),
+    graceDays: request.cnGraceDays ?? null,
+    graceEndDate: expiryDateOf(request) && request.cnGraceDays ? expiryDateOf(request)! : null,
+    policyStage: request.cnPolicyStage === "WORKING" || request.cnPolicyStage === "GRACE" || request.cnPolicyStage === "EXPIRED" ? request.cnPolicyStage : null,
+    policyCycle: request.cnPolicyCycle,
+    followUpWindowEnd: expired ? null : taskWindowEnd(request),
+    // SO reports a payment on the active SCHEDULED task; Admin verifies once the SO has reported a status. An Expired CN accepts neither until an Admin reopens it.
+    canUpdate: !expired && canReportCnPayment(ctx, request.officerId) && activeTask?.taskStatus === "SCHEDULED",
+    canVerify: !expired && isAdmin && hasAdminPermission(ctx, "cnRequests", "verifyPayment") && request.paymentStatus != null && request.paymentStatus !== "Pending",
     paymentVerified: verifiedRow?.paymentVerified ?? false,
     isAdmin,
     activeTaskId: activeTask?.id ?? null,
@@ -859,6 +948,8 @@ function paymentSchemas(L: ResolvedLabels) {
     verify: z.object({
       status: z.enum(CN_PAYMENT_STATUS_VALUES, { errorMap: () => ({ message: L["cn_requests.validation.payment_status_required"] }) }),
       amountPaid, requestKey: z.string().min(8).max(200),
+      /** Only for a CN returned from the ledger (a posted CN verified as not fully paid): the Admin-chosen expiry that starts its new cycle. */
+      expiryDate: z.string().optional(),
     }),
     schedule: z.object({ taskId: z.string().optional(), taskDate: z.string().refine(isCnBusinessDateKey, L["cn_requests.validation.valid_task_date"]) }),
     confirmTask: z.object({ taskId: z.string().optional() }),
@@ -887,7 +978,7 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
       where: { id },
       select: {
         id: true, officerId: true, paymentTrackingMode: true, paymentStatus: true,
-        paymentOriginalAmount: true, paymentOutstandingAmount: true, acceptedAt: true, cnExpiryDays: true,
+        paymentOriginalAmount: true, paymentOutstandingAmount: true, acceptedAt: true, cnExpiryDays: true, cnExpiryDate: true, cnGraceDays: true, cnPolicyStage: true,
         paymentEvents: { where: { taskStatus: { in: ["UNSCHEDULED", "SCHEDULED"] } }, orderBy: { createdAt: "desc" }, take: 1 },
       },
     });
@@ -896,6 +987,8 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
     if (!canReportCnPayment(ctx, request.officerId)) {
       throw new ApiError(403, L["cn_requests.error.owning_officer_payment"]);
     }
+    // Locks the CN, applies any stage change already due and refuses an Expired CN (direct API calls and stale browser tabs included) before anything changes.
+    const stage = await assertCnNotExpiredTx(tx, id);
     if (request.paymentTrackingMode !== "PAYMENT_V1" || request.paymentOriginalAmount == null || request.paymentOutstandingAmount == null) {
       throw new ApiError(409, L["cn_requests.error.payment_tracking_inactive"]);
     }
@@ -923,7 +1016,7 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
       if (before <= 0) throw new ApiError(409, L["cn_requests.error.settled_not_paid"]);
       if (!data.followUpDate) throw new ApiError(422, L["cn_requests.validation.follow_up_date_required"]);
       if (isCnSundayDateKey(data.followUpDate)) throw new ApiError(422, L["cn_requests.validation.task_date_sunday"]);
-      if (!request.acceptedAt || request.cnExpiryDays == null || !isOpenCnTaskDate(data.followUpDate, request.acceptedAt, request.cnExpiryDays)) {
+      if (!isOpenCnTaskDate(data.followUpDate, request.acceptedAt, policyStateOf({ ...request, cnPolicyStage: stage }))) {
         throw new ApiError(422, L["cn_requests.validation.task_date_outside_expiry"]);
       }
       taskAmount = before;
@@ -936,7 +1029,7 @@ export async function updateCnPayment(ctx: AuthContext, id: string, raw: unknown
       if (data.amountPaid <= 0 || data.amountPaid >= before) throw new ApiError(422, L["cn_requests.validation.payment_amount_invalid"]);
       if (!data.followUpDate) throw new ApiError(422, L["cn_requests.validation.follow_up_date_required"]);
       if (isCnSundayDateKey(data.followUpDate)) throw new ApiError(422, L["cn_requests.validation.task_date_sunday"]);
-      if (!request.acceptedAt || request.cnExpiryDays == null || !isOpenCnTaskDate(data.followUpDate, request.acceptedAt, request.cnExpiryDays)) {
+      if (!isOpenCnTaskDate(data.followUpDate, request.acceptedAt, policyStateOf({ ...request, cnPolicyStage: stage }))) {
         throw new ApiError(422, L["cn_requests.validation.task_date_outside_expiry"]);
       }
       amountPaid = data.amountPaid;
@@ -1033,13 +1126,16 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
         paymentVerified: boolean;
         acceptedAt: Date | null;
         cnExpiryDays: number | null;
+        cnExpiryDate: string | null;
+        cnGraceDays: number | null;
+        cnPolicyStage: string | null;
         cnWorkingDocument: string | null;
         cnWorkingFileName: string | null;
         cnWorkingMimeType: string | null;
       }>>(Prisma.sql`
         SELECT c."id", c."status", c."paymentTrackingMode", c."paymentStatus",
           c."paymentOriginalAmount", c."paymentOutstandingAmount", c."paymentVerified", c."acceptedAt",
-          c."cnExpiryDays", c."cnWorkingDocument",
+          c."cnExpiryDays", c."cnExpiryDate"::text AS "cnExpiryDate", c."cnGraceDays", c."cnPolicyStage", c."cnWorkingDocument",
           c."cnWorkingFileName", c."cnWorkingMimeType"
         FROM "CnRequest" c
         WHERE c."id" = ${id}
@@ -1058,11 +1154,20 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
         if (eventState.requestKeyCnRequestId !== id) throw new ApiError(409, L["cn_requests.error.verification_key_used"]);
         return { idempotent: true, posted: false, postedAmount: null, documentName: null, finalCnName: null };
       }
+      // An Expired CN accepts no verification either until an Admin reopens it. (The row lock is held; this also applies any stage change that is due.)
+      const stage = await assertCnNotExpiredTx(tx, id);
       if (request.paymentTrackingMode !== "PAYMENT_V1" || request.paymentOutstandingAmount == null) {
         throw new ApiError(409, L["cn_requests.error.payment_tracking_inactive"]);
       }
       if (request.paymentStatus == null || request.paymentStatus === "Pending") {
         throw new ApiError(409, L["cn_requests.error.no_report_to_verify"]);
+      }
+      // Verifying a CN that is already posted as anything but Paid RETURNS it from the ledger: it needs a fresh, Admin-chosen expiry that starts a new cycle.
+      const returning = request.status === CN_REQUEST_STATUSES.POSTED_IN_LEDGER && request.paymentStatus === "Paid" && data.status !== "PAID";
+      if (returning) {
+        if (!data.expiryDate) throw new ApiError(422, L["cn_requests.validation.return_expiry_required"]);
+        const problem = cnExpiryDateProblem(data.expiryDate, cnRequestBusinessDateKey(new Date())!);
+        if (problem) throw new ApiError(422, problem === "past" ? L["cn_requests.validation.expiry_past"] : L["cn_requests.validation.expiry_invalid"]);
       }
       // Verifying Paid on a CN Working Shared request posts it, so the Final CN is mandatory. Throwing here, before
       // any write, leaves the payment state, events, CN Working document and CN status exactly as they were.
@@ -1102,8 +1207,10 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
 
       const transitionAt = new Date();
       const nextTaskDate = !agree && after > 0 ? nextCnWorkingDateKey(transitionAt) : null;
-      if (nextTaskDate && (!request.acceptedAt || request.cnExpiryDays == null
-        || !isCnTaskDateWithinExpiry(nextTaskDate, request.acceptedAt, request.cnExpiryDays))) {
+      const windowState: CnPolicyState = returning
+        ? { cnExpiryDate: data.expiryDate!, cnGraceDays: 0, cnPolicyStage: "WORKING" }
+        : policyStateOf({ ...request, cnPolicyStage: stage });
+      if (nextTaskDate && !isOpenCnTaskDate(nextTaskDate, request.acceptedAt, windowState)) {
         throw new ApiError(422, L["cn_requests.validation.default_task_date_unavailable"]);
       }
       if (!agree) {
@@ -1141,6 +1248,8 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
         },
       });
       if (nextTaskDate) await alertNewCnTask(tx, L, verifiedEvent.id, id, nextTaskDate, after);
+      if (returning) await startReturnedCycleTx(tx, ctx, id, data.expiryDate!, transitionAt);
+      else if (after > 0) await enterGraceNowTx(tx, id, transitionAt); // a response is owed again after the expiry date: it is awaited inside the grace window
       if (data.status !== "PAID") return { idempotent: false, posted: false, postedAmount: null, documentName: null, finalCnName: null };
 
       const postedAmount = Number(request.paymentOriginalAmount);
@@ -1197,9 +1306,13 @@ export async function verifyCnPayment(ctx: AuthContext, id: string, raw: unknown
 
 type LegacyCnTaskRawRow = {
   id: string; dealerId: string; amount: string | null; acceptanceReason: string | null; acceptedAt: Date | null;
-  cnExpiryDays: number | null; taskDate: string | null; partyName: string; cnType: string;
+  cnExpiryDays: number | null; cnExpiryDate: string | null; cnGraceDays: number | null; cnPolicyStage: string | null; taskDate: string | null; partyName: string; cnType: string;
   details: string | null; paymentStatus: string | null; legacyDailyWorkConfirmed: boolean | null; legacyDailyWorkEntryId: string | null;
 };
+/** The last date a follow-up may be scheduled for this CN right now (its current stage's window): what the task date pickers must not exceed. */
+function taskWindowEnd(r: Parameters<typeof policyStateOf>[0]): string | null {
+  return cnTaskWindowEnd(policyStateOf(r), currentBusinessDate()) ?? expiryDateOf(r);
+}
 function toLegacyTaskDto(r: LegacyCnTaskRawRow): CnTaskDto {
   const reason = (r.acceptanceReason as CnAcceptanceReason | null) ?? null;
   const amount = r.amount == null ? null : Number(r.amount);
@@ -1210,12 +1323,12 @@ function toLegacyTaskDto(r: LegacyCnTaskRawRow): CnTaskDto {
     taskRescheduled: true,
     confirmed: r.legacyDailyWorkConfirmed === true,
     acceptanceDate: r.acceptedAt ? cnRequestBusinessDateKey(r.acceptedAt) : null,
-    expiryDate: r.acceptedAt ? cnRequestExpiryDateKey(r.acceptedAt, r.cnExpiryDays) : null,
+    expiryDate: taskWindowEnd(r),
     paymentStatus: r.paymentStatus,
   };
 }
 const LEGACY_TASK_SELECT = Prisma.sql`
-  SELECT c."id", c."dealerId", c."amount"::text AS "amount", c."acceptanceReason", c."acceptedAt", c."cnExpiryDays",
+  SELECT c."id", c."dealerId", c."amount"::text AS "amount", c."acceptanceReason", c."acceptedAt", c."cnExpiryDays", c."cnExpiryDate"::text AS "cnExpiryDate", c."cnGraceDays", c."cnPolicyStage",
     c."taskDate"::text AS "taskDate", c."cnType", c."details", c."paymentStatus", c."legacyDailyWorkConfirmed", c."legacyDailyWorkEntryId",
     d."name" AS "partyName"
   FROM "CnRequest" c JOIN "Dealer" d ON d."id" = c."dealerId"`;
@@ -1233,7 +1346,7 @@ function toNewTaskDto(event: NewTaskRow, confirmed = false): CnTaskDto {
     taskRescheduled: event.taskRescheduled,
     confirmed,
     acceptanceDate: request.acceptedAt ? cnRequestBusinessDateKey(request.acceptedAt) : null,
-    expiryDate: request.acceptedAt ? cnRequestExpiryDateKey(request.acceptedAt, request.cnExpiryDays) : null,
+    expiryDate: taskWindowEnd(request),
     paymentStatus: request.paymentStatus,
   };
 }
@@ -1247,11 +1360,15 @@ async function cnTaskScope(ctx: AuthContext): Promise<{ all: boolean; ids: strin
   return getOfficerScope(ctx);
 }
 
+/** An Expired CN yields no actionable task: it is excluded from every task listing until an Admin reopens it (its payment history stays visible on the CN itself). */
+const NOT_EXPIRED: Prisma.CnRequestWhereInput = { OR: [{ cnPolicyStage: null }, { cnPolicyStage: { not: "EXPIRED" } }] };
+
 export async function listPendingCnTasks(ctx: AuthContext): Promise<CnTaskDto[]> {
   const scope = await cnTaskScope(ctx);
+  await reconcileDueCnRequests(scope.all ? null : scope.ids);
   const officerWhere = scope.all ? {} : { officerId: { in: scope.ids } };
   const events = await prisma.cnPaymentEvent.findMany({
-    where: { taskStatus: "UNSCHEDULED", dailyWorkEntryId: null, cnRequest: { paymentTrackingMode: "PAYMENT_V1", ...officerWhere } },
+    where: { taskStatus: "UNSCHEDULED", dailyWorkEntryId: null, cnRequest: { paymentTrackingMode: "PAYMENT_V1", ...officerWhere, ...NOT_EXPIRED } },
     include: { cnRequest: { include: { dealer: true } } }, orderBy: { createdAt: "desc" },
   });
   const scopeClause = scope.all ? Prisma.empty : scope.ids.length ? Prisma.sql`AND c."officerId" IN (${Prisma.join(scope.ids)})` : Prisma.sql`AND FALSE`;
@@ -1266,9 +1383,10 @@ export async function listPendingCnTasks(ctx: AuthContext): Promise<CnTaskDto[]>
 /** All active CN Working tasks, irrespective of their actual scheduled date, for the compact Daily Work table. */
 export async function listActiveCnTasks(ctx: AuthContext): Promise<CnTaskDto[]> {
   const scope = await cnTaskScope(ctx);
+  await reconcileDueCnRequests(scope.all ? null : scope.ids);
   const officerWhere = scope.all ? {} : { officerId: { in: scope.ids } };
   const events = await prisma.cnPaymentEvent.findMany({
-    where: { taskStatus: { in: ["UNSCHEDULED", "SCHEDULED"] }, dailyWorkEntryId: null, cnRequest: { paymentTrackingMode: "PAYMENT_V1", ...officerWhere } },
+    where: { taskStatus: { in: ["UNSCHEDULED", "SCHEDULED"] }, dailyWorkEntryId: null, cnRequest: { paymentTrackingMode: "PAYMENT_V1", ...officerWhere, ...NOT_EXPIRED } },
     include: { cnRequest: { include: { dealer: true } } },
     orderBy: [{ taskDate: "asc" }, { createdAt: "desc" }],
   });
@@ -1288,7 +1406,7 @@ export async function materializedCnTasksForEntries(officerId: string, entryIds:
     where: {
       dailyWorkEntryId: { in: entryIds },
       taskStatus: { in: ["UNSCHEDULED", "SCHEDULED"] },
-      cnRequest: { officerId, paymentTrackingMode: "PAYMENT_V1" },
+      cnRequest: { officerId, paymentTrackingMode: "PAYMENT_V1", ...NOT_EXPIRED },
     },
     include: { cnRequest: { include: { dealer: true } } },
     orderBy: [{ taskDate: "asc" }, { createdAt: "asc" }],
@@ -1322,6 +1440,11 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
     // Daily Work day is always locked before the task row. Materialization uses the same order.
     const day = await lockDailyWorkDay(tx, ctx.userId, workDate);
     if (taskId) {
+      // Lock order everywhere: Daily Work day → CN request → payment event. The CN gate also applies any stage change that is due and refuses an Expired CN.
+      const cnOwner = await tx.cnRequest.findUnique({ where: { id }, select: { officerId: true } });
+      if (!cnOwner) throw new ApiError(404, L["cn_requests.error.task_not_found"]);
+      if (!isCnTaskOwner(ctx, cnOwner.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
+      const stage = await assertCnNotExpiredTx(tx, id);
       const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
         SELECT e."id" FROM "CnPaymentEvent" e WHERE e."id" = ${taskId} FOR UPDATE`);
       if (locked.length === 0) throw new ApiError(404, L["cn_requests.error.task_not_found"]);
@@ -1329,7 +1452,7 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
       if (!event || event.cnRequestId !== id) throw new ApiError(404, L["cn_requests.error.task_not_found"]);
       if (!isCnTaskOwner(ctx, event.cnRequest.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
       if (event.taskStatus !== "UNSCHEDULED" && event.taskStatus !== "SCHEDULED") throw new ApiError(409, L["cn_requests.error.cn_task_inactive"]);
-      if (!event.cnRequest.acceptedAt || event.cnRequest.cnExpiryDays == null || !isOpenCnTaskDate(taskDate, event.cnRequest.acceptedAt, event.cnRequest.cnExpiryDays)) {
+      if (!isOpenCnTaskDate(taskDate, event.cnRequest.acceptedAt, policyStateOf({ ...event.cnRequest, cnPolicyStage: stage }))) {
         throw new ApiError(422, L["cn_requests.validation.task_date_outside_expiry"]);
       }
       if (event.dailyWorkEntryId) {
@@ -1369,13 +1492,13 @@ export async function scheduleCnTask(ctx: AuthContext, id: string, raw: unknown)
     if (locked.length === 0) throw new ApiError(404, L["cn_requests.error.not_found"]);
     const existing = await tx.cnRequest.findUnique({
       where: { id },
-      select: { id: true, officerId: true, status: true, paymentTrackingMode: true, acceptedAt: true, cnExpiryDays: true, taskDate: true,
+      select: { id: true, officerId: true, status: true, paymentTrackingMode: true, acceptedAt: true, cnExpiryDays: true, cnExpiryDate: true, cnGraceDays: true, cnPolicyStage: true, taskDate: true,
         legacyDailyWorkEntryId: true, legacyDailyWorkContribution: true },
     });
     if (!existing) throw new ApiError(404, L["cn_requests.error.not_found"]);
     if (!isCnTaskOwner(ctx, existing.officerId)) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
     if (existing.paymentTrackingMode !== null || existing.status !== CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED) throw new ApiError(409, L["cn_requests.error.not_legacy_task"]);
-    if (existing.acceptedAt && existing.cnExpiryDays != null && !isOpenCnTaskDate(taskDate, existing.acceptedAt, existing.cnExpiryDays)) throw new ApiError(422, L["cn_requests.validation.task_date_outside_expiry"]);
+    if (expiryDateOf(existing) && !isOpenCnTaskDate(taskDate, existing.acceptedAt, policyStateOf(existing))) throw new ApiError(422, L["cn_requests.validation.task_date_outside_expiry"]);
     if (existing.legacyDailyWorkEntryId) {
       await reverseMaterializedDailyWorkContribution(tx, {
         entryId: existing.legacyDailyWorkEntryId,
@@ -1437,6 +1560,7 @@ export async function confirmMaterializedAutoTask(ctx: AuthContext, id: string, 
       const event = await tx.cnPaymentEvent.findUnique({ where: { id: taskId }, include: { cnRequest: { include: { dealer: true } } } });
       if (!event || event.cnRequestId !== id) throw new ApiError(404, L["cn_requests.error.task_not_found"]);
       if (event.cnRequest.officerId !== ctx.userId) throw new ApiError(403, L["cn_requests.error.cannot_schedule_task"]);
+      if (await isCnExpiredNow(tx, id)) throw new ApiError(409, L["cn_requests.error.cn_expired"]); // confirming is a CN mutation too: no bypass through a stale tab
       if (event.taskStatus !== "SCHEDULED") throw new ApiError(409, L["cn_requests.error.cn_task_inactive"]);
       if (!(await entryInEditableRecovery(tx, event.dailyWorkEntryId, day.currentBatchId))) {
         throw new ApiError(409, L["cn_requests.error.task_not_materialized"]);
@@ -1488,6 +1612,7 @@ export async function countUnconfirmedMaterializedTasks(
     SELECT (
       SELECT COUNT(*)::int FROM "CnPaymentEvent" e
       JOIN "DailyWorkEntry" d ON d."id" = e."dailyWorkEntryId"
+      JOIN "CnRequest" ce ON ce."id" = e."cnRequestId" AND ce."cnPolicyStage" IS DISTINCT FROM 'EXPIRED'
       WHERE d."officerId" = ${officerId} AND d."workDate" = ${workDate}::date AND d."batchId" = ${batchId}
         AND d."section" = 'RECOVERY' AND d."status" = 'DRAFT'
         AND e."taskStatus" = 'SCHEDULED' AND e."dailyWorkConfirmed" = false
@@ -1505,8 +1630,9 @@ export async function countUnconfirmedMaterializedTasks(
 export async function cnTasksForOfficerDate(officerId: string, workDate: string): Promise<CnTaskDto[]> {
   if (!isCnBusinessDateKey(workDate)) return [];
   const L = await getResolvedLabels();
+  await reconcileDueCnRequests([officerId]);
   const events = await prisma.cnPaymentEvent.findMany({
-    where: { taskStatus: "SCHEDULED", dailyWorkEntryId: null, taskDate: businessDateValue(new Date(`${workDate}T00:00:00.000Z`), L["cn_requests.error.business_date"]), cnRequest: { officerId, paymentTrackingMode: "PAYMENT_V1" } },
+    where: { taskStatus: "SCHEDULED", dailyWorkEntryId: null, taskDate: businessDateValue(new Date(`${workDate}T00:00:00.000Z`), L["cn_requests.error.business_date"]), cnRequest: { officerId, paymentTrackingMode: "PAYMENT_V1", ...NOT_EXPIRED } },
     include: { cnRequest: { include: { dealer: true } } }, orderBy: { createdAt: "desc" },
   });
   const legacy = await prisma.$queryRaw<LegacyCnTaskRawRow[]>(Prisma.sql`

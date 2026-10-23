@@ -4,8 +4,9 @@ export const CN_FILTER_KEYS = ["party", "cnType", "amount", "paymentStatus", "em
 export type CnFilterKey = (typeof CN_FILTER_KEYS)[number];
 export type CnFilters = Partial<Record<CnFilterKey, string[]>>;
 export interface CnFilterRow {
+  processingReview?: { kind: string; status: string };
   dealerId: string; cnType: string; amount: number | null; paymentStatus: string | null;
-  officerId: string; state: string | null; territory: string | null; status: string; days: number | null; expiryDate: string | null;
+  officerId: string; state: string | null; territory: string | null; status: string; days: number | null; expiryDate: string | null; graceDays?: number | null; graceEndDate?: string | null;
 }
 
 /** Stable values shared by table filters and the existing admin export; names/translated labels never identify employees or dealers. */
@@ -18,9 +19,9 @@ export function cnFilterValue(row: CnFilterRow, key: CnFilterKey): string {
     case "employee": return row.officerId;
     case "state": return row.state ?? "";
     case "territory": return row.territory ?? "";
-    case "status": return cnRequestCurrentDisplayStatus(row.status, row.paymentStatus);
+    case "status": return row.status === "UNDER_PROCESS" && row.processingReview ? `${row.processingReview.kind}:${row.processingReview.status}` : cnRequestCurrentDisplayStatus(row.status, row.paymentStatus);
     case "days": return row.days == null ? "" : String(row.days);
-    case "expiry": return row.expiryDate ?? "";
+    case "expiry": return (row.graceDays ?? 0) > 0 ? "GRACE_GIVEN" : "WITHOUT_GRACE";
   }
 }
 

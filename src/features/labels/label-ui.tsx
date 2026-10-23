@@ -70,6 +70,12 @@ function useLabelCtx(): LabelCtx {
   );
 }
 
+/** Resolve several labels from one context subscription. */
+export function useLabelResolver() {
+  const { labels } = useLabelCtx();
+  return (key: LabelKey): string => labels[key] ?? DEFAULT_LABELS[key];
+}
+
 /** Resolve one label (override → default). */
 export function useLabel(key: LabelKey): string {
   return useLabelCtx().labels[key] ?? DEFAULT_LABELS[key];

@@ -8,6 +8,7 @@ import { cn, formatDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/layout/page-header";
+import { useLabel } from "@/features/labels/label-ui";
 import type { NotificationItem } from "./notification-bell";
 
 interface Feed {
@@ -29,6 +30,7 @@ export function NotificationsPage() {
     queryKey: ["notifications"],
     queryFn: () => api.get<Feed>("/api/notifications"),
   });
+  const L = { title: useLabel("notifications.ui.title"), subtitle: useLabel("notifications.ui.subtitle"), markAll: useLabel("notifications.ui.mark_all_read"), empty: useLabel("notifications.ui.empty") };
   const readAll = useMutation({
     mutationFn: () => api.post(`/api/notifications/read-all`, {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
@@ -41,12 +43,12 @@ export function NotificationsPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title="Notifications"
-        subtitle="Your recent activity."
+        title={L.title}
+        subtitle={L.subtitle}
         actions={
           (data?.unread ?? 0) > 0 ? (
             <Button variant="outline" size="sm" onClick={() => readAll.mutate()}>
-              Mark all read
+              {L.markAll}
             </Button>
           ) : undefined
         }
@@ -58,7 +60,7 @@ export function NotificationsPage() {
             <Skeleton className="h-6 w-full" />
           </div>
         ) : (data?.items.length ?? 0) === 0 ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">No notifications.</p>
+          <p className="py-12 text-center text-sm text-muted-foreground">{L.empty}</p>
         ) : (
           data!.items.map((n) => {
             const href = hrefFor(n);

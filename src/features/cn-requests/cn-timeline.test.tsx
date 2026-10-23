@@ -44,7 +44,7 @@ assert.equal(returned.at(-1)!.paymentStatus, "NOT_PAID");
 assert.equal(returned.filter((e) => e.kind === "POSTED_IN_LEDGER").length, 1, "later payment changes retain original ledger-posting history");
 
 const label = (key: string) => (DEFAULT_LABELS as Record<string, string>)[key] ?? key;
-const { CnTimeline } = testLoader({ "@/features/labels/label-ui": { useLabel: label } })<typeof import("./cn-timeline")>("src/features/cn-requests/cn-timeline.tsx");
+const { CnTimeline } = testLoader({ "@/features/labels/label-ui": { useLabel: label, useLabelResolver: () => label } })<typeof import("./cn-timeline")>("src/features/cn-requests/cn-timeline.tsx");
 let html = renderToStaticMarkup(<CnTimeline entries={posted} />);
 assert.ok(html.includes("<ol") && html.includes('data-cn-event="POSTED_IN_LEDGER"') && html.includes("Final.pdf") && html.includes("Working.pdf"));
 assert.ok(html.includes("Day 0 from submission") && html.includes("Day 2 from submission") && !html.includes('data-cn-event="ACCEPTED"'));
@@ -81,7 +81,7 @@ async function main() {
     dealer: { name: "Dealer" }, officer: { name: "Officer", territory: "North", group: { name: "State" } }, createdAt: new Date(createdAt), acceptedAt: new Date(acceptedAt), postedAt: new Date(postedAt), rejectedAt: null,
     actedByRmId: null, actedByAdminId: "accounts", cnWorkingUploadedById: "amit", finalCnUploadedById: "accounts", finalCnUploadedAt: new Date(postedAt), finalCnFileName: "Final.pdf",
     cnWorkingUploadedAt: new Date(acceptedAt), cnWorkingFileName: "Working.pdf", cnWorkingMimeType: "application/pdf", cnWorkingFileSize: 10,
-    paymentEvents: [{ ...payment, createdAt: new Date(payment.createdAt), recordedById: "so1", recordedBy: { name: "Officer", username: "so1" }, actorDesignation: null }],
+    expiryEvents: [], paymentEvents: [{ ...payment, createdAt: new Date(payment.createdAt), recordedById: "so1", recordedBy: { name: "Officer", username: "so1" }, actorDesignation: null }],
   };
   const selects: object[] = [];
   const users = [{ id: "amit", name: "Amit", username: "amit" }, { id: "accounts", name: "Ishwar Singh", username: "accounts" }];
@@ -93,6 +93,7 @@ async function main() {
   ];
   let detailMode: "posted" | "direct" | "rejected" = "posted";
   const service = testLoader({
+    "./cn-review.server": { cnProcessingEvents: async () => [] },
     "@/lib/prisma": { prisma: { cnRequest: { findUnique: async (q: { select: object }) => { selects.push(q.select);
         if (detailMode === "direct") return { ...raw, acceptedAt: raw.postedAt, cnWorkingUploadedAt: raw.postedAt, finalCnFileName: null, finalCnUploadedAt: null, paymentEvents: [] };
         if (detailMode === "rejected") return { ...raw, status: "REJECTED", acceptedAt: null, postedAt: null, rejectedAt: new Date(acceptedAt), cnWorkingUploadedAt: null, cnWorkingFileName: null, finalCnFileName: null, finalCnUploadedAt: null, paymentEvents: [], rejectionReason: "OTHER", rejectionReasonDetails: "Invoice mismatch" };
@@ -112,11 +113,11 @@ async function main() {
   assert.deepEqual(kinds(detail.timeline), ["SUBMITTED", "WORKING_SHARED", "PAYMENT_REPORTED", "FINAL_CN_SHARED", "POSTED_IN_LEDGER"]);
   assert.ok("paymentEvents" in selects[0]!, "history is fetched on the detail query");
   assert.ok(!("cnWorkingDocument" in selects[0]!), "attachment bytes are not fetched for the timeline");
-  assert.equal(detail.timeline.find((e) => e.kind === "PAYMENT_REPORTED")!.actor, "Officer (@so1)");
-  assert.equal(detail.timeline[0]!.actor, "Regional Manager (@rm)", "submitter is the RM who acted, not the owning SO");
-  assert.equal(detail.timeline.find((e) => e.kind === "WORKING_SHARED")!.actor, "Amit (@amit) (Accounts Officer)");
-  assert.equal(detail.timeline.find((e) => e.kind === "POSTED_IN_LEDGER")!.actor, "Ishwar Singh (@accounts) (Accounts Officer)");
-  assert.equal(detail.timeline.find((e) => e.kind === "FINAL_CN_SHARED")!.actor, "Ishwar Singh (@accounts)");
+  assert.equal(detail.timeline.find((e) => e.kind === "PAYMENT_REPORTED")!.actor, "Officer");
+  assert.equal(detail.timeline[0]!.actor, "Regional Manager", "submitter is the RM who acted, not the owning SO");
+  assert.equal(detail.timeline.find((e) => e.kind === "WORKING_SHARED")!.actor, "Amit");
+  assert.equal(detail.timeline.find((e) => e.kind === "POSTED_IN_LEDGER")!.actor, "Ishwar Singh");
+  assert.equal(detail.timeline.find((e) => e.kind === "FINAL_CN_SHARED")!.actor, "Ishwar Singh");
   const readsBeforeDenied = actorReads;
   await assert.rejects(() => service.getCnRequest({ ...so, userId: "other" }, "cn1"), (e: TestApiError) => e.status === 403, "out-of-scope viewers cannot retrieve the timeline");
   assert.equal(actorReads, readsBeforeDenied, "no account/audit lookups happen for an unauthorized viewer");
@@ -124,25 +125,26 @@ async function main() {
   audits = [];
   const legacyDetail = await service.getCnRequest(so, "cn1");
   assert.equal(legacyDetail.timeline[0]!.actor, undefined, "legacy submission does not invent the owning SO as the submitter");
-  assert.equal(legacyDetail.timeline.find((e) => e.kind === "WORKING_SHARED")!.actor, "Amit (@amit)", "persisted uploader ID identifies the account without inventing a past title");
+  assert.equal(legacyDetail.timeline.find((e) => e.kind === "WORKING_SHARED")!.actor, "Amit", "persisted uploader ID identifies the account without inventing a past title");
   audits = savedAudits;
   detailMode = "direct";
   const directDetail = await service.getCnRequest(so, "cn1");
   assert.deepEqual(kinds(directDetail.timeline), ["SUBMITTED", "POSTED_IN_LEDGER"], "detail API retains the direct route");
-  assert.equal(directDetail.timeline[1]!.actor, "Ishwar Singh (@accounts) (Accounts Officer)");
+  assert.equal(directDetail.timeline[1]!.actor, "Ishwar Singh");
   detailMode = "rejected";
   audits = [savedAudits[0]!, { action: "UPDATE", summary: "CN Request rejected by Accounts Officer", userId: "accounts", actorDesignation: "Accounts Officer", user: users[1]! }];
   const rejectedDetail = await service.getCnRequest(so, "cn1");
   assert.deepEqual(kinds(rejectedDetail.timeline), ["SUBMITTED", "REJECTED"]);
-  assert.equal(rejectedDetail.timeline[1]!.actor, "Ishwar Singh (@accounts) (Accounts Officer)");
+  assert.equal(rejectedDetail.timeline[1]!.actor, "Ishwar Singh");
   assert.equal(rejectedDetail.timeline[1]!.daysFromSubmission, 1);
   detailMode = "posted";
   audits = savedAudits;
   let detailData: object = detail;
   const wrap = ({ children }: { children: React.ReactNode }) => <div>{children}</div>;
   const dialog = testLoader({
+    "./cn-review-ui": { CnReviewHistory: () => null },
     "@/lib/api-client": { api: { get: async () => detailData } },
-    "@/features/labels/label-ui": { useLabel: label },
+    "@/features/labels/label-ui": { useLabel: label, useLabelResolver: () => label },
     "@/features/dealers/dealer-name-ui": { DealerName: ({ name }: { name: string }) => <span>{name}</span> },
     "@tanstack/react-query": { useQuery: (options: { staleTime: number; initialDataUpdatedAt: number }) => {
       assert.equal(options.staleTime, 0); assert.equal(options.initialDataUpdatedAt, 0);
@@ -157,8 +159,8 @@ async function main() {
     assert.ok(content.includes("/api/cn-requests/cn1/working?download=1"), "document actions stay available");
   }
   const accountsHtml = renderToStaticMarkup(<CnTimeline entries={detail.timeline} />);
-  assert.ok(accountsHtml.includes("Amit (@amit) (Accounts Officer)") && accountsHtml.includes("Ishwar Singh (@accounts)"));
-  assert.ok(accountsHtml.includes("By: Regional Manager (@rm)"));
+  assert.ok(accountsHtml.includes("By: Amit") && accountsHtml.includes("By: Ishwar Singh") && !accountsHtml.includes("@") && !accountsHtml.includes("Accounts Officer"));
+  assert.ok(accountsHtml.includes("By: Regional Manager"));
   assert.ok(renderToStaticMarkup(<CnTimeline entries={legacyDetail.timeline} />).includes("By: Account not recorded"));
   console.log("cn-timeline.test.tsx — lifecycle, legacy dates, payments, rendering and scoped detail passed");
 }

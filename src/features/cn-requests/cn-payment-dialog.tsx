@@ -25,7 +25,8 @@ import { useLabel } from "@/features/labels/label-ui";
 interface PaymentDetail {
   cnRequestId: string; partyName: string; dealerId?: string; cnType: string; details: string | null; cnStatus: string;
   paymentStatus: string | null; originalOutstandingAmount: number | null; currentOutstandingAmount: number | null;
-  expiryDate: string | null; canUpdate: boolean; canVerify: boolean; paymentVerified: boolean; isAdmin: boolean; activeTaskId: string | null;
+  expiryDate: string | null; graceDays: number | null; graceEndDate: string | null; policyStage: "WORKING" | "GRACE" | "EXPIRED" | null; policyCycle: number; followUpWindowEnd: string | null;
+  canUpdate: boolean; canVerify: boolean; paymentVerified: boolean; isAdmin: boolean; activeTaskId: string | null;
   events: Array<{ id: string; status: string; amountPaid: number | null; eventDate: string; outstandingBefore: number; outstandingAfter: number; source: string; recordedBy: string; createdAt: string }>;
   tasks: Array<{ id: string; eventId: string; amount: number; date: string | null; status: string; createdAt: string }>;
 }
@@ -65,6 +66,9 @@ export function CnPaymentDialog({ requestId, onClose, onChanged }: { requestId: 
     selected: useLabel("cn_requests.acceptance.selected"), fileHelp: useLabel("cn_requests.acceptance.file_help"),
     finalCnRequired: useLabel("cn_requests.validation.final_cn_required"), finalCnTooLarge: useLabel("cn_requests.validation.final_cn_too_large"),
     finalCnFileType: useLabel("cn_requests.validation.final_cn_file_type"),
+    expiry: useLabel("cn_requests.acceptance.expiry_days"), graceDays: useLabel("cn_requests.acceptance.grace_days"), graceEnds: useLabel("cn_requests.col.grace_ends"),
+    inGrace: useLabel("cn_requests.view.cn_in_grace"), expired: useLabel("cn_requests.view.expired"), expiredNotice: useLabel("cn_requests.payment.expired_notice"),
+    returnExpiry: useLabel("cn_requests.payment.return_expiry"), returnExpiryRequired: useLabel("cn_requests.validation.return_expiry_required"),
     taskUnscheduled: useLabel("cn_requests.payment.task_unscheduled"), taskScheduled: useLabel("cn_requests.payment.task_scheduled"), taskCompleted: useLabel("cn_requests.payment.task_completed"),
   };
 
@@ -92,6 +96,15 @@ export function CnPaymentDialog({ requestId, onClose, onChanged }: { requestId: 
               <div><div className="text-xs text-muted-foreground">{L.original}</div><div className="font-semibold tabular-nums">{money(data.originalOutstandingAmount)}</div></div>
               <div><div className="text-xs text-muted-foreground">{L.outstanding}</div><div className="font-semibold tabular-nums">{money(data.currentOutstandingAmount)}</div></div>
             </div>
+
+            {data.expiryDate && (
+              <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-2" data-testid="cn-expiry-summary">
+                <div><div className="text-xs text-muted-foreground">{L.expiry}</div><div className="font-semibold">{formatDMY(data.expiryDate)}</div></div>
+                <div><div className="text-xs text-muted-foreground">{L.graceDays}</div><div className="font-semibold tabular-nums">{data.graceDays ?? "—"}</div></div>
+                {data.policyStage && data.policyStage !== "WORKING" && <div className="sm:col-span-3"><Badge variant={data.policyStage === "EXPIRED" ? "destructive" : "muted"}>{data.policyStage === "EXPIRED" ? L.expired : L.inGrace}</Badge></div>}
+              </div>
+            )}
+            {data.policyStage === "EXPIRED" && <p role="status" className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">{L.expiredNotice}</p>}
 
             <div>
               <h3 className="mb-2 text-sm font-semibold">{L.history}</h3>
@@ -123,7 +136,7 @@ export function CnPaymentDialog({ requestId, onClose, onChanged }: { requestId: 
             {data.canUpdate && <SalesOfficerReportForm data={data} requestId={requestId} labels={L} onSaved={refresh} />}
 
             {/* Admin verifies / overrides (authoritative → green). No date fields; the SO schedules any new task. */}
-            {data.canVerify && <AdminVerifyForm requestId={requestId} cnStatus={data.cnStatus} labels={L} onSaved={refresh} />}
+            {data.canVerify && <AdminVerifyForm requestId={requestId} cnStatus={data.cnStatus} paymentStatus={data.paymentStatus} labels={L} onSaved={refresh} />}
           </div>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.close}</Button></DialogFooter>
@@ -139,6 +152,7 @@ type PaymentLabels = {
   verifyHelp: string;
   finalCnDocument: string; chooseFile: string; selected: string; fileHelp: string;
   finalCnRequired: string; finalCnTooLarge: string; finalCnFileType: string;
+  returnExpiry: string; returnExpiryRequired: string;
 };
 
 /** SO PAYMENT REPORT — provisional. Reports Paid / Partial Paid / Not Paid with dates on the active task. */
@@ -174,7 +188,7 @@ function SalesOfficerReportForm({ data, requestId, labels, onSaved }: { data: Pa
       />
       {(status === "PAID" || status === "PARTIAL_PAID") && <div className="space-y-1"><Label htmlFor="cn-payment-date">{labels.paymentDate} *</Label><DateInputDMY id="cn-payment-date" value={paymentDate} onChange={setPaymentDate} required /></div>}
       {status === "PARTIAL_PAID" && <div className="space-y-1"><Label>{labels.amountPaid} *</Label><Input type="number" min="0.01" step="0.01" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} required /></div>}
-      {(status === "NOT_PAID" || status === "PARTIAL_PAID") && <div className="space-y-1"><Label htmlFor="cn-follow-up-date">{labels.followUpDate} *</Label><DateInputDMY id="cn-follow-up-date" min={data.events[0]?.eventDate} max={data.expiryDate ?? undefined} value={followUpDate} onChange={setFollowUpDate} required /></div>}
+      {(status === "NOT_PAID" || status === "PARTIAL_PAID") && <div className="space-y-1"><Label htmlFor="cn-follow-up-date">{labels.followUpDate} *</Label><DateInputDMY id="cn-follow-up-date" min={data.events[0]?.eventDate} max={data.followUpWindowEnd ?? undefined} value={followUpDate} onChange={setFollowUpDate} required /></div>}
       {formError && <p className="text-sm text-destructive">{formError}</p>}
       <Button disabled={!status || report.isPending} onClick={() => report.mutate()}>{report.isPending ? labels.saving : labels.saveStatus}</Button>
     </div>
@@ -182,7 +196,7 @@ function SalesOfficerReportForm({ data, requestId, labels, onSaved }: { data: Pa
 }
 
 /** ADMIN VERIFICATION — authoritative. Admin picks only the status (+ Amount Paid for Partial); never dates. */
-function AdminVerifyForm({ requestId, cnStatus, labels, onSaved }: { requestId: string; cnStatus: string; labels: PaymentLabels; onSaved: (next: PaymentDetail) => void }) {
+function AdminVerifyForm({ requestId, cnStatus, paymentStatus, labels, onSaved }: { requestId: string; cnStatus: string; paymentStatus: string | null; labels: PaymentLabels; onSaved: (next: PaymentDetail) => void }) {
   const canPost = useAdminPermission("cnRequests", "post");
   const [status, setStatus] = useState<CnPaymentStatusValue | "">("");
   const [amountPaid, setAmountPaid] = useState("");
@@ -192,11 +206,14 @@ function AdminVerifyForm({ requestId, cnStatus, labels, onSaved }: { requestId: 
   const submittingRef = useRef(false);
   // Paid on a CN Working Shared request posts it to the ledger and therefore needs the Final CN document.
   const needsFinalCn = status === "PAID" && cnStatus === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED;
+  // Verifying a CN that is posted as Paid as anything else RETURNS it from the ledger: the Admin chooses the expiry of its new cycle.
+  const [returnExpiry, setReturnExpiry] = useState("");
+  const returning = cnStatus === CN_REQUEST_STATUSES.POSTED_IN_LEDGER && paymentStatus === "Paid" && !!status && status !== "PAID";
 
   const verify = useMutation({
     mutationFn: async () => {
       if (!needsFinalCn) {
-        return api.post<PaymentDetail>(`/api/cn-requests/${requestId}/verify`, { status, amountPaid: amountPaid || undefined, requestKey });
+        return api.post<PaymentDetail>(`/api/cn-requests/${requestId}/verify`, { status, amountPaid: amountPaid || undefined, requestKey, expiryDate: returning ? returnExpiry : undefined });
       }
       const form = new FormData();
       form.append("status", status);
@@ -217,6 +234,7 @@ function AdminVerifyForm({ requestId, cnStatus, labels, onSaved }: { requestId: 
 
   const submit = () => {
     if (submittingRef.current || !status) return;
+    if (returning && !returnExpiry) { setFormError(labels.returnExpiryRequired); return; }
     if (needsFinalCn) {
       const type = finalCn?.type;
       const error = !finalCn ? labels.finalCnRequired
@@ -259,6 +277,7 @@ function AdminVerifyForm({ requestId, cnStatus, labels, onSaved }: { requestId: 
           <p className="text-xs text-muted-foreground">{labels.fileHelp}</p>
         </div>
       )}
+      {returning && <div className="space-y-1"><Label>{labels.returnExpiry} *</Label><DateInputDMY value={returnExpiry} min={currentBusinessDate()} required aria-label={labels.returnExpiry} onChange={(iso) => { setReturnExpiry(iso); setFormError(null); }} /></div>}
       {status === "PARTIAL_PAID" && <div className="space-y-1"><Label>{labels.amountPaid} *</Label><Input type="number" min="0.01" step="0.01" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} required /></div>}
       {formError && <p className="text-sm text-destructive">{formError}</p>}
       <Button disabled={!status || verify.isPending} onClick={submit}>{verify.isPending ? labels.verifying : labels.verify}</Button>

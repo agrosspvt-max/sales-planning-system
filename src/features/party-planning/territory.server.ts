@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { labeledError } from "@/features/labels/labeled-error";
 import { getCurrentManagerId, getCurrentOwnerByDealer, getOfficerScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { isAdministrativeRole, assertAdminPermission } from "@/features/accounts/permissions";
@@ -31,7 +32,7 @@ import {
 
 function assertTerritoryUser(ctx: AuthContext): void {
   if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER && !isAdministrativeRole(ctx.role)) {
-    throw new ApiError(403, "You do not have access to Territory Mapping");
+    throw labeledError(403, "party_planning.territory.error.no_access");
   }
 }
 /** Writes: SO/RM within their scope; Admin needs the (custom-admin) manage permission — Super Admin always has it. */
@@ -53,10 +54,10 @@ async function loadScopedDealers(ctx: AuthContext): Promise<ScopedDealer[]> {
 }
 async function assertDealerInScope(ctx: AuthContext, dealerId: string): Promise<ScopedDealer> {
   const found = await prisma.dealer.findFirst({ where: { id: dealerId, deletedAt: null }, select: { id: true, name: true, status: true } });
-  if (!found) throw new ApiError(404, "Dealer not found");
+  if (!found) throw labeledError(404, "party_planning.territory.error.dealer_not_found");
   const scope = await getOfficerScope(ctx);
   const owner = (await getCurrentOwnerByDealer([dealerId])).get(dealerId) ?? null;
-  if (!scope.all && (!owner || !scope.ids.includes(owner))) throw new ApiError(403, "You do not have access to this dealer");
+  if (!scope.all && (!owner || !scope.ids.includes(owner))) throw labeledError(403, "party_planning.territory.error.no_access_dealer");
   return { ...found, ownerId: owner };
 }
 
@@ -156,10 +157,10 @@ export interface TerritoryListParams extends PageParams { market: string; office
 async function territoryFilterScope(ctx: AuthContext, officerRaw: string | undefined, stateRaw: string | undefined): Promise<{ officer: string; stateFilter: string; dealers: ScopedDealer[]; states: Map<string, StateRef | null> }> {
   assertTerritoryUser(ctx);
   const officer = officerRaw?.trim() ?? "", stateFilter = stateRaw?.trim() ?? "";
-  if (stateFilter && !isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only an Admin can filter by State");
+  if (stateFilter && !isAdministrativeRole(ctx.role)) throw labeledError(403, "party_planning.territory.error.state_filter_admin_only");
   if (officer) {
     const scope = await getOfficerScope(ctx);
-    if (ctx.role === Role.SALES_OFFICER ? officer !== ctx.userId : !scope.all && !scope.ids.includes(officer)) throw new ApiError(403, "That Sales Officer is outside your scope");
+    if (ctx.role === Role.SALES_OFFICER ? officer !== ctx.userId : !scope.all && !scope.ids.includes(officer)) throw labeledError(403, "party_planning.territory.error.officer_out_of_scope");
   }
   const scoped = (await loadScopedDealers(ctx)).filter((d) => !officer || d.ownerId === officer);
   const states = await dealerStates(scoped.map((d) => d.id));
@@ -253,15 +254,15 @@ export async function updateDealerMapping(ctx: AuthContext, dealerId: string, ra
   const state = (await dealerStates([dealerId])).get(dealerId) ?? null;
   let district: { id: string; name: string } | null = null;
   if (districtId) {
-    if (!state) throw new ApiError(422, "This dealer's state cannot be determined (its current owner has no state group), so a District cannot be assigned yet.");
+    if (!state) throw labeledError(422, "party_planning.territory.error.dealer_state_unknown");
     const found = await prisma.district.findUnique({ where: { id: districtId }, select: { id: true, name: true, groupId: true, isActive: true } });
-    if (!found) throw new ApiError(422, "Select a valid District");
-    if (found.groupId !== state.id) throw new ApiError(422, `"${found.name}" does not belong to this dealer's state (${state.name}).`);
-    if (!found.isActive) throw new ApiError(422, `"${found.name}" is inactive and cannot be assigned.`);
+    if (!found) throw labeledError(422, "party_planning.territory.error.select_valid_district");
+    if (found.groupId !== state.id) throw labeledError(422, "party_planning.territory.error.district_wrong_state", { district: found.name, state: state.name });
+    if (!found.isActive) throw labeledError(422, "party_planning.territory.error.district_inactive", { district: found.name });
     district = { id: found.id, name: found.name };
   }
   const market = marketId ? await prisma.market.findUnique({ where: { id: marketId }, select: { id: true, name: true } }) : null;
-  if (marketId && !market) throw new ApiError(422, "Select a valid Market");
+  if (marketId && !market) throw labeledError(422, "party_planning.territory.error.select_valid_market");
 
   const row = await prisma.$transaction(async (tx) => {
     const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, marketText: true, ...DISTRICT_SELECT, potential: true, market: { select: { name: true } } } });
@@ -310,13 +311,13 @@ export async function editDealerMarket(ctx: AuthContext, dealerId: string, raw: 
   const saved = await prisma.$transaction(async (tx) => {
     const before = await tx.dealerMarketMapping.findUnique({ where: { dealerId }, select: { marketId: true, marketText: true, district: true, districtId: true, potential: true, market: { select: { name: true } } } });
     const current = before?.marketText ?? before?.market?.name ?? null;
-    if (!sameMarket(current, parsed.data.expectedMarket)) throw new ApiError(409, "This dealer's Market was changed by someone else. Reload and try again.");
-    if (sameMarket(current, next)) throw new ApiError(422, "That is already this dealer's Market");
+    if (!sameMarket(current, parsed.data.expectedMarket)) throw labeledError(409, "party_planning.territory.error.market_changed");
+    if (sameMarket(current, next)) throw labeledError(422, "party_planning.territory.error.market_unchanged");
     let row: { marketId: string | null; district: string | null; districtId: string | null; potential: string | null };
     if (before) {
       // Claim: only succeeds while the mapping still holds the value we just read.
       const claimed = await tx.dealerMarketMapping.updateMany({ where: { dealerId, marketId: before.marketId, marketText: before.marketText }, data: { marketText: next, updatedById: ctx.userId } });
-      if (claimed.count !== 1) throw new ApiError(409, "This dealer's Market was changed by someone else. Reload and try again.");
+      if (claimed.count !== 1) throw labeledError(409, "party_planning.territory.error.market_changed");
       row = before;
     } else {
       row = await tx.dealerMarketMapping.create({ data: { dealerId, marketText: next, updatedById: ctx.userId }, select: { marketId: true, district: true, districtId: true, potential: true } });
@@ -356,17 +357,17 @@ const MAX_CANDIDATES = 8;
 /** Parse + match + classify — READ ONLY. Both Preview and Confirm run exactly this, so what was shown is what is applied. */
 async function planFromWorkbook(ctx: AuthContext, buffer: Buffer, sheet: string | null, resolutions?: Record<number, string>): Promise<ImportPreview> {
   let workbook;
-  try { workbook = readWorkbook(buffer); } catch { throw new ApiError(422, "The file could not be read as an Excel workbook"); }
+  try { workbook = readWorkbook(buffer); } catch { throw labeledError(422, "party_planning.territory.error.file_unreadable"); }
   const names = sheetNames(workbook);
-  if (names.length === 0) throw new ApiError(422, "The workbook has no sheets");
+  if (names.length === 0) throw labeledError(422, "party_planning.territory.error.no_sheets");
   const chosen = sheet ?? (names.length === 1 ? names[0]! : null);
   if (!chosen) return { sheetNames: names, sheet: null, needsSheet: true, error: null, plan: [], summary: null };
-  if (!names.includes(chosen)) throw new ApiError(422, "Select a sheet from the uploaded workbook");
+  if (!names.includes(chosen)) throw labeledError(422, "party_planning.territory.error.sheet_not_in_workbook");
 
   // Blank rows are KEPT so a reported "row 6" is row 6 in Excel (the shared sheetRows helper drops them).
   const parsed = parseTerritorySheet(XLSX.utils.sheet_to_json(workbook.Sheets[chosen]!, { header: 1, blankrows: true, defval: null }) as unknown[][]);
   if (parsed.error) return { sheetNames: names, sheet: chosen, needsSheet: false, error: parsed.error, plan: [], summary: null };
-  if (parsed.rows.length + parsed.invalid.length > MAX_IMPORT_ROWS) throw new ApiError(422, `A sheet can import at most ${MAX_IMPORT_ROWS} rows at a time`);
+  if (parsed.rows.length + parsed.invalid.length > MAX_IMPORT_ROWS) throw labeledError(422, "party_planning.territory.error.import_row_limit", { max: MAX_IMPORT_ROWS });
 
   const [resolver, scoped, aliasNames, mappings, markets, masters] = await Promise.all([
     loadDealerResolver(),
@@ -429,7 +430,7 @@ export interface ImportResult {
 export async function commitTerritoryImport(ctx: AuthContext, buffer: Buffer, sheet: string | null, resolutions: Record<number, string>): Promise<ImportResult> {
   assertTerritoryWriter(ctx);
   const preview = await planFromWorkbook(ctx, buffer, sheet, resolutions);
-  if (preview.needsSheet) throw new ApiError(422, "Select a sheet to import");
+  if (preview.needsSheet) throw labeledError(422, "party_planning.territory.error.select_sheet");
   if (preview.error) throw new ApiError(422, preview.error);
 
   const apply = preview.plan.filter((r) => r.status === "MATCHED" && r.action !== "NO_CHANGE");
@@ -450,7 +451,7 @@ export async function commitTerritoryImport(ctx: AuthContext, buffer: Buffer, sh
       const freshStates = await dealerStates(districtRows.map((r) => r.dealerId!), tx as unknown as typeof prisma);
       for (const r of districtRows) {
         const d = freshById.get(r.districtId!);
-        if (!d || !d.isActive || d.groupId !== freshStates.get(r.dealerId!)?.id) throw new ApiError(409, `The District "${r.districtName}" for ${r.partyName} is no longer valid. Nothing was imported — preview the file again.`);
+        if (!d || !d.isActive || d.groupId !== freshStates.get(r.dealerId!)?.id) throw labeledError(409, "party_planning.territory.error.import_district_invalid", { district: r.districtName ?? "", party: r.partyName ?? "" });
       }
     }
     // 1) Markets named in the sheet that do not exist yet (source EXISTING; potential stays undecided — it is a MARKET-level value).
@@ -518,7 +519,7 @@ async function requesterState(userId: string): Promise<StateRef | null> {
   return group ?? null;
 }
 export async function listRequesterDistricts(ctx: AuthContext): Promise<RequesterDistricts> {
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only a Sales Officer or Regional Manager can request a Market");
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw labeledError(403, "party_planning.territory.error.request_market_roles");
   const state = await requesterState(ctx.userId);
   if (!state) return { stateName: null, districts: [] };
   const rows = await prisma.district.findMany({ where: { groupId: state.id, isActive: true }, select: { id: true, name: true } });
@@ -527,18 +528,18 @@ export async function listRequesterDistricts(ctx: AuthContext): Promise<Requeste
 
 /** SO / RM submit a request. Duplicate Markets (normalized name) and duplicate pending requests are refused, never merged. */
 export async function createMarketRequest(ctx: AuthContext, raw: unknown): Promise<MarketRequestDto> {
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only a Sales Officer or Regional Manager can request a Market");
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw labeledError(403, "party_planning.territory.error.request_market_roles");
   const input = (raw ?? {}) as Record<string, unknown>;
   const problem = validateMarketRequest({ marketName: input.marketName, potential: input.potential, numberOfParties: input.numberOfParties });
   if (problem) throw new ApiError(422, problem);
   // District (required for new requests): an existing, ACTIVE District Master entry of the requester's own State.
-  if (typeof input.districtId !== "string" || !input.districtId.trim()) throw new ApiError(422, "Select a District.");
+  if (typeof input.districtId !== "string" || !input.districtId.trim()) throw labeledError(422, "party_planning.territory.msg.select_district");
   const state = await requesterState(ctx.userId);
-  if (!state) throw new ApiError(422, "Your State could not be identified, so a Market cannot be requested.");
+  if (!state) throw labeledError(422, "party_planning.territory.msg.no_state");
   const district = await prisma.district.findUnique({ where: { id: input.districtId.trim() } });
-  if (!district) throw new ApiError(422, "That District does not exist.");
-  if (!district.isActive) throw new ApiError(422, "That District is not active.");
-  if (district.groupId !== state.id) throw new ApiError(422, `That District does not belong to your State (${state.name}).`);
+  if (!district) throw labeledError(422, "party_planning.territory.error.district_missing");
+  if (!district.isActive) throw labeledError(422, "party_planning.territory.error.district_not_active");
+  if (district.groupId !== state.id) throw labeledError(422, "party_planning.territory.error.district_not_your_state", { state: state.name });
   const marketName = cleanMarketName(String(input.marketName));
   const nameKey = marketNameKey(marketName);
   const potential = input.potential as Potential;
@@ -548,8 +549,8 @@ export async function createMarketRequest(ctx: AuthContext, raw: unknown): Promi
     prisma.market.findUnique({ where: { nameKey }, select: { name: true } }),
     prisma.marketRequest.findFirst({ where: { nameKey, status: { in: ["PENDING_RM", "PENDING_ADMIN"] } }, select: { id: true } }),
   ]);
-  if (existingMarket) throw new ApiError(409, `The Market "${existingMarket.name}" already exists.`);
-  if (pending) throw new ApiError(409, `A request for the Market "${marketName}" is already pending.`);
+  if (existingMarket) throw labeledError(409, "party_planning.territory.error.market_exists", { market: existingMarket.name });
+  if (pending) throw labeledError(409, "party_planning.territory.error.market_request_pending", { market: marketName });
 
   // SO → their RM first; an RM (or an SO with no RM in their group) goes straight to Admin review.
   const rmId = ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId) : null;
@@ -566,7 +567,7 @@ export async function createMarketRequest(ctx: AuthContext, raw: unknown): Promi
       return row;
     });
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw new ApiError(409, `A request for the Market "${marketName}" is already pending.`);
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw labeledError(409, "party_planning.territory.error.market_request_pending", { market: marketName });
     throw e;
   }
   return (await toRequestDtos([created]))[0]!;
@@ -576,7 +577,8 @@ export type MarketRequestView = "mine" | "review" | "history";
 
 /**
  * mine    → the caller's own requests (any status).
- * review  → what the caller must act on now: RM → PENDING_RM of requesters in their group; Admin → PENDING_ADMIN.
+ * review  → RM: PENDING_RM in their team; Admin: all pending requests, including those still awaiting RM review.
+ * Visibility does not advance approval: Admin decisions still require PENDING_ADMIN.
  * history → decided requests (APPROVED / REJECTED, or past the caller's step) within the caller's scope (RM: group, Admin: all).
  */
 async function requestScopeWhere(ctx: AuthContext, view: MarketRequestView): Promise<Prisma.MarketRequestWhereInput> {
@@ -586,7 +588,7 @@ async function requestScopeWhere(ctx: AuthContext, view: MarketRequestView): Pro
   if (view === "mine") return { requesterId: ctx.userId };
   if (view === "review") {
     if (ctx.role === Role.REGIONAL_MANAGER) return { status: "PENDING_RM", ...inScope, requesterId: { in: scope.ids.filter((id) => id !== ctx.userId) } };
-    if (isAdministrativeRole(ctx.role)) return { status: "PENDING_ADMIN" };
+    if (isAdministrativeRole(ctx.role)) return { ...inScope, status: { in: ["PENDING_RM", "PENDING_ADMIN"] } };
     return { id: "__none__" }; // a Sales Officer reviews nothing
   }
   if (ctx.role === Role.SALES_OFFICER) return { requesterId: ctx.userId, status: { in: ["APPROVED", "REJECTED"] } };
@@ -660,34 +662,34 @@ const actInput = z.object({ action: z.enum(["approve", "reject"]), reason: z.str
 /** RM review (PENDING_RM) then Admin review (PENDING_ADMIN). Rejection needs a reason at either step. */
 export async function actOnMarketRequest(ctx: AuthContext, id: string, raw: unknown): Promise<MarketRequestDto> {
   const parsed = actInput.safeParse(raw);
-  if (!parsed.success) throw new ApiError(422, "Choose approve or reject");
+  if (!parsed.success) throw labeledError(422, "party_planning.territory.error.choose_decision");
   const { action } = parsed.data;
   const reason = parsed.data.reason?.trim() ?? "";
-  if (action === "reject" && !reason) throw new ApiError(422, "A rejection reason is required.");
-  if (reason.length > 500) throw new ApiError(422, "The reason can be at most 500 characters.");
+  if (action === "reject" && !reason) throw labeledError(422, "party_planning.territory.error.rejection_reason_required");
+  if (reason.length > 500) throw labeledError(422, "party_planning.territory.error.reason_too_long");
 
   const isRm = ctx.role === Role.REGIONAL_MANAGER;
   const isAdmin = isAdministrativeRole(ctx.role);
-  if (!isRm && !isAdmin) throw new ApiError(403, "Only a Regional Manager or Admin can review Market requests");
+  if (!isRm && !isAdmin) throw labeledError(403, "party_planning.territory.error.review_market_roles");
   if (isAdmin) assertAdminPermission(ctx, "partyPlanning", action === "approve" ? "approve" : "reject");
 
   let updated: RequestRow;
   try {
     updated = await prisma.$transaction(async (tx) => {
       const request = await tx.marketRequest.findUnique({ where: { id }, include: REQUEST_INCLUDE });
-      if (!request) throw new ApiError(404, "Market request not found");
+      if (!request) throw labeledError(404, "party_planning.territory.error.market_request_missing");
       const now = new Date();
       // A decision is a compare-and-set on the status read above: if another reviewer decided in the meantime the write matches no row and this one is refused
       // (409), so two simultaneous decisions can never both succeed or overwrite each other.
       const decide = async (expected: string, data: Prisma.MarketRequestUncheckedUpdateManyInput): Promise<RequestRow> => {
         const { count } = await tx.marketRequest.updateMany({ where: { id, status: expected }, data });
-        if (count !== 1) throw new ApiError(409, "This request has already been decided. Refresh to see its current status.");
+        if (count !== 1) throw labeledError(409, "party_planning.territory.error.market_request_decided");
         return (await tx.marketRequest.findUnique({ where: { id }, include: REQUEST_INCLUDE }))!;
       };
       if (isRm) {
-        if (request.status !== "PENDING_RM") throw new ApiError(409, "This request is not waiting for RM review");
+        if (request.status !== "PENDING_RM") throw labeledError(409, "party_planning.territory.error.not_waiting_rm");
         const scope = await getOfficerScope(ctx, tx);
-        if (request.requesterId === ctx.userId || !scope.ids.includes(request.requesterId)) throw new ApiError(403, "This request is outside your team");
+        if (request.requesterId === ctx.userId || !scope.ids.includes(request.requesterId)) throw labeledError(403, "party_planning.territory.error.request_outside_team");
         const data = action === "approve"
           ? { status: "PENDING_ADMIN", rmDecision: "APPROVED", rmDecidedById: ctx.userId, rmDecidedAt: now }
           : { status: "REJECTED", rmDecision: "REJECTED", rmDecidedById: ctx.userId, rmDecidedAt: now, rejectionStage: "RM", rejectionReason: reason };
@@ -695,14 +697,14 @@ export async function actOnMarketRequest(ctx: AuthContext, id: string, raw: unkn
         await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `RM ${action === "approve" ? "approved" : "rejected"} Market request "${request.marketName}"${action === "reject" ? ` — ${reason}` : ""}` }, tx);
         return row;
       }
-      if (request.status !== "PENDING_ADMIN") throw new ApiError(409, "This request is not waiting for Admin review");
+      if (request.status !== "PENDING_ADMIN") throw labeledError(409, "party_planning.territory.error.not_waiting_admin");
       if (action === "reject") {
         const row = await decide("PENDING_ADMIN", { status: "REJECTED", adminDecision: "REJECTED", adminDecidedById: ctx.userId, adminDecidedAt: now, rejectionStage: "ADMIN", rejectionReason: reason });
         await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "marketRequest", entityId: id, summary: `Admin rejected Market request "${request.marketName}" — ${reason}` }, tx);
         return row;
       }
       // Final approval is the ONLY point at which the Market becomes real / usable.
-      if (await tx.market.findUnique({ where: { nameKey: request.nameKey }, select: { id: true } })) throw new ApiError(409, `The Market "${request.marketName}" already exists.`);
+      if (await tx.market.findUnique({ where: { nameKey: request.nameKey }, select: { id: true } })) throw labeledError(409, "party_planning.territory.error.market_exists", { market: request.marketName });
       const market = await tx.market.create({ data: { name: request.marketName, nameKey: request.nameKey, potential: request.potential, source: "REQUESTED", expectedParties: request.numberOfParties, createdById: request.requesterId }, select: { id: true } });
       const row = await decide("PENDING_ADMIN", { status: "APPROVED", adminDecision: "APPROVED", adminDecidedById: ctx.userId, adminDecidedAt: now, marketId: market.id });
       await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "CREATE", entity: "market", entityId: market.id, summary: `Admin approved Market request "${request.marketName}" (Potential ${request.potential})` }, tx);
@@ -710,7 +712,7 @@ export async function actOnMarketRequest(ctx: AuthContext, id: string, raw: unkn
     });
   } catch (e) {
     // Two Admins approving at once: the loser's Market insert hits the unique name — a conflict, not a crash (its whole transaction rolled back).
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw new ApiError(409, "This request has already been decided, or its Market already exists. Refresh to see its current status.");
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw labeledError(409, "party_planning.territory.error.market_request_decided_or_exists");
     throw e;
   }
   return (await toRequestDtos([updated]))[0]!;
@@ -731,7 +733,7 @@ type StatusRequestRow = Prisma.DealerStatusRequestGetPayload<Record<string, neve
 
 /** Status requests are reviewed by Admin only; Custom Admins need the Party Planning "manage" permission (Super Admin always has it). */
 function assertStatusRequestAdmin(ctx: AuthContext): void {
-  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only an Admin can review dealer status requests");
+  if (!isAdministrativeRole(ctx.role)) throw labeledError(403, "party_planning.territory.error.review_status_admin_only");
   assertAdminPermission(ctx, "partyPlanning", "manage");
 }
 
@@ -768,9 +770,9 @@ async function toStatusRequestDtos(ctx: AuthContext, rows: StatusRequestRow[], w
  * per dealer (checked here and enforced by a partial unique index, so concurrent submits cannot both succeed).
  */
 export async function createDealerStatusRequest(ctx: AuthContext, raw: unknown): Promise<DealerStatusRequestDto> {
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only a Sales Officer or Regional Manager can request a dealer status change");
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw labeledError(403, "party_planning.territory.error.request_status_roles");
   const input = (raw ?? {}) as Record<string, unknown>;
-  if (typeof input.dealerId !== "string" || !input.dealerId.trim()) throw new ApiError(422, "Choose a dealer.");
+  if (typeof input.dealerId !== "string" || !input.dealerId.trim()) throw labeledError(422, "party_planning.territory.error.choose_dealer");
   const problem = validateStatusRequest({ reason: input.reason, description: input.description });
   if (problem) throw new ApiError(422, problem);
   const reason = input.reason as DealerStatusReason;
@@ -781,7 +783,7 @@ export async function createDealerStatusRequest(ctx: AuthContext, raw: unknown):
   let created: StatusRequestRow;
   try {
     created = await prisma.$transaction(async (tx) => {
-      if (await tx.dealerStatusRequest.findFirst({ where: { dealerId: dealer.id, status: "PENDING" }, select: { id: true } })) throw new ApiError(409, "A status change request for this dealer is already pending.");
+      if (await tx.dealerStatusRequest.findFirst({ where: { dealerId: dealer.id, status: "PENDING" }, select: { id: true } })) throw labeledError(409, "party_planning.territory.error.status_request_pending");
       const row = await tx.dealerStatusRequest.create({
         data: { dealerId: dealer.id, statusAtRequest: dealer.status, reason, description, requestedById: ctx.userId, requestedByRole: ctx.role, status: "PENDING" },
       });
@@ -789,7 +791,7 @@ export async function createDealerStatusRequest(ctx: AuthContext, raw: unknown):
       return row;
     });
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw new ApiError(409, "A status change request for this dealer is already pending.");
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") throw labeledError(409, "party_planning.territory.error.status_request_pending");
     throw e;
   }
   return (await toStatusRequestDtos(ctx, [created], false))[0]!;
@@ -843,13 +845,13 @@ export async function listDealerStatusRequestsFiltered(ctx: AuthContext, view: "
 export async function resolveDealerStatusRequest(ctx: AuthContext, id: string, raw: unknown): Promise<DealerStatusRequestDto> {
   assertStatusRequestAdmin(ctx);
   const notes = cleanRequestText(((raw ?? {}) as Record<string, unknown>).notes);
-  if (notes.length > STATUS_REQUEST_NOTES_MAX) throw new ApiError(422, `The notes can be at most ${STATUS_REQUEST_NOTES_MAX} characters.`);
+  if (notes.length > STATUS_REQUEST_NOTES_MAX) throw labeledError(422, "party_planning.territory.error.notes_too_long", { max: STATUS_REQUEST_NOTES_MAX });
   const resolved = await prisma.$transaction(async (tx) => {
     const request = await tx.dealerStatusRequest.findUnique({ where: { id } });
-    if (!request) throw new ApiError(404, "Status request not found");
+    if (!request) throw labeledError(404, "party_planning.territory.error.status_request_missing");
     // Conditional write: only a still-PENDING row can be resolved, so two Admins cannot both resolve it.
     const { count } = await tx.dealerStatusRequest.updateMany({ where: { id, status: "PENDING" }, data: { status: "RESOLVED", resolvedById: ctx.userId, resolvedAt: new Date(), resolutionNotes: notes || null } });
-    if (count !== 1) throw new ApiError(409, "This request has already been resolved.");
+    if (count !== 1) throw labeledError(409, "party_planning.territory.error.status_request_resolved");
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dealerStatusRequest", entityId: id, summary: `Resolved dealer status request (${request.reason}) for dealer ${request.dealerId}${notes ? ` — ${notes}` : ""}` }, tx);
     return (await tx.dealerStatusRequest.findUnique({ where: { id } }))!;
   });

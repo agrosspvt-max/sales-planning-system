@@ -35,6 +35,10 @@ const outstanding = { date: "2026-10-19", deadline: "2026-10-19T18:30:00.000Z", 
 let html = render(<OutstandingReportPanel outstanding={outstanding} onOpenReport={() => undefined} onChanged={() => undefined} />);
 assert.ok(html.includes('data-testid="outstanding-date">19/10/2026') && /data-testid="outstanding-deadline">20\/10\/2026/.test(html), "work date and original deadline (IST)");
 assert.ok(text(html).includes("must be submitted before a new Daily Plan can be created") && text(html).includes("Request Late Report Submission"), "explanation + the request button");
+// The same panel is actionable within Daily Report, where an Open report link would lead to the current screen.
+html = render(<OutstandingReportPanel outstanding={outstanding} onChanged={() => undefined} />);
+assert.ok(buttons.some((b) => b.children === "Request Late Report Submission"), "the Report view can request reopening too");
+assert.ok(!buttons.some((b) => b.children === DEFAULT_LABELS["daily_work.late.open_report"]), "no redundant Open report action inside the report");
 // Pending: the status is shown, the button is gone, the report stays read-only (no duplicate request from the UI).
 const req = (status: string, extra: Record<string, unknown> = {}) => ({ id: "r1", workDate: "2026-10-19", deadline: "2026-10-19T18:30:00.000Z", reason: "I was without network all evening", status, requestedAt: "2026-10-22T04:00:00.000Z", decidedByName: null, decidedAt: null, decisionReason: null, ...extra });
 html = render(<OutstandingReportPanel outstanding={{ ...outstanding, canRequest: false, requests: [req("PENDING")] }} onOpenReport={() => undefined} onChanged={() => undefined} />);

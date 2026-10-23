@@ -347,6 +347,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
   const [cnRequestDealer, setCnRequestDealer] = useState<RecoveryDealer | null>(null);
   const canRequestCn = role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER;
   const cnLabels = {
+    underProcess: useLabel("cn_requests.processing.tab"),
     request: useLabel("recovery.requestCn"),
     lastCn: useLabel("recovery.cnStatus.lastCn"),
     requestRaised: useLabel("recovery.cnStatus.requestRaised"),
@@ -356,6 +357,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
     returnedFromLedger: useLabel("recovery.cnStatus.returnedFromLedger"),
   };
   const cnStatusPresentation = (status: CnRequestCurrentDisplayStatus | null) => {
+    if (status === "UNDER_PROCESS") return { label: cnLabels.underProcess, color: "text-warning" };
     if (status === "SUBMITTED") return { label: cnLabels.requestRaised, color: "text-blue-600 dark:text-blue-400" };
     if (status === "REJECTED") return { label: cnLabels.rejected, color: "text-destructive" };
     if (status === "ACCEPTED_NOT_POSTED") return { label: cnLabels.cnWorkingSent, color: "text-warning" };

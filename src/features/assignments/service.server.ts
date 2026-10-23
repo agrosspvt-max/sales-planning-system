@@ -190,15 +190,14 @@ export async function loadAssignmentOptions() {
       orderBy: { name: "asc" },
     }),
   ]);
-  const label = (u: { role: Role; name: string }) => (u.role === Role.REGIONAL_MANAGER ? `${u.name} (RM)` : u.name);
   return {
     dealers: dealers.map((d) => ({ value: d.id, label: d.name })),
     // Dealer→Officer assignment: SO only stays for the Officer→RM screen's "officers" list; dealer OWNERS
-    // may be a Sales Officer OR a Regional Manager, so expose a combined, role-tagged list for that field.
+    // may be a Sales Officer OR a Regional Manager, so expose a combined list of names for that field.
     officers: officers.map((o) => ({ value: o.id, label: o.name })),
     managers: managers.map((m) => ({ value: m.id, label: m.name })),
     dealerOwners: [...officers, ...managers]
-      .map((u) => ({ value: u.id, label: label(u), sort: u.name.toLowerCase() }))
+      .map((u) => ({ value: u.id, label: u.name, sort: u.name.toLowerCase() }))
       .sort((a, b) => a.sort.localeCompare(b.sort))
       .map(({ value, label }) => ({ value, label })),
   };

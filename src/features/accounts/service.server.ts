@@ -32,7 +32,7 @@ const permissionsSchema = z.record(z.array(z.string())).superRefine((grants, ctx
 const fields = {
   name: z.string().trim().min(1, "Full name is required.").max(120),
   username: z.string().trim().toLowerCase().min(3).max(60).regex(/^[a-zA-Z0-9._-]+$/, "Use letters, numbers, dot, dash or underscore."),
-  designation: z.string().trim().min(1, "Designation is required.").max(120),
+  designation: z.string().trim().max(120).nullish().transform(value => value || null),
   isActive: z.boolean(),
   permissions: permissionsSchema,
 };

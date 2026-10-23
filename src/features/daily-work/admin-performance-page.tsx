@@ -80,7 +80,7 @@ export function AdminPerformancePage() {
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5">
           <Label>{L.date}</Label>
-          <DateInputDMY aria-label="Date" value={workDate} onChange={(v) => setWorkDate(v || currentBusinessDate())} className="w-48" />
+          <DateInputDMY aria-label={L.date} value={workDate} onChange={(v) => setWorkDate(v || currentBusinessDate())} className="w-48" />
         </div>
         <div className="space-y-1.5">
           <Label>{L.fRm}</Label>

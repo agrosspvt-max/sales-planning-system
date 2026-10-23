@@ -24,7 +24,7 @@ import { EMPTY_EXCEPTION_SUMMARY, type BillingExceptionRow, type ExceptionRankEn
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   AUTH_FILTER_OPTIONS, BILLING_FILTER_OPTIONS, DAY_BUCKETS, DEFAULT_DAYS_SORT, bucketOfAging, dayBucketAsAging, NO_EXPORT_DATA_MESSAGE, SEARCH_APPLY_DELAY_MS, changeFilterStep, formatLastUpdate, parseLastPaymentReportParams, paymentAgingToParams, sameReportFilters, REPORT_DEFAULT_PAGE_SIZE, REPORT_FILTER_KEYS,
-  type DayBucketKey, type DaySummary, type DaysSort, type LastPaymentReportRow, type PaymentAgingFilter, type ReportFilterKey, type ReportFilterOptions, type ReportFilters,
+  type DayBucketKey, type DaySummary, type DaysSort, type LastPaymentReportRow, type PaymentAgingFilter, type ReportFilterOptions, type ReportFilters,
 } from "@/lib/last-payment-report";
 
 /** The three tables of the page: the Last Payment report itself, and Billing Exception → Current / History (one row per exception). */
@@ -47,13 +47,32 @@ interface ReportPage {
 
 // Column order: Party | Status | State | Territory | Sales Officer. `width` rebalances the (fixed-layout) table: Party takes the
 // remaining space, the rest are compact — no large empty gaps between the right-hand columns.
-const FILTER_COLUMNS: { key: ReportFilterKey; label: string; width?: string }[] = [
-  { key: "party", label: "Party" },
-  { key: "status", label: "Status", width: "w-28" },
-  { key: "state", label: "State", width: "w-24" },
-  { key: "territory", label: "Territory", width: "w-40" },
-  { key: "officer", label: "Sales Officer", width: "w-36" },
+const FILTER_COLUMNS: { key: "party" | "status" | "state" | "territory" | "officer"; width?: string }[] = [
+  { key: "party" },
+  { key: "status", width: "w-28" },
+  { key: "state", width: "w-24" },
+  { key: "territory", width: "w-40" },
+  { key: "officer", width: "w-36" },
 ];
+/** Every static word of this page, resolved through the Labels system (override → default). Filter keys, view keys and bucket keys stay fixed identifiers. */
+function useReportText() {
+  const col = { party: useLabel("last_payment.col.party"), status: useLabel("last_payment.col.status"), state: useLabel("last_payment.col.state"), territory: useLabel("last_payment.col.territory"), officer: useLabel("last_payment.col.officer") };
+  const bucket: Record<string, string> = { "0-30": useLabel("last_payment.bucket.0-30"), "31-44": useLabel("last_payment.bucket.31-44"), "45-60": useLabel("last_payment.bucket.45-60"), "61-90": useLabel("last_payment.bucket.61-90"), "91+": useLabel("last_payment.bucket.91+") };
+  return {
+    col, bucket,
+    crumb: useLabel("last_payment.page.crumb"), title: useLabel("last_payment.page.title"), subtitle: useLabel("last_payment.page.subtitle"),
+    tabLastPayment: useLabel("last_payment.tab.last_payment"), tabException: useLabel("last_payment.tab.billing_exception"), tabCurrent: useLabel("last_payment.tab.current"), tabHistory: useLabel("last_payment.tab.history"),
+    lastPaymentDate: useLabel("last_payment.col.last_payment_date"), days: useLabel("last_payment.col.days"), billingDate: useLabel("last_payment.col.billing_date"), authorizedBy: useLabel("last_payment.col.authorized_by"),
+    info: useLabel("last_payment.col.info"), billingStatus: useLabel("last_payment.col.billing_status"), filterBy: useLabel("last_payment.aria.filter_by"), sortDays: useLabel("last_payment.aria.sort_days"),
+    ascending: useLabel("last_payment.aria.ascending"), descending: useLabel("last_payment.aria.descending"), emptyExceptions: useLabel("last_payment.empty.exceptions"), emptyDealers: useLabel("last_payment.empty.dealers"),
+    searchPlaceholder: useLabel("last_payment.search.placeholder"), exportLabel: useLabel("last_payment.action.export"), exporting: useLabel("last_payment.action.exporting"), exportFailed: useLabel("last_payment.error.export_failed"),
+    lastUpdate: useLabel("last_payment.msg.last_update"), pageOf: useLabel("last_payment.page.of"), previous: useLabel("last_payment.action.previous"), next: useLabel("last_payment.action.next"),
+    allDealers: useLabel("last_payment.summary.all_dealers"), totalBills: useLabel("last_payment.summary.total_bills"), dealers: useLabel("last_payment.summary.dealers"), topDealers: useLabel("last_payment.summary.top_dealers"),
+    topSo: useLabel("last_payment.summary.top_so"), topOfficers: useLabel("last_payment.summary.top_officers"), details: useLabel("last_payment.summary.details"), dealerName: useLabel("last_payment.ranking.dealer_name"),
+    bills: useLabel("last_payment.ranking.bills"), amount: useLabel("last_payment.ranking.amount"), rank: useLabel("last_payment.ranking.rank"), totalAmount: useLabel("last_payment.ranking.total_amount"),
+    rankingEmpty: useLabel("last_payment.ranking.empty"), incompleteTip: useLabel("last_payment.ranking.incomplete_tip"), incompleteNote: useLabel("last_payment.ranking.incomplete_note"),
+  };
+}
 const NO_OPTIONS: ReportFilterOptions = { party: [], status: [], state: [], territory: [], officer: [], billing: BILLING_FILTER_OPTIONS, authBy: AUTH_FILTER_OPTIONS };
 const STATUS_VARIANT: Record<string, "success" | "muted" | "secondary" | "destructive"> = { ACTIVE: "success", INACTIVE: "muted", PENDING: "secondary", DEFAULTER: "destructive" };
 
@@ -63,6 +82,7 @@ const dateLabel = (isoDate: string) => formatDate(new Date(`${isoDate}T00:00:00`
 
 /** Billing Exception summary (Total Ex. Bills · Dealers · Top Dealers · Top SO) — same container / label / count look as the Last Payment panel. Informational only: nothing here filters the table. */
 function ExceptionSummaryPanel({ summary }: { summary: ExceptionSummary | undefined }) {
+  const T = useReportText();
   const [open, setOpen] = useState<"dealers" | "officers" | null>(null);
   const s = summary ?? EMPTY_EXCEPTION_SUMMARY;
   const count = (n: number | undefined) => (summary ? new Intl.NumberFormat("en-IN").format(n ?? 0) : "—");
@@ -71,7 +91,7 @@ function ExceptionSummaryPanel({ summary }: { summary: ExceptionSummary | undefi
     : <ol className="space-y-0.5 text-xs">{entries.map((e, i) => <li key={e.id} className="flex justify-between gap-2"><span className="truncate">{i + 1}. {e.name}</span><span className="font-semibold tabular-nums">{e.bills}</span></li>)}</ol>;
   const ranked = (title: string, testId: string, entries: ExceptionRankEntry[], kind: "dealers" | "officers") => (
     <button
-      type="button" onClick={() => setOpen(kind)} data-testid={testId} aria-haspopup="dialog" title={`${title} — details`}
+      type="button" onClick={() => setOpen(kind)} data-testid={testId} aria-haspopup="dialog" title={T.details.replace("{title}", title)}
       className="-m-1 col-span-2 min-w-0 cursor-pointer rounded-md p-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:col-span-1"
     >
       <div className="mb-0.5 text-xs text-muted-foreground">{title}</div>
@@ -81,19 +101,20 @@ function ExceptionSummaryPanel({ summary }: { summary: ExceptionSummary | undefi
   return (
     <>
       <div className="grid grid-cols-2 gap-3 rounded-lg border bg-background p-4 sm:grid-cols-4" data-testid="exception-summary">
-        <div><div className="text-xs text-muted-foreground">Total Ex. Bills</div><div className="text-lg font-semibold tabular-nums" data-testid="summary-total-bills">{count(summary?.totalBills)}</div></div>
-        <div><div className="text-xs text-muted-foreground">Dealers</div><div className="text-lg font-semibold tabular-nums" data-testid="summary-dealers">{count(summary?.dealers)}</div></div>
-        {ranked("Top Dealers", "summary-top-dealers", s.topDealers.byBills, "dealers")}
-        {ranked("Top SO", "summary-top-so", s.topOfficers.byBills, "officers")}
+        <div><div className="text-xs text-muted-foreground">{T.totalBills}</div><div className="text-lg font-semibold tabular-nums" data-testid="summary-total-bills">{count(summary?.totalBills)}</div></div>
+        <div><div className="text-xs text-muted-foreground">{T.dealers}</div><div className="text-lg font-semibold tabular-nums" data-testid="summary-dealers">{count(summary?.dealers)}</div></div>
+        {ranked(T.topDealers, "summary-top-dealers", s.topDealers.byBills, "dealers")}
+        {ranked(T.topSo, "summary-top-so", s.topOfficers.byBills, "officers")}
       </div>
-      {open === "dealers" && <RankingDialog title="Top Dealers" nameHeader="Dealer Name" ranking={s.topDealers} incomplete={s.amountsIncomplete} onClose={() => setOpen(null)} />}
-      {open === "officers" && <RankingDialog title="Top Sales Officers" nameHeader="Sales Officer" ranking={s.topOfficers} incomplete={s.amountsIncomplete} onClose={() => setOpen(null)} />}
+      {open === "dealers" && <RankingDialog title={T.topDealers} nameHeader={T.dealerName} ranking={s.topDealers} incomplete={s.amountsIncomplete} onClose={() => setOpen(null)} />}
+      {open === "officers" && <RankingDialog title={T.topOfficers} nameHeader={T.col.officer} ranking={s.topOfficers} incomplete={s.amountsIncomplete} onClose={() => setOpen(null)} />}
     </>
   );
 }
 
 /** Small information popup: Rank → name → No of Bills → Total Billing Amount, ranked by the chosen metric (each metric's list is computed on the server from ALL entries). */
 function RankingDialog({ title, nameHeader, ranking, incomplete, onClose }: { title: string; nameHeader: string; ranking: ExceptionRanking; incomplete: boolean; onClose: () => void }) {
+  const T = useReportText();
   const [metric, setMetric] = useState<"bills" | "amount">("bills");
   const entries = metric === "bills" ? ranking.byBills : ranking.byAmount;
   const anyIncomplete = entries.some((e) => e.incomplete);
@@ -101,27 +122,27 @@ function RankingDialog({ title, nameHeader, ranking, incomplete, onClose }: { ti
     <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogContent className="max-h-[90vh] max-w-md overflow-y-auto" data-testid="ranking-dialog">
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
-        <PillNav value={metric} onChange={setMetric} items={[{ value: "bills", label: "No of Bills" }, { value: "amount", label: "Amount of Bills" }]} />
+        <PillNav value={metric} onChange={setMetric} items={[{ value: "bills", label: T.bills }, { value: "amount", label: T.amount }]} />
         {entries.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground" data-testid="ranking-empty">No billing exceptions match.</p>
+          <p className="py-4 text-center text-sm text-muted-foreground" data-testid="ranking-empty">{T.rankingEmpty}</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="border-b text-left text-xs text-muted-foreground"><th className="py-1 pr-2 font-medium">Rank</th><th className="py-1 pr-2 font-medium">{nameHeader}</th><th className="py-1 pr-2 text-right font-medium">No of Bills</th><th className="py-1 text-right font-medium">Total Billing Amount</th></tr></thead>
+              <thead><tr className="border-b text-left text-xs text-muted-foreground"><th className="py-1 pr-2 font-medium">{T.rank}</th><th className="py-1 pr-2 font-medium">{nameHeader}</th><th className="py-1 pr-2 text-right font-medium">{T.bills}</th><th className="py-1 text-right font-medium">{T.totalAmount}</th></tr></thead>
               <tbody data-testid="ranking-rows">
                 {entries.map((e, i) => (
                   <tr key={e.id} className="border-b last:border-0">
                     <td className="py-1.5 pr-2 tabular-nums">{i + 1}</td>
                     <td className="py-1.5 pr-2 font-medium">{e.name}</td>
                     <td className="py-1.5 pr-2 text-right tabular-nums">{e.bills}</td>
-                    <td className="py-1.5 text-right tabular-nums">{e.incomplete && e.amount === 0 ? dash : formatCurrency(e.amount)}{e.incomplete && e.amount !== 0 ? <span title="Some exceptions have no saved Billing Amount">*</span> : null}</td>
+                    <td className="py-1.5 text-right tabular-nums">{e.incomplete && e.amount === 0 ? dash : formatCurrency(e.amount)}{e.incomplete && e.amount !== 0 ? <span title={T.incompleteTip}>*</span> : null}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-        {(anyIncomplete || (incomplete && entries.length > 0 && entries.some((e) => e.incomplete))) && <p className="text-xs text-muted-foreground" data-testid="ranking-incomplete">* Some exceptions were recorded without a Billing Amount; those are left out of the amount, so it is incomplete.</p>}
+        {(anyIncomplete || (incomplete && entries.length > 0 && entries.some((e) => e.incomplete))) && <p className="text-xs text-muted-foreground" data-testid="ranking-incomplete">{T.incompleteNote}</p>}
       </DialogContent>
     </Dialog>
   );
@@ -130,6 +151,7 @@ function RankingDialog({ title, nameHeader, ranking, incomplete, onClose }: { ti
 const countText = (n: number | undefined) => (n === undefined ? "—" : new Intl.NumberFormat("en-IN").format(n));
 /** Clickable dealer summary (Performance's summary-panel look: bordered container, muted labels, bold counts). Counts come from the server for the whole filtered result. */
 function DaySummaryPanel({ summary, selected, onSelect, onAll }: { summary: DaySummary | undefined; selected: DayBucketKey | null; onSelect: (key: DayBucketKey) => void; onAll: () => void }) {
+  const T = useReportText();
   const item = (label: string, count: number | undefined, active: boolean, onClick: () => void, testId: string) => (
     <button
       key={testId} type="button" onClick={onClick} aria-pressed={active} data-testid={testId} title={label}
@@ -141,8 +163,8 @@ function DaySummaryPanel({ summary, selected, onSelect, onAll }: { summary: DayS
   );
   return (
     <div className="grid grid-cols-2 gap-3 rounded-lg border bg-background p-4 sm:grid-cols-3 lg:grid-cols-6" data-testid="day-summary">
-      {item("All Dealers", summary?.total, selected === null, onAll, "summary-all")}
-      {DAY_BUCKETS.map((b) => item(b.label, summary?.buckets[b.key], selected === b.key, () => onSelect(b.key), `summary-${b.key}`))}
+      {item(T.allDealers, summary?.total, selected === null, onAll, "summary-all")}
+      {DAY_BUCKETS.map((b) => item(T.bucket[b.key] ?? b.label, summary?.buckets[b.key], selected === b.key, () => onSelect(b.key), `summary-${b.key}`))}
     </div>
   );
 }
@@ -172,6 +194,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
   // A Billing Exception notification opens straight on its details: /reports/last-payment?exception=<id> (the details API still enforces the caller's scope).
   const linkedException = useSearchParams()?.get("exception") ?? null;
   const [infoId, setInfoId] = useState<string | null>(linkedException);
+  const T = useReportText();
   const loadingLabel = useLabel("last_payment.filter.loading");
   const failedLabel = useLabel("last_payment.filter.error");
   const daysLabels = { frozen: useLabel("billing_exception.days.frozen"), running: useLabel("billing_exception.days.running") };
@@ -198,7 +221,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
       const response = await fetch(exceptionView ? `/api/reports/last-payment/billing-exceptions/export?${reportQuery({ view })}` : `/api/reports/last-payment/export?${reportQuery()}`);
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: string };
-        setExportMessage(body.error ?? "Failed to export report");
+        setExportMessage(body.error ?? T.exportFailed);
         return;
       }
       const url = URL.createObjectURL(await response.blob());
@@ -207,7 +230,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
       document.body.appendChild(link); link.click(); link.remove();
       URL.revokeObjectURL(url);
     } catch {
-      setExportMessage("Failed to export report");
+      setExportMessage(T.exportFailed);
     } finally {
       setExporting(false);
     }
@@ -281,7 +304,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
         <div className="flex flex-wrap items-center gap-2">
           <Input
             className="w-72 max-w-sm"
-            placeholder="Search parties…"
+            placeholder={T.searchPlaceholder}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -293,10 +316,10 @@ function ReportView({ view }: { view: ReportViewKey }) {
         <div className="flex items-center gap-3">
           {canExport && (
             <Button variant="outline" size="sm" disabled={exporting || isLoading || busy || failed} onClick={() => void exportReport()}>
-              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} {exporting ? "Exporting…" : "Export"}
+              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} {exporting ? T.exporting : T.exportLabel}
             </Button>
           )}
-          <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground" data-testid="last-update">Last Update: {formatLastUpdate(data?.lastUpdate) ?? "—"}</span>
+          <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground" data-testid="last-update">{T.lastUpdate} {formatLastUpdate(data?.lastUpdate) ?? "—"}</span>
         </div>
       </div>
       {exportMessage && <p className="text-sm text-destructive" role="alert">{exportMessage}</p>}
@@ -322,28 +345,28 @@ function ReportView({ view }: { view: ReportViewKey }) {
         <Table numbered numberStart={(data ? (data.page - 1) * data.pageSize : 0) + 1} className={exceptionView ? "min-w-[1360px] table-fixed" : "min-w-[1130px] table-fixed"}>
           <TableHeader>
             <TableRow>
-              {FILTER_COLUMNS.map(({ key, label, width }) => (
+              {FILTER_COLUMNS.map(({ key, width }) => { const label = T.col[key]; return (
                 <ColumnFilterHeader
                   key={key}
                   className={width}
                   label={label}
-                  ariaLabel={`Filter by ${label}`}
+                  ariaLabel={T.filterBy.replace("{column}", label)}
                   options={options[key]}
                   selected={filters[key] ?? []}
                   onChange={(next) => changeFilters({ [key]: next })}
                 />
-              ))}
-              <TableHead className="w-40 text-right">Last Payment Date</TableHead>
+              ); })}
+              <TableHead className="w-40 text-right">{T.lastPaymentDate}</TableHead>
               <TableHead className="w-24 text-right" aria-sort={sort === "days_asc" ? "ascending" : "descending"}>
                 <div className="inline-flex items-center gap-0.5">
                 <button
                   type="button"
-                  aria-label="Sort by Days"
+                  aria-label={T.sortDays}
                   className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted"
                   onClick={() => { setSort(sort === "days_asc" ? "days_desc" : "days_asc"); setPage(1); }}
                 >
-                  Days
-                  {sort === "days_asc" ? <ArrowUp className="h-3.5 w-3.5" aria-label="ascending" /> : <ArrowDown className="h-3.5 w-3.5" aria-label="descending" />}
+                  {T.days}
+                  {sort === "days_asc" ? <ArrowUp className="h-3.5 w-3.5" aria-label={T.ascending} /> : <ArrowDown className="h-3.5 w-3.5" aria-label={T.descending} />}
                 </button>
                 {/* One Days filter: with a quick-filter range selected and no manual constraint, the control shows that range; changing / clearing it here keeps both in step. */}
                 <PaymentAgingFilterControl
@@ -359,13 +382,13 @@ function ReportView({ view }: { view: ReportViewKey }) {
               </TableHead>
               {exceptionView ? (
                 <>
-                  <TableHead className="w-32 text-right">Billing Date</TableHead>
-                  <ColumnFilterHeader className="w-36" label="Authorized By" ariaLabel="Filter by Authorized By" options={AUTH_FILTER_OPTIONS} selected={filters.authBy ?? []} onChange={(next) => changeFilters({ authBy: next })} />
-                  <TableHead className="w-20 text-center">Info</TableHead>
+                  <TableHead className="w-32 text-right">{T.billingDate}</TableHead>
+                  <ColumnFilterHeader className="w-36" label={T.authorizedBy} ariaLabel={T.filterBy.replace("{column}", T.authorizedBy)} options={AUTH_FILTER_OPTIONS} selected={filters.authBy ?? []} onChange={(next) => changeFilters({ authBy: next })} />
+                  <TableHead className="w-20 text-center">{T.info}</TableHead>
                 </>
               ) : (
                 // Same component / dropdown / automatic-apply behaviour as the Sales Officer header filter.
-                <ColumnFilterHeader className="w-40" label="Billing Status" ariaLabel="Filter by Billing Status" options={BILLING_FILTER_OPTIONS} selected={filters.billing ?? []} onChange={(next) => changeFilters({ billing: next })} />
+                <ColumnFilterHeader className="w-40" label={T.billingStatus} ariaLabel={T.filterBy.replace("{column}", T.billingStatus)} options={BILLING_FILTER_OPTIONS} selected={filters.billing ?? []} onChange={(next) => changeFilters({ billing: next })} />
               )}
             </TableRow>
           </TableHeader>
@@ -373,7 +396,7 @@ function ReportView({ view }: { view: ReportViewKey }) {
             {isLoading ? (
               <TableRow><TableCell colSpan={exceptionView ? 10 : 8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
             ) : !data || data.items.length === 0 ? (
-              <TableRow><TableCell colSpan={exceptionView ? 10 : 8} className="py-8 text-center text-muted-foreground">{exceptionView ? "No billing exceptions found." : "No dealers found."}</TableCell></TableRow>
+              <TableRow><TableCell colSpan={exceptionView ? 10 : 8} className="py-8 text-center text-muted-foreground">{exceptionView ? T.emptyExceptions : T.emptyDealers}</TableCell></TableRow>
             ) : (
               data.items.map((row) => (
                 // One row per EXCEPTION in the exception views (its id is the key — a dealer with three exceptions has three rows).
@@ -431,10 +454,10 @@ function ReportView({ view }: { view: ReportViewKey }) {
       {infoId && <BillingExceptionInfoDialog exceptionId={infoId} onClose={() => { setInfoId(null); if (linkedException && typeof window !== "undefined") window.history.replaceState(null, "", window.location.pathname); }} />}
       {data && data.totalPages > 1 && (
         <div className="flex items-center justify-between text-sm">
-          <span className="text-muted-foreground">Page {data.page} of {data.totalPages} · {data.total} total</span>
+          <span className="text-muted-foreground">{T.pageOf.replace("{page}", String(data.page)).replace("{pages}", String(data.totalPages)).replace("{total}", String(data.total))}</span>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Previous</Button>
-            <Button variant="outline" size="sm" disabled={page >= data.totalPages} onClick={() => setPage((p) => p + 1)}>Next</Button>
+            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>{T.previous}</Button>
+            <Button variant="outline" size="sm" disabled={page >= data.totalPages} onClick={() => setPage((p) => p + 1)}>{T.next}</Button>
           </div>
         </div>
       )}
@@ -448,20 +471,21 @@ function ReportView({ view }: { view: ReportViewKey }) {
  * Billing Exception opens on Current.
  */
 export function LastPaymentReportPage() {
+  const T = useReportText();
   const [main, setMain] = useState<"last-payment" | "billing-exception">("last-payment");
   const [sub, setSub] = useState<ExceptionView>("current");
   const view: ReportViewKey = main === "last-payment" ? "last-payment" : sub;
   return (
     <div className="space-y-5">
       <PageHeader
-        crumbs={[{ label: "Reports" }, { label: "Last Payment Report" }]}
-        title="Last Payment Report"
-        subtitle="The latest payment received from each dealer, and how many days ago it was."
+        crumbs={[{ label: T.crumb }, { label: T.title }]}
+        title={T.title}
+        subtitle={T.subtitle}
       />
 
-      <PillNav value={main} onChange={setMain} items={[{ value: "last-payment", label: "Last Payment" }, { value: "billing-exception", label: "Billing Exception" }]} />
+      <PillNav value={main} onChange={setMain} items={[{ value: "last-payment", label: T.tabLastPayment }, { value: "billing-exception", label: T.tabException }]} />
       {/* Own line below the main switch, above search / filters: the SAME underlined text tabs as Sales Planning's Seasonal / Monthly / Yearly. */}
-      {main === "billing-exception" && <UnderlineTabs value={sub} onChange={setSub} items={[{ value: "current", label: "Current" }, { value: "history", label: "History" }]} />}
+      {main === "billing-exception" && <UnderlineTabs value={sub} onChange={setSub} items={[{ value: "current", label: T.tabCurrent }, { value: "history", label: T.tabHistory }]} />}
       <ReportView key={view} view={view} />
     </div>
   );

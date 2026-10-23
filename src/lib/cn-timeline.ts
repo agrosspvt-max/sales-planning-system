@@ -1,6 +1,9 @@
+import { accountSnapshotName } from "@/features/accounts/identity";
 import { cnRequestBusinessDateKey, cnRequestDisplayStatus } from "./cn-request";
+import type { CnReviewProduct } from "./cn-review";
+import { cnGraceEndDateKey } from "./cn-expiry";
 
-export type CnTimelineKind = "SUBMITTED" | "WORKING_SHARED" | "REJECTED" | "PAYMENT_REPORTED" | "PAYMENT_VERIFIED" | "FINAL_CN_SHARED" | "POSTED_IN_LEDGER";
+export type CnTimelineKind = "SUBMITTED" | "WORKING_SHARED" | "REJECTED" | "PAYMENT_REPORTED" | "PAYMENT_VERIFIED" | "FINAL_CN_SHARED" | "POSTED_IN_LEDGER" | "EXPIRY_SET" | "ENTERED_GRACE" | "GRACE_GRANTED" | "GRACE_MIGRATED" | "EXPIRED" | "REOPENED" | "RETURNED" | "REVIEW_SENT" | "REVIEW_RESPONDED" | "REVIEW_CANCELLED" | "REVIEW_FINALIZED";
 export interface CnTimelineEntry {
   id: string;
   kind: CnTimelineKind;
@@ -13,6 +16,21 @@ export interface CnTimelineEntry {
   paymentStatus?: string;
   amountPaid?: number | null;
   outstandingAfter?: number;
+  /** Expiry-policy entries. `system` marks an automatic transition (no account); occurredAt is its EFFECTIVE time, `processedAt` when it was recorded. */
+  system?: boolean;
+  cycleNo?: number;
+  expiryDate?: string | null;
+  previousExpiryDate?: string | null;
+  graceDays?: number | null;
+  graceEndDate?: string | null;
+  authorizedBy?: string | null;
+  note?: string | null;
+  processedAt?: string | null;
+  reviewKind?: string; reviewStatus?: string; assignedToName?: string; products?: CnReviewProduct[]; destination?: string; bypassReason?: string | null;
+}
+export interface CnExpiryTimelineEvent {
+  id: string; kind: "POLICY_SET" | "ENTERED_GRACE" | "GRACE_GRANTED" | "GRACE_MIGRATED" | "EXPIRED" | "REOPENED" | "RETURNED"; cycleNo: number; effectiveAt: Date | string; processedAt?: Date | string | null;
+  expiryIncludesGrace?: boolean; actor?: string | null; expiryDate?: Date | string | null; previousExpiryDate?: Date | string | null; graceDays?: number | null; reason?: string | null; authorizedBy?: string | null; note?: string | null;
 }
 interface TimelineInput {
   status: string; createdAt: Date | string; acceptedAt?: Date | string | null;
@@ -22,6 +40,8 @@ interface TimelineInput {
   acceptanceReason?: string | null;
   rejectionReason?: string | null; rejectionReasonDetails?: string | null;
   actors?: Partial<Record<CnTimelineKind, string>>;
+  processingEvents?: Array<{ id: string; kind: string; occurredAt: string; actor: string; details: unknown }>;
+  expiryEvents?: CnExpiryTimelineEvent[];
   payments?: Array<{ id: string; source: string; requestKey: string; createdAt: Date | string; actor: string; status: string; amountPaid: number | null; outstandingAfter: number }>;
 }
 const iso = (value: Date | string | null | undefined): string | null => {
@@ -60,6 +80,11 @@ export function orderCnTimelineEntries(entries: readonly CnTimelineEntry[]): CnT
 /** Recorded stages only. A direct posting's mandatory uploaded file is not an intermediate Working Shared stage. */
 export function buildCnTimeline(request: TimelineInput): CnTimelineEntry[] {
   const entries: CnTimelineEntry[] = [{ id: "submitted", kind: "SUBMITTED", occurredAt: iso(request.createdAt) }];
+  for (const event of request.processingEvents ?? []) {
+    const d = event.details as { kind?: string; status?: string; note?: string; assignedToName?: string; products?: CnReviewProduct[]; destination?: string; bypassReason?: string; fileName?: string };
+    entries.push({ id: `review:${event.id}`, kind: event.kind as CnTimelineKind, occurredAt: event.occurredAt, actor: event.actor,
+      reviewKind: d.kind, reviewStatus: d.status, note: d.note, assignedToName: d.assignedToName ? accountSnapshotName(d.assignedToName) : undefined, products: d.products, destination: d.destination, bypassReason: d.bypassReason, fileName: d.fileName });
+  }
   const status = cnRequestDisplayStatus(request.status);
   const acceptedAt = iso(request.acceptedAt), postedAt = iso(request.postedAt), workingAt = iso(request.cnWorkingUploadedAt);
   const hasWorkingStage = status === "ACCEPTED_NOT_POSTED" || !!request.acceptanceReason
@@ -67,6 +92,18 @@ export function buildCnTimeline(request: TimelineInput): CnTimelineEntry[] {
     || !!(postedAt && ((acceptedAt && acceptedAt < postedAt) || (workingAt && workingAt < postedAt)));
   if (hasWorkingStage) entries.push({ id: "working", kind: "WORKING_SHARED", occurredAt: workingAt ?? acceptedAt, fileName: request.cnWorkingFileName });
   if (request.rejectedAt || status === "REJECTED") entries.push({ id: "rejected", kind: "REJECTED", occurredAt: iso(request.rejectedAt), reason: request.rejectionReason, reasonDetails: request.rejectionReasonDetails });
+  // Recorded expiry-policy history (durable events, never rebuilt from the latest status): settings → grace → expired → reopened, per cycle.
+  const dateKey = (v: Date | string | null | undefined): string | null => (v ? new Date(v).toISOString().slice(0, 10) : null);
+  for (const e of request.expiryEvents ?? []) {
+    const expiryDate = dateKey(e.expiryDate);
+    entries.push({
+      id: `expiry:${e.id}`, kind: e.kind === "POLICY_SET" ? "EXPIRY_SET" : e.kind, occurredAt: iso(e.effectiveAt), processedAt: iso(e.processedAt),
+      ...(e.actor ? { actor: e.actor } : { system: e.kind === "ENTERED_GRACE" || e.kind === "EXPIRED" || e.kind === "GRACE_MIGRATED" }),
+      cycleNo: e.cycleNo, expiryDate, previousExpiryDate: dateKey(e.previousExpiryDate), graceDays: e.graceDays ?? null,
+      graceEndDate: expiryDate && e.graceDays && !e.expiryIncludesGrace && e.kind !== "GRACE_GRANTED" && e.kind !== "GRACE_MIGRATED" ? cnGraceEndDateKey(expiryDate, e.graceDays) : null,
+      reason: e.reason ?? null, authorizedBy: e.authorizedBy ?? null, note: e.note ?? null,
+    });
+  }
   for (const payment of request.payments ?? []) {
     // Initial payment state is part of the acceptance/posting action, not a separate report or verification.
     if (payment.source === "ACCEPTANCE" || payment.requestKey.startsWith("acceptance:")) continue;
@@ -76,5 +113,8 @@ export function buildCnTimeline(request: TimelineInput): CnTimelineEntry[] {
   if (request.postedAt || status === "POSTED_IN_LEDGER") entries.push({ id: "posted", kind: "POSTED_IN_LEDGER", occurredAt: postedAt, ...(!hasWorkingStage ? { fileName: request.cnWorkingFileName } : {}) });
   // Stable insertion order resolves simultaneous actions; legacy unknown dates are explicit at the end.
   return orderCnTimelineEntries(entries)
-    .map((entry) => ({ ...entry, actor: entry.actor ?? request.actors?.[entry.kind], daysFromSubmission: cnTimelineDaysFromSubmission(request.createdAt, entry.occurredAt) }));
+    .map((entry) => {
+      const actor = entry.actor ?? request.actors?.[entry.kind];
+      return { ...entry, actor: actor ? accountSnapshotName(actor) : undefined, daysFromSubmission: cnTimelineDaysFromSubmission(request.createdAt, entry.occurredAt) };
+    });
 }

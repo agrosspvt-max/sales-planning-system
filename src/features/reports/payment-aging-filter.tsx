@@ -31,6 +31,8 @@ export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentA
     { value: "between", label: useLabel("last_payment.aging.op_between") },
   ];
   const valueLabel = useLabel("last_payment.aging.value");
+  const T = { title: useLabel("last_payment.aging.title"), legend: useLabel("last_payment.aging.legend"), from: useLabel("last_payment.aging.from"), to: useLabel("last_payment.aging.to"), clear: useLabel("last_payment.aging.clear"),
+    ariaFilter: useLabel("last_payment.aria.aging_filter"), ariaFrom: useLabel("last_payment.aria.aging_from"), ariaTo: useLabel("last_payment.aria.aging_to"), ariaValue: useLabel("last_payment.aria.aging_value") };
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<PaymentAgingDraft>(draftOf(value));
   const active = value !== null;
@@ -58,7 +60,7 @@ export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentA
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label="Filter by Payment Aging"
+          aria-label={T.ariaFilter}
           className={`inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted ${active ? "text-primary" : ""}`}
         >
           {active && <span data-testid="aging-active">{paymentAgingLabel(value)}</span>}
@@ -70,9 +72,9 @@ export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentA
         className="min-w-[15rem] space-y-3 p-3 normal-case"
         onKeyDown={(event) => event.stopPropagation()} // typing digits must not trigger the menu's type-ahead
       >
-        <div className="text-sm font-medium">Payment Aging</div>
+        <div className="text-sm font-medium">{T.title}</div>
         <fieldset className="space-y-1 text-sm">
-          <legend className="mb-1 text-muted-foreground">Show dealers with Days:</legend>
+          <legend className="mb-1 text-muted-foreground">{T.legend}</legend>
           {OPERATORS.map((op) => (
             <label key={op.value} className="flex cursor-pointer items-center gap-2">
               <input type="radio" name="payment-aging-operator" checked={draft.operator === op.value} onChange={() => set({ operator: op.value })} /> {op.label}
@@ -81,18 +83,18 @@ export function PaymentAgingFilterControl({ value, onChange }: { value: PaymentA
         </fieldset>
         {draft.operator === "between" ? (
           <div className="space-y-2 text-sm">
-            <label className="flex items-center gap-2"><span className="w-10">From</span>
-              <Input inputMode="numeric" aria-label="Payment Aging from" value={draft.from} onChange={(e) => set({ from: e.target.value })} /></label>
-            <label className="flex items-center gap-2"><span className="w-10">To</span>
-              <Input inputMode="numeric" aria-label="Payment Aging to" value={draft.to} onChange={(e) => set({ to: e.target.value })} /></label>
+            <label className="flex items-center gap-2"><span className="w-10">{T.from}</span>
+              <Input inputMode="numeric" aria-label={T.ariaFrom} value={draft.from} onChange={(e) => set({ from: e.target.value })} /></label>
+            <label className="flex items-center gap-2"><span className="w-10">{T.to}</span>
+              <Input inputMode="numeric" aria-label={T.ariaTo} value={draft.to} onChange={(e) => set({ to: e.target.value })} /></label>
           </div>
         ) : (
           <label className="flex items-center gap-2 text-sm"><span className="w-10">{valueLabel}</span>
-            <Input inputMode="numeric" aria-label="Payment Aging value" value={draft.value} onChange={(e) => set({ value: e.target.value })} /></label>
+            <Input inputMode="numeric" aria-label={T.ariaValue} value={draft.value} onChange={(e) => set({ value: e.target.value })} /></label>
         )}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <div className="flex justify-start gap-2">
-          <Button type="button" variant="outline" size="sm" disabled={!active} onClick={() => { setDraft(draftOf(null)); onChange(null); setOpen(false); }}>Clear</Button>
+          <Button type="button" variant="outline" size="sm" disabled={!active} onClick={() => { setDraft(draftOf(null)); onChange(null); setOpen(false); }}>{T.clear}</Button>
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

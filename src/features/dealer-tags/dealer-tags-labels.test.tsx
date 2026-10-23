@@ -55,7 +55,7 @@ async function main() {
   for (const k of TAG_KEYS) assert.equal(labelMeta(k).module, "Dealer Tags", k);
   assert.equal(new Set(labelCatalog(undefined).filter((e) => e.module === "Dealer Tags").map((e) => e.key)).size, TAG_KEYS.length, "all keys appear on the Labels management page");
   const used = new Set<string>();
-  for (const src of [SRC.page, SRC.requests, SRC.filter, SRC.service, read("src/features/navigation/nav.ts")]) for (const m of src.matchAll(/["'](dealer_tags\.[a-z_.]+)["']/g)) used.add(m[1]!);
+  for (const src of [SRC.page, SRC.requests, SRC.filter, SRC.service, read("src/features/navigation/nav.ts"), read("src/features/dealer-tags/tag-master-page.tsx")]) for (const m of src.matchAll(/["'](dealer_tags\.[a-z_.]+)["']/g)) used.add(m[1]!);
   for (const m of SRC.service.matchAll(/L\["(dealer_tags\.[a-z_.]+)"\]/g)) used.add(m[1]!);
   for (const k of used) assert.ok(k in DEFAULT_LABELS, `${k} is registered`);
   for (const k of TAG_KEYS) assert.ok(used.has(k), `${k} is used`);

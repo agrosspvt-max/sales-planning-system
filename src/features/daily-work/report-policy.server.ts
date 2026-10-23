@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { labeledError } from "@/features/labels/labeled-error";
 import { writeAudit } from "@/lib/audit";
 import { hasAdminPermission, isAdministrativeRole } from "@/features/accounts/permissions";
 import { getOfficerScope } from "@/lib/scope";
@@ -129,8 +130,8 @@ const toDto = (r: RequestRow): LateRequestDto => ({
 
 /** Lightweight approval refresh: one indexed read, bound to the authenticated SO (never a supplied officer id). */
 export async function ownLateReportRequestStatus(ctx: AuthContext, workDate: string | null): Promise<{ id: string; status: LateRequestDto["status"] } | null> {
-  if (ctx.role !== Role.SALES_OFFICER) throw new ApiError(403, "Only a Sales Officer can read their own late-report request status.");
-  if (!workDate || !isoDateToDMY(workDate)) throw new ApiError(422, "A valid report date is required.");
+  if (ctx.role !== Role.SALES_OFFICER) throw labeledError(403, "daily_work.error.late_status_so_only");
+  if (!workDate || !isoDateToDMY(workDate)) throw labeledError(422, "daily_work.error.report_date_required");
   const rows = await prisma.$queryRaw<{ id: string; status: LateRequestDto["status"] }[]>(Prisma.sql`
     SELECT "id", "status" FROM "LateReportRequest" WHERE "officerId" = ${ctx.userId} AND "workDate" = ${workDate}::date
     ORDER BY "requestedAt" DESC, "id" DESC LIMIT 1`);

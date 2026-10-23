@@ -43,6 +43,7 @@ model User {
   dailyReportPolicies      DailyReportPolicy[]         @relation("DailyReportPolicyOfficer")
   retailerRequests         RetailerRequest[]           @relation("RetailerRequestRequester")
   retailersCreated         Retailer[]                  @relation("RetailerCreator")
+  cnExpiryEvents           CnExpiryEvent[]             @relation("CnExpiryEventActor")
   lateReportRequests       LateReportRequest[]         @relation("LateReportRequestOfficer")
   dailyWorkDays            DailyWorkDay[]              @relation("DailyWorkDayOfficer")
   marketRequests           MarketRequest[]             @relation("MarketRequestRequester")
@@ -728,18 +729,20 @@ model Dealer {
 /// SUBMITTED → ACCEPTED_NOT_POSTED → POSTED_IN_LEDGER, or SUBMITTED → REJECTED.
 /// Legacy ACCEPTED / APPROVED rows remain unchanged and are treated as already posted by the application.
 model CnRequest {
-  id                          String           @id @default(cuid())
+  reviews                     CnReviewAttempt[]
+  processingEvents            CnProcessingEvent[]
+  id                          String              @id @default(cuid())
   officerId                   String
   dealerId                    String
   cnType                      String
-  amount                      Decimal?         @db.Decimal(14, 2)
+  amount                      Decimal?            @db.Decimal(14, 2)
   paymentStatus               String?
-  status                      String           @default("SUBMITTED")
+  status                      String              @default("SUBMITTED")
   remarks                     String?
   actedByRmId                 String?
   actedByAdminId              String?
-  createdAt                   DateTime         @default(now())
-  updatedAt                   DateTime         @updatedAt
+  createdAt                   DateTime            @default(now())
+  updatedAt                   DateTime            @updatedAt
   details                     String?
   acceptedAt                  DateTime?
   rejectedAt                  DateTime?
@@ -754,19 +757,26 @@ model CnRequest {
   cnWorkingFileSize           Int?
   cnWorkingUploadedById       String?
   cnWorkingUploadedAt         DateTime?
-  taskDate                    DateTime?        @db.Date
+  taskDate                    DateTime?           @db.Date
   cnExpiryDays                Int?
-  postedAmount                Decimal?         @db.Decimal(14, 2)
-  paymentOriginalAmount       Decimal?         @db.Decimal(14, 2)
-  paymentOutstandingAmount    Decimal?         @db.Decimal(14, 2)
+  /// Calendar expiry (IST date, valid through its end). Legacy rows: acceptance date + cnExpiryDays - 1 (backfilled by migration).
+  cnExpiryDate                DateTime?           @db.Date
+  /// Cumulative manually granted extension days in this cycle. Already included in cnExpiryDate.
+  cnGraceDays                 Int?
+  /// WORKING | GRACE | EXPIRED while the expiry policy governs this CN; NULL = not governed (exempt / legacy / no reliable data).
+  cnPolicyStage               String?
+  cnPolicyCycle               Int                 @default(0)
+  postedAmount                Decimal?            @db.Decimal(14, 2)
+  paymentOriginalAmount       Decimal?            @db.Decimal(14, 2)
+  paymentOutstandingAmount    Decimal?            @db.Decimal(14, 2)
   paymentTrackingMode         String?
-  paymentVerified             Boolean          @default(false)
+  paymentVerified             Boolean             @default(false)
   legacyDailyWorkEntryId      String?
-  legacyDailyWorkContribution Decimal?         @db.Decimal(14, 2)
+  legacyDailyWorkContribution Decimal?            @db.Decimal(14, 2)
   /// Legacy schedule whose move history is unknown (set once, by migration).
-  rescheduleHistoryGap        Boolean          @default(false)
+  rescheduleHistoryGap        Boolean             @default(false)
   legacyTaskAbandonedAt       DateTime?
-  legacyDailyWorkConfirmed    Boolean          @default(false)
+  legacyDailyWorkConfirmed    Boolean             @default(false)
   finalCnDocument             String?
   finalCnFileName             String?
   finalCnMimeType             String?
@@ -774,14 +784,16 @@ model CnRequest {
   finalCnUploadedById         String?
   finalCnUploadedAt           DateTime?
   paymentEvents               CnPaymentEvent[]
-  dealer                      Dealer           @relation(fields: [dealerId], references: [id])
-  legacyDailyWorkEntry        DailyWorkEntry?  @relation("LegacyCnTaskDailyWorkEntry", fields: [legacyDailyWorkEntryId], references: [id])
-  officer                     User             @relation("OfficerCnRequests", fields: [officerId], references: [id])
+  expiryEvents                CnExpiryEvent[]
+  dealer                      Dealer              @relation(fields: [dealerId], references: [id])
+  legacyDailyWorkEntry        DailyWorkEntry?     @relation("LegacyCnTaskDailyWorkEntry", fields: [legacyDailyWorkEntryId], references: [id])
+  officer                     User                @relation("OfficerCnRequests", fields: [officerId], references: [id])
 
   @@index([officerId])
   @@index([status])
   @@index([officerId, taskDate])
   @@index([legacyDailyWorkEntryId])
+  @@index([cnPolicyStage, cnExpiryDate])
 }
 
 /// Immutable CN payment decisions. A row may also own the one Recovery follow-up task produced by that
@@ -2647,4 +2659,73 @@ model RetailerDealerLink {
 
   @@unique([retailerId, dealerId])
   @@index([dealerId])
+}
+
+/// Durable, idempotent history of a CN's expiry cycles. `effectiveAt` is when the transition took effect (e.g. 00:00 IST after the
+/// expiry date); `processedAt` is when it was recorded (a late reconciliation never rewrites the real boundary). Automatic transitions have no actor.
+model CnExpiryEvent {
+  id                 String    @id @default(cuid())
+  cnRequestId        String
+  cycleNo            Int
+  /// POLICY_SET | ENTERED_GRACE | EXPIRED | REOPENED | RETURNED
+  kind               String
+  effectiveAt        DateTime  @db.Timestamptz(3)
+  processedAt        DateTime  @default(now()) @db.Timestamptz(3)
+  actorId            String?
+  actorDesignation   String?
+  expiryDate         DateTime? @db.Date
+  previousExpiryDate DateTime? @db.Date
+  graceDays          Int?
+  reason             String?
+  authorizedBy       String?
+  note               String?
+  cnRequest          CnRequest @relation(fields: [cnRequestId], references: [id])
+  actor              User?     @relation("CnExpiryEventActor", fields: [actorId], references: [id])
+
+  /// True for effective expiry dates that already include explicitly granted grace. Old events retain their original semantics.
+  expiryIncludesGrace Boolean  @default(false)
+  sequence           Int       @default(0)
+  requestKey         String?   @unique
+
+  @@unique([cnRequestId, cycleNo, kind, sequence])
+  @@index([cnRequestId, effectiveAt])
+}
+
+/// Immutable assignment attempts. A replacement closes the old attempt rather than changing its recipient.
+model CnReviewAttempt {
+  id             String    @id @default(cuid())
+  cnRequestId    String
+  kind           String
+  status         String    @default("PENDING")
+  requestKey     String    @unique
+  assignedToId   String
+  assignedToName String
+  sentById       String
+  sentByName     String
+  createdAt      DateTime  @default(now())
+  respondedAt    DateTime?
+  note           String?
+  products       Json
+  document       String?
+  fileName       String?
+  mimeType       String?
+  cnRequest      CnRequest @relation(fields: [cnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([assignedToId, status, createdAt])
+  @@index([cnRequestId, createdAt])
+}
+
+/// Durable processing history, written in the same transaction as each review or final CN decision.
+model CnProcessingEvent {
+  id          String    @id @default(cuid())
+  cnRequestId String
+  attemptId   String?
+  kind        String
+  actorId     String
+  actorName   String
+  createdAt   DateTime  @default(now())
+  details     Json
+  cnRequest   CnRequest @relation(fields: [cnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([cnRequestId, createdAt])
 }

@@ -2,11 +2,13 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { ApiError, type AuthContext } from "@/lib/http";
+import { type AuthContext } from "@/lib/http";
+import { labeledError } from "@/features/labels/labeled-error";
 import { writeAudit } from "@/lib/audit";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { lockDailyWorkDay, type DailyWorkDayState } from "./day-lock.server";
 import { materializeDueBillingTasksInTransaction } from "./billing-task.server";
+import { reconcileDueCnRequestsTx } from "@/features/cn-requests/cn-expiry.server";
 import { dropEmptyTaskRow, ensureTaskRow, splitCombinedDraftRows } from "./task-rows.server";
 
 type DueTask = {
@@ -64,6 +66,8 @@ async function materializeDueCnTasksInTransaction(
   if (day.status === "FINALIZED") return { materializedTasks: 0, affectedDealers: 0, finalized: true };
   await splitCombinedDraftRows(tx, officerId, workDate, day); // historical combined draft rows → one row per task, from their own links
 
+  // A stage change that is already due is applied first, so an Expired CN can never materialize a task (no bypass of the expiry).
+  await reconcileDueCnRequestsTx(tx, [officerId]);
   const paymentTasks = await tx.$queryRaw<Array<Omit<DueTask, "sourceKind">>>(Prisma.sql`
     SELECT e."id" AS "sourceId", c."dealerId", e."taskAmount"::text AS "amount"
     FROM "CnPaymentEvent" e
@@ -71,6 +75,7 @@ async function materializeDueCnTasksInTransaction(
     JOIN "DealerAssignment" da ON da."dealerId" = c."dealerId" AND da."officerId" = c."officerId" AND da."effectiveTo" IS NULL
     WHERE c."officerId" = ${officerId}
       AND c."paymentTrackingMode" = 'PAYMENT_V1'
+      AND c."cnPolicyStage" IS DISTINCT FROM 'EXPIRED'
       AND e."taskStatus" = 'SCHEDULED'
       AND e."taskDate" IS NOT NULL AND e."taskDate" <= ${workDate}::date
       AND e."taskAmount" IS NOT NULL AND e."taskAmount" > 0
@@ -105,7 +110,7 @@ async function materializeDueCnTasksInTransaction(
     const contribution = new Prisma.Decimal(task.amount);
     if (!contribution.isPositive()) continue;
     const entryId = await ensureTaskRow(tx, { officerId, dealerId: task.dealerId, workDate, batchId: day.currentBatchId, section: "RECOVERY", kind: task.sourceKind === "PAYMENT_EVENT" ? "CNP" : "CNL", sourceId: task.sourceId });
-    if (!entryId) throw new ApiError(409, "The current Recovery plan changed while Auto Tasks were being added.");
+    if (!entryId) throw labeledError(409, "daily_work.error.recovery_plan_changed_auto");
     const linked = task.sourceKind === "PAYMENT_EVENT"
       ? await tx.$executeRaw(Prisma.sql`
           UPDATE "CnPaymentEvent"
@@ -187,12 +192,12 @@ export async function reverseMaterializedDailyWorkContribution(
     FOR UPDATE`);
   const row = rows[0];
   if (!row || input.day.status === "FINALIZED") {
-    throw new ApiError(409, "This Auto Task belongs to submitted or finalized Daily Work and cannot be rescheduled.");
+    throw labeledError(409, "daily_work.error.auto_task_submitted");
   }
   const current = new Prisma.Decimal(row.todaysPlan ?? 0);
   const contribution = new Prisma.Decimal(input.contribution);
   if (!contribution.isPositive() || current.lessThan(contribution)) {
-    throw new ApiError(409, "The Auto Task contribution cannot be safely removed from the current Recovery plan.");
+    throw labeledError(409, "daily_work.error.auto_task_contribution");
   }
   await tx.$executeRaw(Prisma.sql`
     UPDATE "DailyWorkEntry"

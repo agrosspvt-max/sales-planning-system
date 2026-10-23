@@ -9,6 +9,7 @@ import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { labeledError } from "@/features/labels/labeled-error";
 import { getCurrentDealerIds, getCurrentOwnerByDealer, getOfficerScope, assertOfficerInScope } from "@/lib/scope";
 import { writeAudit } from "@/lib/audit";
 import { runningSchemes } from "@/features/schemes/scheme-planning.server";
@@ -1535,7 +1536,7 @@ async function sectionFacts(officerId: string, workDate: string, batchId: string
  */
 export function assertDailyWorkSectionWritable(section: unknown): void {
   if (section === "SCHEME_CONVERSION" && !isDailyWorkSectionEnabled(section)) {
-    throw new ApiError(409, "Scheme Conversion is temporarily disabled in Daily Work.");
+    throw labeledError(409, "daily_work.error.scheme_conversion_disabled");
   }
 }
 

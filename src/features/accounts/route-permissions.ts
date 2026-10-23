@@ -40,10 +40,12 @@ export function apiPermission(path: string, method: string): Rule | "personal" |
   }
   // Billing Exception tasks: the responsible officer acts on them (service-checked); an administrative viewer may READ the originating exception. No administrative write.
   if (p.startsWith("billing-exception-tasks")) return read ? ["lastPaymentReport", "read"] : null;
+  if (p.startsWith("cn-reviews/")) return "personal"; // assignment-scoped access is enforced independently by every review service
   if (p.startsWith("cn-requests")) {
     if (read) return ["cnRequests", "read"];
     if (p.endsWith("/act")) return ["cnRequests", "reject"];
     if (p.endsWith("/verify")) return ["cnRequests", "verifyPayment"];
+    if (p.endsWith("/reopen") || p.endsWith("/grace")) return ["cnRequests", "approve"]; // expired CN: same approval permission as acceptance
     if (p.endsWith("/accept")) return ["cnRequests", "read"]; // approve/post selected in acceptance service
     return null; // SO payment/task/creation operations stay SO/RM-only.
   }

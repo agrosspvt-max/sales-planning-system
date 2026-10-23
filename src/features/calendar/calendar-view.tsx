@@ -85,6 +85,7 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
 
   // Labels
   const L = {
+    planning: useLabel("party_planning.crumb.planning"), subtitleOfficer: useLabel("calendar.subtitle_officer"), subtitleTeam: useLabel("calendar.subtitle_team"), viewGroup: useLabel("calendar.view_group"), more: useLabel("calendar.more"),
     title: useLabel("calendar.title"),
     today: useLabel("calendar.today"),
     prev: useLabel("calendar.prev_month"),
@@ -230,9 +231,9 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
   return (
     <div className="space-y-5">
       <PageHeader
-        crumbs={[{ label: "Planning" }, { label: L.title }]}
+        crumbs={[{ label: L.planning }, { label: L.title }]}
         title={L.title}
-        subtitle={role === Role.SALES_OFFICER ? "Your scheme conversion dates, tasks, meetings, reminders and notes." : "Scheme conversion dates, tasks, meetings, reminders and notes — yours and your team's."}
+        subtitle={role === Role.SALES_OFFICER ? L.subtitleOfficer : L.subtitleTeam}
       />
 
       {/* Toolbar: month nav + Today + (Admin/RM) officer filter */}
@@ -245,7 +246,7 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {role === Role.REGIONAL_MANAGER && (
-            <div className="inline-flex rounded-md border bg-background p-0.5 text-sm" role="group" aria-label="Calendar view">
+            <div className="inline-flex rounded-md border bg-background p-0.5 text-sm" role="group" aria-label={L.viewGroup}>
               {([["mine", L.myCalendar], ["team", L.teamCalendar]] as const).map(([value, label]) => (
                 <button
                   key={value} type="button"
@@ -267,7 +268,7 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
                 className="w-64" aria-label={L.salesOfficer}
                 value={officerId}
                 onChange={(e) => setOfficerId(e.target.value)}
-                options={[{ value: "", label: L.allOfficers }, ...officers.map((o) => ({ value: o.id, label: `${o.name} — ${o.roleLabel}` }))]}
+                options={[{ value: "", label: L.allOfficers }, ...officers.map((o) => ({ value: o.id, label: o.name }))]}
               />
             </>
           )}
@@ -350,7 +351,7 @@ export function CalendarView({ role, partyPlanningEnabled = false }: { role: Rol
                         <span className="truncate">{groupByOfficer ? `${e.ownerName} · ${(L as Record<string, string>)[KIND_LABEL_PROP[e.kind]]}` : (L as Record<string, string>)[KIND_LABEL_PROP[e.kind]]}</span>
                       </div>
                     ))}
-                    {totalEvs > 1 && <div className="px-1 text-[11px] text-muted-foreground">+{totalEvs - 1} more</div>}
+                    {totalEvs > 1 && <div className="px-1 text-[11px] text-muted-foreground">{L.more.replace("{count}", String(totalEvs - 1))}</div>}
                   </div>
                 </button>
               );
@@ -574,7 +575,7 @@ function AddEntryForm({ kind, dateKey: dk, payload, labels: L, onCancel, onSaved
   const assigning = canAssign && recipientId !== "";
   const needsRecipient = canAssign && kind === "TASK"; // an Admin owns no Daily Work, so a task always needs an SO/RM recipient
   const officers = (payload?.officers ?? []).filter((o) => o.role === "SALES_OFFICER" || o.role === "REGIONAL_MANAGER");
-  const recipientOptions = officers.map((o) => ({ value: o.id, label: employeeHeaderText(o.name, o.territory, o.state) })); // same-name officers stay distinguishable
+  const recipientOptions = officers.map((o) => ({ value: o.id, label: o.name })); // IDs keep selection tied to the intended account.
   const dealerSection = section === "SALES" || section === "RECOVERY";
   // The dealer choices are the RECIPIENT's own (never the Admin's); an SO / RM uses their own list.
   const recipientDealerQuery = useQuery<{ id: string; name: string }[]>({

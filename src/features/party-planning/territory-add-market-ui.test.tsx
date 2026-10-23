@@ -75,6 +75,18 @@ async function main() {
   assert.equal(count("+ Add Market"), 1);
   render(Role.REGIONAL_MANAGER); assert.equal(count("+ Add Market"), 1); assert.ok(render(Role.REGIONAL_MANAGER).includes("To review"));
   render(Role.SUPER_ADMIN); assert.equal(count("+ Add Market"), 0, "Admin does not raise requests");
+  // Admin sees both pending stages, but decisions remain tied to the correct reviewer.
+  requests = [REQ("waiting-rm"), { ...REQ("waiting-admin"), status: "PENDING_ADMIN" }];
+  hooks.length = 0; html = render(Role.SUPER_ADMIN);
+  assert.ok(html.includes("Market waiting-rm") && html.includes("Awaiting RM review") && html.includes("Market waiting-admin") && html.includes("Awaiting Admin review"), "both pending stages render with their actual status");
+  assert.equal(count("Approve"), 1, "Admin can decide only the request whose RM stage is complete");
+  assert.equal(count("Reject"), 1);
+  hooks.length = 0; html = render(Role.CUSTOM_ADMIN);
+  assert.ok(html.includes("Awaiting RM review"));
+  assert.equal(count("Approve"), 1, "administrative accounts share the same review-stage gating");
+  requests = [REQ("waiting-rm")];
+  hooks.length = 0; html = render(Role.REGIONAL_MANAGER);
+  assert.equal(count("Approve"), 1, "RM still reviews their pending requests");
   // open the modal
   hooks.length = 0; render(); btn("+ Add Market").onClick!(); html = render();
   assert.ok(html.indexOf("District *") > -1 && html.indexOf("District *") < html.indexOf("Market Name *") && html.indexOf("Market Name *") < html.indexOf("Market Potential *"), "District is the FIRST field");

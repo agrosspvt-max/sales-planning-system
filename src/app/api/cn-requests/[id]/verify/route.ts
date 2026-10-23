@@ -20,6 +20,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           status: String(form.get("status") ?? ""),
           amountPaid: String(form.get("amountPaid") ?? "") || undefined,
           requestKey: String(form.get("requestKey") ?? ""),
+          expiryDate: String(form.get("expiryDate") ?? "") || undefined,
         },
         file instanceof File ? { name: file.name, type: file.type, buffer: Buffer.from(await file.arrayBuffer()) } : null,
       ));

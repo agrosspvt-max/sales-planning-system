@@ -66,6 +66,7 @@ export function BillingTaskRescheduleDialog({ task, today, onClose, onDone }: { 
 
 /** The originating Billing Exception behind a task — also opened from the Calendar (the endpoint authorizes the owner, the supervising RM and an authorized administrative viewer). */
 export function BillingTaskDetailDialog({ id, onClose }: { id: string; onClose: () => void }) {
+  const statusText = { stateCurrent: useLabel("billing_exception.info.state_current"), stateResolved: useLabel("billing_exception.info.state_resolved") };
   const L = {
     title: useLabel("daily_work.billing_tasks.details_title"), dealer: useLabel("daily_work.billing_tasks.col.dealer"), amount: useLabel("daily_work.billing_tasks.col.amount"),
     billNo: useLabel("daily_work.billing_tasks.detail.bill_no"), auth: useLabel("daily_work.billing_tasks.detail.auth_person"), billingDate: useLabel("daily_work.billing_tasks.detail.billing_date"),
@@ -82,7 +83,7 @@ export function BillingTaskDetailDialog({ id, onClose }: { id: string; onClose: 
           <dl data-testid="billing-task-detail">
             {row(L.dealer, data.dealerName)}{row(L.amount, formatCurrency(data.amount))}{row(L.billNo, data.billNo ?? "—")}{row(L.auth, data.authPerson ?? "—")}
             {row(L.billingDate, data.billingDate ? dateText(data.billingDate) : "—")}{row(L.scheduled, dateText(data.taskDate))}{row(L.promised, dateText(data.promisedDate))}{row(L.owner, data.officerName)}{row(L.by, data.createdByName ?? "—")}
-            {row(L.exception, data.exceptionStatus === "CURRENT" ? "Current" : "Resolved")}
+            {row(L.exception, data.exceptionStatus === "CURRENT" ? statusText.stateCurrent : statusText.stateResolved)}
           </dl>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.close}</Button></DialogFooter>

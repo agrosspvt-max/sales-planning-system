@@ -628,10 +628,10 @@ async function statusFilter() {
   // Layout: Status right after Party; fixed layout with compact widths for the short columns.
   const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
   assert.ok(page.indexOf('key: "status"') > page.indexOf('key: "party"') && page.indexOf('key: "status"') < page.indexOf('key: "state"'), "Status sits immediately after Party");
-  assert.ok(page.includes('table-fixed') && /key: "status", label: "Status", width: "w-\d+"/.test(page) && page.includes("w-40 text-right"), "balanced, fixed column widths");
+  assert.ok(page.includes('table-fixed') && /key: "status", width: "w-\d+"/.test(page) && page.includes("w-40 text-right"), "balanced, fixed column widths");
   // The Sales Officer column was 12rem (w-48) → the empty space before the right-aligned Last Payment Date; it is now compact and the date column was NOT widened.
-  assert.ok(page.includes('key: "officer", label: "Sales Officer", width: "w-36"') && !page.includes('width: "w-48"'), "Sales Officer is compact (9rem)");
-  assert.ok(page.includes('<TableHead className="w-40 text-right">Last Payment Date') && page.includes('key: "territory", label: "Territory", width: "w-40"'), "Last Payment Date / Territory widths unchanged");
+  assert.ok(page.includes('key: "officer", width: "w-36"') && !page.includes('width: "w-48"'), "Sales Officer is compact (9rem)");
+  assert.ok(page.includes('<TableHead className="w-40 text-right">{T.lastPaymentDate}') && page.includes('key: "territory", width: "w-40"'), "Last Payment Date / Territory widths unchanged");
 }
 
 /* ---------------------------------- Last Update (latest successful Day Book upload) ---------------------------------- */
@@ -772,7 +772,7 @@ async function exportTests() {
   // Read-only + UI wiring (source level): ONE query builder feeds both the paged table and the export; loading state; no duplicate clicks.
   const page = readFileSync("src/features/reports/last-payment-report-page.tsx", "utf8");
   assert.ok(page.includes("const reportQuery = ") && page.includes("reportQuery({ page: String(page)") && page.includes("/api/reports/last-payment/export?${reportQuery()}"), "export is built from the same query as the table (current state at click time)");
-  assert.ok(page.includes("if (exporting) return;") && page.includes("disabled={exporting || isLoading || busy || failed}") && page.includes('"Exporting…"'), "disabled + loading state, no duplicate requests");
+  assert.ok(page.includes("if (exporting) return;") && page.includes("disabled={exporting || isLoading || busy || failed}") && page.includes("exporting ? T.exporting : T.exportLabel"), "disabled + loading state, no duplicate requests");
   assert.ok(page.includes("NO_EXPORT_DATA_MESSAGE") && page.includes("shown.total === 0"), "empty result shows the message");
   const route = readFileSync("src/app/api/reports/last-payment/export/route.ts", "utf8");
   assert.ok(route.includes("getLastPaymentReportExport(ctx, params)") && !/officerId|scope/i.test(route.replace(/ctx|session scope|scope parameter/g, "")), "same service + session scope, no scope input");
@@ -851,7 +851,7 @@ async function applyWorkflow() {
   assert.equal(D({ operator: "between", from: "x", to: "" }).kind, "invalid");
   assert.equal(D({ operator: "lt", value: "0" }).kind, "ready", "0 is a valid number of days");
   const control = readFileSync("src/features/reports/payment-aging-filter.tsx", "utf8");
-  assert.ok(!/>Apply</.test(control) && control.includes(">Clear</Button>"), "Apply removed, Clear kept");
+  assert.ok(!/>Apply</.test(control) && control.includes(">{T.clear}</Button>"), "Apply removed, Clear kept");
   assert.ok(control.includes("AGING_APPLY_DELAY_MS") && control.includes('status.kind !== "ready"') && control.includes("readyKey === currentKey"), "valid-only, delayed, no repeat of the applied value");
 
   // Cascading options (server): unchanged behaviour.
@@ -951,7 +951,7 @@ async function page() {
   const filterHandler = pageSource.slice(pageSource.indexOf("onChange={(next) =>"), pageSource.indexOf("/>", pageSource.indexOf("onChange={(next) =>")));
   assert.ok(filterHandler.includes("changeFilters({ [key]: next })") && !/setPage|setFilters/.test(filterHandler), "choosing a filter goes through changeFilters (which applies it and resets to page 1)");
   assert.ok(!/setSort|setSearch/.test(filterHandler), "choosing a filter never resets the Days sort or search");
-  const sortHandler = pageSource.slice(pageSource.indexOf('aria-label="Sort by Days"'), pageSource.indexOf("Days\n"));
+  const sortHandler = pageSource.slice(pageSource.indexOf("aria-label={T.sortDays}"), pageSource.indexOf("{T.days}\n"));
   assert.ok(/setSort\(/.test(sortHandler) && !/setFilters|changeFilters|setAppliedSearch|setSearch/.test(sortHandler), "changing the Days sort never clears filters or search");
   assert.ok(/onChange=\{\(event\) => setSearch\(event\.target\.value\)\}/.test(pageSource), "search only edits the search box (applied after the delay)");
 
@@ -974,7 +974,7 @@ async function page() {
   assert.ok(![...new URL(requested, "http://x").searchParams.keys()].some((k) => k.startsWith("paymentAging")), "cleared → no aging parameters");
   // handlers: applying/clearing aging only edits aging (+ page 1); sort / search / column filters never touch it.
   assert.ok(/setBucket\(exact\);[^}]*setAging\(exact \? null : next\);\s*setPage\(1\);/.test(pageSource), "aging change only sets aging (+ the matching quick-filter selection) and page 1");
-  const sortBtn = pageSource.slice(pageSource.indexOf('aria-label="Sort by Days"'), pageSource.indexOf("<PaymentAgingFilterControl"));
+  const sortBtn = pageSource.slice(pageSource.indexOf('aria-label={T.sortDays}'), pageSource.indexOf("<PaymentAgingFilterControl"));
   assert.ok(/setSort\(/.test(sortBtn) && !/setAging|setFilters|changeFilters|setSearch/.test(sortBtn), "sorting never clears aging");
   assert.ok(!/setSort|setSearch|setFilters|changeFilters/.test(pageSource.slice(pageSource.indexOf("<PaymentAgingFilterControl"), pageSource.indexOf("</TableHead>", pageSource.indexOf("<PaymentAgingFilterControl")))), "applying aging never resets sort / search / filters");
   const control = readFileSync("src/features/reports/payment-aging-filter.tsx", "utf8");

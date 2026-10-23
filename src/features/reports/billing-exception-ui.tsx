@@ -15,7 +15,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { dealerStatusLabel } from "@/lib/dealer-status";
 import { useLabel } from "@/features/labels/label-ui";
 import {
-  AUTH_PERSONS, BILLING_STATUS_LABEL, RESOLUTION_LABEL, billingStatusClickable, validateBillingExceptionInput,
+  AUTH_PERSONS, BILLING_STATUS_LABEL, RESOLUTION_PAYMENT_RECEIVED, billingStatusClickable, validateBillingExceptionInput,
   type BillingExceptionDetail, type BillingExceptionInput, type BillingStatus,
 } from "@/lib/billing-exception";
 
@@ -23,7 +23,6 @@ import {
 export const BILLING_QUERY_KEYS = ["last-payment-report", "last-payment-report-options", "billing-exceptions", "billing-exceptions-options", "account-access", "calendar", "calendar-upcoming"] as const; // account-access: re-reads the signed-in account's permissions (e.g. creation just revoked)
 
 const dash = <span className="text-muted-foreground">—</span>;
-const TASK_STATUS = { SCHEDULED: "Scheduled", IN_DAILY_WORK: "In Daily Work", OVERDUE: "Overdue — pending" } as const;
 /** The Daily Work business date (India) — only a hint for the client check; the server decides. */
 const businessToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const dateLabel = (iso: string) => formatDMY(iso);
@@ -79,12 +78,13 @@ function BillingExceptionForm({ dealerId, party, onClose }: { dealerId: string; 
   const [paymentAmount, setPaymentAmount] = useState("");
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false); // synchronous guard: two clicks in the same tick cannot both pass (state alone updates a render later)
+  const errSave = useLabel("billing_exception.error.save_failed");
   const refresh = () => { for (const key of BILLING_QUERY_KEYS) void queryClient.invalidateQueries({ queryKey: [key] }); };
   const save = useMutation({
     mutationFn: (body: BillingExceptionInput) => api.post("/api/reports/last-payment/billing-exceptions", body),
     onSettled: () => { inFlight.current = false; },
     onSuccess: () => { refresh(); onClose(); },
-    onError: (e) => { setError((e as Error).message || "Could not save the Billing Exception."); refresh(); }, // entered values are kept; a stale Save also refreshes the report
+    onError: (e) => { setError((e as Error).message || errSave); refresh(); }, // entered values are kept; a stale Save also refreshes the report
   });
   const submit = () => {
     if (save.isPending || inFlight.current) return; // no repeated Save while a request is in flight
@@ -164,6 +164,11 @@ export function BillingExceptionInfoDialog({ exceptionId, onClose }: { exception
     title: useLabel("billing_exception.info.title"), dealer: useLabel("billing_exception.info.dealer"), billingDate: useLabel("billing_exception.info.billing_date"), billNo: useLabel("billing_exception.info.bill_no"),
     authPerson: useLabel("billing_exception.info.auth_person"), billingAmount: useLabel("billing_exception.info.billing_amount"), condition: useLabel("billing_exception.info.condition"),
     promisedDate: useLabel("billing_exception.info.promised_date"), promisedAmount: useLabel("billing_exception.info.promised_amount"), task: useLabel("billing_exception.info.task"),
+    created: useLabel("billing_exception.info.created"), createdBy: useLabel("billing_exception.info.created_by"), exception: useLabel("billing_exception.info.exception"), stateCurrent: useLabel("billing_exception.info.state_current"), stateResolved: useLabel("billing_exception.info.state_resolved"),
+    resolvedAt: useLabel("billing_exception.info.resolved_at"), resolution: useLabel("billing_exception.info.resolution"), resPaid: useLabel("billing_exception.info.resolution_payment_received"), daysAtResolution: useLabel("billing_exception.info.days_at_resolution"),
+    atCreation: useLabel("billing_exception.info.at_creation"), days: useLabel("billing_exception.info.days"), lastPaymentDate: useLabel("billing_exception.info.last_payment_date"), amount: useLabel("billing_exception.info.amount"), status: useLabel("billing_exception.info.status"),
+    taskNow: useLabel("billing_exception.info.task_now"), errLoad: useLabel("billing_exception.error.load_failed"),
+    taskStatus: { SCHEDULED: useLabel("billing_exception.info.task_scheduled"), IN_DAILY_WORK: useLabel("billing_exception.info.task_in_daily_work"), OVERDUE: useLabel("billing_exception.info.task_overdue") },
     notRecorded: useLabel("billing_exception.info.not_recorded"), close: useLabel("billing_exception.info.close"), yes: useLabel("billing_exception.form.yes"), no: useLabel("billing_exception.form.no"),
   };
   const field = (label: string, value: React.ReactNode) => <div className="flex justify-between gap-4 border-b py-1.5 text-sm last:border-0"><dt className="text-muted-foreground">{label}</dt><dd className="text-right font-medium">{value}</dd></div>;
@@ -171,7 +176,7 @@ export function BillingExceptionInfoDialog({ exceptionId, onClose }: { exception
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-md">
         <DialogHeader><DialogTitle>{L.title}</DialogTitle></DialogHeader>
-        {isLoading ? <Skeleton className="h-32 w-full" /> : error || !data ? <p role="alert" className="text-sm text-destructive">{(error as Error | null)?.message || "Could not load this Billing Exception."}</p> : (
+        {isLoading ? <Skeleton className="h-32 w-full" /> : error || !data ? <p role="alert" className="text-sm text-destructive">{(error as Error | null)?.message || L.errLoad}</p> : (
           <dl data-testid="exception-info">
             {field(L.dealer, data.party)}
             {field(L.billingDate, dateLabel(data.billingDate))}
@@ -182,18 +187,18 @@ export function BillingExceptionInfoDialog({ exceptionId, onClose }: { exception
             {data.paymentCondition === "YES" && field(L.promisedDate, data.paymentDate ? dateLabel(data.paymentDate) : dash)}
             {/* The promised recovery amount — a separate value from the Billing Amount above (exceptions saved before it existed show "Not recorded"). */}
             {data.paymentCondition === "YES" && field(L.promisedAmount, data.paymentAmount !== null ? formatCurrency(data.paymentAmount) : <span className="text-muted-foreground">{L.notRecorded}</span>)}
-            {data.task && field(L.task, `${data.task.officerName} · ${TASK_STATUS[data.task.status]}${data.task.taskDate !== data.task.promisedDate ? ` (now ${dateLabel(data.task.taskDate)})` : ""}`)}
-            {field("Created", formatDateTimeDMY(data.createdAt))}
-            {field("Created by", data.createdByName)}
-            {field("Exception", <Badge variant={data.exceptionStatus === "CURRENT" ? "warning" : "muted"}>{data.exceptionStatus === "CURRENT" ? "Current" : "Resolved"}</Badge>)}
-            {data.exceptionStatus === "RESOLVED" && field("Resolved", data.resolvedAt ? formatDateTimeDMY(data.resolvedAt) : dash)}
-            {data.exceptionStatus === "RESOLVED" && field("Resolution", data.resolutionReason ? RESOLUTION_LABEL[data.resolutionReason] ?? data.resolutionReason : dash)}
-            {data.exceptionStatus === "RESOLVED" && data.resolvedDays !== null && field("Days at resolution", data.resolvedDays)}
-            <div className="mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">At creation</div>
-            {field("Days", data.snapshot.days)}
-            {field("Last Payment Date", data.snapshot.lastPaymentDate ? dateLabel(data.snapshot.lastPaymentDate) : dash)}
-            {field("Amount", data.snapshot.amount !== null ? formatCurrency(data.snapshot.amount) : dash)}
-            {field("Status", dealerStatusLabel(data.snapshot.status))}
+            {data.task && field(L.task, `${data.task.officerName} · ${L.taskStatus[data.task.status]}${data.task.taskDate !== data.task.promisedDate ? ` ${L.taskNow.replace("{date}", dateLabel(data.task.taskDate))}` : ""}`)}
+            {field(L.created, formatDateTimeDMY(data.createdAt))}
+            {field(L.createdBy, data.createdByName)}
+            {field(L.exception, <Badge variant={data.exceptionStatus === "CURRENT" ? "warning" : "muted"}>{data.exceptionStatus === "CURRENT" ? L.stateCurrent : L.stateResolved}</Badge>)}
+            {data.exceptionStatus === "RESOLVED" && field(L.resolvedAt, data.resolvedAt ? formatDateTimeDMY(data.resolvedAt) : dash)}
+            {data.exceptionStatus === "RESOLVED" && field(L.resolution, data.resolutionReason ? (data.resolutionReason === RESOLUTION_PAYMENT_RECEIVED ? L.resPaid : data.resolutionReason) : dash)}
+            {data.exceptionStatus === "RESOLVED" && data.resolvedDays !== null && field(L.daysAtResolution, data.resolvedDays)}
+            <div className="mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{L.atCreation}</div>
+            {field(L.days, data.snapshot.days)}
+            {field(L.lastPaymentDate, data.snapshot.lastPaymentDate ? dateLabel(data.snapshot.lastPaymentDate) : dash)}
+            {field(L.amount, data.snapshot.amount !== null ? formatCurrency(data.snapshot.amount) : dash)}
+            {field(L.status, dealerStatusLabel(data.snapshot.status))}
           </dl>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.close}</Button></DialogFooter>

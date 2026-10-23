@@ -2,28 +2,26 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { ApiError, type AuthContext } from "@/lib/http";
+import { type AuthContext } from "@/lib/http";
+import { labeledError } from "@/features/labels/labeled-error";
+import type { LabelKey } from "@/features/labels/labels";
 import { writeAudit } from "@/lib/audit";
 import { assertAdminPermission, isAdministrativeRole } from "@/features/accounts/permissions";
 import { getCurrentDealerIds, getCurrentOwnerByDealer, getOfficerScope } from "@/lib/scope";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { territoryText } from "@/lib/territory-mapping";
-import { cleanText, validateRetailerInput, type RetailerInputError } from "@/lib/retailer";
+import { cleanText, validateRetailerInput } from "@/lib/retailer";
 
 /**
  * RETAILER MAPPING. A Retailer is its own entity (never a Dealer) linked to any number of dealers. An SO / RM submits a creation REQUEST (Pending); Admin approves (one retailer + its dealer
  * links, atomically) or rejects (with a reason). Linked dealers a requester may pick are the dealers CURRENTLY assigned to that requester — an RM's own, never their team's. Every submitted
  * dealer id is re-verified on the server, and the whole submission is refused if any one of them is not the requester's.
  */
-const ERROR: Record<RetailerInputError, string> = {
-  name_required: "Enter the Retailer Name.", name_long: "The Retailer Name is too long.", firm_required: "Enter the Firm Name.", firm_long: "The Firm Name is too long.",
-  phone_invalid: "The Phone Number must be exactly 10 digits.", dealers_required: "Select at least one Linked Dealer.", dealers_too_many: "Too many Linked Dealers selected.",
-};
 function assertRequester(ctx: AuthContext): void {
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw new ApiError(403, "Only a Sales Officer or Regional Manager can add a Retailer");
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER) throw labeledError(403, "party_planning.retailer.error.requester_roles");
 }
 function assertReviewer(ctx: AuthContext): void {
-  if (!isAdministrativeRole(ctx.role)) throw new ApiError(403, "Only an Admin can review Retailer requests");
+  if (!isAdministrativeRole(ctx.role)) throw labeledError(403, "party_planning.retailer.error.reviewer_admin_only");
   assertAdminPermission(ctx, "partyPlanning", "manage");
 }
 
@@ -54,23 +52,23 @@ const toDto = (r: Row): RetailerRequestDto => ({
 export async function createRetailerRequest(ctx: AuthContext, raw: unknown): Promise<RetailerRequestDto> {
   assertRequester(ctx);
   const input = (raw ?? {}) as Record<string, unknown>;
-  if (Array.isArray(input.dealerIds) && input.dealerIds.some((id) => typeof id !== "string" || !id || id.length > 64)) throw new ApiError(422, "Select valid Linked Dealers.");
+  if (Array.isArray(input.dealerIds) && input.dealerIds.some((id) => typeof id !== "string" || !id || id.length > 64)) throw labeledError(422, "party_planning.retailer.error.dealers_invalid");
   const dealerIds = [...new Set(Array.isArray(input.dealerIds) ? input.dealerIds.filter((x): x is string => typeof x === "string" && x.length > 0 && x.length <= 64) : [])];
   const problem = validateRetailerInput({ retailerName: input.retailerName, firmName: input.firmName, phone: input.phone, dealerIds });
-  if (problem) throw new ApiError(422, ERROR[problem]);
+  if (problem) throw labeledError(422, `party_planning.retailer.error.${problem}` as LabelKey);
   const key = typeof input.submissionKey === "string" && /^[A-Za-z0-9-]{8,64}$/.test(input.submissionKey) ? input.submissionKey : randomUUID();
   const retailerName = cleanText(input.retailerName), firmName = cleanText(input.firmName), phone = input.phone as string;
   const replay = (existing: Row) => {
-    if (existing.retailerName !== retailerName || existing.firmName !== firmName || existing.phone !== phone || existing.dealers.map((d) => d.dealerId).sort().join("|") !== [...dealerIds].sort().join("|")) throw new ApiError(409, "This submission was already saved with different details. Close the form and start a new request.");
+    if (existing.retailerName !== retailerName || existing.firmName !== firmName || existing.phone !== phone || existing.dealers.map((d) => d.dealerId).sort().join("|") !== [...dealerIds].sort().join("|")) throw labeledError(409, "party_planning.retailer.error.submission_conflict");
     return toDto(existing);
   };
   const existing = await prisma.retailerRequest.findUnique({ where: { requesterId_submissionKey: { requesterId: ctx.userId, submissionKey: key } }, include: INCLUDE });
   if (existing) return replay(existing); // retries still work if an assignment changed after the first successful submission
   // Every dealer must CURRENTLY belong to the requester. One forged / stale id refuses the whole submission (never a partial acceptance).
   const mine = new Set(await getCurrentDealerIds(ctx.userId));
-  if (dealerIds.some((id) => !mine.has(id))) throw new ApiError(403, "One or more selected dealers are not currently assigned to you.");
+  if (dealerIds.some((id) => !mine.has(id))) throw labeledError(403, "party_planning.retailer.error.dealers_not_yours");
   const [dealers, alias] = await Promise.all([prisma.dealer.findMany({ where: { id: { in: dealerIds }, deletedAt: null }, select: { id: true, name: true } }), loadDealerAliasNameMap(dealerIds)]);
-  if (dealers.length !== dealerIds.length) throw new ApiError(422, "One or more selected dealers no longer exist.");
+  if (dealers.length !== dealerIds.length) throw labeledError(422, "party_planning.retailer.error.dealers_missing");
   try {
     const id = await prisma.$transaction(async (tx) => {
       const row = await tx.retailerRequest.create({
@@ -103,7 +101,7 @@ export interface RetailerDto { id: string; name: string; firmName: string; phone
  * dealer links are shown (an RM never sees a retailer's dealers outside their team; an SO only their own).
  */
 export async function listRetailers(ctx: AuthContext): Promise<RetailerDto[]> {
-  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER && !isAdministrativeRole(ctx.role)) throw new ApiError(403, "You do not have access to Retailer Mapping");
+  if (ctx.role !== Role.SALES_OFFICER && ctx.role !== Role.REGIONAL_MANAGER && !isAdministrativeRole(ctx.role)) throw labeledError(403, "party_planning.retailer.error.no_access");
   assertAdminPermission(ctx, "partyPlanning", "read");
   const scope = await getOfficerScope(ctx);
   let dealerFilter: { in: string[] } | undefined;
@@ -141,22 +139,22 @@ export async function decideRetailerRequest(ctx: AuthContext, id: string, raw: u
   assertReviewer(ctx);
   const input = (raw ?? {}) as Record<string, unknown>;
   const action = input.action === "approve" || input.action === "reject" ? input.action : null;
-  if (!action) throw new ApiError(422, "Choose approve or reject.");
+  if (!action) throw labeledError(422, "party_planning.retailer.error.choose_decision");
   const reason = cleanText(input.reason);
-  if (action === "reject" && reason.length < 3) throw new ApiError(422, "Enter the reason for rejecting this request.");
+  if (action === "reject" && reason.length < 3) throw labeledError(422, "party_planning.retailer.error.rejection_reason_required");
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "RetailerRequest" WHERE "id" = ${id} FOR UPDATE`);
     const request = await tx.retailerRequest.findUnique({ where: { id }, include: { dealers: true, requester: { select: { isActive: true, deletedAt: true, role: true } } } });
-    if (!request) throw new ApiError(404, "Retailer request not found");
-    if (request.status !== "PENDING") throw new ApiError(409, "This request has already been decided.");
+    if (!request) throw labeledError(404, "party_planning.retailer.error.request_missing");
+    if (request.status !== "PENDING") throw labeledError(409, "party_planning.retailer.error.already_decided");
     const actor = (await tx.user.findUnique({ where: { id: ctx.userId }, select: { name: true } }))?.name ?? ctx.username ?? ctx.userId;
     if (action === "approve") {
       const owners = await getCurrentOwnerByDealer(request.dealers.map((d) => d.dealerId), tx);
       const lost = request.dealers.filter((d) => owners.get(d.dealerId) !== request.requesterId).map((d) => d.dealerName);
-      if (!request.requester.isActive || request.requester.deletedAt || (request.requester.role !== Role.SALES_OFFICER && request.requester.role !== Role.REGIONAL_MANAGER)) throw new ApiError(409, "The requester is no longer an active SO or RM, so this request cannot be approved. Reject it instead.");
-      if (lost.length > 0) throw new ApiError(409, `These dealers are no longer assigned to the requester: ${lost.join(", ")}. Reject the request or ask them to submit it again.`);
+      if (!request.requester.isActive || request.requester.deletedAt || (request.requester.role !== Role.SALES_OFFICER && request.requester.role !== Role.REGIONAL_MANAGER)) throw labeledError(409, "party_planning.retailer.error.requester_inactive");
+      if (lost.length > 0) throw labeledError(409, "party_planning.retailer.error.dealers_reassigned", { lost: lost.join(", ") });
       const available = await tx.dealer.count({ where: { id: { in: request.dealers.map((d) => d.dealerId) }, deletedAt: null } });
-      if (available !== request.dealers.length) throw new ApiError(409, "One or more linked dealers are no longer available. Reject the request or ask for a new submission.");
+      if (available !== request.dealers.length) throw labeledError(409, "party_planning.retailer.error.dealers_unavailable");
     }
     let retailerId: string | null = null;
     if (action === "approve") {
@@ -165,7 +163,7 @@ export async function decideRetailerRequest(ctx: AuthContext, id: string, raw: u
     }
     // The row lock serializes decisions. The approved status and its required retailer link are written together.
     const claimed = await tx.retailerRequest.updateMany({ where: { id, status: "PENDING" }, data: { status: action === "approve" ? "APPROVED" : "REJECTED", decidedById: ctx.userId, decidedByName: actor, decidedAt: new Date(), retailerId, rejectionReason: action === "reject" ? reason : null } });
-    if (claimed.count !== 1) throw new ApiError(409, "This request has already been decided.");
+    if (claimed.count !== 1) throw labeledError(409, "party_planning.retailer.error.already_decided");
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "retailerRequest", entityId: id, summary: `${action === "approve" ? "Approved" : "Rejected"} Retailer request "${request.retailerName}"${action === "reject" ? `: ${reason}` : ""}` }, tx);
     return toDto(await tx.retailerRequest.findUniqueOrThrow({ where: { id }, include: INCLUDE }));
   });

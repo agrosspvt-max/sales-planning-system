@@ -19,23 +19,25 @@ const row = (id: string, dealerId: string, officerId: string, state: string | nu
   paymentStatus: "Pending", paymentVerified: false, paymentTrackingMode: "PAYMENT_V1", paymentOriginalAmount: 1000, paymentOutstandingAmount: 1000,
   officerId, employeeName: "Same Name", state, territory, status: "SUBMITTED", details: null, remarks: null,
   rejectionReason: null, rejectionReasonDetails: null, acceptanceReason: null, acceptanceReasonDetails: null,
-  cnExpiryDays: null, expiryDate: "2026-10-25", cnWorking: null, finalCn: null, createdAt: "2026-10-19T05:00:00Z", days: 1,
+  processingReview: undefined as { kind: string; status: string } | undefined, cnExpiryDays: null, expiryDate: "2026-10-25", cnWorking: null, finalCn: null, createdAt: "2026-10-19T05:00:00Z", days: 1,
 });
 const data = [row("r1", "d1", "so1", "MP", "North", "CD"), row("r2", "d2", "so2", "UP", "South", "Freight"), row("r3", "d1", "so1", "MP", "North", "Damage")];
 let rows = data;
+let allowActions = true;
 const load = testLoader({
   react: { ...React, useState: (initial: unknown) => { const i = cursor++; if (!(i in hooks)) hooks[i] = typeof initial === "function" ? (initial as () => unknown)() : initial; return [hooks[i], (v: unknown) => { hooks[i] = typeof v === "function" ? (v as (old: unknown) => unknown)(hooks[i]) : v; }]; } },
-  "@/features/labels/label-ui": { useLabel: (k: string) => (DEFAULT_LABELS as Record<string, string>)[k] ?? k },
-  "@/features/accounts/permission-ui": { useAdminPermission: () => true },
+  "@/features/labels/label-ui": { useLabel: (k: string) => (DEFAULT_LABELS as Record<string, string>)[k] ?? k, useLabelResolver: () => (k: string) => (DEFAULT_LABELS as Record<string, string>)[k] ?? k },
+  "@/features/accounts/permission-ui": { useAdminPermission: () => allowActions },
   "@/features/dealers/dealer-name-ui": { DealerName: ({ name }: { name: string }) => <span>{name}</span> },
   "@/features/dealers/dealer-table-ui": { DealerTableBody: ({ children }: { children: React.ReactNode }) => <tbody>{children}</tbody> },
   "@/components/ui/column-filter-header": { ColumnFilterHeader: (p: Header) => { headers.push(p); return <th>{p.label}</th>; } },
   "@/components/ui/select": { NativeSelect: () => <select /> },
   "@/features/planning/plan-list-ui": { PillNav: (p: (typeof navs)[number]) => { navs.push(p); return <div />; }, UnderlineTabs: (p: (typeof navs)[number]) => { navs.push(p); return <div />; } },
   "@/components/layout/page-header": { PageHeader: () => null },
+  "./cn-review-ui": { CnProcessingDialog: (p: { requestId: string; canHandle: boolean }) => <div data-open-review={p.requestId} data-can-handle={String(p.canHandle)} /> },
   "./cn-payment-dialog": { CnPaymentDialog: () => null },
   "./cn-request-detail-dialog": { CnRequestDetailDialog: () => null },
-  "@/components/ui/button": { Button: (p: { children?: React.ReactNode; onClick?: () => void }) => { if (typeof p.children === "string" && p.onClick) clicks[p.children] = p.onClick; return <button>{p.children}</button>; } },
+  "@/components/ui/button": { Button: (p: { children?: React.ReactNode; onClick?: () => void; variant?: string; className?: string }) => { if (typeof p.children === "string" && p.onClick) clicks[p.children] = p.onClick; return <button data-variant={p.variant} className={p.className}>{p.children}</button>; } },
   "@/lib/api-client": { api: { get: async (u: string) => { urls.push(u); return rows; } } },
   "@tanstack/react-query": {
     useQuery: (o: { queryFn: () => unknown }) => { void o.queryFn(); return { data: rows, isLoading: false }; },
@@ -78,3 +80,34 @@ same(filterCnRequests(data, parseCnFilters(cnFilterParams(filters))).map((r) => 
 same(filterCnRequests([row("empty", "d3", "so3", null, null, "Demo")], { state: [""] }).map((r) => r.id), ["empty"], "missing State can be selected explicitly");
 same(filterCnRequests([{ ...data[0]!, amount: 1000.1 }, { ...data[1]!, amount: 1000.2 }], { amount: ["1000"] }).length, 2, "amount choices group the same displayed whole-rupee value without changing stored amounts");
 console.log("cn-request-filters.test.tsx — all assertions passed");
+
+// Under Process has one review action, with its status/filter preserved in CN Update for every viewer.
+for (const role of [Role.SUPER_ADMIN, Role.CUSTOM_ADMIN, Role.SALES_OFFICER, Role.REGIONAL_MANAGER]) {
+  hooks.length = 0; allowActions = role !== Role.CUSTOM_ADMIN;
+  rows = [{ ...data[0]!, status: "UNDER_PROCESS", processingReview: { kind: "RATE_CONFIRMATION", status: "CONFIRMED" } }];
+  render(role); navs[0]!.onChange("accepted"); render(role); navs[1]!.onChange("under-process"); html = render(role);
+  assert.ok(!headers.some(h => h.label === label("cn_requests.field.status")), `${role}: no separate CN Status column`);
+  assert.equal((html.match(/>Price Confirmed<\/button>/g) ?? []).length, 1, `${role}: one review button per row`);
+  assert.ok(html.includes("text-success") && !html.includes("Open Review"), "confirmed status is inside a green button");
+  const update = headers.find(h => h.options.some(o => o.value === "RATE_CONFIRMATION:CONFIRMED"))!;
+  assert.ok(update?.searchable, "CN Update preserves the searchable status filter");
+  update.onChange(["RATE_CONFIRMATION:CONFIRMED"]); html = render(role);
+  same(shown(html), ["d1"], "status filtering still returns the matching row");
+  clicks["Price Confirmed"]!(); html = render(role);
+  assert.ok(html.includes('data-open-review="r1"'), "Open Review opens the same request");
+  const handler = role === Role.SUPER_ADMIN;
+  assert.ok(html.includes(`data-can-handle="${handler}"`), "read-only viewers retain history access without gaining decision permissions");
+}
+console.log("Under Process combined review column, status filter and role-safe access passed");
+
+// Both review branches color their actual outcome; an unanswered review remains neutral.
+for (const kind of ["RATE_CONFIRMATION", "CN_APPROVAL"]) {
+  hooks.length = 0; allowActions = true;
+  rows = [{ ...data[0]!, status: "UNDER_PROCESS", processingReview: { kind, status: "REJECTED" } }];
+  render(); navs[0]!.onChange("accepted"); render(); navs[1]!.onChange("under-process"); html = render();
+  const rejectedLabel = kind === "RATE_CONFIRMATION" ? "Rate Confirmation Rejected" : "CN Approval Rejected";
+  assert.ok(html.includes(`data-variant="destructive">${rejectedLabel}</button>`), "rejected outcome is the red button label");
+  clicks[rejectedLabel]!(); html = render();
+  assert.ok(html.includes('data-open-review="r1"'), "red outcome button still opens the review");
+}
+console.log("CN Update outcome button labels, green confirmation and red rejection passed");

@@ -21,6 +21,7 @@ import { GlobalSearch } from "@/features/search/global-search";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { PermissionContext } from "@/features/accounts/permission-ui";
 import type { AdminPermissions } from "@/features/accounts/permissions";
+import { accountBadgeLabel } from "@/features/accounts/identity";
 
 interface AppUser {
   name: string;
@@ -220,8 +221,8 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
               <p className="text-sm font-medium leading-none">{user.name}</p>
               <p className="text-xs text-muted-foreground">@{user.username}</p>
             </div>
-            {/* A Sales Officer sees their own name here (not the generic role); admins/others keep the role label. */}
-            <Badge variant="secondary">{user.role === Role.SALES_OFFICER ? user.name : identity.designation ?? ROLE_LABELS[user.role]}</Badge>
+            {/* Account Management accounts show their optional designation, falling back to their name. Other role badges keep their existing rules. */}
+            <Badge variant="secondary">{accountBadgeLabel(user.name, user.role, identity.designation, ROLE_LABELS[user.role])}</Badge>
             <LogoutButton />
           </div>
         </header>

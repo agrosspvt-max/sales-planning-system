@@ -574,7 +574,7 @@ async function main() {
     assert.deepEqual((await service.listMarkets(SO1)).length, 0, "…and none is usable");
     assert.deepEqual((await service.listMarketRequests(SO1, "mine")).map((r) => r.id), [req.id], "the requester sees their request and its status");
     assert.deepEqual((await service.listMarketRequests(RM1, "review")).map((r) => r.id), [req.id], "the RM review queue");
-    assert.equal((await service.listMarketRequests(ADMIN, "review")).length, 0, "Admin is not asked yet");
+    assert.deepEqual((await service.listMarketRequests(ADMIN, "review")).map((r) => [r.id, r.status]), [[req.id, "PENDING_RM"]], "Admin sees the request immediately with its actual Awaiting RM review status");
     assert.equal((await service.listMarketRequests(RM2, "review")).length, 0, "another group's RM never sees it");
     assert.equal((await service.listMarketRequests(SO2, "review")).length, 0, "an SO reviews nothing");
     // Validation + duplicates (normalized), never merged.
@@ -590,11 +590,13 @@ async function main() {
     assert.equal(await status(() => service.actOnMarketRequest(ADMIN, req.id, { action: "approve" })), 409, "Admin cannot skip the RM step");
     const rmApproved = await service.actOnMarketRequest(RM1, req.id, { action: "approve" });
     assert.deepEqual([rmApproved.status, rmApproved.rmDecidedByName != null, rmApproved.rmDecidedAt != null], ["PENDING_ADMIN", true, true], "RM approval moves it to Admin review and is recorded");
+    assert.deepEqual((await service.listMarketRequests(ADMIN, "review")).map((r) => [r.id, r.status]), [[req.id, "PENDING_ADMIN"]], "RM approval updates the visible request rather than introducing it for the first time");
     assert.equal(t.markets.length, 0, "still not a Market after the RM step");
     assert.equal(await status(() => service.actOnMarketRequest(RM1, req.id, { action: "approve" })), 409, "the RM step cannot be repeated");
     assert.equal(await status(() => service.actOnMarketRequest(ADMIN, req.id, { action: "reject" })), 422, "Admin rejection requires a reason");
     const approved = await service.actOnMarketRequest(ADMIN, req.id, { action: "approve" });
     assert.deepEqual([approved.status, approved.adminDecidedByName, approved.marketId != null], ["APPROVED", "Admin", true]);
+    assert.equal((await service.listMarketRequests(ADMIN, "review")).length, 0, "final approval removes it from the pending list");
     assert.deepEqual(t.markets.map((m) => [m.name, m.potential, m.source, m.expectedParties]), [["Pipariya", "A", "REQUESTED", 12]], "final approval creates the Market");
     assert.deepEqual((await service.listMarkets(SO1)).map((m) => m.name), ["Pipariya"], "the approved Market is now available");
     assert.equal(await status(() => service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "pipariya", potential: "C", numberOfParties: 4 })), 409, "an existing Market blocks a duplicate request");
@@ -604,6 +606,7 @@ async function main() {
     const r2 = await service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "Bareli", potential: "B", numberOfParties: 5 });
     const rmRej = await service.actOnMarketRequest(RM1, r2.id, { action: "reject", reason: "Too small" });
     assert.deepEqual([rmRej.status, rmRej.rejectionStage, rmRej.rejectionReason, rmRej.rmDecidedByName], ["REJECTED", "RM", "Too small", "RM One"]);
+    assert.ok((await service.listMarketRequests(ADMIN, "history")).some((r) => r.id === r2.id && r.rejectionStage === "RM"), "Admin can also see RM-rejected requests in history");
     assert.equal(t.markets.length, 1, "a rejected request creates no Market");
     const r3 = await service.createMarketRequest(SO1, { districtId: "dist-raj", marketName: "Bareli", potential: "B", numberOfParties: 5 });
     await service.actOnMarketRequest(RM1, r3.id, { action: "approve" });

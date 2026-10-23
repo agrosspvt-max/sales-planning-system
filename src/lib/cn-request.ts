@@ -57,6 +57,7 @@ export type CnPaymentStatus = (typeof CN_PAYMENT_STATUSES)[number];
 export const CN_PAYMENT_STATUS_VALUES = ["PENDING", "NOT_PAID", "PARTIAL_PAID", "PAID"] as const;
 export type CnPaymentStatusValue = (typeof CN_PAYMENT_STATUS_VALUES)[number];
 
+import { cnExpiryDateProblem } from "./cn-expiry";
 export const CN_REQUEST_DETAILS_REQUIRED_MESSAGE = "Details is required.";
 
 /** New CN Requests require meaningful details; historical rows may still contain null. */
@@ -154,17 +155,26 @@ export const CN_WORKING_MAX_BYTES = 3_500_000;
 export const CN_WORKING_PDF_MIME = "application/pdf";
 export const CN_WORKING_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
+/** Only Payment Pending CN Working Shared starts an expiry/grace window. Under Process and direct ledger posting do not ask for expiry; reason "Other" remains exempt. */
+export function cnAcceptanceNeedsExpiry(status: CnAcceptanceStatus | "", reason: CnAcceptanceReason | ""): boolean {
+  return status === "ACCEPTED_NOT_POSTED" && reason === "PAYMENT_PENDING";
+}
+
 export function validateCnAcceptance(input: {
   status: CnAcceptanceStatus | "";
   reason: CnAcceptanceReason | "";
   acceptanceReasonDetails: string;
-  expiryDays: string | number | null | undefined;
+  /** YYYY-MM-DD. Required for a policy-governed acceptance (Payment Pending) and for a direct Posted in Ledger acceptance; reason "Other" is not governed. */
+  expiryDate: string | null | undefined;
+  graceDays?: string | number | null;
+  /** Today in IST, so a past expiry is rejected in the browser exactly as the server rejects it. */
+  todayKey?: string;
   postedAmount: string | number | null | undefined;
   outstandingAmount?: string | number | null | undefined;
   hasFile: boolean;
 }, messages: {
   statusRequired: string; reasonRequired: string; detailsRequired: string;
-  expiryRequired: string; expiryInvalid: string; postedAmountRequired: string; postedAmountInvalid: string;
+  expiryRequired: string; expiryInvalid: string; expiryPast?: string; graceRequired?: string; graceInvalid?: string; postedAmountRequired: string; postedAmountInvalid: string;
   outstandingRequired: string; outstandingInvalid: string; workingRequired: string;
 } = {
   statusRequired: CN_ACCEPTANCE_STATUS_REQUIRED_MESSAGE,
@@ -183,12 +193,11 @@ export function validateCnAcceptance(input: {
   if (input.status === "ACCEPTED_NOT_POSTED" && input.reason === "OTHER" && !input.acceptanceReasonDetails.trim()) {
     return messages.detailsRequired;
   }
-  if (input.status === "ACCEPTED_NOT_POSTED") {
-    if (input.expiryDays === "" || input.expiryDays == null) return messages.expiryRequired;
-    const expiryDays = Number(input.expiryDays);
-    if (!Number.isSafeInteger(expiryDays) || expiryDays <= 0 || expiryDays > 2_147_483_647) {
-      return messages.expiryInvalid;
-    }
+  if (cnAcceptanceNeedsExpiry(input.status, input.reason)) {
+    if (!input.expiryDate) return messages.expiryRequired;
+    const problem = cnExpiryDateProblem(input.expiryDate, input.todayKey ?? "0000-00-00");
+    if (problem === "invalid") return messages.expiryInvalid;
+    if (problem === "past") return messages.expiryPast ?? messages.expiryInvalid;
   }
   if (input.status === "ACCEPTED_NOT_POSTED" && input.reason === "PAYMENT_PENDING") {
     if (input.outstandingAmount === "" || input.outstandingAmount == null) return messages.outstandingRequired;
@@ -216,6 +225,7 @@ export function paymentStatusLabel(status: string | null | undefined, labels: { 
 
 export const CN_REQUEST_STATUSES = {
   SUBMITTED: "SUBMITTED",
+  UNDER_PROCESS: "UNDER_PROCESS",
   REJECTED: "REJECTED",
   ACCEPTED_NOT_POSTED: "ACCEPTED_NOT_POSTED",
   POSTED_IN_LEDGER: "POSTED_IN_LEDGER",
@@ -223,13 +233,18 @@ export const CN_REQUEST_STATUSES = {
   LEGACY_APPROVED: "APPROVED",
 } as const;
 
-export type CnRequestView = "submitted" | "rejected" | "accepted-not-posted" | "posted-in-ledger";
+export type CnRequestView = "submitted" | "rejected" | "accepted-not-posted" | "posted-in-ledger" | "cn-in-grace" | "cn-near-expire" | "expired-cn" | "under-process";
 
 /** Lifecycle status families. Accepted tab membership is additionally derived from current payment status. */
 export const CN_REQUEST_VIEW_STATUSES: Record<CnRequestView, readonly string[]> = {
   submitted: [CN_REQUEST_STATUSES.SUBMITTED],
+  "under-process": [CN_REQUEST_STATUSES.UNDER_PROCESS],
   rejected: [CN_REQUEST_STATUSES.REJECTED],
   "accepted-not-posted": [CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED],
+  // Grace / Expired are policy stages of a not-yet-posted accepted CN (a returned-from-ledger CN lives under the POSTED lifecycle value too).
+  "cn-near-expire": [CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED, CN_REQUEST_STATUSES.POSTED_IN_LEDGER],
+  "cn-in-grace": [CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED, CN_REQUEST_STATUSES.POSTED_IN_LEDGER],
+  "expired-cn": [CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED, CN_REQUEST_STATUSES.POSTED_IN_LEDGER],
   "posted-in-ledger": [
     CN_REQUEST_STATUSES.POSTED_IN_LEDGER,
     CN_REQUEST_STATUSES.LEGACY_ACCEPTED,
@@ -238,7 +253,7 @@ export const CN_REQUEST_VIEW_STATUSES: Record<CnRequestView, readonly string[]> 
 };
 
 export function isCnRequestView(value: string | null | undefined): value is CnRequestView {
-  return value === "submitted" || value === "rejected" || value === "accepted-not-posted" || value === "posted-in-ledger";
+  return value === "under-process" || value === "submitted" || value === "rejected" || value === "accepted-not-posted" || value === "posted-in-ledger" || value === "cn-near-expire" || value === "cn-in-grace" || value === "expired-cn";
 }
 
 /** Identifiers for the row "⋮" action menu on the CN Requests table. */
@@ -280,7 +295,8 @@ export function cnActionMenuItems(opts: {
   return items;
 }
 
-export function cnRequestDisplayStatus(status: string): "SUBMITTED" | "REJECTED" | "ACCEPTED_NOT_POSTED" | "POSTED_IN_LEDGER" {
+export function cnRequestDisplayStatus(status: string): "SUBMITTED" | "UNDER_PROCESS" | "REJECTED" | "ACCEPTED_NOT_POSTED" | "POSTED_IN_LEDGER" {
+  if (status === CN_REQUEST_STATUSES.UNDER_PROCESS) return "UNDER_PROCESS";
   if (status === CN_REQUEST_STATUSES.REJECTED) return "REJECTED";
   if (status === CN_REQUEST_STATUSES.ACCEPTED_NOT_POSTED) return "ACCEPTED_NOT_POSTED";
   if (CN_REQUEST_VIEW_STATUSES["posted-in-ledger"].includes(status)) return "POSTED_IN_LEDGER";
@@ -346,17 +362,6 @@ export function cnRequestExpiryDateKey(acceptedAt: Date | string, expiryDays: nu
   return Number.isNaN(result.getTime()) ? null : result.toISOString().slice(0, 10);
 }
 
-export function isCnTaskDateWithinExpiry(
-  taskDate: string,
-  acceptedAt: Date | string,
-  expiryDays: number,
-): boolean {
-  if (!isCnBusinessDateKey(taskDate) || isCnSundayDateKey(taskDate)) return false;
-  const acceptanceDate = cnRequestBusinessDateKey(acceptedAt);
-  const expiryDate = cnRequestExpiryDateKey(acceptedAt, expiryDays);
-  return !!acceptanceDate && !!expiryDate && taskDate >= acceptanceDate && taskDate <= expiryDate;
-}
-
 /** Inclusive calendar days: the submission date is Day 1, regardless of the timestamps' time of day. */
 export function inclusiveCnRequestDays(start: Date | string, end: Date | string): number | null {
   const startKey = cnRequestBusinessDateKey(start);
@@ -378,7 +383,7 @@ export interface CnRequestAgeInput {
 /** Resolve the authoritative endpoint for the request's current stage, then count inclusive calendar days. */
 export function cnRequestAgeDays(request: CnRequestAgeInput, now: Date = new Date()): number | null {
   const displayStatus = cnRequestDisplayStatus(request.status);
-  const endpoint = displayStatus === "SUBMITTED" ? now
+  const endpoint = (displayStatus === "SUBMITTED" || displayStatus === "UNDER_PROCESS") ? now
     : displayStatus === "REJECTED" ? request.rejectedAt
       : displayStatus === "ACCEPTED_NOT_POSTED" ? request.acceptedAt
         : request.postedAt;
@@ -426,7 +431,7 @@ export type CnExportRow = Record<(typeof CN_EXPORT_COLUMNS)[number]["key"], stri
 
 export const NO_CN_EXPORT_MESSAGE = "There are no CN Requests to export in this tab.";
 const CN_EXPORT_VIEW_NAME: Record<CnRequestView, string> = {
-  submitted: "Submitted", rejected: "Rejected", "accepted-not-posted": "CN-Working-Shared", "posted-in-ledger": "Posted-in-Ledger",
+  "under-process": "Under-Process", submitted: "Submitted", rejected: "Rejected", "accepted-not-posted": "CN-Working-Shared", "posted-in-ledger": "Posted-in-Ledger", "cn-near-expire": "CN-Near-Expire", "cn-in-grace": "CN-Near-Expire", "expired-cn": "Expired-CN",
 };
 /** e.g. CN-Requests-CN-Working-Shared-2026-10-09.xlsx (the date is the business date, IST). */
 export function cnExportFilename(view: CnRequestView, date: Date = new Date()): string {

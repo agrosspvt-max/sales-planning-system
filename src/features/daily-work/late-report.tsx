@@ -65,10 +65,10 @@ export function LateRequestDialog({ workDate, onClose, onSent }: { workDate: str
 }
 
 /**
- * Shown in the Daily Plan area while a Sales Officer's earlier report is still outstanding: which report, its original deadline, why the plan is blocked, the request status / history
+ * Shown in both Daily Plan and Daily Report while a Sales Officer's earlier report is still outstanding: which report, its original deadline, why the plan is blocked, the request status / history
  * and the Request Late Report Submission button (hidden while a request is pending or approved). The plan itself stays blocked on the server whatever this panel shows.
  */
-export function OutstandingReportPanel({ outstanding, onOpenReport, onChanged }: { outstanding: OutstandingReportView; onOpenReport: () => void; onChanged: () => void }) {
+export function OutstandingReportPanel({ outstanding, onOpenReport, onChanged }: { outstanding: OutstandingReportView; onOpenReport?: () => void; onChanged: () => void }) {
   const [open, setOpen] = useState(false);
   const [notice, setNotice] = useState(false);
   const qc = useQueryClient();
@@ -99,7 +99,7 @@ export function OutstandingReportPanel({ outstanding, onOpenReport, onChanged }:
       )}
       <div className="flex flex-wrap items-center gap-2">
         {outstanding.canRequest && <Button size="sm" onClick={() => { setNotice(false); setOpen(true); }} data-testid="request-late-report">{L.request}</Button>}
-        <Button size="sm" variant="outline" onClick={onOpenReport}>{L.openReport}</Button>
+        {onOpenReport && <Button size="sm" variant="outline" onClick={onOpenReport}>{L.openReport}</Button>}
         {notice && <span className="text-xs text-success">{L.sent}</span>}
       </div>
       {older.length > 0 && (

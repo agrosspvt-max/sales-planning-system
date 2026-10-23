@@ -18,14 +18,23 @@ const seed = (id: string, status: string, o: Partial<Row> = {}) => rows.push({ i
 
 const prisma = {
   cnRequest: {
-    findMany: async ({ where }: { where: { officerId?: { in: string[] }; status?: { in: string[] }; paymentStatus?: string; paymentVerified?: boolean; OR?: { paymentStatus?: null | { not: string }; paymentVerified?: boolean }[] } }) => {
+    findMany: async ({ where }: { where: Record<string, unknown> & { officerId?: { in: string[] }; status?: { in: string[] } } }) => {
       findManyCalls++;
+      // Direct fields plus nested AND / OR with null / { not } / equality (payment status, verification, expiry stage — all null here: nothing in this fixture is Grace / Expired).
+      const matches = (r: Row, cond: Record<string, unknown>): boolean => Object.entries(cond).every(([key, value]) => {
+        if (value === undefined || ["officerId", "status"].includes(key)) return true;
+        if (key === "OR") return (value as Record<string, unknown>[]).some((c) => matches(r, c));
+        if (key === "NOT") return !matches(r, value as Record<string, unknown>);
+        if (key === "AND") return (value as Record<string, unknown>[]).every((c) => matches(r, c));
+        const actual = key === "cnPolicyStage" ? null : (r as unknown as Record<string, unknown>)[key] ?? null;
+        if (value === null) return actual === null;
+        if (typeof value === "object" && "not" in (value as object)) return actual !== (value as { not: unknown }).not;
+        return actual === value;
+      });
       return rows
         .filter((r) => !where.officerId || where.officerId.in.includes(r.officerId))
         .filter((r) => !where.status || where.status.in.includes(r.status))
-        .filter((r) => where.paymentStatus === undefined || r.paymentStatus === where.paymentStatus)
-        .filter((r) => where.paymentVerified === undefined || r.paymentVerified === where.paymentVerified)
-        .filter((r) => !where.OR || where.OR.some((c) => (c.paymentVerified !== undefined ? r.paymentVerified === c.paymentVerified : c.paymentStatus === null ? r.paymentStatus == null : r.paymentStatus !== (c.paymentStatus as { not: string }).not)))
+        .filter((r) => matches(r, where))
         .map((r) => ({ ...r, amount: 5000, postedAmount: null, details: "secret details", createdAt: new Date("2026-09-22T06:00:00Z"), acceptedAt: null, rejectedAt: null, postedAt: null,
           dealer: { name: r.dealer }, officer: { name: r.officer, territory: r.territory, group: r.state ? { name: r.state } : null } }));
     },
@@ -36,6 +45,7 @@ class FakeNextResponse { constructor(public body: unknown, public init: { status
 let session: AuthContext = { userId: "admin-1", role: Role.SUPER_ADMIN, username: "admin", groupId: null };
 const load = testLoader({
   "@/lib/prisma": { prisma },
+  "./cn-expiry.server": { reconcileDueCnRequests: async () => 0 },
   "@/lib/api-error": { ApiError: TestApiError },
   "@/lib/http": { ApiError: TestApiError, requireAuth: async () => session },
   "next/server": { NextResponse: FakeNextResponse },
@@ -72,10 +82,12 @@ async function main() {
   seed("p1", ST.POSTED_IN_LEDGER, { paymentStatus: "Paid", paymentVerified: true }); seed("p2", ST.LEGACY_ACCEPTED, { paymentStatus: "Paid", paymentVerified: true, dealer: "Legacy Dealer" });
 
   // 1. Each tab exports exactly its own requests, with only the five columns in order.
-  const expectDealers: Record<CnRequestView, string[]> = {
+  const expectDealers: Partial<Record<CnRequestView, string[]>> = {
     submitted: ["Dealer s1", "Dealer s2", "Other Dealer"], rejected: ["Dealer r1", "Dealer r2"],
-    "accepted-not-posted": ["Dealer w1", "Dealer w2", "Dealer w3"], "posted-in-ledger": ["Dealer p1", "Legacy Dealer"],
+    "accepted-not-posted": ["Dealer w1", "Dealer w2", "Dealer w3"], "posted-in-ledger": ["Dealer p1", "Legacy Dealer"]
   };
+  // The two new Accepted tabs use the same export path; nothing in this fixture is in Grace / Expired, so they report the standard empty-tab message (no file).
+  for (const view of ["cn-in-grace", "expired-cn"] as CnRequestView[]) assert.equal((await call(view)).status, 422, `${view}: empty tab is refused like any other empty tab`);
   for (const view of Object.keys(expectDealers) as CnRequestView[]) {
     const res = await call(view);
     assert.equal(res.status, 200, view);
@@ -83,7 +95,7 @@ async function main() {
     const { grid, ws } = await sheet(res);
     assert.deepEqual(grid[0], HEAD, `${view}: header`);
     assert.ok(grid.every((r) => r.length === 5), `${view}: exactly five columns`);
-    assert.deepEqual(grid.slice(1).map((r) => r[0]).sort(), [...expectDealers[view]].sort(), `${view}: only that tab's requests`);
+    assert.deepEqual(grid.slice(1).map((r) => r[0]).sort(), [...expectDealers[view]!].sort(), `${view}: only that tab's requests`);
     assert.equal(ws.getRow(1).font?.bold, true, "bold header row");
     assert.ok(ws.columns.every((c) => (c.width ?? 0) >= 18), "readable column widths");
     assert.equal(ws.columnCount, 5);

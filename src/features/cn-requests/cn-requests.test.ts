@@ -55,17 +55,47 @@ import {
   cnRequestExpiryDateKey,
   formatCnRequestDays,
   inclusiveCnRequestDays,
-  isCnTaskDateWithinExpiry,
   isCnBusinessDateKey,
   isCnSundayDateKey,
   nextCnWorkingDateKey,
   paymentStatusLabel,
+  cnAcceptanceNeedsExpiry,
   validateCnAcceptance,
   validateCnRejection,
   validateCnRequestDetails,
 } from "@/lib/cn-request";
 import { DEFAULT_LABELS, labelMeta } from "@/features/labels/labels";
 import { buildCnTimeline } from "@/lib/cn-timeline";
+import * as cnExpiryLib from "@/lib/cn-expiry";
+import { addCnDays, isCnTaskDateAllowed } from "@/lib/cn-expiry";
+
+/** Fixed-date fixtures (acceptedAt in September) need the service's "today" pinned inside their window; null = the real IST date. */
+let testToday: string | null = null;
+/** The expiry DATE that reproduces the old "N days, acceptance day = Day 1" deadline for a CN accepted today (IST). */
+const expiryAfter = (days: number): string => addCnDays(cnRequestBusinessDateKey(new Date())!, days - 1);
+/** The legacy window rule (acceptance date .. derived expiry, no Sundays) expressed through the single shared task-date rule. */
+const legacyTaskDateOk = (taskDate: string, acceptedAt: string, days: number): boolean =>
+  isCnTaskDateAllowed(taskDate, acceptedAt, { cnExpiryDate: cnRequestExpiryDateKey(acceptedAt, days), cnGraceDays: null, cnPolicyStage: null }, cnRequestBusinessDateKey(acceptedAt)!);
+
+/** The subset of Prisma `where` the CN list queries use: direct fields, nested AND / OR, null / { not } / equality for payment status and expiry stage. */
+function fakeWhereMatches(row: Record<string, unknown>, cond: Record<string, unknown>): boolean {
+  const field = (key: string, value: unknown): boolean => {
+    const actual = row[key] ?? (key === "paymentVerified" ? false : null);
+    if (value === null) return actual === null;
+    if (value && typeof value === "object" && "gt" in value) return actual != null && Number(actual) > Number((value as { gt: number }).gt);
+    if (value && typeof value === "object" && "gte" in value && "lte" in value) return actual instanceof Date && actual >= (value as { gte: Date }).gte && actual <= (value as { lte: Date }).lte;
+    if (value && typeof value === "object" && "not" in (value as object)) return actual !== (value as { not: unknown }).not;
+    return actual === value;
+  };
+  for (const [key, value] of Object.entries(cond)) {
+    if (value === undefined || ["dealerId", "officerId", "status"].includes(key)) continue;
+    if (key === "OR") { if (!(value as Record<string, unknown>[]).some((c) => fakeWhereMatches(row, c))) return false; }
+    else if (key === "NOT") { if (fakeWhereMatches(row, value as Record<string, unknown>)) return false; }
+    else if (key === "AND") { if (!(value as Record<string, unknown>[]).every((c) => fakeWhereMatches(row, c))) return false; }
+    else if (!field(key, value)) return false;
+  }
+  return true;
+}
 
 interface StoredRequest {
   id: string;
@@ -86,6 +116,10 @@ interface StoredRequest {
   acceptanceReason?: string | null;
   acceptanceReasonDetails?: string | null;
   cnExpiryDays?: number | null;
+  cnExpiryDate?: Date | null;
+  cnGraceDays?: number | null;
+  cnPolicyStage?: string | null;
+  cnPolicyCycle?: number;
   cnWorkingDocument?: string | null;
   cnWorkingFileName?: string | null;
   cnWorkingMimeType?: string | null;
@@ -139,13 +173,15 @@ function makeStore() {
     createdAt: row.createdAt ?? new Date("2026-09-22T06:00:00.000Z"),
     dealer: { name: "Dealer One" },
     officer: { name: "Officer One", territory: "North", group: { name: "State One" } },
+    expiryEvents: [],
     paymentEvents: paymentEvents.filter((event) => event.cnRequestId === row.id).map((event) => ({ ...event, recordedBy: { name: event.recordedById === "admin-1" ? "Admin One" : "Officer One" } })),
   });
   // Raw-SQL fake for the CN task queries (SELECT pending/by-date/by-id; UPDATE taskDate).
-  const flat = (row: StoredRequest) => ({ id: row.id, dealerId: row.dealerId, amount: row.amount == null ? null : String(row.amount), acceptanceReason: row.acceptanceReason ?? null, acceptedAt: row.acceptedAt ?? null, cnExpiryDays: row.cnExpiryDays ?? null, taskDate: row.taskDate ?? null, partyName: "Dealer One", cnType: row.cnType, details: row.details, paymentStatus: row.paymentStatus, legacyDailyWorkConfirmed: row.legacyDailyWorkConfirmed ?? false });
+  const flat = (row: StoredRequest) => ({ id: row.id, dealerId: row.dealerId, amount: row.amount == null ? null : String(row.amount), acceptanceReason: row.acceptanceReason ?? null, acceptedAt: row.acceptedAt ?? null, cnExpiryDays: row.cnExpiryDays ?? null, cnExpiryDate: row.cnExpiryDate ? row.cnExpiryDate.toISOString().slice(0, 10) : null, cnGraceDays: row.cnGraceDays ?? null, cnPolicyStage: row.cnPolicyStage ?? null, taskDate: row.taskDate ?? null, partyName: "Dealer One", cnType: row.cnType, details: row.details, paymentStatus: row.paymentStatus, legacyDailyWorkConfirmed: row.legacyDailyWorkConfirmed ?? false });
   const runRaw = (sql: { sql: string; values: unknown[] }) => {
     const text = sql.sql.replace(/\s+/g, " ").trim();
     const v = sql.values;
+    if (text.startsWith('DELETE FROM "DailyWorkEntry" e')) return 0; // dropEmptyTaskRow: the fake keeps no Daily Work rows
     if (text.includes('FROM "CnRequest" c') && text.includes('FOR UPDATE OF c')) {
       const row = rows.find((r) => r.id === v[0]);
       return row ? [{ ...row }] : [];
@@ -180,18 +216,13 @@ function makeStore() {
     if (text.startsWith('SELECT "id", "dailyWorkConfirmed" AS "confirmed" FROM "CnPaymentEvent"')) {
       return paymentEvents.filter((e) => v.includes(e.id)).map((e) => ({ id: e.id, confirmed: e.dailyWorkConfirmed ?? false }));
     }
-    // Unconfirmed-materialized-task counters used by the day-submit gate.
-    if (text.includes('FROM "CnPaymentEvent" e') && text.includes('COUNT(*)') && text.includes('"dailyWorkConfirmed" = false')) {
-      const [officerId, workDate, batchId] = v as string[];
-      void workDate; void batchId;
-      const n = paymentEvents.filter((e) => e.taskStatus === "SCHEDULED" && e.dailyWorkEntryId != null && (e.dailyWorkConfirmed ?? false) === false
-        && rows.some((r) => r.id === e.cnRequestId && r.officerId === officerId)).length;
-      return [{ n }];
-    }
-    if (text.includes('FROM "CnRequest" c') && text.includes('COUNT(*)') && text.includes('"legacyDailyWorkConfirmed" = false')) {
+    // Unconfirmed-materialized-task counter used by the day-submit gate: ONE statement counting payment events (not of an Expired CN) + legacy requests.
+    if (text.includes('COUNT(*)') && text.includes('"dailyWorkConfirmed" = false') && text.includes('"legacyDailyWorkConfirmed" = false')) {
       const [officerId] = v as string[];
-      const n = rows.filter((r) => r.officerId === officerId && r.paymentTrackingMode == null && r.legacyDailyWorkEntryId != null && (r.legacyDailyWorkConfirmed ?? false) === false).length;
-      return [{ n }];
+      const events = paymentEvents.filter((e) => e.taskStatus === "SCHEDULED" && e.dailyWorkEntryId != null && (e.dailyWorkConfirmed ?? false) === false
+        && rows.some((r) => r.id === e.cnRequestId && r.officerId === officerId && r.cnPolicyStage !== "EXPIRED")).length;
+      const legacy = rows.filter((r) => r.officerId === officerId && r.paymentTrackingMode == null && r.legacyDailyWorkEntryId != null && (r.legacyDailyWorkConfirmed ?? false) === false).length;
+      return [{ n: events + legacy }];
     }
     if (text.includes('AS "requestKeyCnRequestId"') && text.includes('AS "latestOutstandingBefore"')) {
       const existing = paymentEvents.find((event) => event.requestKey === v[0]);
@@ -273,13 +304,7 @@ function makeStore() {
         .filter((row) => !where.dealerId || where.dealerId.in.includes(row.dealerId))
         .filter((row) => !where.officerId || where.officerId.in.includes(row.officerId))
         .filter((row) => !where.status || where.status.in.includes(row.status))
-        .filter((row) => where.paymentStatus === undefined || row.paymentStatus === where.paymentStatus)
-        .filter((row) => where.paymentVerified === undefined || (row.paymentVerified ?? false) === where.paymentVerified)
-        .filter((row) => !where.OR || where.OR.some((condition) => condition.paymentVerified !== undefined
-          ? (row.paymentVerified ?? false) === condition.paymentVerified
-          : condition.paymentStatus === null
-            ? row.paymentStatus == null
-            : row.paymentStatus !== condition.paymentStatus?.not))
+        .filter((row) => fakeWhereMatches(row as unknown as Record<string, unknown>, where as Record<string, unknown>))
         .sort((a, b) => {
           if (!orderBy) return 0;
           const orders = Array.isArray(orderBy) ? orderBy : [orderBy];
@@ -431,13 +456,14 @@ function loadService(
   const exports = {};
   const mocks: Record<string, unknown> = {
     "server-only": {},
+    "./cn-review.server": { cnProcessingEvents: async () => [], finishCnReviewTx: async () => undefined, lockCnReviewTx: async () => undefined },
     "@/lib/prisma": { prisma },
     "@/lib/cn-timeline": { buildCnTimeline },
     "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (rows: unknown[]) => rows, dealerDisplayName: (n: string) => n },
     "@/lib/http": { ApiError: TestApiError },
     "@/lib/scope": { getOfficerScope: async (ctx: AuthContext) => ctx.role === Role.SUPER_ADMIN ? ({ all: true, ids: [] }) : ctx.role === Role.REGIONAL_MANAGER ? ({ all: false, ids: [ctx.userId, "so-1", "so-2"] }) : ({ all: false, ids: [ctx.userId] }) },
     "@/lib/audit": { writeAudit: async (entry: { summary?: string | null }) => { audits.push(entry); } },
-    "@/lib/daily-work": { currentBusinessDate: () => cnRequestBusinessDateKey(new Date())! },
+    "@/lib/daily-work": { currentBusinessDate: () => testToday ?? cnRequestBusinessDateKey(new Date())! },
     "@/features/daily-work/day-lock.server": { lockDailyWorkDay: async () => ({ currentBatchId: "test-batch", status: "OPEN", selfRating: null, finalizedAt: null }) },
     "@/features/daily-work/auto-task-materialization.server": {
       reverseMaterializedDailyWorkContribution: async (_tx: unknown, input: { entryId: string; contribution: number }) => { reversals.push(input); },
@@ -445,6 +471,13 @@ function loadService(
     "@/features/labels/service.server": { getResolvedLabels: async () => ({ ...DEFAULT_LABELS, ...labelOverrides }) },
     "@/features/tasks/task-history.server": { recordTaskReschedule: async (_tx: unknown, _ctx: unknown, move: Record<string, unknown>) => { cnReschedules.push(move); return true; } }, // own suites: tasks/task-analysis-ui.test.tsx + billing-task.integration.ts
     "@/features/notifications/task-alerts.server": { notifyAutoTaskCreated: async (_tx: unknown, _labels: unknown, alert: Record<string, unknown>) => { cnTaskAlerts.push(alert); } }, // own suite: notifications/task-alerts.test.ts
+    "@/lib/cn-expiry": cnExpiryLib,
+    // The expiry policy's database side is covered by cn-expiry.integration.ts (real Postgres); the fake database here has no stage rows, so these are inert.
+    "./cn-expiry.server": {
+      reconcileCnExpiry: async () => null, reconcileCnExpiryTx: async () => null, reconcileDueCnRequests: async () => 0, reconcileDueCnRequestsTx: async () => 0,
+      assertCnNotExpiredTx: async () => null, isCnExpiredNow: async () => false, enterGraceNowTx: async () => undefined,
+      recordCnPolicySetTx: async () => undefined, startReturnedCycleTx: async () => undefined,
+    },
     "@/lib/cn-request": {
       CN_PAYMENT_STATUSES,
       CN_ACCEPTANCE_DETAILS_REQUIRED_MESSAGE,
@@ -489,7 +522,7 @@ function loadService(
       cnRequestExpiryDateKey,
       cnTaskKindForReason: (reason: string | null | undefined) => (reason === "PAYMENT_PENDING" ? "CN_RECOVERY" : "CN_TASK"),
       cnTaskAmount: (reason: string | null | undefined, amount: number | null) => (reason === "PAYMENT_PENDING" ? amount : null),
-      isCnTaskDateWithinExpiry,
+      cnAcceptanceNeedsExpiry,
       isCnBusinessDateKey,
       isCnSundayDateKey,
       nextCnWorkingDateKey,
@@ -683,31 +716,31 @@ async function main() {
   assert.ok(createPageSource.includes('useLabel("cn_requests.status.returned_from_ledger")'), "Returned from Ledger resolves through the configurable label system");
   assert.match(createPageSource, /RETURNED_FROM_LEDGER: "destructive"/, "Returned from Ledger reuses the red destructive badge variant");
   assert.ok(createPageSource.includes('useLabel("cn_requests.action.create_new_request")'));
-  assert.equal(validateCnAcceptance({ status: "", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "", hasFile: false }), CN_ACCEPTANCE_STATUS_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "", hasFile: true }), CN_ACCEPTANCE_REASON_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "OTHER", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "", hasFile: true }), CN_ACCEPTANCE_DETAILS_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "OTHER", acceptanceReasonDetails: " \n\t ", expiryDays: "", postedAmount: "", hasFile: true }), CN_ACCEPTANCE_DETAILS_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "", hasFile: true }), CN_EXPIRY_DAYS_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDays: "0", postedAmount: "", hasFile: true }), CN_EXPIRY_DAYS_INVALID_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDays: "3", postedAmount: "", outstandingAmount: "", hasFile: true }), CN_OUTSTANDING_AMOUNT_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDays: "3", postedAmount: "", outstandingAmount: "0", hasFile: true }), CN_OUTSTANDING_AMOUNT_INVALID_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDays: "3", postedAmount: "", outstandingAmount: "12000", hasFile: false }), CN_WORKING_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "", hasFile: true }), CN_POSTED_AMOUNT_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "0", hasFile: true }), CN_POSTED_AMOUNT_INVALID_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "-1", hasFile: true }), CN_POSTED_AMOUNT_INVALID_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "abc", hasFile: true }), CN_POSTED_AMOUNT_INVALID_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "12000", hasFile: false }), CN_WORKING_REQUIRED_MESSAGE);
-  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDays: "", postedAmount: "12000", hasFile: true }), null);
+  assert.equal(validateCnAcceptance({ status: "", reason: "", acceptanceReasonDetails: "", expiryDate: "", graceDays: "", postedAmount: "", hasFile: false }), CN_ACCEPTANCE_STATUS_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "", acceptanceReasonDetails: "", expiryDate: "", graceDays: "", postedAmount: "", hasFile: true }), CN_ACCEPTANCE_REASON_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "OTHER", acceptanceReasonDetails: "", expiryDate: "", graceDays: "", postedAmount: "", hasFile: true }), CN_ACCEPTANCE_DETAILS_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "OTHER", acceptanceReasonDetails: " \n\t ", expiryDate: "", graceDays: "", postedAmount: "", hasFile: true }), CN_ACCEPTANCE_DETAILS_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDate: "", graceDays: "", postedAmount: "", hasFile: true }), CN_EXPIRY_DAYS_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDate: "not-a-date", graceDays: "5", postedAmount: "", hasFile: true }), CN_EXPIRY_DAYS_INVALID_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "", outstandingAmount: "", hasFile: true }), CN_OUTSTANDING_AMOUNT_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "", outstandingAmount: "0", hasFile: true }), CN_OUTSTANDING_AMOUNT_INVALID_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "", outstandingAmount: "12000", hasFile: false }), CN_WORKING_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "", hasFile: true }), CN_POSTED_AMOUNT_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "0", hasFile: true }), CN_POSTED_AMOUNT_INVALID_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "-1", hasFile: true }), CN_POSTED_AMOUNT_INVALID_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "abc", hasFile: true }), CN_POSTED_AMOUNT_INVALID_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "12000", hasFile: false }), CN_WORKING_REQUIRED_MESSAGE);
+  assert.equal(validateCnAcceptance({ status: "POSTED_IN_LEDGER", reason: "", acceptanceReasonDetails: "", expiryDate: "2999-01-01", graceDays: "5", postedAmount: "12000", hasFile: true }), null);
   assert.equal(cnRequestExpiryDateKey("2026-09-23T10:00:00.000+05:30", 3), "2026-09-25");
-  assert.equal(isCnTaskDateWithinExpiry("2026-09-23", "2026-09-23T10:00:00.000+05:30", 3), true);
-  assert.equal(isCnTaskDateWithinExpiry("2026-09-25", "2026-09-23T10:00:00.000+05:30", 3), true);
-  assert.equal(isCnTaskDateWithinExpiry("2026-09-26", "2026-09-23T10:00:00.000+05:30", 3), false);
+  assert.equal(legacyTaskDateOk("2026-09-23", "2026-09-23T10:00:00.000+05:30", 3), true);
+  assert.equal(legacyTaskDateOk("2026-09-25", "2026-09-23T10:00:00.000+05:30", 3), true);
+  assert.equal(legacyTaskDateOk("2026-09-26", "2026-09-23T10:00:00.000+05:30", 3), false);
   assert.equal(nextCnWorkingDateKey("2026-09-21"), "2026-09-22", "Monday defaults to Tuesday");
   assert.equal(nextCnWorkingDateKey("2026-09-25"), "2026-09-26", "Friday defaults to Saturday");
   assert.equal(nextCnWorkingDateKey("2026-09-26"), "2026-09-28", "Saturday skips Sunday and defaults to Monday");
   assert.equal(nextCnWorkingDateKey("2026-09-27"), "2026-09-28", "Sunday defaults to Monday");
   assert.equal(isCnSundayDateKey("2026-09-27"), true);
-  assert.equal(isCnTaskDateWithinExpiry("2026-09-27", "2026-09-26T10:00:00.000+05:30", 3), false, "Sunday is rejected inside an otherwise valid expiry window");
+  assert.equal(legacyTaskDateOk("2026-09-27", "2026-09-26T10:00:00.000+05:30", 3), false, "Sunday is rejected inside an otherwise valid expiry window");
   assert.equal(isCnBusinessDateKey("2026-02-31"), false);
   assert.ok(createPageSource.includes("<AcceptanceStatusAction"), "Submitted Admin actions use the acceptance-status selector");
   assert.ok(createPageSource.includes('value=""'), "the acceptance action has no default selection");
@@ -716,8 +749,8 @@ async function main() {
   assert.ok(createPageSource.includes("labels.postedAmount"), "Posted in Ledger shows the required Posted Amount input");
   assert.ok(createPageSource.includes("labels.outstandingAmount"), "Payment Pending shows the required Outstanding Amount input");
   assert.ok(createPageSource.includes('showExpires && filterHeader("expiry", labels.expires)'), "only the Accepted / Not Posted table adds the searchable Expires header");
-  assert.ok(createPageSource.includes('const showApproval = !isOfficer && section === "submitted-rejected"'), "Approval is limited to Submitted / Rejected");
-  assert.ok(createPageSource.includes('{showApproval && <TableHead className="text-right">{labels.approval}</TableHead>}'), "Accepted tables do not render the Approval header");
+  assert.ok(createPageSource.includes('const showApproval = view === "under-process" || (!isOfficer && section === "submitted-rejected")'), "CN decisions are available in Submitted / Rejected and Under Process");
+  assert.ok(createPageSource.includes('view === "under-process" ? filterHeader("status", labels.approval, "text-right")'), "Under Process keeps its status filter in the combined CN Update header");
   // Test 3 — no manual Post in Ledger route: the CN Working Shared (and Posted) row menu is View Details + Download only.
   assert.ok(!createPageSource.includes("onPostInLedger"), "the Accepted row Action menu no longer offers manual Post in Ledger");
   assert.ok(!createPageSource.includes("labels.postInLedger"), "no replacement posting control is rendered");
@@ -752,7 +785,7 @@ async function main() {
   assert.ok(createPageSource.includes("hasFinalCn: request.finalCn != null"), "the row menu reads the Final CN from the list row");
   assert.ok(createPageSource.includes('/api/cn-requests/${request.id}/${endpoint}?download=1') && createPageSource.includes('"final-cn" : "working"'), "Final CN downloads use /final-cn; CN Working keeps /working");
   const acceptRouteSource = readFileSync(resolve("src/app/api/cn-requests/[id]/accept/route.ts"), "utf8");
-  assert.ok(acceptRouteSource.includes('form.get("cnExpiryDays")'), "the multipart acceptance route forwards expiry days to the server");
+  assert.ok(acceptRouteSource.includes('form.get("cnExpiryDate")') && !acceptRouteSource.includes('form.get("graceDays")'), "the multipart acceptance route forwards expiry without an initial grace period");
   assert.ok(acceptRouteSource.includes('form.get("postedAmount")'), "the multipart acceptance route forwards Posted Amount to the server");
   assert.ok(acceptRouteSource.includes('form.get("outstandingAmount")'), "the multipart acceptance route forwards Outstanding Amount to the server");
   const dailyWorkSource = readFileSync(resolve("src/features/daily-work/daily-work-page.tsx"), "utf8");
@@ -898,8 +931,8 @@ async function main() {
       assert.equal(lifeStore.rows.find((row) => row.id === id)?.status, "SUBMITTED");
       assert.equal((await lifeService.listCnRequests(ADMIN, "submitted")).find((row) => row.id === id)?.cnType, cnType, "Submitted list shows it");
       // Accept → CN Working (document stored) → SO reports Paid → Admin verifies Paid with the Final CN → Posted in Ledger.
-      await lifeService.acceptCnRequest(ADMIN, id, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 15000 }, PDF_UPLOAD);
-      assert.equal((await lifeService.listCnRequests(ADMIN, "accepted-not-posted")).find((row) => row.id === id)?.cnType, cnType, "CN Working list shows it");
+      await lifeService.acceptCnRequest(ADMIN, id, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 15000 }, PDF_UPLOAD);
+      assert.equal((await openCnRows(lifeService, ADMIN)).find((row) => row.id === id)?.cnType, cnType, "CN Working list shows it");
       assert.deepEqual((await lifeService.getCnWorkingDocument(SO, id)).buffer, PDF_UPLOAD.buffer, "CN Working document works");
       assert.equal((await lifeService.getCnPaymentDetail(ADMIN, id)).cnType, cnType, "Payment Status detail shows it");
       await lifeService.updateCnPayment(SO, id, { status: "PAID", paymentDate: "2026-09-23", taskId: lifeStore.paymentEvents[0]!.id, requestKey: `${cnType}-so-paid` });
@@ -988,15 +1021,20 @@ async function main() {
     CN_EXPIRY_DAYS_REQUIRED_MESSAGE,
   );
   await expect422(
-    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 0 }, PDF_UPLOAD),
-    CN_EXPIRY_DAYS_INVALID_MESSAGE,
+    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(0), graceDays: 5 }, PDF_UPLOAD),
+    "CN Expiry Date cannot be in the past.",
   );
   await expect422(
-    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 3, outstandingAmount: 12000 }, null),
+    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: "31/10/2026", graceDays: 5, outstandingAmount: 100 }, PDF_UPLOAD),
+    CN_EXPIRY_DAYS_INVALID_MESSAGE, // only an unambiguous YYYY-MM-DD is accepted
+  );
+
+  await expect422(
+    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(3), graceDays: 5, outstandingAmount: 12000 }, null),
     CN_WORKING_REQUIRED_MESSAGE,
   );
   await expect422(
-    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 1, outstandingAmount: 12000 }, PDF_UPLOAD),
+    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(1), graceDays: 5, outstandingAmount: 12000 }, PDF_UPLOAD),
     CN_TASK_DEFAULT_DATE_UNAVAILABLE_MESSAGE,
   );
   assert.equal(store.rows.find((row) => row.id === "cn-1")?.status, "SUBMITTED", "invalid acceptance attempts leave the request unchanged");
@@ -1006,7 +1044,7 @@ async function main() {
   assert.equal((await acceptanceService.acceptCnRequest(
     ADMIN,
     "cn-1",
-    { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 3, outstandingAmount: 12000 },
+    { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(3), graceDays: 5, outstandingAmount: 12000 },
     PDF_UPLOAD,
   )).status, "ACCEPTED_NOT_POSTED");
   // The accepted Payment-Pending CN opens ONE Recovery task: exactly one alert request, for the planned (outstanding) amount, linked to the task event.
@@ -1019,7 +1057,10 @@ async function main() {
   const accepted = store.rows.find((row) => row.id === "cn-1")!;
   assert.equal(accepted.acceptanceReason, "PAYMENT_PENDING");
   assert.equal(accepted.acceptanceReasonDetails, null);
-  assert.equal(accepted.cnExpiryDays, 3);
+  assert.equal(accepted.cnExpiryDate?.toISOString().slice(0, 10), expiryAfter(3), "the chosen calendar expiry is stored on the CN");
+  assert.equal(accepted.cnGraceDays, 0, "new CNs have no grace until explicitly granted");
+  assert.equal(accepted.cnPolicyStage, "WORKING");
+  assert.equal(accepted.cnPolicyCycle, 1);
   assert.equal(accepted.paymentStatus, "Pending");
   assert.equal(accepted.paymentOriginalAmount, 12000);
   assert.equal(accepted.paymentOutstandingAmount, 12000);
@@ -1038,14 +1079,15 @@ async function main() {
   assert.equal(accepted.postedAt, null);
   assert.match(acceptanceAudits.at(-1)?.summary ?? "", /accepted, not posted/);
   assert.match(acceptanceAudits.at(-1)?.summary ?? "", /Reason: PAYMENT_PENDING/);
-  assert.match(acceptanceAudits.at(-1)?.summary ?? "", /CN Expiry: 3 days/);
+  assert.match(acceptanceAudits.at(-1)?.summary ?? "", /CN Expiry: \d{4}-\d{2}-\d{2}; Grace: 0 days/);
   assert.match(acceptanceAudits.at(-1)?.summary ?? "", /CN working: CN Working\.pdf/);
   assert.equal((await service.listCnRequests(ADMIN, "submitted")).length, 0);
-  const notPostedRows = await service.listCnRequests(ADMIN, "accepted-not-posted");
+  const notPostedRows = await openCnRows(service, ADMIN);
   assert.equal(notPostedRows.map((r) => r.id).join(","), "cn-1");
   assert.equal(notPostedRows[0]?.acceptanceReason, "PAYMENT_PENDING");
-  assert.equal(notPostedRows[0]?.cnExpiryDays, 3);
-  assert.equal(notPostedRows[0]?.expiryDate, cnRequestExpiryDateKey(accepted.acceptedAt!, 3));
+  assert.equal(notPostedRows[0]?.graceDays, 0);
+  assert.equal(notPostedRows[0]?.expiryDate, expiryAfter(3));
+  assert.equal(notPostedRows[0]?.graceEndDate, null);
   assert.equal(JSON.stringify(notPostedRows[0]?.cnWorking), JSON.stringify({
     fileName: PDF_UPLOAD.name,
     mimeType: PDF_UPLOAD.type,
@@ -1071,14 +1113,14 @@ async function main() {
   const beforeStandalonePost = structuredClone(store.rows.find((row) => row.id === "cn-1"));
   const eventCountBeforeStandalonePost = store.paymentEvents.length;
   for (const attempt of [
-    { raw: { status: "POSTED_IN_LEDGER", postedAmount: 12000 }, upload: null },
-    { raw: { status: "POSTED_IN_LEDGER", postedAmount: 12000 }, upload: PDF_UPLOAD },
+    { raw: { status: "POSTED_IN_LEDGER", postedAmount: 12000, cnExpiryDate: expiryAfter(3), graceDays: 5 }, upload: null },
+    { raw: { status: "POSTED_IN_LEDGER", postedAmount: 12000, cnExpiryDate: expiryAfter(3), graceDays: 5 }, upload: PDF_UPLOAD },
   ]) {
     await expectStatus(() => acceptanceService.acceptCnRequest(ADMIN, "cn-1", attempt.raw, attempt.upload), 409);
   }
   assert.deepEqual(store.rows.find((row) => row.id === "cn-1"), beforeStandalonePost, "a rejected standalone post changes nothing");
   assert.equal(store.paymentEvents.length, eventCountBeforeStandalonePost, "no payment event is created by a rejected post");
-  const stillWorkingShared = await service.listCnRequests(ADMIN, "accepted-not-posted");
+  const stillWorkingShared = await openCnRows(service, ADMIN);
   assert.equal(stillWorkingShared.map((r) => r.id).join(","), "cn-1", "the CN stays in CN Working Shared");
   assert.equal((await service.listCnRequests(ADMIN, "posted-in-ledger")).length, 0);
   assert.equal(stillWorkingShared[0]?.paymentStatus, "Pending");
@@ -1106,13 +1148,16 @@ async function main() {
   assert.equal((await directPostedService.acceptCnRequest(
     ADMIN,
     directPostedId,
-    { status: "POSTED_IN_LEDGER", postedAmount: 15000 },
+    { status: "POSTED_IN_LEDGER", postedAmount: 15000, cnExpiryDate: expiryAfter(3), graceDays: 5 },
     XLSX_UPLOAD,
   )).status, "POSTED_IN_LEDGER");
   const directPosted = directPostedStore.rows[0]!;
   assert.equal(directPosted.acceptanceReason, null);
   assert.equal(directPosted.acceptanceReasonDetails, null);
-  assert.equal(directPosted.cnExpiryDays, null, "direct Posted in Ledger does not create a scheduling expiry");
+  assert.equal(directPosted.cnExpiryDays ?? null, null, "the legacy day count is never written any more");
+  assert.equal(directPosted.cnExpiryDate ?? null, null, "direct posting does not set an expiry");
+  assert.equal(directPosted.cnGraceDays ?? null, null);
+  assert.equal(directPosted.cnPolicyStage ?? null, null, "a direct, verified-paid posting is never governed by Grace / Expired");
   assert.equal(directPosted.postedAmount, 15000);
   assert.equal(directPosted.amount, 10000, "historical Approx Amount data remains intact");
   assert.equal(directPosted.paymentStatus, "Paid", "Accepted, Posted in Ledger persists the canonical Paid payment status");
@@ -1125,7 +1170,7 @@ async function main() {
   assert.equal(directPosted.paymentOutstandingAmount, 0);
   assert.equal(directPosted.paymentOriginalAmount, 15000);
   assert.equal(directPosted.paymentTrackingMode, "PAYMENT_V1");
-  assert.equal((await directPostedService.listCnRequests(ADMIN, "accepted-not-posted")).length, 0, "no intermediate CN Working Shared state");
+  assert.equal((await openCnRows(directPostedService, ADMIN)).length, 0, "no intermediate CN Working Shared state");
   const directPostedRow = (await directPostedService.listCnRequests(ADMIN, "posted-in-ledger"))[0]!;
   assert.equal(directPostedRow.id, directPostedId, "appears under Accepted → Posted in Ledger");
   assert.equal(cnRequestCurrentDisplayStatus(directPosted.status, directPosted.paymentStatus), "POSTED_IN_LEDGER", "not Returned from Ledger");
@@ -1144,8 +1189,8 @@ async function main() {
     const pathBId = pathBStore.seed("SUBMITTED", "cn-path-b", "so-1");
     const pathBAudits: Array<{ summary?: string | null }> = [];
     const pathBService = loadService(pathBStore.prisma, pathBAudits);
-    await pathBService.acceptCnRequest(ADMIN, pathBId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 15000 }, PDF_UPLOAD);
-    assert.equal((await pathBService.listCnRequests(ADMIN, "accepted-not-posted")).length, 1, "Path B starts in CN Working Shared");
+    await pathBService.acceptCnRequest(ADMIN, pathBId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 15000 }, PDF_UPLOAD);
+    assert.equal((await openCnRows(pathBService, ADMIN)).length, 1, "Path B starts in CN Working Shared");
     await pathBService.updateCnPayment(SO, pathBId, { status: "PAID", paymentDate: "2026-09-23", taskId: pathBStore.paymentEvents[0]!.id, requestKey: "path-b-so-paid" });
     await pathBService.verifyCnPayment(ADMIN, pathBId, { status: "PAID", requestKey: "path-b-verify-paid" }, FINAL_CN_UPLOAD);
     const pathB = pathBStore.rows[0]!;
@@ -1175,7 +1220,7 @@ async function main() {
   await otherAcceptanceService.acceptCnRequest(
     ADMIN,
     otherAcceptanceId,
-    { status: "ACCEPTED_NOT_POSTED", reason: "OTHER", acceptanceReasonDetails: "  Dealer payment expected next week.  ", cnExpiryDays: 3 },
+    { status: "ACCEPTED_NOT_POSTED", reason: "OTHER", acceptanceReasonDetails: "  Dealer payment expected next week.  ", cnExpiryDate: expiryAfter(3), graceDays: 5 },
     XLSX_UPLOAD,
   );
   assert.equal(otherAcceptanceStore.rows[0]?.acceptanceReason, "OTHER");
@@ -1189,15 +1234,15 @@ async function main() {
   const invalidFileId = invalidFileStore.seed("SUBMITTED", "cn-invalid-file");
   const invalidFileService = loadService(invalidFileStore.prisma);
   await expect422(
-    () => invalidFileService.acceptCnRequest(ADMIN, invalidFileId, { status: "POSTED_IN_LEDGER", postedAmount: 100 }, { name: "working.png", type: "image/png", buffer: Buffer.from("image") }),
+    () => invalidFileService.acceptCnRequest(ADMIN, invalidFileId, { status: "POSTED_IN_LEDGER", postedAmount: 100, cnExpiryDate: expiryAfter(3), graceDays: 5 }, { name: "working.png", type: "image/png", buffer: Buffer.from("image") }),
     "CN Working document must be a PDF or XLSX file.",
   );
   await expect422(
-    () => invalidFileService.acceptCnRequest(ADMIN, invalidFileId, { status: "POSTED_IN_LEDGER", postedAmount: 100 }, { name: "working.pdf", type: CN_WORKING_PDF_MIME, buffer: Buffer.from("not a PDF") }),
+    () => invalidFileService.acceptCnRequest(ADMIN, invalidFileId, { status: "POSTED_IN_LEDGER", postedAmount: 100, cnExpiryDate: expiryAfter(3), graceDays: 5 }, { name: "working.pdf", type: CN_WORKING_PDF_MIME, buffer: Buffer.from("not a PDF") }),
     "CN Working document content does not match its file type.",
   );
   await expect422(
-    () => invalidFileService.acceptCnRequest(ADMIN, invalidFileId, { status: "POSTED_IN_LEDGER", postedAmount: 100 }, { name: "working.xlsx", type: CN_WORKING_XLSX_MIME, buffer: Buffer.alloc(CN_WORKING_MAX_BYTES + 1) }),
+    () => invalidFileService.acceptCnRequest(ADMIN, invalidFileId, { status: "POSTED_IN_LEDGER", postedAmount: 100, cnExpiryDate: expiryAfter(3), graceDays: 5 }, { name: "working.xlsx", type: CN_WORKING_XLSX_MIME, buffer: Buffer.alloc(CN_WORKING_MAX_BYTES + 1) }),
     "CN Working document must be smaller than 3.5 MB.",
   );
   assert.equal(invalidFileStore.rows[0]?.status, "SUBMITTED");
@@ -1257,11 +1302,11 @@ async function main() {
     403,
   );
   await expectStatus(
-    () => service.acceptCnRequest(ADMIN, rejectedId, { status: "POSTED_IN_LEDGER", postedAmount: 100 }, PDF_UPLOAD),
+    () => service.acceptCnRequest(ADMIN, rejectedId, { status: "POSTED_IN_LEDGER", postedAmount: 100, cnExpiryDate: expiryAfter(3), graceDays: 5 }, PDF_UPLOAD),
     409,
   );
   await expectStatus(
-    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "POSTED_IN_LEDGER", postedAmount: 100 }, PDF_UPLOAD),
+    () => service.acceptCnRequest(ADMIN, "cn-1", { status: "POSTED_IN_LEDGER", postedAmount: 100, cnExpiryDate: expiryAfter(3), graceDays: 5 }, PDF_UPLOAD),
     409,
   );
   await assert.rejects(
@@ -1275,7 +1320,7 @@ async function main() {
   const acceptedStore = makeStore();
   const acceptedId = acceptedStore.seed("ACCEPTED_NOT_POSTED", "cn-accepted-not-posted");
   const acceptedService = loadService(acceptedStore.prisma);
-  const historicalNotPosted = (await acceptedService.listCnRequests(ADMIN, "accepted-not-posted"))[0];
+  const historicalNotPosted = (await openCnRows(acceptedService, ADMIN))[0];
   assert.equal(historicalNotPosted?.cnWorking, null, "pre-feature accepted rows remain readable without an invented document");
   await expectStatus(() => acceptedService.getCnWorkingDocument(SO, acceptedId), 404);
   await assert.rejects(
@@ -1288,7 +1333,7 @@ async function main() {
   const legacyApproved = store.seed("APPROVED", "cn-legacy-approved");
   store.rows.find((row) => row.id === legacyAccepted)!.paymentStatus = "Paid";
   store.rows.find((row) => row.id === legacyAccepted)!.paymentVerified = true;
-  const notPostedIds = (await service.listCnRequests(ADMIN, "accepted-not-posted")).map((r) => r.id);
+  const notPostedIds = (await openCnRows(service, ADMIN)).map((r) => r.id);
   assert.ok(!notPostedIds.includes(legacyAccepted), "Paid legacy accepted row belongs in Posted in Ledger");
   assert.ok(notPostedIds.includes(legacyApproved), "every non-Paid accepted row belongs in CN Working Shared");
   assert.ok(notPostedIds.includes("cn-1"), "lifecycle POSTED_IN_LEDGER does not override a current non-Paid status");
@@ -1301,7 +1346,7 @@ async function main() {
   // All four server filters are mutually correct.
   assert.equal((await service.listCnRequests(ADMIN, "submitted")).map((r) => r.id).join(","), submittedId);
   assert.equal((await service.listCnRequests(ADMIN, "rejected")).map((r) => r.id).join(","), rejectedId);
-  assert.equal((await service.listCnRequests(ADMIN, "accepted-not-posted")).map((r) => r.id).sort().join(","), ["cn-1", legacyApproved].sort().join(","));
+  assert.equal((await openCnRows(service, ADMIN)).map((r) => r.id).sort().join(","), ["cn-1", legacyApproved].sort().join(","));
   assert.equal((await service.listCnRequests(ADMIN, "posted-in-ledger")).map((r) => r.id).join(","), legacyAccepted);
 
   // Inclusive India-calendar-day age: time-of-day and elapsed 24-hour periods are irrelevant.
@@ -1419,7 +1464,7 @@ async function main() {
     const paymentId = paymentStore.seed("SUBMITTED", "cn-payment", "so-1");
     const paymentService = loadService(paymentStore.prisma);
     await paymentService.acceptCnRequest(ADMIN, paymentId, {
-      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 120000,
+      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 120000,
     }, PDF_UPLOAD);
     const request = paymentStore.rows[0]!;
     const taskDate = paymentStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
@@ -1499,7 +1544,7 @@ async function main() {
     assert.equal(request.status, "ACCEPTED_NOT_POSTED", "Paid never changes the CN lifecycle status");
     assert.equal(paymentStore.paymentEvents[3]?.amountPaid, 80000);
     assert.equal(paymentStore.paymentEvents[3]?.taskStatus, null, "Paid creates no follow-up task");
-    assert.equal((await paymentService.listCnRequests(ADMIN, "accepted-not-posted")).map((row) => row.id).join(","), paymentId, "SO-reported Paid remains in CN Working Shared until Admin verifies it");
+    assert.equal((await openCnRows(paymentService, ADMIN)).map((row) => row.id).join(","), paymentId, "SO-reported Paid remains in CN Working Shared until Admin verifies it");
     assert.equal((await paymentService.listCnRequests(ADMIN, "posted-in-ledger")).length, 0, "provisional Paid is not authoritative");
 
     // Admin override: SO reported Paid; Admin verifies Partial (₹60,000 of the ₹80,000 that existed BEFORE the
@@ -1551,7 +1596,7 @@ async function main() {
     const verifyAudits: Array<{ summary?: string | null }> = [];
     const verifyService = loadService(verifyStore.prisma, verifyAudits);
     await verifyService.acceptCnRequest(ADMIN, verifyId, {
-      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 50000,
+      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 50000,
     }, PDF_UPLOAD);
     const vRequest = verifyStore.rows[0]!;
     const vTaskDate = verifyStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
@@ -1580,7 +1625,7 @@ async function main() {
     assert.equal(verifyStore.paymentEvents[1]?.taskStatus, "SCHEDULED", "the SO's task is left intact");
     assert.equal(vRequest.status, "ACCEPTED_NOT_POSTED", "Admin-verified Partial Paid is not posted to ledger");
     assert.equal(cnRequestCurrentDisplayStatus(vRequest.status, vRequest.paymentStatus), "ACCEPTED_NOT_POSTED", "never-posted Partial Paid is not Returned from Ledger");
-    assert.equal((await verifyService.listCnRequests(ADMIN, "accepted-not-posted")).map((row) => row.id).join(","), verifyId);
+    assert.equal((await openCnRows(verifyService, ADMIN)).map((row) => row.id).join(","), verifyId);
     assert.equal((await verifyService.listCnRequests(ADMIN, "posted-in-ledger")).length, 0);
 
     // A later SO report resets the pill to gray again (provisional until re-verified).
@@ -1597,7 +1642,7 @@ async function main() {
     assert.equal(vRequest.status, "ACCEPTED_NOT_POSTED", "Admin-verified Not Paid is not posted to ledger");
     assert.equal(cnRequestCurrentDisplayStatus(vRequest.status, vRequest.paymentStatus), "ACCEPTED_NOT_POSTED", "never-posted Not Paid is not Returned from Ledger");
     assert.equal(verifyStore.paymentEvents[3]?.taskStatus, "SCHEDULED", "Not Paid follow-up remains unchanged");
-    assert.equal((await verifyService.listCnRequests(ADMIN, "accepted-not-posted")).map((row) => row.id).join(","), verifyId);
+    assert.equal((await openCnRows(verifyService, ADMIN)).map((row) => row.id).join(","), verifyId);
     assert.equal((await verifyService.listCnRequests(ADMIN, "posted-in-ledger")).length, 0);
 
     // Admin-verified Paid settles the balance and atomically performs the existing Post in Ledger transition.
@@ -1613,7 +1658,7 @@ async function main() {
     assert.ok(vRequest.postedAt, "Paid verification records the ledger posting timestamp");
     assert.equal(vRequest.actedByAdminId, ADMIN.userId);
     assert.equal(vRequest.cnWorkingFileName, PDF_UPLOAD.name, "posting preserves the existing CN Working document");
-    assert.equal((await verifyService.listCnRequests(ADMIN, "accepted-not-posted")).length, 0, "Paid leaves CN Working Shared");
+    assert.equal((await openCnRows(verifyService, ADMIN)).length, 0, "Paid leaves CN Working Shared");
     assert.equal((await verifyService.listCnRequests(ADMIN, "posted-in-ledger")).map((row) => row.id).join(","), verifyId, "Paid enters Posted in Ledger");
     const lastEvent = verifyStore.paymentEvents[verifyStore.paymentEvents.length - 1]!;
     assert.equal(lastEvent.source, "ADMIN_VERIFY");
@@ -1629,20 +1674,24 @@ async function main() {
       status: "PAID", requestKey: "v-paid-1",
     });
     assert.equal(verifyStore.paymentEvents.length, eventCount, "retry cannot duplicate payment history");
-    assert.equal(vRequest.postedAt, postedAt, "retry cannot duplicate or replace the ledger posting");
+    assert.equal(vRequest.postedAt?.getTime(), postedAt?.getTime(), "retry cannot duplicate or replace the ledger posting");
     assert.equal(verifyAudits.filter((entry) => entry.summary?.includes("posted in ledger")).length, 1, "retry creates no duplicate posting audit");
 
     // A later authoritative Partial Paid moves the already-posted CN back to CN Working Shared. The immutable
     // ledger timestamp remains as history and the existing verification logic creates exactly one remainder task.
+    // Returning a posted CN from the ledger starts a NEW expiry cycle: the Admin must choose its expiry (valid, not in the past).
+    await expect422(() => verifyService.verifyCnPayment(ADMIN, verifyId, { status: "PARTIAL_PAID", amountPaid: 10000, requestKey: "v-paid-to-partial-0" }), "Enter the new CN Expiry Date for the CN returned from the ledger.");
+    await expect422(() => verifyService.verifyCnPayment(ADMIN, verifyId, { status: "PARTIAL_PAID", amountPaid: 10000, requestKey: "v-paid-to-partial-0", expiryDate: expiryAfter(0) }), "CN Expiry Date cannot be in the past.");
+    assert.equal(vRequest.paymentStatus, "Paid", "a refused return changes nothing");
     await verifyService.verifyCnPayment(ADMIN, verifyId, {
-      status: "PARTIAL_PAID", amountPaid: 10000, requestKey: "v-paid-to-partial-1",
+      status: "PARTIAL_PAID", amountPaid: 10000, requestKey: "v-paid-to-partial-1", expiryDate: expiryAfter(10),
     });
     assert.equal(vRequest.paymentStatus, "Partial Paid");
     assert.equal(vRequest.paymentOutstandingAmount, 20000);
     assert.equal(vRequest.status, "POSTED_IN_LEDGER", "historical ledger state is preserved; tab membership is payment-driven");
     assert.equal(cnRequestCurrentDisplayStatus(vRequest.status, vRequest.paymentStatus), "RETURNED_FROM_LEDGER", "previously posted Partial Paid displays Returned from Ledger");
-    assert.equal(vRequest.postedAt, postedAt, "moving sections never rewrites the original posting timestamp");
-    assert.equal((await verifyService.listCnRequests(ADMIN, "accepted-not-posted")).map((row) => row.id).join(","), verifyId);
+    assert.equal(vRequest.postedAt?.getTime(), postedAt?.getTime(), "moving sections never rewrites the original posting timestamp");
+    assert.equal((await openCnRows(verifyService, ADMIN)).map((row) => row.id).join(","), verifyId);
     assert.equal((await verifyService.listCnRequests(ADMIN, "posted-in-ledger")).length, 0);
     const partialOverride = verifyStore.paymentEvents.at(-1)!;
     assert.equal(partialOverride.source, "ADMIN_VERIFY");
@@ -1657,22 +1706,22 @@ async function main() {
     assert.equal(vRequest.paymentStatus, "Paid");
     assert.equal(cnRequestCurrentDisplayStatus(vRequest.status, vRequest.paymentStatus), "POSTED_IN_LEDGER", "Returned from Ledger becomes Posted in Ledger when Paid again");
     assert.equal(vRequest.paymentOutstandingAmount, 0);
-    assert.equal((await verifyService.listCnRequests(ADMIN, "accepted-not-posted")).length, 0);
+    assert.equal((await openCnRows(verifyService, ADMIN)).length, 0);
     assert.equal((await verifyService.listCnRequests(ADMIN, "posted-in-ledger")).map((row) => row.id).join(","), verifyId);
-    assert.equal(vRequest.postedAt, postedAt, "Paid again does not duplicate ledger posting");
+    assert.equal(vRequest.postedAt?.getTime(), postedAt?.getTime(), "Paid again does not duplicate ledger posting");
     assert.equal(verifyAudits.filter((entry) => entry.summary?.includes("posted in ledger")).length, 1);
 
     // Paid → Not Paid follows the same current-status classification and creates only the existing follow-up.
     const beforeNotPaidEvents = verifyStore.paymentEvents.length;
     await verifyService.verifyCnPayment(ADMIN, verifyId, {
-      status: "NOT_PAID", requestKey: "v-paid-to-not-paid-1",
+      status: "NOT_PAID", requestKey: "v-paid-to-not-paid-1", expiryDate: expiryAfter(10),
     });
     assert.equal(vRequest.paymentStatus, "Not Paid");
     assert.equal(cnRequestCurrentDisplayStatus(vRequest.status, vRequest.paymentStatus), "RETURNED_FROM_LEDGER", "previously posted Not Paid displays Returned from Ledger");
     assert.equal(vRequest.paymentOutstandingAmount, 30000, "existing authoritative outstanding calculation remains unchanged");
     assert.equal(verifyStore.paymentEvents.length, beforeNotPaidEvents + 1, "Not Paid creates one verification event");
     assert.equal(verifyStore.paymentEvents.at(-1)?.taskStatus, "SCHEDULED", "Not Paid creates one default-dated follow-up task");
-    assert.equal((await verifyService.listCnRequests(ADMIN, "accepted-not-posted")).map((row) => row.id).join(","), verifyId);
+    assert.equal((await openCnRows(verifyService, ADMIN)).map((row) => row.id).join(","), verifyId);
     assert.equal((await verifyService.listCnRequests(ADMIN, "posted-in-ledger")).length, 0);
 
     // Verifying a Pending / unreported CN is rejected.
@@ -1680,7 +1729,7 @@ async function main() {
     const pendingId = pendingStore.seed("SUBMITTED", "cn-pending-verify", "so-1");
     const pendingService = loadService(pendingStore.prisma);
     await pendingService.acceptCnRequest(ADMIN, pendingId, {
-      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 10000,
+      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 10000,
     }, PDF_UPLOAD);
     await expectStatus(() => pendingService.verifyCnPayment(ADMIN, pendingId, {
       status: "PAID", requestKey: "verify-pending-1",
@@ -1707,7 +1756,7 @@ async function main() {
       const ownStore = makeStore();
       const ownId = ownStore.seed("SUBMITTED", `cn-own-${ownerId}-${cnType}`, ownerId, {}, cnType);
       const ownService = loadService(ownStore.prisma);
-      await ownService.acceptCnRequest(ADMIN, ownId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 120000 }, PDF_UPLOAD);
+      await ownService.acceptCnRequest(ADMIN, ownId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 120000 }, PDF_UPLOAD);
       const own = ownStore.rows[0]!;
       const day = ownStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
       const label = `${ownerId}/${cnType}`;
@@ -1747,7 +1796,7 @@ async function main() {
     const concurrentAudits: Array<{ summary?: string | null }> = [];
     const concurrentService = loadService(concurrentStore.prisma, concurrentAudits);
     await concurrentService.acceptCnRequest(ADMIN, concurrentId, {
-      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 25000,
+      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 25000,
     }, PDF_UPLOAD);
     const concurrentDate = concurrentStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
     const concurrentTaskId = concurrentStore.paymentEvents[0]!.id;
@@ -1774,7 +1823,7 @@ async function main() {
     const rollbackId = rollbackStore.seed("SUBMITTED", "cn-verify-rollback", "so-1");
     const rollbackService = loadService(rollbackStore.prisma);
     await rollbackService.acceptCnRequest(ADMIN, rollbackId, {
-      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 15000,
+      status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 15000,
     }, PDF_UPLOAD);
     const rollbackDate = rollbackStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
     const rollbackTaskId = rollbackStore.paymentEvents[0]!.id;
@@ -1819,6 +1868,7 @@ async function main() {
       source: "ACCEPTANCE", requestKey: "materialized-1", recordedById: "admin-1", createdAt: new Date("2026-09-29T04:30:00.000Z"),
     });
     const reversals: Array<{ entryId: string; contribution: number }> = [];
+    testToday = "2026-09-30";
     const taskService = loadService(taskStore.prisma, [], {}, reversals);
     assert.equal((await taskService.listActiveCnTasks(SO)).length, 0, "materialized task is absent from Today's Auto Tasks");
     const rescheduled = await taskService.scheduleCnTask(SO, requestId, { taskId: "task-materialized", taskDate: "2026-10-01" });
@@ -2005,7 +2055,7 @@ async function main() {
       const fId = fStore.seed("SUBMITTED", `cn-final-${name}`, "so-1");
       const fAudits: Array<{ summary?: string | null }> = [];
       const fService = loadService(fStore.prisma, fAudits);
-      await fService.acceptCnRequest(ADMIN, fId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDays: 5, outstandingAmount: 20000 }, PDF_UPLOAD);
+      await fService.acceptCnRequest(ADMIN, fId, { status: "ACCEPTED_NOT_POSTED", reason: "PAYMENT_PENDING", cnExpiryDate: expiryAfter(5), graceDays: 5, outstandingAmount: 20000 }, PDF_UPLOAD);
       const taskId = fStore.paymentEvents[0]!.id;
       const taskDate = fStore.paymentEvents[0]!.taskDate!.toISOString().slice(0, 10);
       return { fStore, fId, fAudits, fService, row: fStore.rows[0]!, taskId, taskDate };
@@ -2020,7 +2070,7 @@ async function main() {
     assert.equal(w.row.finalCnDocument ?? null, null, "no Final CN exists before Paid is verified");
 
     // Test 10 — an existing CN without a Final CN loads and displays correctly.
-    const beforeRow = (await w.fService.listCnRequests(ADMIN, "accepted-not-posted"))[0]!;
+    const beforeRow = (await openCnRows(w.fService, ADMIN))[0]!;
     assert.equal(beforeRow.finalCn, null);
     assert.equal(beforeRow.cnWorking?.fileName, PDF_UPLOAD.name);
     assert.equal((await w.fService.getCnRequest(SO, w.fId)).finalCn, null);
@@ -2122,7 +2172,7 @@ async function main() {
     const d = makeStore();
     const dId = d.seed("SUBMITTED", "cn-final-direct", "so-1");
     const dService = loadService(d.prisma);
-    await dService.acceptCnRequest(ADMIN, dId, { status: "POSTED_IN_LEDGER", postedAmount: 9000 }, PDF_UPLOAD);
+    await dService.acceptCnRequest(ADMIN, dId, { status: "POSTED_IN_LEDGER", postedAmount: 9000, cnExpiryDate: expiryAfter(3), graceDays: 5 }, PDF_UPLOAD);
     assert.equal(d.rows[0]?.status, "POSTED_IN_LEDGER");
     assert.equal(d.rows[0]?.cnWorkingFileName, PDF_UPLOAD.name, "the direct path's one document is stored where it always was");
     assert.equal(d.rows[0]?.finalCnDocument ?? null, null, "no second document is created for the direct path");
@@ -2147,7 +2197,7 @@ async function main() {
     }
     // The row-menu data: the list row carries finalCn only when one exists.
     assert.equal((await w.fService.listCnRequests(ADMIN, "posted-in-ledger"))[0]?.finalCn?.fileName, FINAL_CN_UPLOAD.name);
-    assert.equal((await n.fService.listCnRequests(ADMIN, "accepted-not-posted"))[0]?.finalCn, null);
+    assert.equal((await openCnRows(n.fService, ADMIN))[0]?.finalCn, null);
 
     // Source-level wiring: the verify route accepts multipart, and the Final CN has its own authenticated endpoint.
     const verifyRouteSource = readFileSync(resolve("src/app/api/cn-requests/[id]/verify/route.ts"), "utf8");
@@ -2164,3 +2214,8 @@ async function main() {
 }
 
 void main();
+
+// Existing payment/attachment lifecycle assertions apply to both open-CN tabs. Exact tab boundaries are tested against Postgres in cn-expiry.integration.ts.
+async function openCnRows(service: Pick<typeof import("./service.server"), "listCnRequests">, ctx: AuthContext) {
+  return [...await service.listCnRequests(ctx, "accepted-not-posted"), ...await service.listCnRequests(ctx, "cn-near-expire")];
+}

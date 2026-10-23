@@ -128,12 +128,22 @@ export function ok<T>(data: T, status = 200) {
 
 /** Wrap a route handler with uniform error handling. The handler itself must never throw. */
 export function handle(fn: () => Promise<NextResponse>) {
-  return fn().catch((error: unknown) => {
+  return fn().catch(async (error: unknown) => {
     // Any failure while classifying/serialising the error must still yield a valid response,
     // never a second crash that masks the original problem.
     try {
       if (error instanceof ApiError) {
-        return NextResponse.json({ error: error.message }, { status: error.status });
+        // A labeled error carries an editable label: show the administrator's current wording (placeholders filled), never a stale default.
+        const labeled = error as ApiError & { labelKey?: string; labelVars?: Record<string, string | number> };
+        let message = error.message;
+        if (labeled.labelKey) {
+          try {
+            const { getResolvedLabels } = await import("@/features/labels/service.server");
+            const text = (await getResolvedLabels() as Record<string, string>)[labeled.labelKey];
+            if (text) message = text.replace(/\{(\w+)\}/g, (m, k: string) => (labeled.labelVars && k in labeled.labelVars ? String(labeled.labelVars[k]) : m));
+          } catch { /* labels unavailable → the default wording already in the message */ }
+        }
+        return NextResponse.json({ error: message }, { status: error.status });
       }
       if (error instanceof ZodError) {
         return NextResponse.json(

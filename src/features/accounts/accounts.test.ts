@@ -1,3 +1,5 @@
+import { accountBadgeLabel, accountSnapshotName } from "./identity";
+import { DEFAULT_LABELS } from "@/features/labels/labels";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { runInNewContext } from "node:vm";
@@ -55,7 +57,7 @@ async function main() {
   assert.equal(mayEnterPage(custom({ salesPlanning: ["read"] }), "/planning/scheme"), false);
   assert.equal(mayEnterPage(custom({ productCatalogue: ["read"] }), "/groups/state/catalogue"), true);
   const nav = navForRole(Role.CUSTOM_ADMIN, true, viewer.permissions, true);
-  assert.deepEqual(nav.map(n => n.href).sort(), ["/account", "/requests/cn"].sort());
+  assert.deepEqual(nav.map(n => n.href).sort(), ["/account", "/requests/cn", "/planning/approvals"].sort());
   assert.equal(navForRole(Role.SUPER_ADMIN, true, undefined, true).some(n => n.href === "/account-management"), true);
   assert.equal(navForRole(Role.SUPER_ADMIN).some(n => n.href === "/account-management"), false);
   assert.equal(navForRole(Role.CUSTOM_ADMIN, false, { calendar: ["read"] }).some(n => n.href === "/planning/calendar"), false);
@@ -120,7 +122,7 @@ async function main() {
     for (const perms of [{ lastPaymentReport: ["read"] }, { lastPaymentReport: ["read", "export"] }, { lastPaymentReport: ["create"] }, { reports: ["read", "export", "create"] }, {}] as AdminPermissions[]) assert.equal(as(Role.CUSTOM_ADMIN, perms), false, JSON.stringify(perms));
     assert.equal(as(Role.SALES_OFFICER, { lastPaymentReport: ["read", "create"] }, { designation: "Super Admin" }), false, "SO never");
     assert.equal(as(Role.REGIONAL_MANAGER, { lastPaymentReport: ["read", "create"] }), false, "RM never");
-    assert.ok(readFileSync("src/features/accounts/accounts-page.tsx", "utf8").includes('"Create Billing Exception"'), "Account Management labels the grant 'Create Billing Exception'");
+    assert.ok(readFileSync("src/features/accounts/accounts-page.tsx", "utf8").includes('"accounts.permission.create_billing_exception"') && DEFAULT_LABELS["accounts.permission.create_billing_exception"] === "Create Billing Exception", "Account Management labels the grant 'Create Billing Exception'");
   }
   // Billing Exception: recording one is its OWN grant (create); reading / exporting never allows it.
   assert.deepEqual(apiPermission("/api/reports/last-payment/billing-exceptions", "POST"), ["lastPaymentReport", "create"]);
@@ -175,6 +177,11 @@ async function main() {
   await assert.rejects(account.requireAccountOwner(root), e => (e as { status: number }).status === 403);
   const input = { name: "  Rahul  ", username: "Controller", password: "local-test-only", designation: "Operations Head", isActive: true, permissions: { cnRequests: ["read", "approve"] } };
   assert.equal(account.createAccountSchema.parse(input).username, "controller");
+  for (const designation of [undefined, null, "", "   "]) {
+    assert.equal(account.createAccountSchema.parse({ ...input, designation }).designation, null, "new accounts may omit designation");
+    assert.equal(account.editAccountSchema.parse({ ...input, designation, password: undefined }).designation, null, "designation may be cleared when editing");
+  }
+  assert.equal(account.createAccountSchema.parse({ ...input, designation: "  Operations Head  " }).designation, "Operations Head");
   // Account service: the new permission validates like every other (read required before export; unknown actions rejected).
   const base = { name: "Rahul", username: "controller", password: "local-test-only", designation: "Ops", isActive: true };
   assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "export"] } }).success, true);
@@ -182,7 +189,7 @@ async function main() {
   assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "create"] } }).success, true, "create (Billing Exception) is a grantable action");
   assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["create"] } }).success, false, "create needs module access");
   assert.equal(account.createAccountSchema.safeParse({ ...base, permissions: { lastPaymentReport: ["read", "delete"] } }).success, false, "no invented actions");
-  for (const bad of [{ ...input, designation: " " }, { ...input, password: "" }, { ...input, role: "SUPER_ADMIN" }, { ...input, permissions: { accountManagement: ["read"] } }, { ...input, permissions: { cnRequests: ["approve"] } }]) {
+  for (const bad of [{ ...input, designation: "x".repeat(121) }, { ...input, password: "" }, { ...input, role: "SUPER_ADMIN" }, { ...input, permissions: { accountManagement: ["read"] } }, { ...input, permissions: { cnRequests: ["approve"] } }]) {
     assert.equal(account.createAccountSchema.safeParse(bad).success, false);
   }
 
@@ -221,3 +228,12 @@ async function main() {
   console.log(`Account authorization tests passed; ${routes} actual route/method combinations audited.`);
 }
 void main();
+
+for (const designation of [null, undefined, "", "   "]) assert.equal(accountBadgeLabel("Pooja", Role.CUSTOM_ADMIN, designation, "Custom Admin"), "Pooja");
+assert.equal(accountBadgeLabel("Pooja", Role.CUSTOM_ADMIN, "Accounts Officer", "Custom Admin"), "Accounts Officer");
+assert.equal(accountBadgeLabel("SO", Role.SALES_OFFICER, null, "Sales Officer"), "SO");
+assert.equal(accountBadgeLabel("RM", Role.REGIONAL_MANAGER, null, "Regional Manager"), "Regional Manager");
+assert.equal(accountBadgeLabel("System Administrator", Role.SUPER_ADMIN, null, "Super Admin"), "Super Admin");
+assert.equal(accountSnapshotName("Ishwar Singh (@accounts) (Accounts Officer)"), "Ishwar Singh");
+assert.equal(accountSnapshotName("Amit (@amit)"), "Amit");
+assert.equal(accountSnapshotName("Amit (North)"), "Amit (North)", "parentheses in real names are retained");

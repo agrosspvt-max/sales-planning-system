@@ -9,6 +9,7 @@ import { testLoader } from "@/features/dealer-tags/test-loader";
 let hooks: unknown[] = [];
 let cursor = 0;
 const urls: string[] = [];
+const rangeHeaders: { from: string; to: string; today: string; onApply: (f: string, t: string) => void }[] = [];
 const headers: { label: string; ariaLabel: string; selected: string[]; options: { value: string; label: string }[]; onChange: (next: string[]) => void }[] = [];
 const selects: { value?: string; onChange?: (e: { target: { value: string } }) => void; options: { value: string; label: string }[] }[] = [];
 
@@ -54,6 +55,7 @@ const overrides: Record<string, unknown> = {
   "@/components/ui/column-filter-header": {
     ColumnFilterHeader: (props: (typeof headers)[number]) => { headers.push(props); return <th>{props.label}</th>; },
   },
+  "@/components/ui/date-range-filter-header": { DateRangeFilterHeader: (p: (typeof rangeHeaders)[number]) => { rangeHeaders.push(p); return <th>Date</th>; } },
   "@/components/ui/select": {
     NativeSelect: (props: (typeof selects)[number]) => { selects.push(props); return <select />; },
   },
@@ -63,7 +65,7 @@ const overrides: Record<string, unknown> = {
 const load = testLoader(overrides);
 const { PerformancePage } = load("src/features/daily-work/performance-page.tsx") as { PerformancePage: React.ComponentType<{ role: Role }> };
 
-const render = (role: Role) => { cursor = 0; headers.length = 0; selects.length = 0; return renderToStaticMarkup(<PerformancePage role={role} />); };
+const render = (role: Role) => { cursor = 0; headers.length = 0; rangeHeaders.length = 0; selects.length = 0; return renderToStaticMarkup(<PerformancePage role={role} />); };
 const lastUrl = () => urls[urls.length - 1]!;
 const lastHeader = () => headers.find((h) => h.label === "Sales Officer")!;
 const stateHeader = () => headers.find((h) => h.label === "State")!;
@@ -73,7 +75,7 @@ const plain = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 {
   const h = render(Role.SUPER_ADMIN);
   assert.ok(/data-testid="mode-switch"[^>]*>\s*<button[^>]*aria-pressed="true"[^>]*>Performance<\/button>\s*<button[^>]*aria-pressed="false"[^>]*>Tasks<\/button>/.test(h), "Performance | Tasks, Performance selected");
-  assert.ok(h.indexOf('data-testid="mode-switch"') < h.indexOf("Date From"), "the switches sit above the date filters");
+  assert.ok(h.indexOf('data-testid="mode-switch"') < h.indexOf('data-testid="section-totals"'), "the switches sit above the summary cards");
   const act = [...h.matchAll(/data-testid="task-activity"[^>]*>([^]*?)<\/td>/g)].map((m) => m[1]!.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
   assert.deepEqual(act, ["Unavailable", "9 tasks · 4 completed Sales 3 · Recovery 2 · Dealer Appointment 2 · Visits 2 ↻ 3 reschedules", "No tasks ↻ 0 reschedules"], "Task Activity: tasks · completed, ↻ reschedules; zero is stated, an unavailable cell is a dash");
   assert.ok(h.includes("Task Activity"), "its own column heading");
@@ -224,6 +226,48 @@ assert.equal(headers.length, 0, "Sales Officer view has no person filter");
   const q = new URLSearchParams(detailUrls[0]!.split("?")[1]);
   assert.deepEqual(q.getAll("officerId"), ["so1", "so3"]);
   assert.deepEqual(q.getAll("groupId"), ["g1", "g2"]);
+}
+
+// Sunday presentation: "Sunday" under the date (even when worked), "—" instead of Missed only for an unfilled Sunday; real Sunday activity is untouched.
+{
+  const SUN = { date: "2026-09-27", sunday: true };
+  hooks = [];
+  const cells = (html: string, name: string) => { const tr = [...html.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map((m) => m[1]!).find((t) => t.includes(name))!; return [...tr.matchAll(/<td[^>]*>(.*?)<\/td>/g)].map((m) => m[1]!); };
+  patch = {
+    so1: { ...SUN, planSubmittedAt: null, planMissed: true, reportMissed: true, unfilledSunday: true },                       // nothing entered
+    so3: { ...SUN, reportMissed: true, unfilledSunday: false },                                                              // worked: plan submitted, report missed
+    rm2: { ...SUN, planSubmittedAt: null, planMissed: true, reportMissed: true, unfilledSunday: false },                      // a genuine draft: keeps its (derived) state
+  };
+  const html = render(Role.SUPER_ADMIN);
+  const unfilled = cells(html, "Rahul"), worked = cells(html, "Ravi"), draft = cells(html, "RM Two");
+  assert.ok(unfilled[1]!.includes("27/09/2026") && unfilled[1]!.includes('data-testid="sunday-label">Sunday<'), "Sunday is shown beneath the date");
+  assert.ok(worked[1]!.includes('data-testid="sunday-label">Sunday<'), "a worked Sunday carries the annotation too");
+  assert.ok(!unfilled.join("").includes("Missed"), "an unfilled Sunday shows no Missed badge in either submission cell");
+  assert.ok(unfilled.filter((c) => c === "—").length >= 2, "plain dashes in Plan and Report Submission");
+  assert.ok(worked.join("").includes("Missed"), "a worked Sunday with a missed report keeps the Missed badge");
+  assert.ok(draft.join("").includes("Missed"), "a real draft is never replaced by a dash");
+  hooks = []; patch = { so1: { date: "2026-09-28" } };
+  assert.ok(!render(Role.SUPER_ADMIN).includes("sunday-label"), "weekday rows have no annotation");
+  patch = {};
+}
+
+// Date column filter: the header drives the same from/to query state; State and Sales Officer selections survive a date change; the standalone date inputs are gone.
+{
+  hooks = [];
+  let html2 = render(Role.SUPER_ADMIN);
+  assert.ok(!html2.includes("Date From") && !html2.includes("Date To"), "no standalone Date From / Date To inputs");
+  assert.equal(rangeHeaders.length, 1, "the Date column header is the range filter");
+  stateHeader().onChange(["g1"]); html2 = render(Role.SUPER_ADMIN);
+  lastHeader().onChange(["so1"]); html2 = render(Role.SUPER_ADMIN);
+  rangeHeaders[0]!.onApply("2026-10-18", "2026-10-24"); html2 = render(Role.SUPER_ADMIN);
+  const q2 = new URLSearchParams(lastUrl().split("?")[1]);
+  assert.deepEqual([q2.get("from"), q2.get("to"), q2.getAll("groupId"), q2.getAll("officerId")], ["2026-10-18", "2026-10-24", ["g1"], ["so1"]], "the new range is queried with the State and officer kept");
+  assert.deepEqual([rangeHeaders[0]!.from, rangeHeaders[0]!.to], ["2026-10-18", "2026-10-24"], "the header shows the applied range");
+  // Empty results: the Date header (and so its applied-range indicator) is still rendered.
+  lastHeader().onChange(["nobody"]); html2 = render(Role.SUPER_ADMIN);
+  assert.ok(html2.includes((DEFAULT_LABELS as Record<string, string>)["daily_work.performance.empty"]!), "the empty state is shown");
+  assert.equal(rangeHeaders.length, 1, "the Date header with its indicator stays visible when results are empty");
+  hooks = [];
 }
 
 console.log("performance-filter.test.tsx — all assertions passed");

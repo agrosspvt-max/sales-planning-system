@@ -1,4 +1,8 @@
 import { getTaskActivity } from "@/features/tasks/task-analysis.server";
+import { compareListRows } from "@/lib/task-analysis";
+import { PERFORMANCE_MAX_RANGE_DAYS } from "@/lib/date-range";
+import { loadReschedulingReview } from "./reschedule-review.server";
+import type { ReschedulingReview } from "./reschedule-review";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { hasAdminPermission } from "@/features/accounts/permissions";
@@ -26,7 +30,7 @@ import { type CnTaskDto } from "@/lib/cn-request";
 import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
 import { rolloutEffectiveAt, createLateReportRequest, decideLateReportRequest, listLateRequests, myLateRequests, type LateRequestDto, assertPlanWritable, assertReportWritable, completeLateRequest, loadLateRequestFacts, loadPolicyDeadlines, outstandingReport, recordPolicyOnFirstSubmit, reportWindow } from "./report-policy.server";
 import { hasCombinedDraftRows, isTaskRowKey, splitCombinedDraftRows, submittedManualDealerIds } from "./task-rows.server";
-import { commitTaskOutcomes, readRowUnits, rescheduledEntryIds, writeOutcomeDraftBatch, type EntryFacts, type TaskUnitDto } from "./task-outcome.server";
+import { commitTaskOutcomes, readRowUnits, rescheduleCountsByEntry, writeOutcomeDraftBatch, type EntryFacts, type TaskUnitDto } from "./task-outcome.server";
 import { materializeDueDailyWorkTasks, materializeDueDailyWorkTasksInTransaction, autoTasksApplyToRole } from "./auto-task-materialization.server";
 import { materializeDueCalendarTasks, calendarLinkedEntryIds } from "./calendar-task-materialization.server";
 import { isPartyPlanningEnabled } from "@/lib/feature-flags";
@@ -218,6 +222,8 @@ export interface DailyWorkPayload {
   calendarEntryIds: string[]; // rows created from a Calendar Daily Task → Task Type "Calendar"
   billingTasks: BillingTaskDto[]; // Recovery (plan): Billing Exception tasks inside the current editable rows (confirm / reschedule / details act on these)
   billingEntryIds: string[]; // rows carrying a Billing Exception contribution → Task Type "Billing Exception" (plan, report and review views)
+  /** Recorded date changes per row (rows that were never moved are absent); the Rescheduled badge shows the count beside it. */
+  rescheduleCounts: Record<string, number>;
   rescheduledEntryIds: string[]; // rows whose tasks carry a reschedule history (the Rescheduled badge on the day a moved task arrives)
   dealers: DailyWorkDealerDto[];
 }
@@ -705,7 +711,8 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
   }
   const unitsOf = (entryId: string) => units.get(entryId)?.units ?? [];
   const billingEntryIds = [...new Set([...billingLinked, ...dailyRows.filter((r) => unitsOf(r.id).some((u) => u.source === "BILLING_EXCEPTION")).map((r) => r.id)])];
-  const reschedIds = await rescheduledEntryIds(prisma, dailyRows.map((r) => ({ id: r.id, workDate })));
+  const reschedCounts = await rescheduleCountsByEntry(prisma, dailyRows.map((r) => ({ id: r.id, workDate })));
+  const reschedIds = Object.keys(reschedCounts);
   const cnLinkedIds = section === "RECOVERY" ? [...new Set([...(await autoTaskEntryIdsForReport(officerId, dailyRows.map((row) => row.id))), ...dailyRows.filter((r) => unitsOf(r.id).some((u) => u.source === "CN_REQUEST")).map((r) => r.id)])] : [];
   // Task Type "Auto" (Daily Report / review views) = any system-generated contribution: a CN follow-up OR a Billing Exception task.
   const autoTaskEntryIds = section === "RECOVERY" && mode === "REPORT" ? [...new Set([...cnLinkedIds, ...billingEntryIds])] : [];
@@ -739,6 +746,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     billingTasks,
     billingEntryIds,
     rescheduledEntryIds: reschedIds,
+    rescheduleCounts: reschedCounts,
     dealers,
   };
 }
@@ -2018,6 +2026,8 @@ export interface DailyWorkReviewDetailPayload {
   /** false → only the Daily Plan has been submitted: no actuals, self-rating or RM rating exist, and rating is not allowed. */
   reportSubmitted: boolean;
   reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
+  /** Display-only rescheduling facts (scheduled-date history of the shown rows, history-only tasks, and the date-change actions made that day). Never part of any total. */
+  rescheduling: ReschedulingReview;
 }
 
 /**
@@ -2050,6 +2060,8 @@ export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: s
     getDailyStatus(ctx, workDate, officerId),
     loadDailyWorkReview(officerId, workDate),
   ]);
+  // Read-only: follow each shown task by its stable identity (not by its current link or date) and list the date changes made on this business date.
+  const rescheduling = await loadReschedulingReview(officerId, workDate, [...sales.dealers, ...recovery.dealers].filter((d) => d.entryId).map((d) => ({ entryId: d.entryId, units: (d.tasks ?? []).map((t) => ({ unitType: t.unitType, unitId: t.unitId })) })));
   return {
     officerId,
     officerName: officer?.name ?? "—",
@@ -2063,6 +2075,7 @@ export async function getDailyWorkReviewDetail(ctx: AuthContext, rawOfficerId: s
     selfRating: reportSubmitted ? status.selfRating : null, reportSections: status.reportSections,
     review: reportSubmitted ? review : null,
     reportSubmitted,
+    rescheduling,
   };
 }
 
@@ -2270,7 +2283,7 @@ export async function getAdminPerformance(ctx: AuthContext, raw: unknown = {}): 
  * Server-authoritative population + filters. Batched: a FIXED set of queries independent of #officers × #days.
  * ===================================================================================== */
 
-const MAX_PERFORMANCE_RANGE_DAYS = 92; // guardrail: a bounded report keeps the row set (and query cost) sane
+const MAX_PERFORMANCE_RANGE_DAYS = PERFORMANCE_MAX_RANGE_DAYS; // guardrail: a bounded report keeps the row set (and query cost) sane
 
 export interface PerformanceRow {
   officerId: string;
@@ -2285,6 +2298,10 @@ export interface PerformanceRow {
   selfRating: number | null;
   rmRating: number | null;
   submitted: boolean; // plan submitted that day → detail is openable
+  /** Display only: the business date (YYYY-MM-DD, Asia/Kolkata convention, never the viewer's clock) is a Sunday. */
+  sunday: boolean;
+  /** Display only: a Sunday on which the employee entered nothing themselves (no submitted plan, no draft row of their own, no report) — shown as "—" instead of Missed. Scheduled-task rows (rowKey t:…) do not count as entered. */
+  unfilledSunday: boolean;
   /** Compact Task Activity of this employee / date (see getTaskActivity); null only when it could not be computed — the rest of the row is unaffected. */
   taskActivity: { tasks: number; completed: number; reschedules: number; abandoned: number; sections: Record<string, number> } | null;
   /** Derived, never stored: plan submitted, report not finalized and the OWNER's deadline has passed → shown as "Missed". A skipped date (no plan, after the rollout) is Missed in both columns. */
@@ -2468,6 +2485,17 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
   const dayMap = new Map(dayRows.map((r) => [cell(r.officerId, dk(r.workDate)), r]));
   const rmMap = new Map(rmRows.map((r) => [cell(r.officerId, dk(r.workDate)), r.rating]));
 
+  // Sundays only: which employee/date pairs have a row the employee entered themselves. Rows materialised for scheduled tasks (rowKey "t:…") are not employee input.
+  const isSundayDate = (date: string) => new Date(`${date}T00:00:00.000Z`).getUTCDay() === 0;
+  const sundayDates = dates.filter(isSundayDate);
+  const enteredSundays = new Set<string>();
+  if (ids.length > 0 && sundayDates.length > 0) {
+    const entered = await prisma.$queryRaw<{ officerId: string; workDate: Date }[]>(Prisma.sql`
+      SELECT DISTINCT "officerId", "workDate" FROM "DailyWorkEntry"
+      WHERE "officerId" IN (${Prisma.join(ids)}) AND "workDate" IN (${Prisma.join(sundayDates.map((d) => Prisma.sql`${d}::date`))}) AND "rowKey" NOT LIKE 't:%'`);
+    for (const r of entered) enteredSundays.add(cell(r.officerId, dk(r.workDate)));
+  }
+
   const now = dailyWorkClock.now();
   // Task Activity: two batch queries for the WHOLE table (never one per row). A failure here must never take the existing Performance view down.
   let activity: Awaited<ReturnType<typeof getTaskActivity>> | null = null;
@@ -2506,6 +2534,8 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
         // An RM rating does not apply to a Regional Manager: that row never carries one.
         rmRating: officer.role === Role.REGIONAL_MANAGER ? null : rmMap.get(key) ?? null,
         submitted: plan != null,
+        sunday: isSundayDate(date),
+        unfilledSunday: isSundayDate(date) && plan == null && !isFinal && !enteredSundays.has(key),
         taskActivity: activity ? { ...(activity.get(key) ?? { tasks: 0, completed: 0, reschedules: 0, abandoned: 0, sections: {} }) } : null,
         reportMissed: planMissed || (plan != null && !isFinal && passed),
         planMissed,
@@ -2513,6 +2543,9 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
       });
     }
   }
+
+  // Table order: date first (newest first, compared as ISO business dates), then employee name A–Z (case-insensitive), then the stable id. The whole result is ordered here, before the response.
+  rows.sort((a, b) => compareListRows({ date: a.date, name: a.officerName, ownerId: a.officerId, key: "" }, { date: b.date, name: b.officerName, ownerId: b.officerId, key: "" }));
 
   const summary: PerformanceSummary = {
     salesOfficers: population.filter((p) => p.role === Role.SALES_OFFICER).length,
@@ -2584,7 +2617,7 @@ export async function getPerformanceMetricDetail(ctx: AuthContext, raw: unknown 
 
   const sign = dir === "asc" ? 1 : -1;
   contributions.sort((a, b) => {
-    const byDate = a.date.localeCompare(b.date), byName = a.person.name.localeCompare(b.person.name), byValue = a.value - b.value;
+    const byDate = a.date.localeCompare(b.date), byName = a.person.name.toLowerCase().localeCompare(b.person.name.toLowerCase()) || a.person.id.localeCompare(b.person.id), byValue = a.value - b.value;
     const primary = sort === "date" ? byDate : sort === "employee" ? byName : byValue;
     return sign * primary || byDate * -1 || byName || String(a.r.id).localeCompare(String(b.r.id));
   });

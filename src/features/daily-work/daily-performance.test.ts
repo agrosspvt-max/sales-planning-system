@@ -61,6 +61,14 @@ function makeFake(init: Partial<Store> = {}) {
     const text = sql.sql.replace(/\s+/g, " ").trim();
     const v = sql.values as unknown[];
     if (text.startsWith('SELECT e."dealerId", SUM(t."contribution")')) return [];
+    // Sunday display lookup (one batched query, only when the range contains a Sunday): rows the employee entered themselves — rowKey "t:…" rows are scheduled tasks. Counted apart from the four range queries.
+    if (text.startsWith('SELECT DISTINCT "officerId", "workDate" FROM "DailyWorkEntry"')) {
+      const isDate = (x: unknown) => typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x);
+      const oids = v.filter((x) => !isDate(x)) as string[], dts = v.filter(isDate) as string[];
+      const seen = new Set<string>();
+      for (const e of store.entries) if (oids.includes(e.officerId) && dts.includes(e.date) && !(e.rowKey ?? "").startsWith("t:")) seen.add(`${e.officerId}|${e.date}`);
+      return [...seen].map((k) => { const [officerId, date] = k.split("|"); return { officerId, workDate: D(date) }; });
+    }
     if (isQuery) store.rawCount += 1;
     if (text.includes('DailyWorkAttendance')) throw new Error('attendance must never be read or written');
     // Section totals: values = [...ids, from, to, summaryRowKey]. Emulates the query's WHERE (submitted rows only) and its day join.
@@ -171,8 +179,10 @@ async function main() {
     const p = await svc.getDailyPerformance(RM1);
     assert.equal(p.from, p.to, "default From and To are both the current business date");
     assert.equal(p.rows.length, 3, "one default-date row for the RM themself and one for each officer in the RM's team");
-    assert.deepEqual([p.rows[0].officerId, p.rows[0].officerRole], ["rm1", Role.REGIONAL_MANAGER], "own row first; the role is the ROW person's");
-    assert.deepEqual(flat0(p.rows.slice(1).map((r) => [r.officerId, r.officerRole]).sort()), [["so1", Role.SALES_OFFICER], ["so2", Role.SALES_OFFICER]], "then the team");
+    const own = p.rows.find((r) => r.officerId === "rm1")!;
+    assert.deepEqual([own.officerId, own.officerRole], ["rm1", Role.REGIONAL_MANAGER], "the RM's own row is present; the role is the ROW person's");
+    assert.equal(JSON.stringify(p.rows.map((r) => r.officerName)), JSON.stringify(["Amit", "Rahul", "RM One"]), "same date → name A–Z, ignoring case");
+    assert.deepEqual(flat0(p.rows.filter((r) => r.officerId !== "rm1").map((r) => [r.officerId, r.officerRole]).sort()), [["so1", Role.SALES_OFFICER], ["so2", Role.SALES_OFFICER]], "and the team");
     assert.equal(new Set(p.rows.map(cell)).size, p.rows.length, "every person/date record appears exactly once");
     assert.equal(p.summary.salesOfficers, 2, "'Sales Officers' counts Sales Officers only — the RM is not one");
     assert.deepEqual(flat0(p.officers.map((o) => o.id).sort()), ["rm1", "so1", "so2"], "the Sales Officer filter lists the RM's own row and their team");
@@ -270,8 +280,8 @@ async function main() {
     const f = makeFake({ plans: new Map([["so1|2026-09-28", D("2026-09-28")], ["so1|2026-10-05", D("2026-10-05")]]) });
     const svc = loadService(f.prisma);
     const p = await svc.getDailyPerformance(SO1, RANGE);
-    assert.equal(p.rows[0]?.date, RANGE.from, "From date is included");
-    assert.equal(p.rows.at(-1)?.date, RANGE.to, "To date is included");
+    assert.equal(p.rows[0]?.date, RANGE.to, "newest date (the To date, included) comes first");
+    assert.equal(p.rows.at(-1)?.date, RANGE.from, "oldest date (the From date, included) comes last");
     assert.equal(p.rows.find((r) => r.date === "2026-09-28")?.submitted, true);
     assert.ok(!p.rows.some((r) => r.date === "2026-10-05"), "out-of-range excluded");
     const single = await svc.getDailyPerformance(SO1, { from: "2026-09-28", to: "2026-09-28" });
@@ -435,9 +445,8 @@ async function main() {
   // 9b) UI: the Sales Officer COLUMN HEADER is the filter (shared ColumnFilterHeader); State is a multiselect column header and resets employee choices.
   {
     const page = readFileSync(resolve("src/features/daily-work/performance-page.tsx"), "utf8");
-    const fromAt = page.indexOf("<Label>{L.dateFrom}</Label>");
-    const toAt = page.indexOf("<Label>{L.dateTo}</Label>");
-    assert.ok(fromAt < toAt, "Date From → Date To filters remain");
+    assert.ok(!page.includes("<Label>{L.dateFrom}</Label>") && !page.includes("<Label>{L.dateTo}</Label>"), "the standalone Date From / Date To inputs are gone");
+    assert.ok(/<DateRangeFilterHeader[^>]*label=\{L\.colDate\}/s.test(page) && page.includes("onApply={(f, t) => { setFrom(f); setTo(t); }}"), "the Date column header owns the range and feeds the same from/to query state");
     assert.ok(/<ColumnFilterHeader[^>]*label=\{L\.colState\}/s.test(page), "State is a multiselect column header");
     assert.ok(!page.includes("<NativeSelect"), "no duplicate single-State control");
     assert.ok(!page.includes("<Label>{L.officerLabel}</Label>"), "the separate Sales Officer dropdown above the table is gone");
@@ -517,6 +526,43 @@ async function main() {
     assert.equal(f.store.days.has("so1|2026-09-28"), false, "no DailyWorkDay / submission record was created for the Missed day");
     assert.equal(f.store.reviews.size, 0, "no RM review exists for a Missed day");
     lib.dailyWorkClock.now = () => new Date();
+  }
+
+  // 9e) Sunday display flags: derived from the business date string (never the viewer's clock); stored data and the other row fields are untouched.
+  {
+    const f = makeFake({
+      plans: new Map([["so3|2026-09-27", TS("2026-09-27T05:00:00Z")]]),
+      entries: [
+        { officerId: "so2", date: "2026-09-27", section: "SALES", rowKey: "dealer-1", status: "DRAFT", planSubmittedAt: null },
+        { officerId: "rm2", date: "2026-09-27", section: "SALES", rowKey: "t:CAL:abc", status: "DRAFT", planSubmittedAt: null },
+      ],
+    });
+    const svc = loadService(f.prisma);
+    const rows = (await svc.getDailyPerformance(ADMIN, { from: "2026-09-27", to: "2026-09-28" })).rows;
+    const at = (id: string, date: string) => rows.find((r) => r.officerId === id && r.date === date)!;
+    assert.deepEqual([at("so1", "2026-09-27").sunday, at("so1", "2026-09-27").unfilledSunday], [true, true], "an untouched Sunday is unfilled");
+    assert.deepEqual([at("so1", "2026-09-28").sunday, at("so1", "2026-09-28").unfilledSunday], [false, false], "weekdays are never Sundays");
+    assert.deepEqual([at("so2", "2026-09-27").sunday, at("so2", "2026-09-27").unfilledSunday], [true, false], "a genuine draft is kept as it is");
+    assert.deepEqual([at("rm2", "2026-09-27").sunday, at("rm2", "2026-09-27").unfilledSunday], [true, true], "scheduled-task rows alone are not an employee plan");
+    assert.deepEqual([at("so3", "2026-09-27").sunday, at("so3", "2026-09-27").unfilledSunday, at("so3", "2026-09-27").planSubmittedAt != null], [true, false, true], "a submitted Sunday plan is shown normally");
+  }
+
+  // 9f) Row order: date newest first (across month and year boundaries), then name A–Z ignoring case, then the stable id; the whole result is ordered before it is returned.
+  {
+    const f = makeFake();
+    const svc = loadService(f.prisma);
+    const rows = (await svc.getDailyPerformance(ADMIN, { from: "2026-12-30", to: "2027-01-02" })).rows;
+    const key = rows.map((r) => `${r.date}|${r.officerName}`);
+    const expectedDates = ["2027-01-02", "2027-01-01", "2026-12-31", "2026-12-30"];
+    assert.equal(JSON.stringify([...new Set(rows.map((r) => r.date))]), JSON.stringify(expectedDates), "latest date first, across the year boundary");
+    const firstDay = rows.filter((r) => r.date === "2027-01-02").map((r) => r.officerName);
+    assert.equal(JSON.stringify(firstDay), JSON.stringify([...firstDay].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))), "within a date, names A–Z ignoring case");
+    assert.equal(JSON.stringify(firstDay.slice(0, 3)), JSON.stringify(["Amit", "Bina", "Chetan"]));
+    assert.equal(JSON.stringify(key), JSON.stringify([...key].sort((a, b) => { const [da, na] = a.split("|"), [db, nb] = b.split("|"); return da! < db! ? 1 : da! > db! ? -1 : na!.toLowerCase().localeCompare(nb!.toLowerCase()); })), "every date is finished before the previous date starts");
+    const again = (await svc.getDailyPerformance(ADMIN, { from: "2026-12-30", to: "2027-01-02" })).rows;
+    assert.equal(JSON.stringify(again.map((r) => `${r.date}|${r.officerId}`)), JSON.stringify(rows.map((r) => `${r.date}|${r.officerId}`)), "the order is stable between requests");
+    const filtered = (await svc.getDailyPerformance(ADMIN, { from: "2026-12-30", to: "2027-01-02", groupId: "g1" })).rows;
+    assert.ok(filtered.length > 0 && filtered.every((r) => r.groupId === "g1") && filtered[0]!.date === "2027-01-02", "the order is kept when a State filter changes");
   }
 
   // 10) Detail authorization (403). Success paths are covered by the existing review-detail tests.

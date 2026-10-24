@@ -23,8 +23,10 @@ const payload = (rows: ReturnType<typeof row>[], over: Record<string, unknown> =
 const ev = (i: number, prev: string, next: string, actor: string) => ({ id: `e${i}`, previousDate: prev, newDate: next, actorName: actor, actorRole: "SALES_OFFICER", reason: i === 2 ? "Dealer asked for time" : null, createdAt: `2026-10-0${i + 1}T09:30:00.000Z` });
 
 const useState = (initial: unknown) => { const v = queue.length ? queue.shift() : UNSET; return [v === UNSET || v === undefined ? initial : v, () => {}]; };
+const dialogPart = ({ children }: { children?: React.ReactNode }) => <div>{children}</div>;
 const load = testLoader({
   react: { ...React, useState, useEffect: () => {} },
+  "@/components/ui/dialog": { Dialog: dialogPart, DialogContent: dialogPart, DialogDescription: dialogPart, DialogHeader: dialogPart, DialogTitle: dialogPart },
   "@tanstack/react-query": { useQuery: ({ queryKey }: { queryKey: string[] }) => ({ data: queryKey[1] === "analysis" ? analysis : queryKey[1] === "calendar" ? calendar : history, isLoading: false, error: null }) },
   "@/lib/api-client": { api: { get: async () => ({}) } },
   "@/features/labels/label-ui": { useLabel: (k: LabelKey) => text(k), Th: ({ labelKey }: { labelKey: LabelKey }) => <th>{text(labelKey)}</th> },
@@ -44,8 +46,8 @@ async function main() {
   analysis = payload([row({}), row({ key: "CALENDAR_ENTRY:t2", sourceType: "CALENDAR_ENTRY", taskId: "t2", type: "MANUAL", subtype: "SCHEME", section: "RECOVERY", dealerName: "XYZ Stores", amount: 8000, moves: 0, daysMoved: 0, originalDate: "2026-10-18", currentDate: "2026-10-18", status: "COMPLETED" })]);
   let html = view();
   const t = norm(html);
-  assert.ok(t.includes("Suresh Verma [Raigarh] CG") && t.includes("Auto · Recovery [Billing Exception]") && t.includes("test_dealer5") && t.includes("₹12,000") && t.includes("14/10/2026") && t.includes("20/10/2026") && t.includes("3 times") && t.includes("6 days later") && t.includes("Pending"), "the example row: employee, Auto · Recovery [Billing Exception], dealer, amount, original, current, count, days moved, status");
-  assert.ok(t.includes("Manual · Recovery [Scheme]") && t.includes("0 times") && t.includes("Not moved") && t.includes("Completed"), "a manual, never-moved, completed task");
+  assert.ok(t.includes("Suresh Verma [Raigarh] CG") && t.includes("Auto · Recovery [Billing Exception]") && t.includes("test_dealer5") && t.includes("₹12,000") && t.includes("14/10/2026") && t.includes("20/10/2026") && t.includes("3 times") && t.includes("6 days") && !t.includes("6 days later") && t.includes("Pending"), "the example row: employee, Auto · Recovery [Billing Exception], dealer, amount, original, current, count, days moved, status");
+  assert.ok(t.includes("Manual · Recovery [Scheme]") && t.includes("0 times") && !t.includes("Not moved") && />-<\//.test(html) && t.includes("Completed"), "a manual, never-moved, completed task");
   assert.ok(/aria-pressed="true"[^>]*>Auto</.test(html) && /aria-pressed="false"[^>]*>All</.test(html) && /aria-pressed="false"[^>]*>Manual</.test(html), "All | Auto | Manual with Auto selected");
   for (const [label, value] of [["Total Tasks", "2"], ["Completed", "1"], ["Pending", "1"], ["Overdue", "0"], ["Tasks Rescheduled", "1"], ["Total Reschedules", "3"], ["Average Reschedules per Task", "1.5"]]) assert.ok(new RegExp(`${label}\\s*[^]*?${value}`).test(t), `${label} = ${value}`);
   assert.ok(html.includes('data-testid="basis-note"') && t.includes("Original Due Date") && t.includes("Original Due Date, 01/10/2026 to 31/10/2026"), "the date meaning is stated: Original Due Date");
@@ -87,24 +89,28 @@ async function main() {
   assert.ok(/1 14\/10\/2026 \( ?Original ?\)/.test(trail) && trail.includes("4 16/10/2026") && /\( ?Current ?\)/.test(trail), "ordered trail with original / current markers");
   ok("calendar: one intensity scale, counts, legend, period vs selected totals, selected-task trail and fading");
 
-  // 4. History panel: identity, dates, totals, net movement, timeline; preview with explicit omission; partial / unavailable.
+  // 4. Both entry points render the same complete timeline, including histories longer than five moves.
   const six = [ev(0, "2026-10-14", "2026-10-15", "Suresh Verma"), ev(1, "2026-10-15", "2026-10-16", "Suresh Verma"), ev(2, "2026-10-16", "2026-10-17", "Admin"), ev(3, "2026-10-17", "2026-10-18", "Suresh Verma"), ev(4, "2026-10-18", "2026-10-19", "Suresh Verma"), ev(5, "2026-10-19", "2026-10-20", "Admin")];
-  history = { task: row({ moves: 6 }), events: six, trail: ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20"], outcomes: [], chainOk: true, distinctDates: [] };
-  const panel = (r: unknown, seeds: unknown[] = []) => { queue = seeds; return renderToStaticMarkup(<TaskHistoryPanel row={r as never} onClose={() => {}} onShowOnCalendar={() => {}} />); };
+  history = { task: row({ moves: 6 }), origin: { createdAt: "2026-10-01T04:30:00.000Z", actorName: "Admin" }, events: six, trail: ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20"], outcomes: [], chainOk: true, distinctDates: [] };
+  const panel = (r: unknown) => { queue = []; return renderToStaticMarkup(<TaskHistoryPanel row={r as never} onClose={() => {}} onShowOnCalendar={() => {}} />); };
   html = panel(row({ moves: 6 }));
   const p = norm(html);
-  assert.ok(p.includes("Auto Task - Recovery [Billing Exception]") && p.includes("Suresh Verma [Raigarh] CG") && p.includes("test_dealer5") && p.includes("Read-only history"), "task identity and read-only");
-  assert.ok(p.includes("Originally due 14/10/2026") && p.includes("20/10/2026 — Current date") && p.includes("6 times") && p.includes("6 days later than originally planned"), "original, current, total, net movement");
-  assert.ok(html.includes('data-testid="history-omitted"') && p.includes("2 moves not shown") && (html.match(/data-testid="history-step"/g) ?? []).length === 4, "a long history shows 4 of 6 steps and says 2 are not shown");
-  assert.ok(p.includes("View full history") && p.includes("Moved by Suresh Verma") && p.includes("Moved by Admin"), "who moved it");
-  html = panel(row({ moves: 6 }), [true]);
-  assert.ok(!html.includes('data-testid="history-omitted"') && (html.match(/data-testid="history-step"/g) ?? []).length === 6 && norm(html).includes("Dealer asked for time") && norm(html).includes("Show fewer steps"), "the full history shows every step, with the reason");
+  assert.ok(p.includes("Task timeline") && p.includes("Auto Task - Recovery [Billing Exception]") && p.includes("Suresh Verma") && p.includes("test_dealer5") && p.includes("Read-only history"), "same timeline heading and identity as the Performance reschedule panel");
+  assert.ok(p.includes("Task initiated") && p.includes("Original scheduled date: 14/10/2026") && p.includes("20/10/2026") && p.includes("6 times"), "initiation, original date, latest date and count");
+  assert.equal((html.match(/data-testid="review-task-move"/g) ?? []).length, 6, "every move is visible immediately");
+  assert.ok(html.includes("rounded-full border-2") && html.includes("border-l-2 border-border") && p.includes("By: Suresh Verma") && p.includes("By: Admin") && p.includes("Dealer asked for time"), "CN-style markers, line, actor names and notes");
+  assert.ok(!p.includes("View full history") && !p.includes("moves not shown") && p.includes("Show on calendar"));
   history = { task: row({ moves: 0, historyState: "UNAVAILABLE", originalVerified: false, daysMoved: null }), events: [], trail: [], outcomes: [], chainOk: true, distinctDates: [] };
-  html = panel(row({ moves: 0, historyState: "UNAVAILABLE", originalVerified: false, daysMoved: null }));
-  assert.ok(html.includes('data-testid="history-unavailable"') && norm(html).includes("Unknown — the original date is not verified") && !html.includes('data-testid="history-timeline"') && !html.includes("Show on calendar"), "unavailable: stated plainly, no invented timeline");
+  html = panel(row({}));
+  assert.ok(norm(html).includes("History unavailable:") && norm(html).includes("Initiation time was not recorded.") && !html.includes('data-testid="review-task-move"') && !html.includes("Show on calendar"), "unavailable history is explicit; no invented moves or calendar action");
   history = { task: row({ moves: 0, daysMoved: 0, currentDate: "2026-10-14" }), events: [], trail: [], outcomes: [], chainOk: true, distinctDates: [] };
-  assert.ok(panel(row({ moves: 0, daysMoved: 0, currentDate: "2026-10-14" })).includes('data-testid="history-empty"'), "a verified never-moved task says so");
-  ok("history panel: identity, dates, totals, net movement, timeline, preview omission, full view, unavailable");
+  html = panel(row({}));
+  assert.ok(norm(html).includes("Original scheduled date: 14/10/2026") && !html.includes('data-testid="review-task-move"') && !html.includes("Show on calendar"), "never-moved task still has its starting date");
+  // The simplified table wording also covers a one-day move, an earlier date, and an unknown distance.
+  analysis = payload([row({ daysMoved: 1 }), row({ key: "a", daysMoved: -5 }), row({ key: "b", daysMoved: null })]);
+  html = view();
+  assert.ok(norm(html).includes("1 day") && norm(html).includes("5 days") && norm(html).includes("Unknown") && !norm(html).includes("earlier") && !norm(html).includes("later"));
+  ok("shared complete timeline, legacy history, calendar action and compact Days Moved text");
 
   // 5. Labels / wiring (source level).
   overrides = { "tasks.summary.total": "All tasks", "tasks.col.original": "Planned for", "tasks.type.auto": "Automatic", "tasks.calendar.show": "Open calendar", "tasks.empty": "Nothing here" };
@@ -114,11 +120,13 @@ async function main() {
   overrides = {};
   const keys = (Object.keys(DEFAULT_LABELS) as LabelKey[]).filter((k) => k.startsWith("tasks."));
   for (const k of keys) assert.equal(labelMeta(k).module, "Performance Tasks", k);
-  const src = ["task-analysis-view.tsx", "reschedule-calendar.tsx", "task-history-panel.tsx", "task-text.tsx"].map((f) => readFileSync(`src/features/tasks/${f}`, "utf8")).join("\n") + readFileSync("src/features/daily-work/performance-page.tsx", "utf8");
+  const src = ["task-analysis-view.tsx", "reschedule-calendar.tsx", "task-history-panel.tsx", "task-text.tsx"].map((f) => readFileSync(`src/features/tasks/${f}`, "utf8")).join("\n") + readFileSync("src/features/daily-work/performance-page.tsx", "utf8") + readFileSync("src/features/daily-work/review-task-history.tsx", "utf8");
   const used = new Set([...src.matchAll(/["'](tasks\.[a-z_.]+)["']/g)].map((m) => m[1]!));
   for (const u of used) assert.ok(u in DEFAULT_LABELS, `${u} is registered`);
-  for (const k of keys) assert.ok(used.has(k) || readFileSync("src/features/tasks/task-analysis.server.ts", "utf8").includes(k), `${k} is used`);
-  ok(`${keys.length} labels registered under Performance Tasks, all used, customisation changes the display`);
+  // Retain retired panel Labels keys so saved administrator overrides are not deleted by a UI refactor.
+  const retired = new Set(["tasks.panel.title", "tasks.panel.close", "tasks.panel.originally_due", "tasks.panel.moved_by", "tasks.panel.current_date", "tasks.panel.net", "tasks.panel.no_moves", "tasks.panel.view_full", "tasks.panel.show_less", "tasks.panel.omitted", "tasks.panel.abandoned", "tasks.panel.abandon_reason", "tasks.panel.completed"]);
+  for (const k of keys) assert.ok(retired.has(k) || used.has(k) || readFileSync("src/features/tasks/task-analysis.server.ts", "utf8").includes(k), `${k} is used`);
+  ok(`${keys.length} labels registered under Performance Tasks; active labels used, retired overrides retained`);
   // 6. Every existing reschedule path appends its history row INSIDE the transaction that moves the date; analysis endpoints are read-only and scope-checked.
   {
     const billing = readFileSync("src/features/daily-work/billing-task.server.ts", "utf8"), cn = readFileSync("src/features/cn-requests/service.server.ts", "utf8");

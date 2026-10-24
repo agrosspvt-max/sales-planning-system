@@ -11,8 +11,7 @@ import { Eye } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { Button } from "@/components/ui/button";
-import { DateInputDMY } from "@/components/ui/date-input-dmy";
-import { Label } from "@/components/ui/label";
+import { DateRangeFilterHeader } from "@/components/ui/date-range-filter-header";
 import { Badge } from "@/components/ui/badge";
 import { RmBadge } from "@/components/ui/rm-badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -32,6 +31,7 @@ interface PerfRow {
   officerId: string; officerName: string; officerRole: Role; groupId: string | null; stateName: string | null; date: string;
   planSubmittedAt: string | null; reportSubmittedAt: string | null;
   selfRating: number | null; rmRating: number | null; submitted: boolean; reportMissed: boolean;
+  sunday?: boolean; unfilledSunday?: boolean;
   planMissed?: boolean; lateReport?: { open: "PENDING" | "APPROVED" | null; late: boolean };
   taskActivity: { tasks: number; completed: number; reschedules: number; abandoned: number; sections: Record<string, number> } | null;
 }
@@ -83,14 +83,17 @@ export function PerformancePage({ role }: { role: Role }) {
     team: useLabel("daily_work.performance.team_title"),
     company: useLabel("daily_work.performance.company_title"),
     breadcrumb: useLabel("daily_work.performance.breadcrumb"),
-    dateFrom: useLabel("daily_work.performance.date_from"),
-    dateTo: useLabel("daily_work.performance.date_to"),
+    fDate: useLabel("daily_work.performance.range.aria"),
+    rLast7: useLabel("daily_work.performance.range.last7"), rLast15: useLabel("daily_work.performance.range.last15"), rLast30: useLabel("daily_work.performance.range.last30"), rCustom: useLabel("daily_work.performance.range.custom"),
+    rStart: useLabel("daily_work.performance.range.start"), rEnd: useLabel("daily_work.performance.range.end"), rApply: useLabel("daily_work.performance.range.apply"), rCancel: useLabel("daily_work.performance.range.cancel"),
+    rApplied: useLabel("daily_work.performance.range.applied"), rSpan: useLabel("daily_work.performance.range.span"), rRequired: useLabel("daily_work.performance.range.required"), rOrder: useLabel("daily_work.performance.range.order"), rTooLarge: useLabel("daily_work.performance.range_too_large"),
     colDate: useLabel("daily_work.performance.col.date"),
     colOfficer: useLabel("daily_work.team.col.sales_officer"),
     colState: useLabel("daily_work.performance.col.state"),
     colPlan: useLabel("daily_work.performance.col.plan_submission"),
     colReport: useLabel("daily_work.performance.col.report_submission"),
     reportMissed: useLabel("daily_work.performance.report_missed"),
+    sunday: useLabel("daily_work.performance.sunday"),
     colSelf: useLabel("daily_work.team.col.self_rating"),
     colRm: useLabel("daily_work.team.col.rm_rating"),
     colAction: useLabel("daily_work.team.col.action"),
@@ -164,12 +167,6 @@ export function PerformancePage({ role }: { role: Role }) {
 
       {mode === "performance" && (
         <>
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1.5"><Label>{L.dateFrom}</Label><DateInputDMY value={from} onChange={(v) => setFrom(v || currentBusinessDate())} className="w-44" aria-label={L.dateFrom} /></div>
-        <div className="space-y-1.5"><Label>{L.dateTo}</Label><DateInputDMY value={to} onChange={(v) => setTo(v || currentBusinessDate())} className="w-44" aria-label={L.dateTo} /></div>
-
-      </div>
-
       {/* Summary cards for the selected range. */}
       <div className="grid gap-3 rounded-lg border bg-background p-4 sm:grid-cols-3 lg:grid-cols-5">
         {!isSO && <Stat label={L.sOfficers} value={data ? String(data.summary.salesOfficers) : "—"} />}
@@ -196,7 +193,11 @@ export function PerformancePage({ role }: { role: Role }) {
         <Table numbered>
           <TableHeader>
             <TableRow>
-              <TableHead>{L.colDate}</TableHead>
+              <DateRangeFilterHeader
+                label={L.colDate} ariaLabel={L.fDate} from={from} to={to} today={currentBusinessDate()}
+                onApply={(f, t) => { setFrom(f); setTo(t); }}
+                text={{ last7: L.rLast7, last15: L.rLast15, last30: L.rLast30, custom: L.rCustom, start: L.rStart, end: L.rEnd, apply: L.rApply, cancel: L.rCancel, applied: L.rApplied, span: L.rSpan, problems: { required: L.rRequired, order: L.rOrder, too_large: L.rTooLarge } }}
+              />
               {showOfficer && (
                 <ColumnFilterHeader
                   label={L.colOfficer}
@@ -231,12 +232,12 @@ export function PerformancePage({ role }: { role: Role }) {
             ) : (
               data!.rows.map((r) => (
                 <TableRow key={`${r.officerId}-${r.date}`}>
-                  <TableCell className="whitespace-nowrap">{dateText(r.date)}</TableCell>
+                  <TableCell className="whitespace-nowrap">{dateText(r.date)}{r.sunday && <div className="text-[11px] leading-tight text-muted-foreground" data-testid="sunday-label">{L.sunday}</div>}</TableCell>
                   {showOfficer && <TableCell className="font-medium">{r.officerName}</TableCell>}
                   {showState && <TableCell>{r.stateName ?? dash}</TableCell>}
-                  <TableCell className="whitespace-nowrap tabular-nums">{r.planSubmittedAt ? timeText(r.planSubmittedAt) : r.planMissed ? <Badge variant="destructive" data-testid="plan-missed">{L.reportMissed}</Badge> : timeText(null)}</TableCell>
+                  <TableCell className="whitespace-nowrap tabular-nums">{r.planSubmittedAt ? timeText(r.planSubmittedAt) : r.planMissed && !r.unfilledSunday ? <Badge variant="destructive" data-testid="plan-missed">{L.reportMissed}</Badge> : timeText(null)}</TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">
-                    {r.reportSubmittedAt ? <>{timeText(r.reportSubmittedAt)}{r.lateReport?.late && <div className="text-[11px] leading-tight text-muted-foreground" data-testid="late-label">{L.late}</div>}</> : r.reportMissed ? <>
+                    {r.reportSubmittedAt ? <>{timeText(r.reportSubmittedAt)}{r.lateReport?.late && <div className="text-[11px] leading-tight text-muted-foreground" data-testid="late-label">{L.late}</div>}</> : r.reportMissed && !r.unfilledSunday ? <>
                       <Badge variant="destructive">{L.reportMissed}</Badge>
                       {r.lateReport?.open && <div className="text-[11px] leading-tight text-muted-foreground" data-testid="late-open">{r.lateReport.open === "PENDING" ? L.pendingApproval : L.reopened}</div>}
                     </> : timeText(null)}
@@ -279,7 +280,7 @@ export function PerformancePage({ role }: { role: Role }) {
       )}
 
       {metric && data && (
-        // The drill-down uses the filters of the data the card was computed from (this page's Date From / Date To / State / officer).
+        // The drill-down uses the filters of the data the card was computed from (this page's Date column range / State / officer).
         <PerformanceMetricDetail request={{ ...metric, from: data.from, to: data.to, officerIds, groupIds, isSO, isAdmin } satisfies MetricRequest} onClose={() => setMetric(null)} />
       )}
 

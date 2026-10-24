@@ -79,6 +79,7 @@ interface Payload {
   billingTasks?: BillingTaskDto[]; billingEntryIds?: string[];
   /** Rows whose tasks were rescheduled earlier — the Rescheduled badge on the day they arrive. */
   rescheduledEntryIds?: string[];
+  rescheduleCounts?: Record<string, number>;
 }
 interface AvailableDealer { id: string; name: string; monthlyPlan: number; actual: number; pending: number }
 
@@ -674,6 +675,9 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     taskTypeNone: useLabel("daily_work.combined.none"),
     legacyOutcome: useLabel("daily_work.outcome.legacy"),
     badgeRescheduled: useLabel("daily_work.outcome.badge_rescheduled"),
+    badgeRescheduledOne: useLabel("daily_work.outcome.badge_rescheduled_count_one"),
+    badgeRescheduledMany: useLabel("daily_work.outcome.badge_rescheduled_count_many"),
+    badgeRescheduledNote: useLabel("daily_work.outcome.badge_rescheduled_count_note"),
   };
 
   const showResults = dailyWorkShowsResults(view);
@@ -848,7 +852,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                 const rowAutoTasks = (data?.materializedCnTasks ?? []).filter((task) => task.entryId === r.entryId);
                 return (
                   <TableRow data-dealer-id={r.dealerId} data-entry-id={r.entryId} data-row-kind={r.rowKind} key={r.entryId}>
-                    <TableCell className={cn("font-medium", (compactRecovery || showResults) && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} />{(data?.rescheduledEntryIds ?? []).includes(r.entryId) && <Badge variant="warning" className="ml-2" data-testid="rescheduled-row-badge">{L.badgeRescheduled}</Badge>}{!isSales && !showTaskType && billingEntrySet.has(r.entryId) && <span className="ml-2 rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-normal text-purple-700 dark:text-purple-300">{taskTypeL.auto}</span>}</TableCell>
+                    <TableCell className={cn("font-medium", (compactRecovery || showResults) && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} />{(data?.rescheduledEntryIds ?? []).includes(r.entryId) && <><Badge variant="warning" className="ml-2" data-testid="rescheduled-row-badge">{L.badgeRescheduled}</Badge>{(data?.rescheduleCounts?.[r.entryId] ?? 0) > 0 && (() => { const n = data!.rescheduleCounts![r.entryId]!; const tip = `${(n === 1 ? L.badgeRescheduledOne : L.badgeRescheduledMany).replace("{n}", String(n))}. ${L.badgeRescheduledNote}`; return <span role="img" aria-label={tip} title={tip} data-testid="rescheduled-count" className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-warning/15 px-1 text-[11px] font-semibold leading-none tabular-nums text-warning ring-1 ring-inset ring-warning/40">{n}</span>; })()}</>}{!isSales && !showTaskType && billingEntrySet.has(r.entryId) && <span className="ml-2 rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-normal text-purple-700 dark:text-purple-300">{taskTypeL.auto}</span>}</TableCell>
                     {/* Task Type — derived from the authoritative Auto Task contribution link (Daily Plan only). */}
                     {showTaskType && <TableCell data-task-type>{taskTypeCell(r.entryId)}</TableCell>}
                     {/* Monthly plan + pending are SOURCED and non-editable. */}

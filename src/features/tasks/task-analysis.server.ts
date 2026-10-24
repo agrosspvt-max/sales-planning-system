@@ -2,13 +2,14 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/http";
+import { loadTaskOrigin, type TaskOrigin } from "./task-origin.server";
 import { currentBusinessDate, SCHEME_CONVERSION_ENABLED } from "@/lib/daily-work";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { DEFAULT_LABELS, type LabelKey } from "@/features/labels/labels";
 import { getResolvedLabels } from "@/features/labels/service.server";
 import { taskSubtype, type TaskSubtype } from "@/lib/calendar";
 import {
-  dateTrail, daysMoved, deriveHistoryState, deriveTaskStatus, distinctTrailDates, isDateKey, rescheduleCalendarCounts, summarizeTasks,
+  compareListRows, dateTrail, daysMoved, deriveHistoryState, deriveTaskStatus, distinctTrailDates, isDateKey, rescheduleCalendarCounts, summarizeTasks,
   TASK_STATUSES, type DateBasis, type HistoryState, type TaskStatus, type TaskSummary, type TaskTypeKind,
 } from "@/lib/task-analysis";
 
@@ -295,28 +296,38 @@ async function population(scope: TaskScope, f: TaskFilters, today: string): Prom
   let rows: TaskRow[];
   if (f.basis === "ABANDONED_ON") {
     // Tasks abandoned (a submitted Abandon outcome) on a business date in the period, for the in-scope employees.
-    const gone = ownerIds.length === 0 ? [] : await prisma.$queryRaw<{ unitType: string; unitId: string }[]>(Prisma.sql`
-      SELECT u."unitType", u."unitId" FROM "DailyTaskOutcome" u
+    const gone = ownerIds.length === 0 ? [] : await prisma.$queryRaw<{ unitType: string; unitId: string; last: string }[]>(Prisma.sql`
+      SELECT u."unitType", u."unitId", MAX(((u."committedAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::date)::text AS "last" FROM "DailyTaskOutcome" u
       WHERE u."officerId" IN (${Prisma.join(ownerIds)}) AND u."outcome" = 'ABANDONED' AND u."state" = 'COMMITTED'
-        AND ((u."committedAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::date BETWEEN ${f.from}::date AND ${f.to}::date`);
+        AND ((u."committedAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')::date BETWEEN ${f.from}::date AND ${f.to}::date GROUP BY u."unitType", u."unitId"`);
     const keys = new Set(gone.map((g) => `${g.unitType === "MANUAL_ROW" ? "DAILY_WORK_ROW" : g.unitType}:${g.unitId}`));
     const raw = gone.length ? await loadRaw(null, { mode: "ids", ids: gone.map((g) => g.unitId) }) : [];
     rows = await hydrate(raw.filter((r) => keys.has(`${r.sourceType}:${r.taskId}`)), scope, today, new Map([...keys].map((k) => [k, 1])));
+    const lastGone = new Map(gone.map((g) => [`${g.unitType === "MANUAL_ROW" ? "DAILY_WORK_ROW" : g.unitType}:${g.unitId}`, g.last]));
+    for (const r of rows) listDate.set(r, lastGone.get(r.key) ?? null);
   } else if (f.basis === "RESCHEDULED_ON") {
     // The task population is "tasks with a date change MADE in the period" (by the business date of the change), for the in-scope employees.
-    const moved = ownerIds.length === 0 ? [] : await prisma.$queryRaw<{ sourceType: string; sourceId: string; n: number }[]>(Prisma.sql`
-      SELECT e."sourceType", e."sourceId", COUNT(*)::int AS "n" FROM "TaskRescheduleEvent" e
+    const moved = ownerIds.length === 0 ? [] : await prisma.$queryRaw<{ sourceType: string; sourceId: string; n: number; last: string }[]>(Prisma.sql`
+      SELECT e."sourceType", e."sourceId", COUNT(*)::int AS "n", MAX(${ISTDATE})::text AS "last" FROM "TaskRescheduleEvent" e
       WHERE e."ownerId" IN (${Prisma.join(ownerIds)}) AND ${ISTDATE} BETWEEN ${f.from}::date AND ${f.to}::date GROUP BY e."sourceType", e."sourceId"`);
     const periodMoves = new Map(moved.map((m) => [`${m.sourceType}:${m.sourceId}`, m.n]));
     const raw = moved.length ? await loadRaw(null, { mode: "ids", ids: moved.map((m) => m.sourceId) }) : [];
     rows = (await hydrate(raw.filter((r) => periodMoves.has(`${r.sourceType}:${r.taskId}`)), scope, today, periodMoves));
+    const lastMove = new Map(moved.map((m) => [`${m.sourceType}:${m.sourceId}`, m.last]));
+    for (const r of rows) listDate.set(r, lastMove.get(r.key) ?? null);
   } else {
     rows = await hydrate(await loadRaw(ownerIds, { mode: "original", from: f.from, to: f.to }), scope, today);
+    for (const r of rows) listDate.set(r, r.originalDate);
   }
   return rows.filter((r) => (f.type === "ALL" || r.type === f.type) && (!f.section || r.section === f.section) && (!f.source || r.subtype === f.source) && (!f.status || r.status === f.status));
 }
 
-const order = (a: TaskRow, b: TaskRow) => a.originalDate.localeCompare(b.originalDate) || a.ownerName.localeCompare(b.ownerName) || a.key.localeCompare(b.key);
+/**
+ * The date each listed task is ordered by — the date the selected basis filters on: the original scheduled date (Original Due Date), the latest date change made in the period
+ * (Rescheduled On) or the latest abandonment made in the period (Abandoned On). Kept beside the rows so the payload shape is unchanged; a task without one sorts last.
+ */
+const listDate = new WeakMap<TaskRow, string | null>();
+const order = (a: TaskRow, b: TaskRow) => compareListRows({ date: listDate.get(a) ?? null, name: a.ownerName, ownerId: a.ownerId, key: a.key }, { date: listDate.get(b) ?? null, name: b.ownerName, ownerId: b.ownerId, key: b.key });
 
 export interface TaskAnalysisPayload {
   filters: Omit<TaskFilters, "page" | "pageSize">; summary: TaskSummary; rows: TaskRow[]; page: number; pageSize: number; totalRows: number; totalPages: number;
@@ -379,7 +390,7 @@ export async function getRescheduleCalendar(scope: TaskScope, f: TaskFilters, mo
 export interface TaskHistoryEvent { id: string; previousDate: string; newDate: string; actorName: string; actorRole: string; reason: string | null; createdAt: string }
 /** A SUBMITTED Daily Report outcome of this task: how it ended (or was moved), with who / when and, for an abandonment, the reason. */
 export interface TaskOutcomeEvent { outcome: "COMPLETED" | "RESCHEDULED" | "ABANDONED"; workDate: string; actualAmount: number | null; nextDate: string | null; reason: string | null; reasonCode: string | null; committedAt: string; committedByName: string | null }
-export interface TaskHistoryPayload { task: TaskRow; events: TaskHistoryEvent[]; outcomes: TaskOutcomeEvent[]; trail: string[]; chainOk: boolean; distinctDates: string[] }
+export interface TaskHistoryPayload { origin?: TaskOrigin | null; task: TaskRow; events: TaskHistoryEvent[]; outcomes: TaskOutcomeEvent[]; trail: string[]; chainOk: boolean; distinctDates: string[] }
 
 /** Read-only. The task must belong to an employee inside the caller's authorized population (anything else looks missing). */
 export async function getTaskHistory(scope: TaskScope, sourceType: string, taskId: string): Promise<TaskHistoryPayload> {
@@ -398,7 +409,23 @@ export async function getTaskHistory(scope: TaskScope, sourceType: string, taskI
     SELECT u."outcome", u."workDate"::text AS "workDate", u."actualAmount"::text AS "actualAmount", u."nextDate"::text AS "nextDate", u."reason", u."reasonCode", u."committedAt", u."committedByName"
     FROM "DailyTaskOutcome" u WHERE u."state" = 'COMMITTED' AND ((u."unitType" = ${unitType} AND u."unitId" = ${taskId}) OR (u."continuedAsType" = ${sourceType} AND u."continuedAsId" = ${taskId}))
     ORDER BY u."committedAt", u."id"`)).map((o) => ({ ...o, actualAmount: o.actualAmount == null ? null : Number(o.actualAmount), committedAt: o.committedAt.toISOString() }));
-  return { task, events, outcomes, trail, chainOk, distinctDates: distinctTrailDates(trail) };
+  const origin = await loadTaskOrigin(sourceType, taskId);
+  return { task, origin, events, outcomes, trail, chainOk, distinctDates: distinctTrailDates(trail) };
+}
+
+/**
+ * Read-only descriptors (dealer / market / description / section / history availability) of the given tasks, keyed `<sourceType>:<taskId>`, in ONE batch. Used by the Daily Work review dialog
+ * to describe tasks that have moved: it looks tasks up by their stable identity, not by their current Daily Work link or date. A task that can no longer be found is simply absent.
+ */
+export async function describeTasks(tasks: readonly { sourceType: string; sourceId: string }[]): Promise<Map<string, TaskRow>> {
+  const out = new Map<string, TaskRow>();
+  const ids = [...new Set(tasks.map((t) => t.sourceId))];
+  if (ids.length === 0) return out;
+  const wanted = new Set(tasks.map((t) => `${t.sourceType}:${t.sourceId}`));
+  const raw = (await loadRaw(null, { mode: "ids", ids })).filter((r) => wanted.has(`${r.sourceType}:${r.taskId}`));
+  const rows = await hydrate(raw, { population: [], officers: [], states: [] }, currentBusinessDate());
+  for (const r of rows) out.set(r.key, r);
+  return out;
 }
 
 /* ------------------------------------------------ compact Task Activity for the Performance table ------------------------------------------------ */

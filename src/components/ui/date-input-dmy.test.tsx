@@ -56,10 +56,11 @@ assert.ok(!/new Date|Date\.|toLocale|Intl\./.test(src), "string handling only â€
   view().picker.onChange({ target: { value: "" } }); assert.equal(emitted.length, count, "an empty pick is ignored")
 }
 
-// Wiring: Date From / Date To use it on every Performance view (My / Team / Company share performance-page; the RM team page has its own filters); state and API stay ISO.
+// Wiring: the Date column's Custom Range uses it on every Performance view (My / Team / Company share performance-page via DateRangeFilterHeader); state and API stay ISO.
 for (const f of ["src/features/daily-work/performance-page.tsx"]) {
   const page = readFileSync(f, "utf8");
-  assert.ok(page.includes("<DateInputDMY value={from} onChange={(v) => setFrom(v || currentBusinessDate())}") && page.includes("<DateInputDMY value={to} onChange={(v) => setTo(v || currentBusinessDate())}"), `${f}: Date From / Date To`);
+  assert.ok(page.includes("<DateRangeFilterHeader") && page.includes("onApply={(f, t) => { setFrom(f); setTo(t); }}"), `${f}: Date column range filter`);
+  assert.ok(readFileSync("src/components/ui/date-range-filter-header.tsx", "utf8").includes("<DateInputDMY value={draftFrom}"), `${f}: Custom Range reuses the shared DD/MM/YYYY field`);
   assert.ok(!/type="date"/.test(page), `${f}: no native date input left`);
   assert.ok(/useState\(currentBusinessDate\)/.test(page) && /new URLSearchParams\(\{ from, to \}\)|query = new URLSearchParams\(\{ from, to \}\)/.test(page), `${f}: default range and the from/to API parameters are unchanged (ISO)`);
 }

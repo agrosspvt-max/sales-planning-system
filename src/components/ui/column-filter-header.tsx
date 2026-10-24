@@ -46,6 +46,7 @@ export function ColumnFilterHeader({
   searchable = false,
   searchPlaceholder = "Search…",
   noMatchText = "No matches",
+  activeText,
 }: {
   label: string;
   ariaLabel: string;
@@ -60,6 +61,8 @@ export function ColumnFilterHeader({
   searchable?: boolean;
   searchPlaceholder?: string;
   noMatchText?: string;
+  /** Single-choice columns: the chosen option's text, shown as a compact blue line beneath the heading while a filter is active (the heading then omits its "(n)" count). */
+  activeText?: string;
 }) {
   const active = selected.length > 0;
 
@@ -72,7 +75,7 @@ export function ColumnFilterHeader({
             aria-label={ariaLabel}
             className={`inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted ${active ? "text-primary" : ""}`}
           >
-            {filterHeaderLabel(label, selected.length)}
+            {activeText === undefined ? filterHeaderLabel(label, selected.length) : label}
             <ChevronDown className="h-3.5 w-3.5" />
           </button>
         </DropdownMenuTrigger>
@@ -82,6 +85,7 @@ export function ColumnFilterHeader({
           />
         </DropdownMenuContent>
       </DropdownMenu>
+      {active && activeText !== undefined && <span className="block max-w-[10rem] break-words px-1 text-[11px] font-normal normal-case leading-tight text-primary" data-testid="column-filter-active">{activeText}</span>}
     </TableHead>
   );
 }

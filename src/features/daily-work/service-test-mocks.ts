@@ -99,10 +99,12 @@ export function dailyWorkServiceInfrastructureMocks(prisma: TestDb) {
       commitTaskOutcomes: async () => ({ completed: 0, rescheduled: 0, abandoned: 0 }),
       readRowUnits: async () => new Map(),
       rescheduledEntryIds: async () => [],
+      rescheduleCountsByEntry: async () => ({}),
       writeOutcomeDrafts: async () => 0,
       writeOutcomeDraftBatch: async () => 0,
     },
     // Performance → Task Activity (own suites: tasks/task-analysis.test.ts + the real-database integration); inert here.
+    "./reschedule-review.server": { loadReschedulingReview: async () => ({ rows: {}, tasks: [], actions: [] }) },
     "@/features/tasks/task-analysis.server": { getTaskActivity: async () => new Map() },
     // Dealer DISPLAY-name layer — stubbed to "no aliases" so tests keep asserting the real dealer names.
     "@/lib/dealer-display-name.server": {

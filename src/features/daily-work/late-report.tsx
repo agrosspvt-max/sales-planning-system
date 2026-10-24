@@ -74,7 +74,7 @@ export function OutstandingReportPanel({ outstanding, onOpenReport, onChanged }:
   const qc = useQueryClient();
   const statusText = useLateStatusText();
   const L = {
-    title: useLabel("daily_work.late.blocked_title"), body: useLabel("daily_work.late.blocked_body"), date: useLabel("daily_work.late.report_date"), deadline: useLabel("daily_work.late.original_deadline"),
+    title: useLabel("daily_work.late.blocked_title"), date: useLabel("daily_work.late.report_date"), deadline: useLabel("daily_work.late.original_deadline"),
     request: useLabel("daily_work.late.request_button"), openReport: useLabel("daily_work.late.open_report"), sent: useLabel("daily_work.late.sent"), history: useLabel("daily_work.late.history"),
     requestedAt: useLabel("daily_work.late.requested_at"), decidedBy: useLabel("daily_work.late.decided_by"), rejection: useLabel("daily_work.late.rejection_reason"), readOnly: useLabel("daily_work.late.read_only_note"),
     approvedNote: useLabel("daily_work.late.approved_note"),
@@ -83,7 +83,6 @@ export function OutstandingReportPanel({ outstanding, onOpenReport, onChanged }:
   return (
     <div role="alert" className="space-y-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm" data-testid="outstanding-report">
       <div className="font-semibold">{L.title}</div>
-      <p className="text-muted-foreground">{L.body.replace("{date}", formatDMY(outstanding.date))}</p>
       <dl className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
         <div><dt className="text-xs text-muted-foreground">{L.date}</dt><dd className="font-medium tabular-nums" data-testid="outstanding-date">{formatDMY(outstanding.date)}</dd></div>
         <div><dt className="text-xs text-muted-foreground">{L.deadline}</dt><dd className="font-medium tabular-nums" data-testid="outstanding-deadline">{formatDateTimeDMY(outstanding.deadline)}</dd></div>

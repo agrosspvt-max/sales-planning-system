@@ -340,7 +340,7 @@ async function main() {
       queryOverride = { dealers: rows, billingEntryIds: ["e-1", "e-2"], billingTasks: [
         { taskId: "bt1", entryId: "e-1", dealerId: "same", dealerName: "test_dealer5", amount: 12444, taskDate: "2026-10-14", promisedDate: "2026-10-14" },
         { taskId: "bt2", entryId: "e-2", dealerId: "same", dealerName: "test_dealer5", amount: 11111, taskDate: "2026-10-14", promisedDate: "2026-10-14" },
-      ], rescheduledEntryIds: ["e-1", "e-2"] };
+      ], rescheduledEntryIds: ["e-1", "e-2"], rescheduleCounts: { "e-1": 2, "e-2": 11 } };
       selects.length = 0;
       const h = render("RECOVERY", "PLAN", false);
       const trs = [...h.matchAll(/<tr[^>]*data-entry-id="([^"]+)"[^>]*>(.*?)<\/tr>/g)];
@@ -349,6 +349,8 @@ async function main() {
       assert.deepEqual(trs.map((t) => (t[2]!.match(/lucide-calendar-clock/g) ?? []).length), [1, 1, 0], "each task row has its OWN reschedule button; the manual row has none");
       assert.deepEqual(trs.map((t) => t[2]!.includes("lucide-trash2")), [false, false, true], "only the manual row can be removed");
       assert.deepEqual(trs.map((t) => (t[2]!.match(/rescheduled-row-badge/g) ?? []).length), [1, 1, 0], "the Rescheduled badge is per task row");
+      assert.deepEqual(trs.map((t) => /data-testid="rescheduled-count"[^>]*>(\d+)</.exec(t[2]!)?.[1] ?? null), ["2", "11", null], "the count circle is per task row (two digits fit) and absent on a row that was never moved");
+      assert.ok(/aria-label="Rescheduled 2 times\. [^"]*"/.test(trs[0]![2]!) && /aria-label="Rescheduled 11 times/.test(trs[1]![2]!), "accessible label / tooltip with the count and the recorded-history note");
       assert.deepEqual(trs.map((t) => /data-task-type="true">(\w+)</.exec(t[2]!)?.[1]), ["Auto", "Auto", "Manual"]);
       // Summary: ONE dealer, THREE tasks, Today's Plan 28,555 — dealer-level figures are not multiplied.
       const counts = (h.match(/data-testid="combined-counts">([^<]*)</) ?? [])[1];

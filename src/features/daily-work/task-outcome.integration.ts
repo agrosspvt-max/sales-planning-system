@@ -40,7 +40,7 @@ const serviceMocks = {
   "@/features/planning/monthly.server": { getMonthly: async () => ({ monthlyMode: "PACK_SIZE", months: [], dealers: [] }) },
   "@/features/planning/monthly-plan.server": { resolveAddableSeasonalPlanId: async () => null },
   "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], countUnconfirmedMaterializedTasks: async () => 0, latestCnRequestStatusByDealer: async () => new Map() },
-  "@/lib/recovery-config": { getAutoTasksEnabled: async () => false, getCalendarEnabled: async () => true },
+  "@/lib/recovery-config": { getAutoTasksEnabled: async () => false, getCalendarEnabled: async () => true, getAppointmentPartyPlanningEnabled: async () => false },
   "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (r: unknown[]) => r, dealerDisplayName: (n: string) => n },
   "./auto-task-materialization.server": { materializeDueDailyWorkTasks: async () => ({}), materializeDueDailyWorkTasksInTransaction: async () => ({}), autoTasksApplyToRole: () => true },
 };
@@ -266,6 +266,8 @@ async function main() {
   const b1 = await rowOf(so1, "SALES", D1, "B");
   eq([b1.tasks!.length, b1.tasks![0]!.outcome, b1.tasks![0]!.unitType, b1.tasks![0]!.unitId, b1.tasks![0]!.rescheduledFrom], [1, null, "CALENDAR_ENTRY", cont.id, D], "a fresh outcome is required; same task identity; Rescheduled-from badge data");
   assert.ok((await svc.getDailyWork(so1, "SALES", D1, undefined, "REPORT")).rescheduledEntryIds.includes(b1.entryId), "the row carries the Rescheduled badge");
+  eq((await svc.getDailyWork(so1, "SALES", D1, undefined, "REPORT")).rescheduleCounts[b1.entryId], 1, "one recorded move → the count circle shows 1");
+  eq((await svc.getDailyWork(so1, "SALES", D1, undefined, "REPORT")).rescheduleCounts[b1.entryId], 1, "a refresh / re-read does not change it");
 
   // reschedule again (from the calendar task itself), twice over
   await post(so1, "SALES", D1, b1, { outcome: "RESCHEDULED", nextDate: day(3) });
@@ -279,6 +281,7 @@ async function main() {
   await svc.submitDailyWorkDay(so1, { workDate: D3 });
   const b3 = await rowOf(so1, "SALES", D3, "B");
   eq([b3.tasks![0]!.unitId, b3.tasks![0]!.rescheduledFrom], [cont.id, D1]);
+  eq((await svc.getDailyWork(so1, "SALES", D3, undefined, "REPORT")).rescheduleCounts[b3.entryId], 2, "the same task moved twice → 2, carried to its new date and Daily Work row");
   // Abandon on the final day: reason required, then the task never comes back
   await post(so1, "SALES", D3, b3, { outcome: "ABANDONED", reasonCode: "OTHER", reason: "...................................." }); // a draft may hold an incomplete choice
   assert.equal(await code(svc.submitDailyReport(so1, { workDate: D3, selfRating: 7 })), 422, "a meaningless reason blocks the report");
@@ -293,6 +296,31 @@ async function main() {
     eq(await prisma.dailyWorkEntry.count({ where: { workDate: new Date(`${day(n)}T00:00:00Z`), section: "SALES" } }), 0, "an abandoned task is never scheduled again");
   }
   eq((await prisma.taskRescheduleEvent.findMany({ where: { sourceId: cont.id }, orderBy: { createdAt: "asc" } })).map((e) => [dateOf(e.previousDate), dateOf(e.newDate)]), [[D, day(1)], [day(1), day(3)]], "every reschedule is kept: previous / next date");
+  /* ---- Performance → View: the review detail follows the task by its stable identity across the successive moves (read-only) ---- */
+  {
+    const reviewOf = async (date: string) => svc.getDailyWorkReviewDetail(so1, "so1", date);
+    const eventsBefore = await prisma.taskRescheduleEvent.count(), outcomesBefore = await prisma.dailyTaskOutcome.count(), entriesBefore = await prisma.dailyWorkEntry.count();
+    const r0 = await reviewOf(D), rowB0 = r0.sales.dealers.find((d) => d.dealerId === "B")!;
+    const m0 = r0.rescheduling.rows[rowB0.entryId]!;
+    eq([m0.length, m0[0]!.from, m0[0]!.to, m0[0]!.count], [1, null, day(1), 2], "the original date keeps the evidence that the manual task moved to the next day (continued as a Calendar task); lifetime count 2");
+    eq([Number(rowB0.todaysPlan), Number(rowB0.todaysActual ?? 0)], [2000, 0], "the saved planned amount and a 0 actual are untouched, and a reschedule implies no completion");
+    const r1 = await reviewOf(day(1)), m1 = Object.values(r1.rescheduling.rows).flat();
+    eq(m1.map((m) => [m.key, m.from, m.to, m.count]), [[`CALENDAR_ENTRY:${cont.id}`, D, day(3), 2]], "the middle date shows both the arrival and the onward move");
+    const r3 = await reviewOf(day(3)), m3 = Object.values(r3.rescheduling.rows).flat();
+    eq(m3.map((m) => [m.from, m.to, m.count]), [[day(1), null, 2]], "the last date shows only the arrival from the previous date");
+    eq(Object.values(r0.rescheduling.rows).flat().length + r0.rescheduling.tasks.length, 1, "the task appears once on the original date (table OR history-only, never both)");
+    // Actions are keyed by the day the change was MADE (real time here), and agree with Performance's reschedule figure for that day.
+    const rs = load<typeof import("./reschedule-review.server")>("src/features/daily-work/reschedule-review.server.ts");
+    const madeToday = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    const todays = await rs.loadReschedulingReview("so1", madeToday, []);
+    const dbCount = await prisma.taskRescheduleEvent.count({ where: { ownerId: "so1" } });
+    eq(todays.actions.length, dbCount, "every recorded date change made that day is listed (two moves of one task → two events)");
+    eq(todays.actions.map((a) => [a.previousDate, a.newDate]), [[D, day(1)], [day(1), day(3)]], "previous and new scheduled dates per event");
+    assert.ok(todays.actions.every((a) => a.actorName && a.createdAt), "the person and the time are present");
+    eq((await rs.loadReschedulingReview("so1", day(1), [])).actions.length, 0, "a scheduled date on which nothing was changed lists no actions");
+    eq(await code(svc.getDailyWorkReviewDetail(so2, "so1", D)), 403, "another Sales Officer cannot open the detail");
+    eq([await prisma.taskRescheduleEvent.count(), await prisma.dailyTaskOutcome.count(), await prisma.dailyWorkEntry.count()], [eventsBefore, outcomesBefore, entriesBefore], "opening the detail wrote nothing");
+  }
   const fin = await counts();
   eq([fin.receipts, fin.exceptions, fin.tasks], [0, 0, 0], "no finance record was created by any outcome");
   /* ---- Performance → Tasks agrees: one task (deduplicated), Abandoned as its own status, full timeline ---- */
@@ -305,6 +333,15 @@ async function main() {
   const abandonedRows = plain(await ana.getTaskAnalysis(scope as never, { ...base, status: "ABANDONED" })).rows;
   eq(abandonedRows.map((r: { section: string }) => r.section).sort(), ["RECOVERY", "SALES"], "the Abandoned status filter finds exactly the two abandoned tasks (Recovery row C, Sales task B)");
   eq([abandonedRows.every((r: { status: string }) => r.status === "ABANDONED"), all.summary.abandoned], [true, 2], "Abandoned is its own status and summary figure");
+  {
+    const dates = all.rows.map((r: { originalDate: string }) => r.originalDate);
+    eq(dates, [...dates].sort().reverse(), "Original Due Date basis: newest scheduled date first");
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    const moved = plain(await ana.getTaskAnalysis(scope as never, { ...base, from: today, to: today, basis: "RESCHEDULED_ON" as never, status: "" }));
+    const gone = plain(await ana.getTaskAnalysis(scope as never, { ...base, from: today, to: today, basis: "ABANDONED_ON" as never, status: "" }));
+    eq([moved.rows.length > 0, gone.rows.length > 0, moved.totalRows === moved.rows.length], [true, true, true], "the Rescheduled On and Abandoned On lists load with their event-date ordering and keep one row per task");
+    eq(new Set(moved.rows.map((r: { key: string }) => r.key)).size, moved.rows.length, "no task is duplicated when several events match");
+  }
   eq(all.rows.filter((r: { taskId: string }) => r.taskId === cont.id).length, 1, "the repeatedly rescheduled task is ONE row, not one per occurrence");
   const hist = plain(await ana.getTaskHistory(scope as never, "CALENDAR_ENTRY", cont.id));
   eq([hist.events.length, hist.outcomes.map((o: { outcome: string }) => o.outcome)], [2, ["RESCHEDULED", "RESCHEDULED", "ABANDONED"]], "history: both reschedules, then the abandonment (reason, actor, time kept)");

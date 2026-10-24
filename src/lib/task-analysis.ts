@@ -128,3 +128,13 @@ export function intensityLevel(count: number, max: number): number {
   if (count <= 0 || max <= 0) return 0;
   return Math.min(5, Math.max(1, Math.ceil((count / max) * 5)));
 }
+
+
+/**
+ * List order for Performance rows and Tasks: date newest first (ISO YYYY-MM-DD strings, never display text; a missing date sorts last), then employee name A–Z ignoring case,
+ * then stable identifiers (owner id, then the record key) so equal names or several records of one employee on one date never reorder between requests.
+ */
+export function compareListRows(a: { date: string | null; name: string; ownerId: string; key: string }, b: { date: string | null; name: string; ownerId: string; key: string }): number {
+  if (a.date !== b.date) { if (a.date === null) return 1; if (b.date === null) return -1; return a.date < b.date ? 1 : -1; }
+  return a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.name.localeCompare(b.name) || a.ownerId.localeCompare(b.ownerId) || a.key.localeCompare(b.key);
+}

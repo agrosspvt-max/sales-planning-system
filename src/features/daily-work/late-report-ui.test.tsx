@@ -34,7 +34,10 @@ const text = (h: string) => h.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim
 const outstanding = { date: "2026-10-19", deadline: "2026-10-19T18:30:00.000Z", requests: [], canRequest: true };
 let html = render(<OutstandingReportPanel outstanding={outstanding} onOpenReport={() => undefined} onChanged={() => undefined} />);
 assert.ok(html.includes('data-testid="outstanding-date">19/10/2026') && /data-testid="outstanding-deadline">20\/10\/2026/.test(html), "work date and original deadline (IST)");
-assert.ok(text(html).includes("must be submitted before a new Daily Plan can be created") && text(html).includes("Request Late Report Submission"), "explanation + the request button");
+assert.ok(text(html).includes("Request Late Report Submission"), "the request button");
+assert.ok(!text(html).includes("was not submitted before its deadline") && !text(html).includes("must be submitted before a new Daily Plan") && !html.includes("Your saved report answers are kept"), "the extra missed-report paragraph is gone");
+assert.ok(!("daily_work.late.blocked_body" in DEFAULT_LABELS), "its label is no longer registered");
+assert.ok(!html.includes("<p ") && html.includes("<dl "), "no empty paragraph or spacing is left; the date/deadline list follows the heading");
 // The same panel is actionable within Daily Report, where an Open report link would lead to the current screen.
 html = render(<OutstandingReportPanel outstanding={outstanding} onChanged={() => undefined} />);
 assert.ok(buttons.some((b) => b.children === "Request Late Report Submission"), "the Report view can request reopening too");

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { CalendarDays } from "lucide-react";
@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
+import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { Th, useLabel } from "@/features/labels/label-ui";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { RescheduleCalendar, type SelectedTask } from "./reschedule-calendar";
@@ -36,6 +37,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
   const L = {
     auto: useLabel("tasks.type.auto"), manual: useLabel("tasks.type.manual"), all: useLabel("tasks.type.all"), basis: useLabel("tasks.filter.basis"), bOriginal: useLabel("tasks.basis.original"), bMoved: useLabel("tasks.basis.rescheduled_on"),
     from: useLabel("tasks.filter.from"), to: useLabel("tasks.filter.to"), allStates: useLabel("daily_work.performance.filter.all_states"), state: useLabel("daily_work.performance.col.state"),
+    colEmployee: useLabel("tasks.col.employee"), colStatus: useLabel("tasks.col.status"), search: useLabel("tasks.filter.search"), noMatch: useLabel("tasks.filter.no_match"), noOptions: useLabel("tasks.filter.no_options"),
     employee: useLabel("tasks.filter.employee"), allEmployees: useLabel("tasks.filter.all_employees"), section: useLabel("tasks.filter.section"), allSections: useLabel("tasks.filter.all_sections"),
     source: useLabel("tasks.filter.source"), allSources: useLabel("tasks.filter.all_sources"), status: useLabel("tasks.filter.status"), allStatuses: useLabel("tasks.filter.all_statuses"),
     noteOriginal: useLabel("tasks.basis.note_original"), noteMoved: useLabel("tasks.basis.note_rescheduled"), range: useLabel("tasks.error.range"),
@@ -58,6 +60,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
   const toggleCalendar = () => { const next = !calendarOpen; setCalendarOpen(next); writePref(next); };
   const [selected, setSelected] = useState<SelectedTask | null>(null);
   const [panel, setPanel] = useState<TaskRow | null>(null);
+  const historyTrigger = useRef<HTMLButtonElement | undefined>(undefined);
 
   const { data, isLoading, error } = useQuery<TaskAnalysisPayload>({
     queryKey: ["tasks", "analysis", taskQueryString(filters, "table")],
@@ -70,6 +73,8 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
   const showTrail = async (r: TaskRow) => { const h = await api.get<TaskHistoryPayload>(`/api/tasks/history/${r.sourceType}/${encodeURIComponent(r.taskId)}`); showOn(r, h); };
   const showOn = (r: TaskRow, h: TaskHistoryPayload) => { setSelected({ key: r.key, label: headingOf(r), trail: h.trail }); if (!calendarOpen) { setCalendarOpen(true); writePref(true); } setPanel(null); };
 
+  /** The column dropdowns are single-choice: toggling the chosen option (or "All") clears it; otherwise the newly toggled option becomes the choice. */
+  const chosen = (current: string, next: string[]) => next.find((v) => v !== current) ?? "";
   const sectionOptions = [["SALES", L.secSALES], ["RECOVERY", L.secRECOVERY], ["APPOINTMENT", L.secAPPOINTMENT], ["VISITS", L.secVISITS], ["OTHERS", L.secOTHERS]] as const;
   const sourceOptions = [["REGULAR", L.subREGULAR], ["SCHEME", L.subSCHEME], ["BILLING_EXCEPTION", L.subBILLING], ["CN_REQUEST", L.subCN]] as const;
   const statusOptions = [["COMPLETED", L.stCompleted], ["PENDING", L.stPending], ["OVERDUE", L.stOverdue], ["ABANDONED", L.stAbandoned], ["CANCELLED", L.stCancelled]] as const;
@@ -99,14 +104,8 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
             <NativeSelect className="w-44" aria-label={L.state} value={filters.groupId} onChange={(e) => set({ groupId: e.target.value, officerId: "", focusDate: null })} options={[{ value: "", label: L.allStates }, ...(data?.states ?? []).map((s) => ({ value: s.id, label: s.name }))]} />
           </div>
         )}
-        {!isSO && (
-          <div className="space-y-1.5"><Label>{L.employee}</Label>
-            <NativeSelect className="w-52" aria-label={L.employee} value={filters.officerId} onChange={(e) => set({ officerId: e.target.value, focusDate: null })} options={[{ value: "", label: L.allEmployees }, ...(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))]} />
-          </div>
-        )}
         <div className="space-y-1.5"><Label>{L.section}</Label><NativeSelect className="w-44" aria-label={L.section} value={filters.section} onChange={(e) => set({ section: e.target.value, focusDate: null })} options={[{ value: "", label: L.allSections }, ...sectionOptions.map(([value, label]) => ({ value, label }))]} /></div>
         <div className="space-y-1.5"><Label>{L.source}</Label><NativeSelect className="w-44" aria-label={L.source} value={filters.source} onChange={(e) => set({ source: e.target.value, focusDate: null })} options={[{ value: "", label: L.allSources }, ...sourceOptions.map(([value, label]) => ({ value, label }))]} /></div>
-        <div className="space-y-1.5"><Label>{L.status}</Label><NativeSelect className="w-40" aria-label={L.status} value={filters.status} onChange={(e) => set({ status: e.target.value, focusDate: null })} options={[{ value: "", label: L.allStatuses }, ...statusOptions.map(([value, label]) => ({ value, label }))]} /></div>
       </div>
       {rangeBad ? <p role="alert" className="text-sm text-destructive">{L.range}</p> : <p className="text-sm text-muted-foreground" data-testid="basis-note"><Badge variant="secondary" className="mr-2">{basisLabel}</Badge>{note}</p>}
 
@@ -141,8 +140,13 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
         <Table numbered numberStart={(data ? (data.page - 1) * data.pageSize : 0) + 1}>
           <TableHeader>
             <TableRow>
-              <Th labelKey="tasks.col.employee" /><Th labelKey="tasks.col.task" /><Th labelKey="tasks.col.detail" /><Th labelKey="tasks.col.planned" /><Th labelKey="tasks.col.original" /><Th labelKey="tasks.col.current" />
-              <Th labelKey="tasks.col.reschedules" /><Th labelKey="tasks.col.days_moved" /><Th labelKey="tasks.col.status" /><Th labelKey="tasks.col.action" />
+              {isSO ? <Th labelKey="tasks.col.employee" /> : (
+                <ColumnFilterHeader label={L.colEmployee} ariaLabel={L.employee} options={(data?.officers ?? []).map((o) => ({ value: o.id, label: o.name }))} selected={filters.officerId ? [filters.officerId] : []}
+                  onChange={(next) => set({ officerId: chosen(filters.officerId, next), focusDate: null })} allLabel={L.allEmployees} searchable searchPlaceholder={L.search} noMatchText={L.noMatch} emptyText={L.noOptions}
+                  activeText={(data?.officers ?? []).find((o) => o.id === filters.officerId)?.name ?? filters.officerId} />
+              )}<Th labelKey="tasks.col.task" /><Th labelKey="tasks.col.detail" /><Th labelKey="tasks.col.planned" /><Th labelKey="tasks.col.original" /><Th labelKey="tasks.col.current" />
+              <Th labelKey="tasks.col.reschedules" /><Th labelKey="tasks.col.days_moved" /><ColumnFilterHeader label={L.colStatus} ariaLabel={L.status} options={statusOptions.map(([value, label]) => ({ value, label }))} selected={filters.status ? [filters.status] : []}
+                onChange={(next) => set({ status: chosen(filters.status, next), focusDate: null })} allLabel={L.allStatuses} activeText={statusOptions.find(([v]) => v === filters.status)?.[1] ?? filters.status} /><Th labelKey="tasks.col.action" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -158,7 +162,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
                   <TableCell className="whitespace-nowrap tabular-nums">{formatDMY(r.originalDate)}{!r.originalVerified && " *"}</TableCell>
                   <TableCell className="whitespace-nowrap tabular-nums">{formatDMY(r.currentDate)}</TableCell>
                   <TableCell className="whitespace-nowrap">
-                    <button type="button" className="text-primary underline-offset-2 hover:underline" onClick={() => setPanel(r)} data-testid="reschedule-count">{T.moves(r)}</button>
+                    <button type="button" className="text-primary underline-offset-2 hover:underline" onClick={(event) => { historyTrigger.current = event.currentTarget; setPanel(r); }} data-testid="reschedule-count">{T.moves(r)}</button>
                     {r.historyState !== "COMPLETE" && <Badge variant="warning" className="ml-1">{r.historyState === "PARTIAL" ? T.partialBadge : T.unavailableBadge}</Badge>}
                   </TableCell>
                   <TableCell className="whitespace-nowrap">{T.daysMoved(r.daysMoved)}</TableCell>
@@ -167,7 +171,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
                     {r.status === "ABANDONED" && (r.abandonReasonCode || r.abandonReason) && <div className="mt-1 max-w-[16rem] whitespace-normal text-xs text-destructive" data-testid="abandon-summary" title={abandon.summary(r.abandonReasonCode, r.abandonReason)}>{abandon.summary(r.abandonReasonCode, r.abandonReason)}</div>}
                   </TableCell>
                   <TableCell className="whitespace-nowrap">
-                    <Button size="sm" variant="outline" onClick={() => setPanel(r)}>{L.history}</Button>
+                    <Button size="sm" variant="outline" onClick={(event) => { historyTrigger.current = event.currentTarget; setPanel(r); }}>{L.history}</Button>
                     {r.moves > 0 && <Button size="sm" variant="ghost" onClick={() => void showTrail(r)}>{L.showOnCal}</Button>}
                   </TableCell>
                 </TableRow>
@@ -183,7 +187,7 @@ export function TaskAnalysisView({ role, filters, onFilters }: { role: Role; fil
           <Button size="sm" variant="outline" disabled={data.page >= data.totalPages} onClick={() => onFilters({ ...filters, page: data.page + 1 })}>{L.next}</Button>
         </div>
       )}
-      {panel && <TaskHistoryPanel row={panel} onClose={() => setPanel(null)} onShowOnCalendar={(h) => showOn(panel, h)} />}
+      {panel && <TaskHistoryPanel row={panel} trigger={historyTrigger.current} onClose={() => setPanel(null)} onShowOnCalendar={(h) => showOn(panel, h)} />}
     </div>
   );
 }

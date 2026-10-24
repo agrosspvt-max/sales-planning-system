@@ -20,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
+import { ReviewTaskHistoryDrawer, type ReviewTaskSelection } from "./review-task-history";
 
 /* --------------------------------- DTOs (mirror the service) --------------------------------- */
 
@@ -29,6 +30,10 @@ interface DealerRow {
   entryId?: string; dealerId: string; dealerName: string; todaysPlan: number | null; todaysActual: number | null;
   entryType?: DailyWorkType; paymentMode?: RecoveryPaymentMode | null; recoverySource?: "BILLING_EXCEPTION" | "CN_REQUEST" | null;
 }
+/** Display-only rescheduling facts (see reschedule-review.ts): `from` = arrived from, `to` = moved away to, `count` = lifetime recorded moves of that one task. */
+interface TaskMove { key: string; sourceType: string; from: string | null; to: string | null; count: number; recordedOnly: boolean; dealerName: string | null; marketName: string | null; description: string | null; section: string | null }
+interface RescheduleAction { id: string; key: string; sourceType: string; section: string | null; dealerName: string | null; marketName: string | null; description: string | null; previousDate: string; newDate: string; createdAt: string; actorName: string; reason: string | null; count: number; recordedOnly: boolean }
+interface Rescheduling { rows: Record<string, TaskMove[]>; tasks: TaskMove[]; actions: RescheduleAction[] }
 interface DealerPayload { dealers: DealerRow[]; autoTaskEntryIds?: string[]; calendarEntryIds?: string[] }
 interface ApptRow { rowId: string; entryId?: string; dealerName: string; marketName: string; monthlyPlanId?: string | null; reportedDealerName?: string; status: string | null }
 interface ConvRow { dealerId: string; schemeId: string; dealerName: string; schemeName: string; todaysPlan: number | null; achievability: string | null }
@@ -43,6 +48,7 @@ interface ReviewDetail {
   sales: DealerPayload; recovery: DealerPayload;
   appointment: { rows: ApptRow[] }; conversion: { rows: ConvRow[] };
   summary: SummaryDto; selfRating: number | null; review: ReviewDto | null; reportSubmitted: boolean;
+  rescheduling?: Rescheduling;
 }
 
 const ratingText = (v: number | null) => (v == null ? "—" : `${v} / 10`);
@@ -56,6 +62,8 @@ const dash = <span className="text-muted-foreground">—</span>;
  */
 export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly = false }: { officerId: string; workDate: string; onClose: () => void; readOnly?: boolean }) {
   const qc = useQueryClient();
+  const [history, setHistory] = useState<ReviewTaskSelection | null>(null);
+  const openHistory: OpenTaskHistory = (key, trigger) => setHistory({ key, trigger });
   const L = {
     title: useLabel("daily_work.review.title"),
     sales: useLabel("daily_work.section.sales"),
@@ -90,8 +98,8 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
           <div className="space-y-5">
             <p className="text-sm text-muted-foreground">{data.officerName} · {workDate}</p>
 
-            <DealerSection title={L.sales} noPlan={savedNoPlan("SALES")} rows={data.sales.dealers} autoEntryIds={data.sales.autoTaskEntryIds} calendarEntryIds={data.sales.calendarEntryIds} />
-            <DealerSection title={L.recovery} noPlan={savedNoPlan("RECOVERY")} rows={data.recovery.dealers} autoEntryIds={data.recovery.autoTaskEntryIds} calendarEntryIds={data.recovery.calendarEntryIds} recovery />
+            <DealerSection title={L.sales} noPlan={savedNoPlan("SALES")} rows={data.sales.dealers} autoEntryIds={data.sales.autoTaskEntryIds} calendarEntryIds={data.sales.calendarEntryIds} moves={data.rescheduling?.rows} onOpenHistory={openHistory} />
+            <DealerSection title={L.recovery} noPlan={savedNoPlan("RECOVERY")} rows={data.recovery.dealers} autoEntryIds={data.recovery.autoTaskEntryIds} calendarEntryIds={data.recovery.calendarEntryIds} moves={data.rescheduling?.rows} onOpenHistory={openHistory} recovery />
             <AppointmentSection title={L.appointment} noPlan={savedNoPlan("APPOINTMENT")} rows={data.appointment.rows} />
             <ConversionSection title={L.conversion} noPlan={savedNoPlan("SCHEME_CONVERSION")} rows={data.conversion.rows} />
             <VisitsSection title={L.visits} noPlan={savedNoPlan("VISITS")} summary={data.summary} />
@@ -124,6 +132,7 @@ export function DailyWorkReviewDialog({ officerId, workDate, onClose, readOnly =
           </div>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>{L.close}</Button></DialogFooter>
+        {history && <ReviewTaskHistoryDrawer selection={history} onClose={() => setHistory(null)} />}
       </DialogContent>
     </Dialog>
   );
@@ -183,8 +192,8 @@ function useReviewColumns() {
 const money = (v: number | null | undefined) => (v == null ? dash : formatCurrency(v));
 
 /** Sales / Recovery: Planned = Today's Plan (Daily Plan); Actual = Today's Sales/Recovery (Daily Report) — separate columns. */
-export function DealerSection({ title, rows, recovery = false, autoEntryIds = [], calendarEntryIds = [], noPlan = false }: {
-  title: string; noPlan?: boolean; rows: DealerRow[]; recovery?: boolean; autoEntryIds?: string[]; calendarEntryIds?: string[];
+export function DealerSection({ title, rows, recovery = false, autoEntryIds = [], calendarEntryIds = [], noPlan = false, moves = {}, onOpenHistory }: {
+  title: string; noPlan?: boolean; rows: DealerRow[]; recovery?: boolean; autoEntryIds?: string[]; calendarEntryIds?: string[]; moves?: Record<string, TaskMove[]>; onOpenHistory?: OpenTaskHistory;
 }) {
   const C = useReviewColumns();
   const auto = new Set(autoEntryIds), calendar = new Set(calendarEntryIds);
@@ -206,7 +215,7 @@ export function DealerSection({ title, rows, recovery = false, autoEntryIds = []
         <DealerTableBody>
           {rows.map((r) => (
             <TableRow data-dealer-id={r.dealerId} key={r.entryId ?? r.dealerId}>
-              <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} /></TableCell>
+              <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.dealerName} />{r.entryId && (moves[r.entryId] ?? []).map((m) => <MoveTag key={m.key} move={m} onOpenHistory={onOpenHistory} />)}</TableCell>
               <TableCell>{taskText(r)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(r.todaysPlan)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(r.todaysActual)}</TableCell>
@@ -404,6 +413,32 @@ function RmReviewPanel({ officerId, workDate, review, onReviewed, readOnly = fal
       <Button disabled={!valid || mut.isPending} onClick={() => valid && mut.mutate()}>
         <Send className="h-4 w-4" /> {mut.isPending ? L.submitting : L.submit}
       </Button>
+    </div>
+  );
+}
+
+
+/* ------------------------------------------------ rescheduling (display only) ------------------------------------------------ */
+
+const dmy = (iso: string) => iso.split("-").reverse().join("/");
+
+/** Rescheduled tag + the moved-from / moved-to dates + the compact circular count of THIS task's recorded moves. */
+type OpenTaskHistory = (key: string, trigger: HTMLButtonElement) => void;
+
+export function MoveTag({ move, onOpenHistory }: { move: TaskMove; onOpenHistory?: OpenTaskHistory }) {
+  const L = {
+    tag: useLabel("daily_work.outcome.badge_rescheduled"), from: useLabel("daily_work.outcome.badge_rescheduled_from"), to: useLabel("daily_work.review.resched.to"),
+    one: useLabel("daily_work.outcome.badge_rescheduled_count_one"), many: useLabel("daily_work.outcome.badge_rescheduled_count_many"), note: useLabel("daily_work.outcome.badge_rescheduled_count_note"),
+    recorded: useLabel("daily_work.review.resched.recorded_only"), recordedTip: useLabel("daily_work.review.resched.recorded_only_tip"),
+  };
+  const tip = `${(move.count === 1 ? L.one : L.many).replace("{n}", String(move.count))}. ${L.note}`;
+  return (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-normal" data-testid="review-move">
+      {onOpenHistory ? <button type="button" aria-haspopup="dialog" onClick={(e) => onOpenHistory(move.key, e.currentTarget)} className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" data-testid="review-rescheduled-button"><Badge variant="warning" className="cursor-pointer hover:bg-warning/25" data-testid="review-rescheduled-tag">{L.tag}</Badge></button> : <Badge variant="warning" data-testid="review-rescheduled-tag">{L.tag}</Badge>}
+      <span role="img" aria-label={tip} title={tip} data-testid="review-reschedule-count" className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-warning/15 px-1 text-[11px] font-semibold leading-none tabular-nums text-warning ring-1 ring-inset ring-warning/40">{move.count}</span>
+      {move.from && <span className="text-muted-foreground" data-testid="review-moved-from">{L.from.replace("{date}", dmy(move.from))}</span>}
+      {move.to && <span className="text-muted-foreground" data-testid="review-moved-to">{L.to.replace("{date}", dmy(move.to))}</span>}
+      {move.recordedOnly && <span className="text-muted-foreground" title={L.recordedTip} data-testid="review-recorded-only">{L.recorded}</span>}
     </div>
   );
 }

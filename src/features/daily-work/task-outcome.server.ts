@@ -141,17 +141,28 @@ export async function readRowUnits(db: DailyWorkDb, entries: readonly EntryFacts
   return result;
 }
 
-/** Rows (of the given entries) whose tasks carry a Rescheduled history, for the Rescheduled badge in Daily Plan / Report. */
-export async function rescheduledEntryIds(db: DailyWorkDb, entries: readonly { id: string; workDate: string }[]): Promise<string[]> {
-  if (entries.length === 0) return [];
-  const rows = await db.$queryRaw<{ entryId: string }[]>(Prisma.sql`
-    SELECT DISTINCT x."entryId" FROM (
+/**
+ * Recorded date changes per Daily Work row, for the Rescheduled badge and its count in Daily Plan / Report. One batched query for all rows. A count is the number of
+ * TaskRescheduleEvent rows of the row's task, found by the task's stable identity (source type + source id — never dealer, date or the occurrence id), so it carries across dates.
+ * A row linking several tasks reports the most-moved one (counts of different tasks are never added). Rows whose tasks were never moved are absent.
+ */
+export async function rescheduleCountsByEntry(db: DailyWorkDb, entries: readonly { id: string; workDate: string }[]): Promise<Record<string, number>> {
+  if (entries.length === 0) return {};
+  const rows = await db.$queryRaw<{ entryId: string; moves: number }[]>(Prisma.sql`
+    SELECT x."entryId", MAX(c."n")::int AS "moves" FROM (
       SELECT t."dailyWorkEntryId" AS "entryId", 'BILLING_EXCEPTION' AS "type", t."id" AS "id" FROM "BillingExceptionTask" t WHERE t."dailyWorkEntryId" IN (${ids(entries.map((e) => e.id))})
       UNION ALL SELECT e."dailyWorkEntryId", 'CN_PAYMENT', e."id" FROM "CnPaymentEvent" e WHERE e."dailyWorkEntryId" IN (${ids(entries.map((e) => e.id))})
       UNION ALL SELECT c."legacyDailyWorkEntryId", 'CN_LEGACY', c."id" FROM "CnRequest" c WHERE c."legacyDailyWorkEntryId" IN (${ids(entries.map((e) => e.id))})
       UNION ALL SELECT c."dailyWorkEntryId", 'CALENDAR_ENTRY', c."id" FROM "CalendarEntry" c WHERE c."dailyWorkEntryId" IN (${ids(entries.map((e) => e.id))})
-    ) x WHERE x."entryId" IS NOT NULL AND EXISTS (SELECT 1 FROM "TaskRescheduleEvent" ev WHERE ev."sourceType" = x."type" AND ev."sourceId" = x."id")`);
-  return rows.map((r) => r.entryId);
+    ) x
+    JOIN LATERAL (SELECT COUNT(*) AS "n" FROM "TaskRescheduleEvent" ev WHERE ev."sourceType" = x."type" AND ev."sourceId" = x."id") c ON c."n" > 0
+    WHERE x."entryId" IS NOT NULL GROUP BY x."entryId"`);
+  return Object.fromEntries(rows.map((r) => [r.entryId, Number(r.moves)]));
+}
+
+/** Rows (of the given entries) whose tasks carry a Rescheduled history. */
+export async function rescheduledEntryIds(db: DailyWorkDb, entries: readonly { id: string; workDate: string }[]): Promise<string[]> {
+  return Object.keys(await rescheduleCountsByEntry(db, entries));
 }
 
 /* ------------------------------------------------ draft write ------------------------------------------------ */

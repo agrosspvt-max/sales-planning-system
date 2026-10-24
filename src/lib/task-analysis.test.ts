@@ -1,7 +1,7 @@
 /** Performance → Tasks pure rules. DB-free.   npx tsx src/lib/task-analysis.test.ts */
 import assert from "node:assert/strict";
 import {
-  dateTrail, daysMoved, defaultTaskFilters, deriveHistoryState, deriveTaskStatus, distinctTrailDates, intensityLevel, monthBounds, previewHistory,
+  compareListRows, dateTrail, daysMoved, defaultTaskFilters, deriveHistoryState, deriveTaskStatus, distinctTrailDates, intensityLevel, monthBounds, previewHistory,
   rescheduleCalendarCounts, shiftMonth, summarizeTasks, taskQueryString, type SummaryTask,
 } from "./task-analysis";
 
@@ -96,6 +96,24 @@ test("intensity: one scale, 0 for nothing, the busiest date is the darkest; coun
   assert.equal(intensityLevel(0, 5), 0); assert.equal(intensityLevel(5, 5), 5); assert.equal(intensityLevel(1, 5), 1); assert.equal(intensityLevel(1, 1), 5);
   const levels = [1, 2, 3, 4, 5].map((n) => intensityLevel(n, 5));
   assert.deepEqual(levels, [1, 2, 3, 4, 5]); assert.equal(intensityLevel(3, 0), 0);
+});
+
+test("list order: date newest first (month/year boundaries), then name A–Z ignoring case, then stable ids; missing dates last", () => {
+  const r = (date: string | null, name: string, ownerId: string, key: string) => ({ date, name, ownerId, key });
+  const rows = [
+    r("2026-12-31", "suresh Verma", "u3", "k1"), r("2027-01-01", "Pankaj Verma", "u2", "k2"), r("2026-12-31", "Abhinav", "u1", "k3"), r(null, "Aaron", "u0", "k0"),
+    r("2027-01-01", "abhinav", "u1", "k4"), r("2026-02-28", "Abhinav", "u1", "k5"), r("2027-01-01", "Abhinav", "u9", "k7"), r("2027-01-01", "Abhinav", "u9", "k6"), r("2026-03-01", "Abhinav", "u1", "k8"),
+  ];
+  const sorted = [...rows].sort(compareListRows).map((x) => `${x.date}|${x.name}|${x.ownerId}|${x.key}`);
+  assert.deepEqual(sorted, [
+    "2027-01-01|abhinav|u1|k4", "2027-01-01|Abhinav|u9|k6", "2027-01-01|Abhinav|u9|k7", "2027-01-01|Pankaj Verma|u2|k2",
+    "2026-12-31|Abhinav|u1|k3", "2026-12-31|suresh Verma|u3|k1", "2026-03-01|Abhinav|u1|k8", "2026-02-28|Abhinav|u1|k5", "null|Aaron|u0|k0",
+  ]);
+  assert.deepEqual([...rows].reverse().sort(compareListRows), [...rows].sort(compareListRows), "the result does not depend on the input order");
+  // Pagination: ordering the whole list before slicing keeps pages consistent.
+  const pages = [sorted.slice(0, 4), sorted.slice(4, 8), sorted.slice(8)];
+  assert.deepEqual(pages.flat(), sorted);
+  assert.ok(pages[0]!.every((x) => x.startsWith("2027-01-01")), "page 1 finishes the newest date first");
 });
 
 console.log(`\n${passed} task-analysis rule tests passed`);

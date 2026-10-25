@@ -1,5 +1,6 @@
 "use client";
 
+import { AutosaveStatus } from "@/features/planning/autosave-status";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
@@ -164,12 +165,12 @@ function MonthlyMobileActionBar({
 }: {
   actionProps: React.ComponentProps<typeof MonthlyPlanActions>;
 }) {
-  const { data, saving, flush, setAdditionalOpen } = useMonthlyEdit();
+  const { data, saving, saveStatus, flush, setAdditionalOpen } = useMonthlyEdit();
   if (!data.canEdit) return null;
   return (
     <div className="sticky bottom-0 z-30 -mx-4 mt-4 flex items-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur sm:hidden">
-      <span className="text-xs text-muted-foreground">{saving ? "Saving…" : "Saved"}</span>
-      <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}>
+      <AutosaveStatus className="text-xs text-muted-foreground" saving={saving} {...saveStatus} />
+      <Button size="sm" variant="outline" onClick={() => void flush().catch(() => undefined)} disabled={saving}>
         <Save className="h-4 w-4" /> Save
       </Button>
       <Button size="sm" variant="outline" onClick={() => setAdditionalOpen(true)}>

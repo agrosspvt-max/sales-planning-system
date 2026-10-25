@@ -1,5 +1,6 @@
 "use client";
 import { BillingTaskRescheduleDialog } from "./billing-task-ui";
+import type { DealerVisitResult } from "./dealer-visit-report";
 import { DateInputDMY } from "@/components/ui/date-input-dmy";
 import type { BillingTaskDto } from "./billing-task.server";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
@@ -11,7 +12,7 @@ import { taggedDealersFirst } from "@/lib/dealer-tags";
 import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { CalendarClock, Eye, FileText, MoreVertical, Plus, Trash2, Save, Send, Check, Ban } from "lucide-react";
+import { CalendarClock, Eye, FileText, MoreVertical, Plus, Trash2, Save, Send, Check, CheckCheck, Ban } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { formatDateTimeDMY } from "@/lib/date-format";
 import { formatSchemeCurrency as formatCurrency } from "@/lib/utils";
@@ -45,7 +46,7 @@ import {
   combineDailyWorkRows, combineAppointmentRows, combineConversionRows, rowTaskType,
   currentBusinessDate, dailyWorkShowsResults, visibleDailyWorkRows, DEFAULT_DAILY_WORK_VIEW, DailyWorkView,
   type RecoveryPaymentMode, type RecoverySource, paymentModeApplies, paymentModeForActual, type DailyWorkDealerRow, type DailyWorkType, type AppointmentRow, type ConversionRow, type TaskType, type DailyWorkView as DailyWorkViewType,
-  MANDATORY_SECTIONS, resolveDailyWorkSection, isValidTodaysPlan, invalidPlanRows, planRequiredMessage, type PlanRowToCheck,
+  MANDATORY_SECTIONS, resolveDailyWorkSection, isValidTodaysPlan, invalidPlanRows, planRequiredMessage, type PlanRowToCheck, type MandatorySection,
   sectionSavedAsNoPlan,
 } from "@/lib/daily-work";
 
@@ -58,6 +59,7 @@ interface DealerDto {
   todaysPlan: number | null; todaysActual: number | null; entryType: DailyWorkType; schemeId: string | null;
   autoContribution?: number; amountLocked?: boolean; rowKind?: "MANUAL" | "TASK"; // Recovery: Σ automatic amount in the row; true → the whole amount is automatic (read-only)
   recoverySource?: RecoverySource | null; // Recovery: the system source of an automatically generated row (locks its Recovery Type)
+  followUpType?: "VISIT" | "TELEPHONIC" | null;
   paymentMode?: RecoveryPaymentMode | null;
   tasks?: TaskUnitDto[]; legacyOutcome?: boolean; // Daily Report: the identifiable tasks of the row with their outcomes (legacy rows: read-only Actual)
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
@@ -96,6 +98,8 @@ interface EditRow {
   tasks: UnitEdit[]; legacyOutcome: boolean;
   /** A Regional Manager's newly added dealer that belongs to one of their Sales Officers: that officer (re-validated by the server; the task stays the RM's own). */
   ownerId?: string;
+  /** Manual rows: how the dealer is followed up. "" = not chosen (an older draft entry, or a task row — nothing is invented for them). */
+  followUpType: "VISIT" | "TELEPHONIC" | "";
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
 }
 
@@ -137,7 +141,6 @@ function useRegisterSaveDraft(active: boolean, handle: SaveDraftHandle): void {
 
 /* ---- Section completion status (progress bar + No Plan + submit gate) ---- */
 
-type MandatorySection = "SALES" | "RECOVERY" | "APPOINTMENT" | "SCHEME_CONVERSION" | "VISITS";
 type SectionStatusValue = "FILLED" | "NO_PLAN" | "REMAINING";
 interface StatusPayload {
   workDate: string;
@@ -148,7 +151,7 @@ interface StatusPayload {
   canSubmitReport: boolean;
   isFinalized: boolean;
   selfRating: number | null;
-  reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
+  reportSections: { section: MandatorySection; required: boolean; complete: boolean; planStatus?: SectionStatusValue; reported?: boolean }[];
   autoTasksEnabled: boolean;
   previousReport?: { date: string; state: "NOT_APPLICABLE" | "SUBMITTED" | "PENDING" | "MISSED"; deadline: string };
   reportDeadline?: string;
@@ -157,8 +160,23 @@ interface StatusPayload {
   reportApproved?: boolean;
   outstandingReport?: OutstandingReportView | null;
 }
-/** Shared status query — every section save/No-Plan invalidates this key so the bar updates immediately. */
+/** Shared status query — section saves / No Plan keep this key current so the bar and the ticks update immediately. */
 const STATUS_KEY = (workDate: string) => ["daily-work-status", workDate] as const;
+
+/** The report completion a Daily REPORT save returns (computed by the server on the saved state, same rules as the status read). */
+interface ReportCompletionDto { hasBatches: boolean; complete: boolean; sections: StatusPayload["reportSections"] }
+/**
+ * After a Daily Report save: write the returned completion (single / double green ticks, required sections, Submit Report) into the cached status
+ * instead of re-reading the whole status. Submit Report follows the server's own rule (open day + complete report + deadline not passed); the deadline
+ * and finalization facts are unchanged by a draft save. An older server without `report` → the previous full refresh.
+ */
+export function applyReportCompletion(prev: StatusPayload, report: ReportCompletionDto): StatusPayload {
+  return { ...prev, reportSections: report.sections, hasSubmittedWork: report.hasBatches, canSubmitReport: !prev.isFinalized && report.complete && !prev.reportDeadlinePassed };
+}
+function refreshAfterReportSave(qc: ReturnType<typeof useQueryClient>, workDate: string, res: { report?: ReportCompletionDto } | undefined) {
+  if (res?.report) qc.setQueryData<StatusPayload>(STATUS_KEY(workDate), (prev) => (prev ? applyReportCompletion(prev, res.report!) : prev));
+  else qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
+}
 /**
  * The shared "No Plan" wording (Edit Labels → daily_work.action.no_plan) plus which sections the day's SUBMITTED report batches saved as No Plan.
  * Only the explicit saved decision counts; an empty section never becomes No Plan by itself.
@@ -238,6 +256,7 @@ function OwnerDailyWorkPage() {
   };
   // Authoritative per-section status (FILLED / NO_PLAN / REMAINING) reused for the minimal per-tab indicators.
   const sectionStatusMap = new Map<MandatorySection, SectionStatusValue>((dayStatus?.sections ?? []).map((x) => [x.section, x.status]));
+  const reportStatusMap = new Map((dayStatus?.reportSections ?? []).map((x) => [x.section, x]));
   // The active section publishes its Save Draft handle here so the Plan Type toolbar can render the button.
   const [draftHandle, setDraftHandle] = useState<SaveDraftHandle | null>(null);
   const registerSaveDraft = useCallback((next: SaveDraftHandle | null) => {
@@ -295,7 +314,11 @@ function OwnerDailyWorkPage() {
                 >
                   {labels[s]}
                 </button>
-                <SectionStatusIcon status={sectionStatusMap.get(s as MandatorySection)} />
+                <SectionStatusIcon
+                  status={view === DailyWorkView.REPORT ? reportStatusMap.get(s)?.planStatus : sectionStatusMap.get(s)}
+                  report={view === DailyWorkView.REPORT}
+                  reported={reportStatusMap.get(s)?.reported || dayStatus?.isFinalized}
+                />
               </div>
             ))}
           </div>
@@ -375,14 +398,19 @@ function OwnerDailyWorkPage() {
 /**
  * Minimal per-section status shown directly under a section tab label. FILLED → green tick; NO_PLAN → the same
  * purple Ban symbol the Recovery No-Plan UI uses (lucide `Ban` + `text-noplan`); REMAINING/undefined → nothing.
+ * Report tabs use submitted-plan facts: one tick until all report answers are saved, then two ticks.
  * Fixed height so tab labels stay aligned whether or not an icon is present.
  */
-function SectionStatusIcon({ status }: { status?: SectionStatusValue }) {
+export function SectionStatusIcon({ status, report = false, reported = false }: { status?: SectionStatusValue; report?: boolean; reported?: boolean }) {
   const noPlanLabel = useLabel("daily_work.action.no_plan");
   const filledLabel = useLabel("daily_work.status.filled");
+  const plannedLabel = useLabel("daily_work.status.report_planned");
+  const reportedLabel = useLabel("daily_work.status.report_completed");
   return (
     <span className="flex h-3.5 items-center justify-center">
-      {status === "FILLED" ? <Check className="h-3.5 w-3.5 text-success" aria-label={filledLabel} />
+      {status === "FILLED" ? report && reported
+        ? <CheckCheck className="h-3.5 w-4 text-success" aria-label={reportedLabel} />
+        : <Check className="h-3.5 w-3.5 text-success" aria-label={report ? plannedLabel : filledLabel} />
         : status === "NO_PLAN" ? <Ban className="h-3.5 w-3.5 text-noplan" aria-label={noPlanLabel} />
           : null}
     </span>
@@ -612,10 +640,12 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   const [error, setError] = useState<string | null>(null);
   const hydratedRef = useRef(false);
   const seedHydrationPendingRef = useRef(false);
+  const visitSigRef = useRef(""); // the Visit dealers of this section as last known to the server
 
   // Seed editable rows from the server payload (the current editable batch's draft).
   useEffect(() => {
     if (!data) return;
+    visitSigRef.current = data.dealers.filter((d) => (d.rowKind ?? "MANUAL") === "MANUAL" && d.followUpType === "VISIT").map((d) => d.dealerId).sort().join(",");
     setRows(
       data.dealers.map((d) => ({
         entryId: d.entryId, batchId: d.batchId, rowKind: d.rowKind ?? "MANUAL",
@@ -624,7 +654,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
         entryType: d.entryType, schemeId: d.schemeId ?? "", recoverySource: d.recoverySource ?? null, autoAmount: d.autoContribution ?? 0, amountLocked: d.amountLocked ?? false, paymentMode: d.paymentMode ?? null,
         todaysActual: d.todaysActual == null ? "" : String(d.todaysActual),
         tasks: unitsFromDto(d.tasks ?? []), legacyOutcome: d.legacyOutcome ?? false,
-        status: d.status,
+        status: d.status, followUpType: d.followUpType ?? "",
       })),
     );
     hydratedRef.current = false; // mark for re-hydration of the autosave baseline
@@ -678,6 +708,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     badgeRescheduledOne: useLabel("daily_work.outcome.badge_rescheduled_count_one"),
     badgeRescheduledMany: useLabel("daily_work.outcome.badge_rescheduled_count_many"),
     badgeRescheduledNote: useLabel("daily_work.outcome.badge_rescheduled_count_note"),
+    followUp: useLabel("daily_work.followup.label"), followUpPlaceholder: useLabel("daily_work.followup.placeholder"), followVisit: useLabel("daily_work.followup.visit"), followTelephonic: useLabel("daily_work.followup.telephonic"), followTele: useLabel("daily_work.followup.tele"),
   };
 
   const showResults = dailyWorkShowsResults(view);
@@ -707,6 +738,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   // Task Type (Daily Plan only) — a row is an Auto Task iff it carries a materialized Auto Task contribution
   // (the existing CN → DailyWorkEntry link exposed as materializedCnTasks). Sales never has an Auto Task source.
   const showTaskType = view === DailyWorkView.PLAN;
+  const monthlyPlanWords = L.plan.trim().split(/\s+/);
   const autoEntryIds = useMemo(() => new Set((data?.materializedCnTasks ?? []).map((t) => t.entryId).filter((x): x is string => !!x)), [data?.materializedCnTasks]);
   // A row created from a Calendar Daily Task (CalendarEntry → DailyWorkEntry link) shows Task Type "Calendar".
   const calendarEntrySet = useMemo(() => new Set(data?.calendarEntryIds ?? []), [data?.calendarEntryIds]);
@@ -717,7 +749,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   const taskTypeL: TaskTypeLabels = { auto: L.taskTypeAuto, manual: L.taskTypeManual, none: L.taskTypeNone, calendar: L.taskTypeCalendar };
 
   const invalidate = () => { qc.invalidateQueries({ queryKey: ["daily-work", section, workDate] }); qc.invalidateQueries({ queryKey: ["daily-work-status", workDate] }); };
-  const payloadRows = () => rows.filter((r) => r.rowKind === "MANUAL").map((r) => ({ dealerId: r.dealerId, ...(r.ownerId ? { ownerId: r.ownerId } : {}), todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null }));
+  const payloadRows = () => rows.filter((r) => r.rowKind === "MANUAL").map((r) => ({ dealerId: r.dealerId, ...(r.ownerId ? { ownerId: r.ownerId } : {}), todaysPlan: r.todaysPlan.trim() === "" ? undefined : numOr0(r.todaysPlan), entryType: r.entryType, schemeId: r.entryType === "SCHEME" ? r.schemeId || null : null, ...(r.followUpType ? { followUpType: r.followUpType } : {}) }));
 
   // AUTOSAVE — persist the current Daily Plan draft through the existing section save endpoint (current editable
   // batch, same authorization). Status is refreshed so the progress bar tracks saved data; section rows are NOT
@@ -734,10 +766,23 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
   const autosaveEnabled = isReport ? canEnterActual && !locked : view === DailyWorkView.PLAN && !locked;
   const draftKey = isReport ? `R|${JSON.stringify(actualEntries())}` : JSON.stringify(payloadRows());
   const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
-    if (isReport) { const entries = actualEntries(); if (entries.length > 0) await api.post("/api/daily-work/actual", { section, workDate, entries }); }
-    else await api.post("/api/daily-work/save", { section, workDate, rows: payloadRows() });
+    if (isReport) {
+      const entries = actualEntries();
+      if (entries.length > 0) refreshAfterReportSave(qc, workDate, await api.post<{ report?: ReportCompletionDto }>("/api/daily-work/actual", { section, workDate, entries }));
+    } else {
+      const sent = payloadRows();
+      const hasRows = rows.length > 0; // every row of this section in the batch (manual and task rows) — what the status counts as "has data"
+      await api.post("/api/daily-work/save", { section, workDate, rows: sent });
+      // Dealer Visits (another section) only needs a refresh when the set of Visit dealers of THIS section changed; an amount edit or a repeated save must not trigger a refetch.
+      const sig = sent.filter((r) => "followUpType" in r && r.followUpType === "VISIT").map((r) => r.dealerId).sort().join(",");
+      const visitsChanged = sig !== visitSigRef.current;
+      if (visitsChanged) { visitSigRef.current = sig; qc.invalidateQueries({ queryKey: ["daily-work", "SUMMARY", workDate] }); }
+      // The plan status (progress bar / Submit gate) depends on whether this section has data at all, and on Visits (fed by Visit follow-ups). Typing an amount
+      // changes neither, so it does not re-read the status; adding the first / removing the last row, or a Visit link change, does.
+      const known = qc.getQueryData<StatusPayload>(STATUS_KEY(workDate))?.sections.find((x) => x.section === section);
+      if (!known || known.hasData !== hasRows || visitsChanged) qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
+    }
     setError(null);
-    qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
   }, { onConflict: () => { qc.invalidateQueries({ queryKey: ["daily-work", section, workDate] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); } });
   useEffect(() => {
     if (!data || hydratedRef.current) return;
@@ -773,15 +818,16 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
     return { ...r, tasks, paymentMode: v != null && v > 0 ? r.paymentMode : null };
   }));
   const removeRow = (entryId: string) => setRows((rs) => rs.filter((r) => !(r.entryId === entryId && r.rowKind === "MANUAL"))); // only the directly entered row can be removed
-  const addDealer = (dealerId: string, picked?: { dealer: AvailableDealer; ownerId?: string }) => {
+  const addDealer = (dealerId: string, picked?: { dealer: AvailableDealer; ownerId?: string }, extras?: AddDealerExtras) => {
     const d = picked?.dealer ?? available.find((x) => x.id === dealerId);
     if (!d) return;
-    setRows((rs) => [...rs, { entryId: `new-${d.id}`, batchId: "", rowKind: "MANUAL", dealerId: d.id, dealerName: d.name, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending, todaysPlan: "", entryType: "REGULAR", schemeId: "", recoverySource: null, autoAmount: 0, amountLocked: false, paymentMode: null, todaysActual: "", tasks: [], legacyOutcome: false, status: "NEW", ...(picked?.ownerId ? { ownerId: picked.ownerId } : {}) }]);
+    setRows((rs) => [...rs, { entryId: `new-${d.id}`, batchId: "", rowKind: "MANUAL", dealerId: d.id, dealerName: d.name, monthlyPlan: d.monthlyPlan, actual: d.actual, pending: d.pending, todaysPlan: "", entryType: "REGULAR", schemeId: "", recoverySource: null, autoAmount: 0, amountLocked: false, paymentMode: null, todaysActual: "", tasks: [], legacyOutcome: false, status: "NEW", followUpType: extras?.followUpType ?? "", ...(picked?.ownerId ? { ownerId: picked.ownerId } : {}) }]);
   };
 
   const showPaymentMode = !isSales && showResults;
   const columnCount = 5 + (showPaymentMode ? 1 : 0) + (showResults ? 1 : 0) + (showTaskType ? 1 : 0) + (view === DailyWorkView.PLAN ? 1 : 0);
   const compactRecovery = !isSales && view === DailyWorkView.PLAN;
+  const compactSales = isSales && view === DailyWorkView.PLAN;
 
   if (isLoading) return <Skeleton className="h-64 w-full" />;
 
@@ -793,7 +839,12 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
           : showResults
             // Daily REPORT: the columns are set by the <colgroup> below (Dealer wraps, the outcome column is wide enough for the dropdown + a readable amount); narrow screens scroll the table.
             ? cn("[&_th]:w-auto [&_th]:px-2 [&_td]:px-2", isSales ? "min-w-[1090px]" : "min-w-[1230px]")
-            : isSales ? "min-w-[928px]" : "min-w-[1072px]")}>
+            : isSales ? "min-w-[928px] [&_th]:w-auto [&_th]:px-3 [&_td]:px-3" : "min-w-[1072px]")}>
+          {compactSales && <colgroup>
+            {/* Six equally sized data columns, with a compact trailing action column. */}
+            <col /><col /><col /><col /><col /><col />
+            <col className="w-16" />
+          </colgroup>}
           {/* Recovery Plan: Dealer absorbs the remaining width; all three row layers share these columns. */}
           {showResults && <colgroup data-testid="report-columns">
             <col className="w-[190px]" />
@@ -817,7 +868,9 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
             <TableRow>
               <TableHead className="w-60">{L.dealer}</TableHead>
               {showTaskType && <TableHead className="w-32">{L.taskType}</TableHead>}
-              <TableHead className="w-44 text-right">{isSales ? L.plan : <MonthlyRecoveryPlanHeader label={L.plan} />}</TableHead>
+              <TableHead className={cn("w-44 text-right", isSales && showTaskType && "text-[11px] leading-tight")}>
+                {isSales ? (showTaskType ? <>{monthlyPlanWords.slice(0, 2).join(" ")}{monthlyPlanWords.length > 2 && <><br />{monthlyPlanWords.slice(2).join(" ")}</>}</> : L.plan) : <MonthlyRecoveryPlanHeader label={L.plan} />}
+              </TableHead>
               <TableHead className="w-32 text-right">{L.pending}</TableHead>
               <TableHead className="w-36 text-right">{L.todaysPlan}</TableHead>
               <TableHead className="w-44">{L.type}</TableHead>
@@ -852,7 +905,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                 const rowAutoTasks = (data?.materializedCnTasks ?? []).filter((task) => task.entryId === r.entryId);
                 return (
                   <TableRow data-dealer-id={r.dealerId} data-entry-id={r.entryId} data-row-kind={r.rowKind} key={r.entryId}>
-                    <TableCell className={cn("font-medium", (compactRecovery || showResults) && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} />{(data?.rescheduledEntryIds ?? []).includes(r.entryId) && <><Badge variant="warning" className="ml-2" data-testid="rescheduled-row-badge">{L.badgeRescheduled}</Badge>{(data?.rescheduleCounts?.[r.entryId] ?? 0) > 0 && (() => { const n = data!.rescheduleCounts![r.entryId]!; const tip = `${(n === 1 ? L.badgeRescheduledOne : L.badgeRescheduledMany).replace("{n}", String(n))}. ${L.badgeRescheduledNote}`; return <span role="img" aria-label={tip} title={tip} data-testid="rescheduled-count" className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-warning/15 px-1 text-[11px] font-semibold leading-none tabular-nums text-warning ring-1 ring-inset ring-warning/40">{n}</span>; })()}</>}{!isSales && !showTaskType && billingEntrySet.has(r.entryId) && <span className="ml-2 rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-normal text-purple-700 dark:text-purple-300">{taskTypeL.auto}</span>}</TableCell>
+                    <TableCell className={cn("font-medium", (compactSales || compactRecovery || showResults) && "break-words")}><DealerName id={r.dealerId} name={r.dealerName} />{view === DailyWorkView.PLAN && r.rowKind === "MANUAL" && r.followUpType && <Badge variant="info" className="ml-2 whitespace-nowrap px-2 text-[11px] font-normal" data-follow-up={r.followUpType} title={`${L.followUp}: ${r.followUpType === "VISIT" ? L.followVisit : L.followTelephonic}`}>{r.followUpType === "VISIT" ? L.followVisit : L.followTele}</Badge>}{(data?.rescheduledEntryIds ?? []).includes(r.entryId) && <><Badge variant="warning" className="ml-2" data-testid="rescheduled-row-badge">{L.badgeRescheduled}</Badge>{(data?.rescheduleCounts?.[r.entryId] ?? 0) > 0 && (() => { const n = data!.rescheduleCounts![r.entryId]!; const tip = `${(n === 1 ? L.badgeRescheduledOne : L.badgeRescheduledMany).replace("{n}", String(n))}. ${L.badgeRescheduledNote}`; return <span role="img" aria-label={tip} title={tip} data-testid="rescheduled-count" className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-warning/15 px-1 text-[11px] font-semibold leading-none tabular-nums text-warning ring-1 ring-inset ring-warning/40">{n}</span>; })()}</>}{!isSales && !showTaskType && billingEntrySet.has(r.entryId) && <span className="ml-2 rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-normal text-purple-700 dark:text-purple-300">{taskTypeL.auto}</span>}</TableCell>
                     {/* Task Type — derived from the authoritative Auto Task contribution link (Daily Plan only). */}
                     {showTaskType && <TableCell data-task-type>{taskTypeCell(r.entryId)}</TableCell>}
                     {/* Monthly plan + pending are SOURCED and non-editable. */}
@@ -860,7 +913,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                     <TableCell className="text-right tabular-nums">{money(r.pending)}</TableCell>
                     {/* Today's Plan — editable until submitted. */}
                     <TableCell className="p-1 text-right">
-                      <Input type="number" min={0} className={cn("h-8 w-full text-right", r.amountLocked && "cursor-default bg-muted/60 text-muted-foreground focus-visible:ring-0", planErrors.has(`${section}:${r.entryId}`) && !isValidTodaysPlan(r.todaysPlan) && "border-destructive focus-visible:ring-destructive")} aria-invalid={planErrors.has(`${section}:${r.entryId}`) && !isValidTodaysPlan(r.todaysPlan) ? true : undefined} placeholder="0" value={r.todaysPlan} disabled={busy || submitted} readOnly={r.amountLocked} aria-readonly={r.amountLocked || undefined} title={r.amountLocked ? L.autoLocked : undefined} data-auto-locked={r.amountLocked || undefined} onChange={(e) => { if (!r.amountLocked) updateEntry(r.entryId, { todaysPlan: e.target.value }); }} />
+                      <Input type="number" min={0} className={cn("h-8 w-full text-right", isSales && showTaskType && "ml-auto w-[57.5%] px-2", r.amountLocked && "cursor-default bg-muted/60 text-muted-foreground focus-visible:ring-0", planErrors.has(`${section}:${r.entryId}`) && !isValidTodaysPlan(r.todaysPlan) && "border-destructive focus-visible:ring-destructive")} aria-invalid={planErrors.has(`${section}:${r.entryId}`) && !isValidTodaysPlan(r.todaysPlan) ? true : undefined} placeholder="0" value={r.todaysPlan} disabled={busy || submitted} readOnly={r.amountLocked} aria-readonly={r.amountLocked || undefined} title={r.amountLocked ? L.autoLocked : undefined} data-auto-locked={r.amountLocked || undefined} onChange={(e) => { if (!r.amountLocked) updateEntry(r.entryId, { todaysPlan: e.target.value }); }} />
                     </TableCell>
                     {/* Scheme Recovery uses the dealer's existing enrolled/verified scheme-payment scope. */}
                     <TableCell className="p-1">
@@ -877,7 +930,7 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
                           />
                         ) : (
                           <NativeSelect
-                            className="h-8 w-full"
+                            className={cn("h-8 w-full", isSales && showTaskType && "w-1/2 px-2")}
                             disabled={busy || submitted || r.rowKind === "TASK"}
                             value={r.entryType}
                             options={typeOptions}
@@ -978,7 +1031,8 @@ function DailyWorkSection({ section, workDate, view, locked }: { section: "SALES
           available={available}
           owner={data?.canPickDealerOwner ? { section, taken: new Set(rows.filter((r) => r.rowKind === "MANUAL").map((r) => r.dealerId)) } : undefined}
           labels={{ title: L.addDealer, choose: L.chooseDealer, select: L.selectDealer, noMore: L.noMoreDealers, cancel: L.cancel, add: L.addDealer }}
-          onAdd={(id, picked) => { addDealer(id, picked); setAddOpen(false); }}
+          followUp={{ label: L.followUp, placeholder: L.followUpPlaceholder, options: [{ value: "VISIT", label: L.followVisit }, { value: "TELEPHONIC", label: L.followTelephonic }] }}
+          onAdd={(id, picked, extras) => { addDealer(id, picked, extras); setAddOpen(false); }}
           onClose={() => setAddOpen(false)}
         />
       )}
@@ -1075,16 +1129,24 @@ function MaterializedTaskRescheduleDialog({ tasks, onChanged, onClose }: { tasks
  * not on the page; dealers are added one at a time and the caller keeps the button available for the next one.
  * Options are the section's existing `available` dealers (scoped, already-added excluded) — no new data source.
  */
-interface DealerChoicesResponse { section: "SALES" | "RECOVERY"; owners: { id: string; name: string }[]; ownerId: string; dealers: AvailableDealer[] }
-export function AddDealerDialog({ available, labels, onAdd, onClose, owner }: {
+interface DealerChoicesResponse { section: "SALES" | "RECOVERY" | "VISITS"; owners: { id: string; name: string }[]; ownerId: string; dealers: AvailableDealer[] }
+export interface AddDealerExtras { followUpType?: "VISIT" | "TELEPHONIC"; purpose?: string }
+export function AddDealerDialog({ available, labels, onAdd, onClose, owner, followUp, purpose }: {
   available: { id: string; name: string }[];
   labels: { title: string; choose: string; select: string; noMore: string; cancel: string; add: string };
-  onAdd: (dealerId: string, picked?: { dealer: AvailableDealer; ownerId?: string }) => void;
+  onAdd: (dealerId: string, picked?: { dealer: AvailableDealer; ownerId?: string }, extras?: AddDealerExtras) => void;
   onClose: () => void;
-  /** Sales / Recovery for a Regional Manager only: the Sales Officer filter. `taken` = dealers whose one manual row this editor already holds. */
-  owner?: { section: "SALES" | "RECOVERY"; taken: ReadonlySet<string> };
+  /** Sales / Recovery / Visits for a Regional Manager only: the Sales Officer filter. `taken` = dealers whose one entry this editor already holds. */
+  owner?: { section: "SALES" | "RECOVERY" | "VISITS"; taken: ReadonlySet<string> };
+  /** Sales / Recovery only: a compulsory Follow-up Type dropdown (Visit | Telephonic). Every other caller of this dialog never passes it and is unaffected. */
+  followUp?: { label: string; placeholder: string; options: { value: "VISIT" | "TELEPHONIC"; label: string }[] };
+  /** Relationship visits only: a compulsory free-text purpose (blank or whitespace-only is refused). */
+  purpose?: { label: string; placeholder: string; required: string };
 }) {
   const [dealerId, setDealerId] = useState("");
+  const [followUpValue, setFollowUpValue] = useState("");
+  const [purposeValue, setPurposeValue] = useState("");
+  const [purposeTouched, setPurposeTouched] = useState(false);
   const [ownerId, setOwnerId] = useState(""); // "" = My Dealers
   const tags = useDealerMarkers();
   const L = {
@@ -1124,10 +1186,28 @@ export function AddDealerDialog({ available, labels, onAdd, onClose, owner }: {
             />
             {owner && choices.isError && <p role="alert" className="text-xs text-destructive" data-testid="dealer-choices-error">{L.failed}</p>}
           </div>
+          {followUp && (
+            <div className="space-y-2">
+              <Label>{followUp.label} *</Label>
+              <NativeSelect aria-label={followUp.label} data-testid="follow-up-type" value={followUpValue} options={[{ value: "", label: followUp.placeholder }, ...followUp.options]} onChange={(e) => setFollowUpValue(e.target.value)} />
+            </div>
+          )}
+          {purpose && (
+            <div className="space-y-2">
+              <Label>{purpose.label} *</Label>
+              <Textarea aria-label={purpose.label} data-testid="visit-purpose" rows={3} maxLength={1000} placeholder={purpose.placeholder} value={purposeValue} aria-invalid={purposeTouched && purposeValue.trim() === ""} onChange={(e) => { setPurposeValue(e.target.value); setPurposeTouched(true); }} />
+              {purposeTouched && purposeValue.trim() === "" && <p role="alert" className="text-xs text-destructive" data-testid="visit-purpose-error">{purpose.required}</p>}
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{labels.cancel}</Button>
-          <Button disabled={!chosen} onClick={() => chosen && onAdd(chosen.id, owner ? { dealer: chosen, ownerId: ownerId || undefined } : undefined)}>{labels.add}</Button>
+          <Button disabled={!chosen || (!!followUp && followUpValue === "") || (!!purpose && purposeValue.trim() === "")} onClick={() => {
+            if (!chosen) return;
+            const picked = owner ? { dealer: chosen, ownerId: ownerId || undefined } : undefined;
+            if (followUp || purpose) onAdd(chosen.id, picked, { ...(followUp ? { followUpType: followUpValue as "VISIT" | "TELEPHONIC" } : {}), ...(purpose ? { purpose: purposeValue.trim() } : {}) });
+            else onAdd(chosen.id, picked); // dialogs without the new fields behave exactly as before
+          }}>{labels.add}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1273,10 +1353,10 @@ function AppointmentSection({ workDate, view, locked }: { workDate: string; view
   const autosaveEnabled = !!data && (isReport ? canEnterStatus && !locked : view === DailyWorkView.PLAN && !locked);
   const draftKey = `${partyPlanningEnabled}|${isReport ? `R|${JSON.stringify(statusEntries())}` : JSON.stringify(payloadRows())}`;
   const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
-    if (isReport) { const entries = statusEntries(); if (entries.length > 0) await api.post("/api/daily-work/actual", { section: "APPOINTMENT", workDate, entries }); }
+    if (isReport) { const entries = statusEntries(); if (entries.length > 0) refreshAfterReportSave(qc, workDate, await api.post<{ report?: ReportCompletionDto }>("/api/daily-work/actual", { section: "APPOINTMENT", workDate, entries })); }
     else await api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, partyPlanningEnabled, rows: payloadRows() });
     setError(null);
-    qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
+    if (!isReport) qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); // a report save already updated the status from its response
   }, { onConflict: () => { qc.invalidateQueries({ queryKey: ["daily-work", "APPOINTMENT", workDate] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); } });
   useEffect(() => {
     if (!data || hydratedRef.current) return;
@@ -1663,41 +1743,56 @@ interface SummaryBatch {
   entryId: string; batchId: string; dealerVisits: number; newPartyVisits: number;
   actualDealerVisits: number | null; actualNewPartyVisits: number | null; others: string;
   noPlanSections: string | null; status: string;
+  additionalActualDealerVisits?: number | null;
+  dealerVisitsDerived?: boolean;
 }
+type VisitSourceDto = "RELATIONSHIP" | "SALES" | "RECOVERY";
+interface VisitRowDto { dealerId: string; dealerName: string; sources: VisitSourceDto[]; purpose: string | null; alreadyPlanned: boolean }
+interface RelationshipEdit { dealerId: string; dealerName: string; purpose: string; ownerId?: string }
 interface SummaryPayload {
   section: "SUMMARY"; workDate: string; dealerVisits: number; newPartyVisits: number; others: string;
   actualDealerVisits: number | null; actualNewPartyVisits: number | null;
   status: "DRAFT" | "PLAN_SUBMITTED" | "FINALIZED" | "SUBMITTED" | "NEW";
   batches: SummaryBatch[];
+  /** Daily Plan: the Dealer Visits table (one row per unique dealer, with every source) and whether the Add dialog offers the Sales Officer filter. */
+  visitRows?: VisitRowDto[]; canPickDealerOwner?: boolean;
+  reportVisitRows?: (Omit<VisitRowDto, "alreadyPlanned"> & { entryId: string; batchId: string; result: DealerVisitResult | null })[];
 }
 
 /**
- * Visits (two whole-number plans/actuals) + Others (one free-text note) share each batch's SUMMARY record.
+ * Visits (dealer choices plus New Party counts; numeric legacy totals) + Others share each batch's SUMMARY record.
  * `focus` chooses which fields the toggle shows; frozen batches accumulate in Daily Report.
  */
-function SummarySection({ workDate, focus, view, locked }: { workDate: string; focus: "VISITS" | "OTHERS"; view: DailyWorkViewType; locked: boolean }) {
+export function SummarySection({ workDate, focus, view, locked }: { workDate: string; focus: "VISITS" | "OTHERS"; view: DailyWorkViewType; locked: boolean }) {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<SummaryPayload>({
     queryKey: ["daily-work", "SUMMARY", workDate, view],
     queryFn: () => api.get<SummaryPayload>(`/api/daily-work?section=SUMMARY&view=${view}&date=${workDate}`),
   });
 
-  const [dealerVisits, setDealerVisits] = useState("");
+  const [relRows, setRelRows] = useState<RelationshipEdit[]>([]); // the manually added Relationship visits (the only part of Dealer Visits the officer edits here)
+  const [addVisitOpen, setAddVisitOpen] = useState(false);
   const [newPartyVisits, setNewPartyVisits] = useState("");
   const [others, setOthers] = useState("");
   const [visitActuals, setVisitActuals] = useState<Record<string, { dealer: string; newParty: string }>>({});
+  const [visitResults, setVisitResults] = useState<Record<string, DealerVisitResult | "">>({});
   const [error, setError] = useState<string | null>(null);
   const hydratedRef = useRef(false);
   const seedHydrationPendingRef = useRef(false);
+  const savedRelRef = useRef(""); // the Relationship visits / New Party Visits as last confirmed by the server
+  const savedNewPartyRef = useRef("");
   useEffect(() => {
     if (!data) return;
-    setDealerVisits(data.dealerVisits ? String(data.dealerVisits) : "");
+    savedRelRef.current = JSON.stringify((data.visitRows ?? []).filter((v) => v.sources.includes("RELATIONSHIP")).map((v) => ({ dealerId: v.dealerId, purpose: v.purpose ?? "" })));
+    savedNewPartyRef.current = data.newPartyVisits ? String(data.newPartyVisits) : "";
+    setRelRows((data.visitRows ?? []).filter((v) => v.sources.includes("RELATIONSHIP")).map((v) => ({ dealerId: v.dealerId, dealerName: v.dealerName, purpose: v.purpose ?? "" })));
     setNewPartyVisits(data.newPartyVisits ? String(data.newPartyVisits) : "");
     setOthers(data.others ?? "");
     setVisitActuals(Object.fromEntries(data.batches.map((batch) => [batch.entryId, {
-      dealer: batch.actualDealerVisits == null ? "" : String(batch.actualDealerVisits),
+      dealer: (data.reportVisitRows ?? []).some((visit) => visit.entryId === batch.entryId) ? batch.additionalActualDealerVisits == null ? "" : String(batch.additionalActualDealerVisits) : batch.actualDealerVisits == null ? "" : String(batch.actualDealerVisits),
       newParty: batch.actualNewPartyVisits == null ? "" : String(batch.actualNewPartyVisits),
     }])));
+    setVisitResults(Object.fromEntries((data.reportVisitRows ?? []).map((visit) => [visit.dealerId, visit.result ?? ""])));
     hydratedRef.current = false;
     seedHydrationPendingRef.current = true;
   }, [data]);
@@ -1716,40 +1811,67 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
     actualDealerVisits: useLabel("daily_work.visits.actual_dealer_visits"),
     actualNewPartyVisits: useLabel("daily_work.visits.actual_new_party_visits"),
     saveDraft: useLabel("daily_work.action.save_draft"),
+    addRelationship: useLabel("daily_work.visits.add_relationship"), dialogTitle: useLabel("daily_work.visits.dialog_title"), chooseDealer: useLabel("daily_work.visits.choose_dealer"),
+    selectDealer: useLabel("daily_work.placeholder.select_dealer"), noMoreDealers: useLabel("daily_work.placeholder.no_more_dealers"), cancel: useLabel("daily_work.action.cancel"),
+    purposeLabel: useLabel("daily_work.visits.purpose_label"), purposePlaceholder: useLabel("daily_work.visits.purpose_placeholder"), purposeRequired: useLabel("daily_work.visits.purpose_required"),
+    colDealer: useLabel("col.dealer"), colTaskType: useLabel("daily_work.col.task_type"), colPurpose: useLabel("daily_work.visits.col.purpose"), colAction: useLabel("daily_work.visits.col.action"),
+    typeRelationship: useLabel("daily_work.visits.type.relationship"), typeSales: useLabel("daily_work.section.sales"), typeRecovery: useLabel("daily_work.section.recovery"),
+    emptyVisits: useLabel("daily_work.visits.empty"), totalPlanned: useLabel("daily_work.visits.total_planned"), linkedHint: useLabel("daily_work.visits.linked_hint"),
+    alreadyPlanned: useLabel("daily_work.visits.already_planned"), removeVisit: useLabel("daily_work.visits.remove"),
     saveActuals: useLabel("daily_work.action.save_actuals"),
     saving: useLabel("daily_work.state.saving"),
     noSubmittedSection: useLabel("daily_work.report.no_submitted_section"),
     enterVisits: useLabel("daily_work.validation.enter_visit_actuals"),
+    visitResult: useLabel("daily_work.visits.result"), visitResultPlaceholder: useLabel("daily_work.visits.result_placeholder"),
+    visited: useLabel("daily_work.visits.visited"), notVisited: useLabel("daily_work.visits.not_visited"), additionalActual: useLabel("daily_work.visits.additional_actual"),
   };
   const noPlanLabel = useLabel("daily_work.action.no_plan");
 
   // Save only the focused tab's fields: VISITS writes the visit columns (so an explicit 0 becomes real data),
   // OTHERS writes only the note — so an Others-only save never marks the Visits section "filled".
-  const body = () => ({ section: "SUMMARY", workDate, focus, dealerVisits: numOr0(dealerVisits), newPartyVisits: numOr0(newPartyVisits), others });
+  const body = () => ({ section: "SUMMARY", workDate, focus, newPartyVisits: numOr0(newPartyVisits), others }); // Dealer Visits is derived on the server from the dealer rows
+  const relationshipBody = () => ({ section: "RELATIONSHIP", workDate, rows: relRows.map((r) => ({ dealerId: r.dealerId, purpose: r.purpose, ...(r.ownerId ? { ownerId: r.ownerId } : {}) })) });
   // Autosave only the currently-focused fields (Visits columns OR the Others note), so an Others edit never
   // marks Visits "filled" and vice-versa. Baseline is re-hydrated on focus/data change (see effects above).
   const reportVisitBatches = (data?.batches ?? []).filter((batch) => {
     const noPlan = new Set((batch.noPlanSections ?? "").split(",").filter(Boolean));
     return !noPlan.has("VISITS");
   });
-  // Daily Report: a batch's two actual counts are saved together once BOTH are entered (same rule as before), through
-  // the existing /actual endpoint — it only stores actuals and never finalizes the day.
+  // Dealer results save progressively (including cleared choices), independently of New Party Visits.
+  // Legacy count-only batches keep their numeric actual; the server derives totals for identified dealers.
   const isReport = view === DailyWorkView.REPORT;
-  const visitEntries = () => reportVisitBatches.flatMap((batch) => {
+  const reportVisitRows = data?.reportVisitRows ?? [];
+  const visitEntries = () => reportVisitBatches.map((batch) => {
     const actual = visitActuals[batch.entryId];
-    return actual && actual.dealer !== "" && actual.newParty !== "" ? [{ entryId: batch.entryId, actualDealerVisits: numOr0(actual.dealer), actualNewPartyVisits: numOr0(actual.newParty) }] : [];
+    const dealers = reportVisitRows.filter((visit) => visit.entryId === batch.entryId);
+    const dealerActual = actual?.dealer ? numOr0(actual.dealer) : null;
+    return {
+      entryId: batch.entryId, actualNewPartyVisits: actual?.newParty ? numOr0(actual.newParty) : null,
+      ...(dealers.length > 0 ? {
+        dealerVisitResults: dealers.map((visit) => ({ dealerId: visit.dealerId, result: visitResults[visit.dealerId] || null })),
+        ...(batch.dealerVisits > dealers.length ? { additionalDealerVisits: dealerActual } : {}),
+      } : { actualDealerVisits: batch.dealerVisitsDerived && batch.dealerVisits === 0 ? 0 : dealerActual }),
+    };
   });
   // Plan: autosave only the currently-focused fields (Visits columns OR the Others note), so an Others edit never
   // marks Visits "filled" and vice-versa. Baseline is re-hydrated on focus/data change (see effects above).
   // Report: Visits actuals only (Others is read-only in the report).
   const reportEditable = isReport && focus === "VISITS" && reportVisitBatches.length > 0;
   const autosaveEnabled = isReport ? reportEditable && !locked : view === DailyWorkView.PLAN && !locked;
-  const draftKey = isReport ? `R|${JSON.stringify(visitEntries())}` : focus === "VISITS" ? `V|${dealerVisits}|${newPartyVisits}` : `O|${others}`;
+  const draftKey = isReport ? `R|${JSON.stringify(visitEntries())}` : focus === "VISITS" ? `V|${newPartyVisits}|${JSON.stringify(relationshipBody().rows)}` : `O|${others}`;
   const autosave = useDailyAutosave(draftKey, autosaveEnabled, async () => {
-    if (isReport) { const entries = visitEntries(); if (entries.length > 0) await api.post("/api/daily-work/actual", { section: "VISITS", workDate, entries }); }
-    else await api.post("/api/daily-work/save", body());
+    if (isReport) { const entries = visitEntries(); if (entries.length > 0) refreshAfterReportSave(qc, workDate, await api.post<{ report?: ReportCompletionDto }>("/api/daily-work/actual", { section: "VISITS", workDate, entries })); }
+    else {
+      // Relationship visits first (they decide the derived Dealer Visits count), then the summary row; both are atomic and idempotent, so a retry can never duplicate a visit.
+      // Only what changed since the last confirmed save is sent: each request takes the day lock, so an unchanged part is never posted again.
+      if (focus === "VISITS") {
+        const rel = JSON.stringify(relationshipBody().rows);
+        if (rel !== savedRelRef.current) { await api.post("/api/daily-work/save", relationshipBody()); savedRelRef.current = rel; }
+        if (newPartyVisits !== savedNewPartyRef.current) { await api.post("/api/daily-work/save", body()); savedNewPartyRef.current = newPartyVisits; }
+      } else await api.post("/api/daily-work/save", body());
+    }
     setError(null);
-    qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) });
+    if (!isReport) qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); // a report save already updated the status from its response
   }, { onConflict: () => { qc.invalidateQueries({ queryKey: ["daily-work", "SUMMARY", workDate] }); qc.invalidateQueries({ queryKey: STATUS_KEY(workDate) }); } });
   useEffect(() => {
     if (!data || hydratedRef.current) return;
@@ -1762,6 +1884,28 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
   // Whole-number-only inputs: block decimals/negatives at the field, backed by server validation.
   const onNumber = (set: (s: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => { const v = e.target.value; if (v === "" || /^\d+$/.test(v)) set(v); };
 
+  // Dealer Visits table: one row per unique dealer — Sales / Recovery Visit follow-ups (from the server) plus the locally edited Relationship visits.
+  const sourceText = (x: VisitSourceDto) => (x === "RELATIONSHIP" ? L.typeRelationship : x === "SALES" ? L.typeSales : L.typeRecovery);
+  const visitTable = (() => {
+    const map = new Map<string, { dealerId: string; dealerName: string; sources: Set<VisitSourceDto>; purpose: string | null; alreadyPlanned: boolean }>();
+    for (const v of data?.visitRows ?? []) {
+      const others = v.sources.filter((x) => x !== "RELATIONSHIP");
+      if (others.length) map.set(v.dealerId, { dealerId: v.dealerId, dealerName: v.dealerName, sources: new Set(others), purpose: null, alreadyPlanned: v.alreadyPlanned });
+    }
+    for (const r of relRows) {
+      const e = map.get(r.dealerId) ?? { dealerId: r.dealerId, dealerName: r.dealerName, sources: new Set<VisitSourceDto>(), purpose: null, alreadyPlanned: (data?.visitRows ?? []).find((v) => v.dealerId === r.dealerId)?.alreadyPlanned ?? false };
+      e.sources.add("RELATIONSHIP"); e.purpose = r.purpose; map.set(r.dealerId, e);
+    }
+    const ORDER: VisitSourceDto[] = ["RELATIONSHIP", "SALES", "RECOVERY"];
+    return [...map.values()].sort((a, b) => a.dealerName.localeCompare(b.dealerName) || a.dealerId.localeCompare(b.dealerId)).map((v) => ({ ...v, sources: ORDER.filter((x) => v.sources.has(x)) }));
+  })();
+  const plannedDealerVisitCount = visitTable.filter((v) => !v.alreadyPlanned).length; // a derived count of unique dealer rows, never an independent number
+  const ownerPicker = !!data?.canPickDealerOwner;
+  const soChoices = useQuery<DealerChoicesResponse>({
+    queryKey: ["dealer-choices", "VISITS", "self"], enabled: addVisitOpen && !ownerPicker,
+    queryFn: () => api.get<DealerChoicesResponse>("/api/daily-work/dealer-choices?section=VISITS"), gcTime: 0, retry: false,
+  });
+
   if (isLoading) return <Skeleton className="h-48 w-full" />;
 
   if (view === DailyWorkView.REPORT && (data?.batches.length ?? 0) === 0) {
@@ -1773,45 +1917,114 @@ function SummarySection({ workDate, focus, view, locked }: { workDate: string; f
       {focus === "VISITS" && view === DailyWorkView.PLAN ? (
         <div className="rounded-lg border bg-background p-4">
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">{L.visits}</h2>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label>{L.dealerVisits}</Label>
-              <Input type="number" min={0} step={1} inputMode="numeric" className="w-full" placeholder="0" value={dealerVisits} disabled={busy || locked} onChange={onNumber(setDealerVisits)} />
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm"><span className="text-muted-foreground">{L.totalPlanned}: </span><span className="font-semibold tabular-nums" data-testid="planned-dealer-visits">{plannedDealerVisitCount}</span></div>
+                <Button size="sm" variant="outline" disabled={busy || locked} onClick={() => setAddVisitOpen(true)}>{L.addRelationship}</Button>
+              </div>
+              <div className="overflow-auto rounded-md border">
+                <Table data-testid="dealer-visits-table">
+                  <TableHeader><TableRow>
+                    <TableHead>{L.colDealer}</TableHead><TableHead>{L.colTaskType}</TableHead><TableHead>{L.colPurpose}</TableHead><TableHead className="w-16 text-right">{L.colAction}</TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {visitTable.length === 0 ? (
+                      <TableRow><TableCell colSpan={4} className="py-6 text-center text-muted-foreground">{L.emptyVisits}</TableCell></TableRow>
+                    ) : visitTable.map((v) => (
+                      <TableRow key={v.dealerId} data-dealer-id={v.dealerId}>
+                        <TableCell className="font-medium"><DealerName id={v.dealerId} name={v.dealerName} /></TableCell>
+                        <TableCell data-testid="visit-task-type">{v.sources.map(sourceText).join(", ")}{v.alreadyPlanned && <div className="text-[11px] text-muted-foreground">{L.alreadyPlanned}</div>}</TableCell>
+                        <TableCell className="whitespace-pre-wrap break-words" data-testid="visit-purpose-cell">{v.purpose ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                        <TableCell className="text-right">
+                          {v.sources.includes("RELATIONSHIP") ? (
+                            <Button size="icon" variant="ghost" className="h-7 w-7" aria-label={L.removeVisit} title={L.removeVisit} disabled={busy || locked} onClick={() => setRelRows((rs) => rs.filter((r) => r.dealerId !== v.dealerId))}><Trash2 className="h-4 w-4" /></Button>
+                          ) : <span className="text-xs text-muted-foreground" title={L.linkedHint}>—</span>}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             </div>
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 sm:max-w-xs">
               <Label>{L.newPartyVisits}</Label>
               <Input type="number" min={0} step={1} inputMode="numeric" className="w-full" placeholder="0" value={newPartyVisits} disabled={busy || locked} onChange={onNumber(setNewPartyVisits)} />
             </div>
           </div>
+          {addVisitOpen && (
+            <AddDealerDialog
+              available={(soChoices.data?.dealers ?? []).filter((d) => !visitTable.some((v) => v.dealerId === d.id)).map((d) => ({ id: d.id, name: d.name }))}
+              owner={ownerPicker ? { section: "VISITS", taken: new Set(visitTable.map((v) => v.dealerId)) } : undefined}
+              labels={{ title: L.dialogTitle, choose: L.chooseDealer, select: L.selectDealer, noMore: L.noMoreDealers, cancel: L.cancel, add: L.addRelationship }}
+              purpose={{ label: L.purposeLabel, placeholder: L.purposePlaceholder, required: L.purposeRequired }}
+              onAdd={(id, picked, extras) => {
+                const name = picked?.dealer.name ?? soChoices.data?.dealers.find((d) => d.id === id)?.name ?? "—";
+                const purposeText = (extras?.purpose ?? "").trim();
+                if (!purposeText) return; // the dialog never offers an empty purpose; the server refuses it as well
+                setRelRows((rs) => (rs.some((r) => r.dealerId === id) ? rs : [...rs, { dealerId: id, dealerName: name, purpose: purposeText, ...(picked?.ownerId ? { ownerId: picked.ownerId } : {}) }]));
+                setAddVisitOpen(false);
+              }}
+              onClose={() => setAddVisitOpen(false)}
+            />
+          )}
         </div>
       ) : focus === "VISITS" ? (
-        <div className="overflow-x-auto rounded-lg border bg-background">
-          <Table>
-            <TableHeader><TableRow>
-              <TableHead>{L.batch}</TableHead>
-              <TableHead className="text-right">{L.plannedDealerVisits}</TableHead>
-              <TableHead className="text-right">{L.plannedNewPartyVisits}</TableHead>
-              <TableHead>{L.actualDealerVisits}</TableHead>
-              <TableHead>{L.actualNewPartyVisits}</TableHead>
-            </TableRow></TableHeader>
-            <TableBody>
-              {reportVisitBatches.length === 0 ? (
-                <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">{sectionSavedAsNoPlan(data?.batches, "VISITS") ? <strong>{noPlanLabel}</strong> : L.noSubmittedSection}</TableCell></TableRow>
-              ) : reportVisitBatches.map((batch, index) => (
-                <TableRow key={batch.entryId}>
-                  <TableCell className="font-medium">{index + 1}</TableCell>
-                  <TableCell className="text-right tabular-nums">{batch.dealerVisits}</TableCell>
-                  <TableCell className="text-right tabular-nums">{batch.newPartyVisits}</TableCell>
-                  <TableCell>
-                    <Input type="number" min={0} step={1} inputMode="numeric" className="w-28" placeholder="0" value={visitActuals[batch.entryId]?.dealer ?? ""} disabled={busy || locked} onChange={(event) => onNumber((value) => setVisitActuals((current) => ({ ...current, [batch.entryId]: { dealer: value, newParty: current[batch.entryId]?.newParty ?? "" } })))(event)} />
-                  </TableCell>
-                  <TableCell>
-                    <Input type="number" min={0} step={1} inputMode="numeric" className="w-28" placeholder="0" value={visitActuals[batch.entryId]?.newParty ?? ""} disabled={busy || locked} onChange={(event) => onNumber((value) => setVisitActuals((current) => ({ ...current, [batch.entryId]: { dealer: current[batch.entryId]?.dealer ?? "", newParty: value } })))(event)} />
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+        <div className="space-y-4">
+          {reportVisitRows.length > 0 && <div className="overflow-x-auto rounded-lg border bg-background">
+            <Table data-testid="report-dealer-visits">
+              <TableHeader><TableRow>
+                <TableHead>{L.colDealer}</TableHead><TableHead>{L.colTaskType}</TableHead><TableHead>{L.colPurpose}</TableHead><TableHead>{L.visitResult}</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>{reportVisitRows.map((visit) => <TableRow key={visit.dealerId} data-dealer-id={visit.dealerId}>
+                <TableCell className="font-medium"><DealerName id={visit.dealerId} name={visit.dealerName} /></TableCell>
+                <TableCell>{visit.sources.map(sourceText).join(", ")}</TableCell>
+                <TableCell className="whitespace-pre-wrap break-words">{visit.purpose || "—"}</TableCell>
+                <TableCell><NativeSelect aria-label={`${L.visitResult}: ${visit.dealerName}`} className="w-44" required value={visitResults[visit.dealerId] ?? ""} disabled={busy || locked}
+                  options={[{ value: "", label: L.visitResultPlaceholder }, { value: "VISITED", label: L.visited }, { value: "NOT_VISITED", label: L.notVisited }]}
+                  onChange={(event) => setVisitResults((current) => ({ ...current, [visit.dealerId]: event.target.value as DealerVisitResult | "" }))} /></TableCell>
+              </TableRow>)}</TableBody>
+            </Table>
+          </div>}
+          <div className="overflow-x-auto rounded-lg border bg-background">
+            <Table>
+              <TableHeader><TableRow>
+                <TableHead>{L.batch}</TableHead>
+                <TableHead className="text-right">{L.plannedDealerVisits}</TableHead>
+                <TableHead className="text-right">{L.plannedNewPartyVisits}</TableHead>
+                <TableHead>{L.actualDealerVisits}</TableHead>
+                <TableHead>{L.actualNewPartyVisits}</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
+                {reportVisitBatches.length === 0 ? (
+                  <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">{sectionSavedAsNoPlan(data?.batches, "VISITS") ? <strong>{noPlanLabel}</strong> : L.noSubmittedSection}</TableCell></TableRow>
+                ) : reportVisitBatches.map((batch, index) => {
+                  const dealers = reportVisitRows.filter((visit) => visit.entryId === batch.entryId);
+                  const additional = Math.max(0, batch.dealerVisits - dealers.length);
+                  const derivedEmpty = !!batch.dealerVisitsDerived && batch.dealerVisits === 0;
+                  const allChosen = dealers.every((visit) => !!visitResults[visit.dealerId]);
+                  const visitedCount = dealers.filter((visit) => visitResults[visit.dealerId] === "VISITED").length;
+                  const actual = visitActuals[batch.entryId];
+                  return <TableRow key={batch.entryId}>
+                    <TableCell className="font-medium">{index + 1}</TableCell>
+                    <TableCell className="text-right tabular-nums">{batch.dealerVisits}</TableCell>
+                    <TableCell className="text-right tabular-nums">{batch.newPartyVisits}</TableCell>
+                    <TableCell>
+                      {dealers.length > 0 && <span className="tabular-nums" data-testid="derived-visited-count">{allChosen && (additional === 0 || actual?.dealer !== "" && actual?.dealer != null) ? visitedCount + (additional > 0 ? numOr0(actual?.dealer ?? "") : 0) : "—"}</span>}
+                      {derivedEmpty && <span className="tabular-nums">0</span>}
+                      {!derivedEmpty && (dealers.length === 0 || additional > 0) && <div className="space-y-1">
+                        {dealers.length > 0 && <Label className="text-xs">{L.additionalActual}</Label>}
+                        <Input aria-label={dealers.length > 0 ? L.additionalActual : L.actualDealerVisits} type="number" min={0} step={1} inputMode="numeric" className="w-28" placeholder="0" value={actual?.dealer ?? ""} disabled={busy || locked} onChange={(event) => onNumber((value) => setVisitActuals((current) => ({ ...current, [batch.entryId]: { dealer: value, newParty: current[batch.entryId]?.newParty ?? "" } })))(event)} />
+                      </div>}
+                    </TableCell>
+                    <TableCell>
+                      <Input aria-label={L.actualNewPartyVisits} type="number" min={0} step={1} inputMode="numeric" className="w-28" placeholder="0" value={actual?.newParty ?? ""} disabled={busy || locked} onChange={(event) => onNumber((value) => setVisitActuals((current) => ({ ...current, [batch.entryId]: { dealer: current[batch.entryId]?.dealer ?? "", newParty: value } })))(event)} />
+                    </TableCell>
+                  </TableRow>;
+                })}
+              </TableBody>
+            </Table>
+          </div>
         </div>
       ) : (
         <div className="rounded-lg border bg-background p-4">

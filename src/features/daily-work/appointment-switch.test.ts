@@ -41,6 +41,8 @@ function query(q: Prisma.Sql): unknown {
     return 1;
   }
   if (sql.startsWith('UPDATE "DailyWorkEntry" SET "resultStatus"')) { const row = rows.find((r) => r.id === v[2])!; Object.assign(row, { resultStatus: v[0], reportedDealerName: v[1] }); return 1; }
+  // The report completion a report save returns (reportCompletion): not modelled here — no submitted batches.
+  if (sql.startsWith('SELECT "section", "batchId", "todaysActual"::text AS "todaysActual", "resultStatus"')) return [];
   throw new Error(`Unhandled SQL: ${sql}`);
 }
 const prisma = {

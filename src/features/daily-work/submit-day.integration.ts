@@ -36,7 +36,7 @@ const svc = testLoader({
   "@/features/party-planning/monthly.server": { ownerSendDocumentsInTx: async () => ({}) },
   "@/features/cn-requests/service.server": { cnTasksForOfficerDate: async () => [], materializedCnTasksForEntries: async () => [], latestCnRequestStatusByDealer: async () => new Map(),
     countUnconfirmedMaterializedTasks: async (tx: Prisma.TransactionClient, o: string, d: string, b: string) => { const r = await tx.$queryRaw<{ n: number }[]>(Prisma.sql`SELECT COUNT(*)::int AS n FROM "CnPaymentEvent" e JOIN "DailyWorkEntry" w ON w."id" = e."dailyWorkEntryId" WHERE w."officerId" = ${o} AND w."workDate" = ${d}::date AND w."batchId" = ${b}`); return r[0]!.n; } },
-  "@/lib/recovery-config": { getAutoTasksEnabled: async () => false, getCalendarEnabled: async () => true },
+  "@/lib/recovery-config": { getAutoTasksEnabled: async () => false, getCalendarEnabled: async () => true, getAppointmentPartyPlanningEnabled: async () => false },
   "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map(), resolveDealerDisplayNames: async () => new Map(), decorateDealerNames: async (r: unknown[]) => r, dealerDisplayName: (n: string) => n },
 })<typeof import("./service.server")>("src/features/daily-work/service.server.ts");
 

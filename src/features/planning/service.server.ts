@@ -4,7 +4,9 @@ import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
-import { PlanStatus, ApprovalActionType, Role, SeasonStatus } from "@prisma/client";
+import { Prisma, PlanStatus, ApprovalActionType, Role, SeasonStatus } from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import { lockSeasonPlan, isForeignKeyViolation, type LockedSeasonPlan } from "@/lib/plan-row-lock.server";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import {
@@ -32,6 +34,8 @@ import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer } 
 
 const EDITABLE: PlanStatus[] = [PlanStatus.DRAFT, PlanStatus.RETURNED, PlanStatus.REJECTED];
 const PENDING: PlanStatus[] = [PlanStatus.PENDING_RM, PlanStatus.PENDING_ADMIN];
+/** Bounded limits for the short officer write transactions (a constant number of statements; nothing waits on the browser inside them). */
+const PLAN_WRITE_TRANSACTION = { maxWait: 10_000, timeout: 15_000 };
 
 /** A short human label for a plan, used in notification messages. */
 async function planLabel(plan: { officerId: string; seasonId: string }): Promise<string> {
@@ -243,21 +247,19 @@ export async function setDealerNoPlan(
   noPlan: boolean,
   reason?: string,
 ): Promise<{ noPlan: boolean; noPlanReason: string | null }> {
-  const plan = await loadPlanOr404(planId);
-  const isOwner = isPlanOwner(ctx, plan.officerId);
-  if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this plan");
-  if (!EDITABLE.includes(plan.status)) throw new ApiError(409, "This plan is not editable");
-  assertLifecycleEditable(plan.lifecycleState);
-
-  const pd = await prisma.planDealer.findUnique({
-    where: { seasonPlanId_dealerId: { seasonPlanId: planId, dealerId } },
-    select: { id: true },
-  });
-  if (!pd) throw new ApiError(404, "Dealer is not part of this plan");
-
   const noPlanReason = noPlan ? reason?.trim() || null : null;
-  await prisma.planDealer.update({ where: { id: pd.id }, data: { noPlan, noPlanReason } });
-  return { noPlan, noPlanReason };
+  // No Plan changes completion, so it follows the same locked-row rule as saves and Submit.
+  return prisma.$transaction(async (tx) => {
+    const plan = await lockSeasonPlan(tx, planId);
+    if (!plan) throw new ApiError(404, "Plan not found");
+    const isOwner = isPlanOwner(ctx, plan.officerId);
+    if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this plan");
+    if (!EDITABLE.includes(plan.status)) throw new ApiError(409, "This plan is not editable");
+    assertLifecycleEditable(plan.lifecycleState);
+    const updated = await tx.planDealer.updateMany({ where: { seasonPlanId: planId, dealerId }, data: { noPlan, noPlanReason } });
+    if (updated.count === 0) throw new ApiError(404, "Dealer is not part of this plan");
+    return { noPlan, noPlanReason };
+  }, PLAN_WRITE_TRANSACTION);
 }
 
 export interface CreateSeasonalPlansInput {
@@ -607,126 +609,151 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
 
 /* ----------------------------- Save (autosave) ---------------------------- */
 
-export async function saveLines(ctx: AuthContext, planId: string, raw: unknown) {
-  const { lines } = saveLinesSchema.parse(raw);
-  const plan = await loadPlanOr404(planId);
-
-  if (!(isPlanOwner(ctx, plan.officerId))) {
-    throw new ApiError(403, "Only the owning Sales Officer can edit this plan"); // V11
-  }
-  if (!EDITABLE.includes(plan.status)) {
-    throw new ApiError(409, "This plan is submitted or approved and cannot be edited"); // V12/V13
-  }
+/** The editability rule every officer write of a seasonal plan shares, checked on the LOCKED row inside the write's own transaction. */
+function assertSeasonPlanWritable(plan: LockedSeasonPlan | null, ctx: AuthContext, refused: string): asserts plan is LockedSeasonPlan {
+  if (!plan) throw new ApiError(404, "Plan not found");
+  if (!(isPlanOwner(ctx, plan.officerId))) throw new ApiError(403, "Only the owning Sales Officer can edit this plan"); // V11
+  if (!EDITABLE.includes(plan.status)) throw new ApiError(409, refused); // V12/V13
   assertLifecycleEditable(plan.lifecycleState);
-  await assertSeasonOpen(plan.seasonId); // V5
+  if (plan.seasonStatus !== SeasonStatus.OPEN) throw new ApiError(422, "The season is closed; plans cannot be created or edited"); // V5
+}
 
-  // Map (dealerId, productId) → planLineId for this plan.
-  const planLines = await prisma.planLine.findMany({
-    where: { planDealer: { seasonPlanId: planId } },
-    select: { id: true, productId: true, planDealer: { select: { dealerId: true } } },
-  });
-  const lineKey = (dealerId: string, productId: string) => `${dealerId}|${productId}`;
-  const lineMap = new Map(planLines.map((l) => [lineKey(l.planDealer.dealerId, l.productId), l.id]));
+export async function saveLines(ctx: AuthContext, planId: string, raw: unknown) {
+  const { lines: sent } = saveLinesSchema.parse(raw);
+  // The same line sent twice in one request: the later entry wins (as the former one-by-one writes did).
+  const lines = [...new Map(sent.map((l) => [`${l.dealerId}|${l.productId}`, l])).values()];
 
-  await prisma.$transaction(async (tx) => {
-    for (const line of lines) {
-      const planLineId = lineMap.get(lineKey(line.dealerId, line.productId));
-      if (!planLineId) continue; // not part of this plan — ignore
+  // What was stored, exactly as written below — returned so the editor can update its cached plan (completion / submit gate) without re-reading the whole plan.
+  const acknowledged: { dealerId: string; productId: string; inputMode: "TOTAL_QUANTITY" | "AMOUNT" | "NBV" | null; inputValue: number | null; packs: Record<string, number> }[] = [];
+  let lastSavedAt: Date;
+  try {
+    lastSavedAt = await prisma.$transaction(async (tx) => {
+      // Editability is checked on the LOCKED plan row: a Submit (or approval / lifecycle change) of this plan waits for this save, and a save that
+      // arrives after a Submit is refused here — it can never write into a submitted plan.
+      assertSeasonPlanWritable(await lockSeasonPlan(tx, planId), ctx, "This plan is submitted or approved and cannot be edited");
 
-      const mode = line.mode ?? "PACK_SIZE";
-      if (mode === "PACK_SIZE") {
-        // Legacy/default: per-pack quantities are the source of truth for this line.
-        for (const pack of line.packs) {
-          await tx.planLinePack.upsert({
-            where: { planLineId_packSizeId: { planLineId, packSizeId: pack.packSizeId } },
-            create: { planLineId, packSizeId: pack.packSizeId, quantity: pack.quantity },
-            update: { quantity: pack.quantity },
-          });
+      // (dealerId, productId) → planLineId, for the sent lines only (lines that are not part of this plan are ignored, as before).
+      const found = lines.length === 0 ? [] : await tx.$queryRaw<{ id: string; dealerId: string; productId: string }[]>(Prisma.sql`
+        SELECT l."id", d."dealerId", l."productId"
+        FROM "PlanLine" l
+        JOIN "PlanDealer" d ON d."id" = l."planDealerId"
+        JOIN unnest(${lines.map((l) => l.dealerId)}::text[], ${lines.map((l) => l.productId)}::text[]) AS v("dealerId", "productId")
+          ON v."dealerId" = d."dealerId" AND v."productId" = l."productId"
+        WHERE d."seasonPlanId" = ${planId}`);
+      const lineMap = new Map(found.map((l) => [`${l.dealerId}|${l.productId}`, l.id]));
+
+      const packRows: { planLineId: string; packSizeId: string; quantity: number }[] = [];
+      const packLineIds: string[] = [];
+      const valueRows: { planLineId: string; mode: "TOTAL_QUANTITY" | "AMOUNT" | "NBV"; value: number }[] = [];
+      for (const line of lines) {
+        const planLineId = lineMap.get(`${line.dealerId}|${line.productId}`);
+        if (!planLineId) continue; // not part of this plan — ignore
+        const mode = line.mode ?? "PACK_SIZE";
+        if (mode === "PACK_SIZE") {
+          // Legacy/default: per-pack quantities are the source of truth for this line (a pack sent twice: the later one wins).
+          const packs = [...new Map(line.packs.map((p) => [p.packSizeId, p.quantity])).entries()];
+          for (const [packSizeId, quantity] of packs) packRows.push({ planLineId, packSizeId, quantity });
+          packLineIds.push(planLineId);
+          acknowledged.push({ dealerId: line.dealerId, productId: line.productId, inputMode: null, inputValue: null, packs: Object.fromEntries(packs) });
+        } else {
+          // Non-pack mode: store the single entered value; quantities in TOTAL_QUANTITY are whole numbers, amount/NBV keep decimals. Packs are left
+          // untouched but ignored while inputMode is set.
+          const rawValue = line.value ?? 0;
+          valueRows.push({ planLineId, mode, value: mode === "TOTAL_QUANTITY" ? Math.max(0, Math.floor(rawValue)) : rawValue });
+          acknowledged.push({ dealerId: line.dealerId, productId: line.productId, inputMode: mode, inputValue: null, packs: {} });
         }
-        await tx.planLine.update({
-          where: { id: planLineId },
-          data: { inputMode: null, inputValue: null },
-        });
-      } else {
-        // Non-pack mode: store the single entered value; quantities in TOTAL_QUANTITY
-        // are whole numbers, amount/NBV keep decimals. Packs are left untouched but
-        // ignored while inputMode is set.
-        const raw = line.value ?? 0;
-        const value = mode === "TOTAL_QUANTITY" ? Math.max(0, Math.floor(raw)) : raw;
-        await tx.planLine.update({
-          where: { id: planLineId },
-          data: { inputMode: mode, inputValue: value },
-        });
       }
-    }
-    await tx.seasonPlan.update({ where: { id: planId }, data: { lastSavedAt: new Date() } });
-  });
 
-  const saved = await prisma.seasonPlan.findUnique({
-    where: { id: planId },
-    select: { lastSavedAt: true },
-  });
-  return { lastSavedAt: saved!.lastSavedAt };
+      // A bounded number of statements whatever the number of lines / pack sizes (the former writes were one statement per pack per line).
+      if (packRows.length > 0) {
+        await tx.$executeRaw(Prisma.sql`
+          INSERT INTO "PlanLinePack" ("id", "planLineId", "packSizeId", "quantity")
+          SELECT v."id", v."planLineId", v."packSizeId", v."quantity"
+          FROM unnest(${packRows.map(() => randomUUID())}::text[], ${packRows.map((r) => r.planLineId)}::text[], ${packRows.map((r) => r.packSizeId)}::text[], ${packRows.map((r) => r.quantity)}::int[])
+            AS v("id", "planLineId", "packSizeId", "quantity")
+          ON CONFLICT ("planLineId", "packSizeId") DO UPDATE SET "quantity" = EXCLUDED."quantity"`);
+      }
+      if (packLineIds.length > 0) {
+        await tx.$executeRaw(Prisma.sql`UPDATE "PlanLine" SET "inputMode" = NULL, "inputValue" = NULL WHERE "id" = ANY(${packLineIds}::text[])`);
+      }
+      if (valueRows.length > 0) {
+        // Decimal values travel as text, so the database rounds them exactly as it did for the former per-line update (Decimal 14,4).
+        const stored = await tx.$queryRaw<{ id: string; inputValue: string | null }[]>(Prisma.sql`
+          UPDATE "PlanLine" l SET "inputMode" = v."mode", "inputValue" = v."value"
+          FROM unnest(${valueRows.map((r) => r.planLineId)}::text[], ${valueRows.map((r) => r.mode)}::text[], ${valueRows.map((r) => String(r.value))}::numeric[]) AS v("id", "mode", "value")
+          WHERE l."id" = v."id"
+          RETURNING l."id", l."inputValue"::text AS "inputValue"`);
+        const storedById = new Map(stored.map((r) => [r.id, r.inputValue == null ? null : Number(r.inputValue)]));
+        // The value AS STORED (not the raw input), matched to its acknowledgement.
+        const ackByLine = new Map(acknowledged.map((a) => [lineMap.get(`${a.dealerId}|${a.productId}`), a]));
+        for (const r of valueRows) { const a = ackByLine.get(r.planLineId); if (a) a.inputValue = storedById.get(r.planLineId) ?? null; }
+      }
+      return (await tx.seasonPlan.update({ where: { id: planId }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } })).lastSavedAt;
+    }, PLAN_WRITE_TRANSACTION);
+  } catch (error) {
+    if (isForeignKeyViolation(error)) throw new ApiError(409, "A referenced record no longer exists. Please refresh and sign in again.");
+    throw error;
+  }
+  // `lines`: the acknowledged values (pack quantities are merged into the line's stored packs; a non-pack line keeps its packs). Existing callers only read lastSavedAt.
+  return { lastSavedAt, lines: acknowledged };
 }
 
 /* ------------------------------ Submit / recall --------------------------- */
 
 export async function submitPlan(ctx: AuthContext, planId: string) {
-  const plan = await loadPlanOr404(planId);
-  if (!(isPlanOwner(ctx, plan.officerId))) {
-    throw new ApiError(403, "Only the owning Sales Officer can submit this plan");
-  }
-  if (!EDITABLE.includes(plan.status)) {
-    throw new ApiError(409, "This plan cannot be submitted in its current state");
-  }
-  assertLifecycleEditable(plan.lifecycleState);
-  await assertSeasonOpen(plan.seasonId); // V5
+  // V31 — every dealer in the plan must currently be assigned to the officer. Assignment is not plan state, so it is read before the transaction.
+  const preview = await loadPlanOr404(planId);
+  if (!(isPlanOwner(ctx, preview.officerId))) throw new ApiError(403, "Only the owning Sales Officer can submit this plan");
+  const currentDealers = new Set(await getCurrentDealerIds(preview.officerId));
 
-  // V31 — every dealer in the plan must currently be assigned to the officer.
-  const currentDealers = new Set(await getCurrentDealerIds(plan.officerId));
-  // Use the SAME eligibility rule as the seasonal view/draft (loadPlan): only currently plannable dealers
-  // (Active, non-Defaulter) must be accounted for. An Inactive/Defaulter dealer is hidden from the planning
-  // UI, so it must not count as "required" here — otherwise a deactivated dealer that still has a historical
-  // PlanDealer row would block submission with no way to plan it. Historical rows are preserved; they are
-  // only excluded from the gate (and from the stray/ownership check below, which must not trip on them).
-  const planDealers = await prisma.planDealer.findMany({
-    where: { seasonPlanId: planId, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
-    include: { dealer: { select: { name: true } }, lines: { include: { packs: { select: { quantity: true } } } } },
-  });
-  const stray = planDealers.filter((pd) => !currentDealers.has(pd.dealerId));
-  if (stray.length > 0) {
-    throw new ApiError(
-      422,
-      `These dealers are no longer assigned to you: ${stray.map((s) => s.dealer.name).join(", ")}`,
-    );
-  }
+  // Status, completion and the status change are decided on the LOCKED plan row: a save still running finishes first (its values count), a later
+  // save is refused, and a second Submit (double click, another tab) waits and then gets the already-submitted answer — exactly one submission.
+  const { plan, nextStatus, managerId } = await prisma.$transaction(async (tx) => {
+    const plan = await lockSeasonPlan(tx, planId);
+    if (!plan) throw new ApiError(404, "Plan not found");
+    if (!EDITABLE.includes(plan.status)) throw new ApiError(409, "This plan cannot be submitted in its current state");
+    assertLifecycleEditable(plan.lifecycleState);
+    if (plan.seasonStatus !== SeasonStatus.OPEN) throw new ApiError(422, "The season is closed; plans cannot be created or edited"); // V5
 
-  // Dealer completion: every dealer must be Completed (≥1 stored quantity) or explicitly
-  // marked "No Plan". No "Remaining" dealers may be submitted.
-  const remaining = planDealers.filter((pd) => {
-    if (pd.noPlan) return false;
-    const hasQty = pd.lines.some(
-      (l: { inputValue: unknown; packs: { quantity: number }[] }) =>
-        (l.inputValue != null && num(l.inputValue) > 0) || l.packs.some((p) => p.quantity > 0),
-    );
-    return !hasQty;
-  });
-  if (remaining.length > 0) {
-    throw new ApiError(
-      422,
-      `Every dealer must be planned or marked "No Plan". Not yet accounted for: ${remaining.map((r) => r.dealer.name).join(", ")}`,
-    );
-  }
+    // Use the SAME eligibility rule as the seasonal view/draft (loadPlan): only currently plannable dealers (Active, non-Defaulter) must be accounted
+    // for. An Inactive/Defaulter dealer is hidden from the planning UI, so it must not count as "required" here — otherwise a deactivated dealer that
+    // still has a historical PlanDealer row would block submission with no way to plan it. Historical rows are preserved; they are only excluded from
+    // the gate (and from the stray/ownership check below, which must not trip on them).
+    // Dealer completion: every dealer must be Completed (≥1 stored quantity) or explicitly marked "No Plan" — one aggregate over the stored lines.
+    const planDealers = await tx.$queryRaw<{ dealerId: string; dealerName: string; noPlan: boolean; hasQty: boolean }[]>(Prisma.sql`
+      SELECT pd."dealerId", dl."name" AS "dealerName", pd."noPlan",
+             COALESCE(BOOL_OR((l."inputValue" IS NOT NULL AND l."inputValue" > 0)
+               OR EXISTS (SELECT 1 FROM "PlanLinePack" pk WHERE pk."planLineId" = l."id" AND pk."quantity" > 0)), false) AS "hasQty"
+      FROM "PlanDealer" pd
+      JOIN "Dealer" dl ON dl."id" = pd."dealerId"
+      LEFT JOIN "PlanLine" l ON l."planDealerId" = pd."id"
+      WHERE pd."seasonPlanId" = ${planId} AND dl."isActive" = true AND dl."status" <> 'DEFAULTER'
+      GROUP BY pd."id", pd."dealerId", dl."name", pd."noPlan"
+      ORDER BY dl."name"`);
+    const stray = planDealers.filter((pd) => !currentDealers.has(pd.dealerId));
+    if (stray.length > 0) {
+      throw new ApiError(
+        422,
+        `These dealers are no longer assigned to you: ${stray.map((s) => s.dealerName).join(", ")}`,
+      );
+    }
+    const remaining = planDealers.filter((pd) => !pd.noPlan && !pd.hasQty);
+    if (remaining.length > 0) {
+      throw new ApiError(
+        422,
+        `Every dealer must be planned or marked "No Plan". Not yet accounted for: ${remaining.map((r) => r.dealerName).join(", ")}`,
+      );
+    }
 
-  const managerId = await getCurrentManagerId(plan.officerId);
-  const nextStatus = managerId ? PlanStatus.PENDING_RM : PlanStatus.PENDING_ADMIN;
+    const managerId = await getCurrentManagerId(plan.officerId, tx);
+    const nextStatus = managerId ? PlanStatus.PENDING_RM : PlanStatus.PENDING_ADMIN;
+    await tx.seasonPlan.update({ where: { id: planId }, data: { status: nextStatus, submittedAt: new Date() } });
+    // The approval history entry commits together with the status change (never one without the other).
+    await tx.approvalAction.create({ data: { seasonPlanId: planId, actorId: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}), action: ApprovalActionType.SUBMIT, fromStatus: plan.status, toStatus: nextStatus } });
+    return { plan, nextStatus, managerId };
+  }, PLAN_WRITE_TRANSACTION);
 
-  await prisma.seasonPlan.update({
-    where: { id: planId },
-    data: { status: nextStatus, submittedAt: new Date() },
-  });
-  await recordAction(planId, ctx, ApprovalActionType.SUBMIT, plan.status, nextStatus);
-
+  // Notifications are sent after the commit (a notification failure must not undo a recorded submission — as before).
   const label = await planLabel(plan);
   if (nextStatus === PlanStatus.PENDING_RM && managerId) {
     await createNotification({

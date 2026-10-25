@@ -35,7 +35,7 @@ runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.Modul
   useLabel: (key: LabelKey) => DEFAULT_LABELS[key],
   useReportNoPlan: () => ({ is: () => false, label: "No Plan" }),
   useDailyAutosave: (_key: string, _enabled: boolean, save: () => Promise<void>) => { saveDraft = save; return { hydrate: () => {}, flush: save }; },
-  useRegisterSaveDraft: () => {}, STATUS_KEY: () => ["status"],
+  useRegisterSaveDraft: () => {}, STATUS_KEY: () => ["status"], refreshAfterReportSave: () => {},
   api: { post: async (url: string, payload: Record<string, unknown>) => { requests.push({ url, payload }); } },
   DailyWorkView: daily.DailyWorkView, dailyWorkShowsResults: daily.dailyWorkShowsResults,
   visibleDailyWorkRows: daily.visibleDailyWorkRows, combineAppointmentRows: daily.combineAppointmentRows,

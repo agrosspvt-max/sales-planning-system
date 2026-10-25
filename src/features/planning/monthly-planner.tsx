@@ -1,5 +1,6 @@
 "use client";
 
+import { AutosaveStatus } from "@/features/planning/autosave-status";
 import { DealerOrder } from "@/features/dealers/dealer-table-ui";
 import { DealerOptionName } from "@/features/dealers/dealer-name-ui";
 import { useCallback, useMemo, useState } from "react";
@@ -45,7 +46,7 @@ const OPTION_COLOR: Record<DealerPlanningStatus, string | undefined> = {
  * and Achievement %).
  */
 export function MonthlyPlanner() {
-  const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, flush, setAdditionalOpen,
+  const { data, monthlyPlanId, monthlyMode, qtyMode, cellFor, monthEditable, setCell, saving, saveStatus, flush, setAdditionalOpen,
     canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave } = useMonthlyEdit();
   const qc = useQueryClient();
   const categories = useCategories();
@@ -240,8 +241,8 @@ export function MonthlyPlanner() {
         </div>
         {data.canEdit && (
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
-            <span>{saving ? "Saving…" : "Saved"}</span>
-            <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}>
+            <AutosaveStatus saving={saving} {...saveStatus} />
+            <Button size="sm" variant="outline" onClick={() => void flush().catch(() => undefined)} disabled={saving}>
               <Save className="h-4 w-4" /> Save
             </Button>
           </div>
@@ -374,7 +375,7 @@ export function MonthlyPlanner() {
           onOpenChange={setNoPlanOpen}
           saving={noPlanMut.isPending}
           onConfirm={(reason) => {
-            void flush().then(() => noPlanMut.mutate({ noPlan: true, reason }));
+            void flush().then(() => noPlanMut.mutate({ noPlan: true, reason })).catch(() => undefined); // a failed save keeps the edits and shows "Not saved"; No Plan waits
           }}
         />
       )}

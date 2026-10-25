@@ -111,6 +111,8 @@ function makeFake(opts: { assignedDealerIds: string[]; dealers: { id: string; na
       for (const r of store) if (r.id === entryId && r.officerId === officerId && r.section === section && r.workDate === workDate && r.batchId !== currentBatchId && r.status === "PLAN_SUBMITTED") { r.resultStatus = result; n++; }
       return n;
     }
+    // The report completion a report save returns (reportCompletion): this suite does not model it, so it reports no submitted batches.
+    if (text.startsWith('SELECT "section", "batchId", "todaysActual"::text AS "todaysActual", "resultStatus"')) return [];
     throw new Error("Unhandled raw SQL: " + text);
   }
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { pollingInterval } from "@/lib/polling";
 import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -18,7 +19,7 @@ export function useLateApprovalSync(outstanding: OutstandingReportView | null) {
     staleTime: 0,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
-    refetchInterval: (query) => pending && !(query.state.data?.id === pending.id && query.state.data.status !== "PENDING") ? 15_000 : false,
+    refetchInterval: pollingInterval(15_000, (query) => !!pending && !(query.state.data?.id === pending.id && query.state.data.status !== "PENDING")),
     refetchIntervalInBackground: false,
   });
   const decisionId = data?.id;

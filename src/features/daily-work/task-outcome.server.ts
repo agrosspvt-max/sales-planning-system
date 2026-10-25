@@ -2,11 +2,10 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { writeAudit } from "@/lib/audit";
 import { cnRequestExpiryDateKey, isCnSundayDateKey } from "@/lib/cn-request";
 import { cnTaskWindowEnd, effectiveCnStage } from "@/lib/cn-expiry";
 import { currentBusinessDate } from "@/lib/daily-work";
-import { recordTaskReschedule, type TaskSourceType } from "@/features/tasks/task-history.server";
+import { recordTaskReschedules, type TaskSourceType } from "@/features/tasks/task-history.server";
 import {
   OUTCOME_UNIT_TYPES, outcomeUnitIsAuto, outcomeUnitSource, rowActualFromOutcomes, sanitizeOutcomeFields, validateOutcome, roundMoney,
   type AbandonReasonCode, type OutcomeError, type OutcomeFields, type OutcomeUnitType, type TaskOutcome,
@@ -266,82 +265,115 @@ export async function commitTaskOutcomes(tx: Prisma.TransactionClient, ctx: Auth
     ORDER BY o."unitType", o."unitId" FOR UPDATE`);
   const result: CommitResult = { completed: 0, rescheduled: 0, abandoned: 0 };
   if (rows.length === 0) return result;
+  // Every statement of a transaction is a network round trip, and a report can carry many tasks: the lookups below are ONE statement per kind of source task (never one per task),
+  // all checks run in memory in the original row order (so the first failing task reports the same error as before), and only then are the effects applied as one set-based write per
+  // table. All of it uses this transaction's client; any failure rolls the whole report back.
   const actor = (await tx.user.findUnique({ where: { id: ctx.userId }, select: { name: true } }))?.name ?? ctx.username ?? ctx.userId;
   const rules = await dateRules(tx, rows);
   const entryIds = [...new Set(rows.map((r) => r.entryId))];
   const facts = await tx.$queryRaw<{ id: string; dealerId: string | null; entryType: string; schemeId: string | null }[]>(Prisma.sql`SELECT "id", "dealerId", "entryType", "schemeId" FROM "DailyWorkEntry" WHERE "id" IN (${ids(entryIds)})`);
+  const factOf = new Map(facts.map((f) => [f.id, f]));
+  const sources = await lockSourceTasks(tx, rows);
+  const plan: { row: OutcomeRow; f: OutcomeFields }[] = [];
+  const moves: { row: OutcomeRow; next: string; previous: string }[] = [];
+  const manual: { row: OutcomeRow; next: string; calendarId: string }[] = [];
+  const abandons: OutcomeRow[] = [];
   for (const row of rows) {
     const f: OutcomeFields = { outcome: row.outcome, actualAmount: row.actualAmount == null ? null : Number(row.actualAmount), nextDate: row.nextDate, reason: row.reason, reasonCode: row.reasonCode };
     const err = validateOutcome(f, today) ?? expiredRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.outcome) ?? (f.outcome === "RESCHEDULED" && f.nextDate ? dateRuleError(rules.get(`${row.unitType}:${row.unitId}`), f.nextDate) : null);
     if (err) throw new ApiError(422, outcomeMessage(L, err));
-    let continuedAs: { type: string; id: string } | null = null;
-    if (f.outcome === "RESCHEDULED") continuedAs = await reschedule(tx, ctx, row, f.nextDate!, facts.find((x) => x.id === row.entryId)!, L);
-    else if (f.outcome === "ABANDONED") await abandon(tx, row, L);
-    await tx.$executeRaw(Prisma.sql`
-      UPDATE "DailyTaskOutcome" SET "state" = 'COMMITTED', "committedAt" = NOW(), "committedById" = ${ctx.userId}, "committedByName" = ${actor},
-        "continuedAsType" = ${continuedAs?.type ?? null}, "continuedAsId" = ${continuedAs?.id ?? null}, "updatedAt" = NOW()
-      WHERE "id" = ${row.id} AND "state" = 'DRAFT'`);
-    if (f.outcome === "COMPLETED") result.completed++; else if (f.outcome === "RESCHEDULED") result.rescheduled++; else result.abandoned++;
-    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyTaskOutcome", entityId: row.id, summary: `Task outcome ${f.outcome} · ${row.unitType} ${row.unitId}${f.outcome === "RESCHEDULED" ? ` → ${f.nextDate}` : ""}${f.outcome === "COMPLETED" ? ` · actual ${f.actualAmount}` : ""}` }, tx);
+    if (f.outcome === "RESCHEDULED") {
+      if (row.unitType === "MANUAL_ROW") manual.push({ row, next: f.nextDate!, calendarId: randomUUID() });
+      else moves.push({ row, next: f.nextDate!, previous: assertCanReschedule(sources.get(`${row.unitType}:${row.unitId}`), row, L) });
+    } else if (f.outcome === "ABANDONED" && row.unitType !== "MANUAL_ROW") {
+      assertCanAbandon(sources.get(`${row.unitType}:${row.unitId}`), row, L);
+      abandons.push(row);
+    }
+    plan.push({ row, f });
   }
+  await applyReschedules(tx, moves);
+  await applyAbandons(tx, abandons, L);
+  const continued = new Map<string, { type: string; id: string }>();
+  if (manual.length) {
+    // MANUAL_ROW: a task typed straight into Daily Work has no source row of its own; it continues as ONE Calendar task (a Manual task, created by the officer) on the next date.
+    await tx.calendarEntry.createMany({
+      data: manual.map(({ row, next, calendarId }) => {
+        const entry = factOf.get(row.entryId)!;
+        return { id: calendarId, ownerId: row.officerId, createdById: ctx.userId, date: new Date(`${next}T00:00:00.000Z`), kind: "TASK", taskSection: row.section, dealerId: entry.dealerId, amount: Number(row.plannedAmount), entryType: entry.entryType, schemeId: entry.entryType === "SCHEME" ? entry.schemeId : null } as never;
+      }),
+    });
+    for (const m of manual) continued.set(m.row.id, { type: "CALENDAR_ENTRY", id: m.calendarId });
+  }
+  await recordTaskReschedules(tx, ctx, actor, [
+    ...moves.map((m) => ({ sourceType: SOURCE_TYPE[m.row.unitType as Exclude<OutcomeUnitType, "MANUAL_ROW">], sourceId: m.row.unitId, ownerId: m.row.officerId, previousDate: m.previous, newDate: m.next })),
+    ...manual.map((m) => ({ sourceType: "CALENDAR_ENTRY" as TaskSourceType, sourceId: m.calendarId, ownerId: m.row.officerId, previousDate: m.row.workDate, newDate: m.next })),
+  ]);
+  const committed = await tx.$executeRaw(Prisma.sql`
+    UPDATE "DailyTaskOutcome" o SET "state" = 'COMMITTED', "committedAt" = NOW(), "committedById" = ${ctx.userId}, "committedByName" = ${actor},
+      "continuedAsType" = v."t", "continuedAsId" = v."i", "updatedAt" = NOW()
+    FROM jsonb_to_recordset(${JSON.stringify(plan.map(({ row }) => ({ id: row.id, t: continued.get(row.id)?.type ?? null, i: continued.get(row.id)?.id ?? null })))}::jsonb) AS v("id" text, "t" text, "i" text)
+    WHERE o."id" = v."id" AND o."state" = 'DRAFT'`);
+  if (Number(committed) !== plan.length) throw changed(L);
+  for (const { f } of plan) {
+    if (f.outcome === "COMPLETED") result.completed++; else if (f.outcome === "RESCHEDULED") result.rescheduled++; else result.abandoned++;
+  }
+  // One audit row per outcome, exactly as before, written in ONE statement by this same transaction.
+  await tx.auditLog.createMany({
+    data: plan.map(({ row, f }) => ({
+      userId: ctx.userId, action: "UPDATE", entity: "dailyTaskOutcome", entityId: row.id,
+      summary: `Task outcome ${f.outcome} · ${row.unitType} ${row.unitId}${f.outcome === "RESCHEDULED" ? ` → ${f.nextDate}` : ""}${f.outcome === "COMPLETED" ? ` · actual ${f.actualAmount}` : ""}`,
+      ...(ctx.designation ? { actorDesignation: ctx.designation } : {}),
+    })),
+  });
   return result;
 }
 
-const changed = (L: Labels) => new ApiError(409, L["daily_work.outcome.error.task_changed"] ?? "task_changed");
+/* ---- commit helpers: one lookup / one write per kind of source task ---- */
 
-/** Move the SAME task to its next date. Source tasks keep their id, amount, owner, source links and original date; a manual task continues as a Calendar task from now on. */
-async function reschedule(tx: Prisma.TransactionClient, ctx: AuthContext, row: OutcomeRow, next: string, entry: { dealerId: string | null; entryType: string; schemeId: string | null }, L: Labels): Promise<{ type: string; id: string } | null> {
-  const move = (type: TaskSourceType, previous: string) => recordTaskReschedule(tx, ctx, { sourceType: type, sourceId: row.unitId, ownerId: row.officerId, previousDate: previous, newDate: next });
-  if (row.unitType === "BILLING_EXCEPTION") {
-    const t = (await tx.$queryRaw<{ taskDate: string; entryId: string | null; abandoned: boolean }[]>(Prisma.sql`SELECT "taskDate"::text AS "taskDate", "dailyWorkEntryId" AS "entryId", ("abandonedAt" IS NOT NULL) AS "abandoned" FROM "BillingExceptionTask" WHERE "id" = ${row.unitId} FOR UPDATE`))[0];
-    if (!t || t.entryId !== row.entryId || t.abandoned) throw changed(L);
-    await tx.$executeRaw(Prisma.sql`UPDATE "BillingExceptionTask" SET "taskDate" = ${next}::date, "rescheduled" = true, "dailyWorkEntryId" = NULL, "dailyWorkContribution" = NULL, "dailyWorkConfirmed" = false, "materializedAt" = NULL, "updatedAt" = NOW() WHERE "id" = ${row.unitId}`);
-    await move("BILLING_EXCEPTION", t.taskDate);
-    return null;
+interface SourceTask { date: string | null; entryId: string | null; abandoned: boolean; status: string | null }
+const SOURCE_LOCK_SQL: Record<Exclude<OutcomeUnitType, "MANUAL_ROW">, (list: readonly string[]) => Prisma.Sql> = {
+  BILLING_EXCEPTION: (list) => Prisma.sql`SELECT "id", "taskDate"::text AS "date", "dailyWorkEntryId" AS "entryId", ("abandonedAt" IS NOT NULL) AS "abandoned", NULL::text AS "status" FROM "BillingExceptionTask" WHERE "id" IN (${ids(list)}) ORDER BY "id" FOR UPDATE`,
+  CN_PAYMENT: (list) => Prisma.sql`SELECT "id", "taskDate"::text AS "date", "dailyWorkEntryId" AS "entryId", FALSE AS "abandoned", "taskStatus" AS "status" FROM "CnPaymentEvent" WHERE "id" IN (${ids(list)}) ORDER BY "id" FOR UPDATE`,
+  CN_LEGACY: (list) => Prisma.sql`SELECT "id", "taskDate"::text AS "date", "legacyDailyWorkEntryId" AS "entryId", ("legacyTaskAbandonedAt" IS NOT NULL) AS "abandoned", NULL::text AS "status" FROM "CnRequest" WHERE "id" IN (${ids(list)}) ORDER BY "id" FOR UPDATE`,
+  CALENDAR_ENTRY: (list) => Prisma.sql`SELECT "id", "date"::text AS "date", "dailyWorkEntryId" AS "entryId", ("abandonedAt" IS NOT NULL) AS "abandoned", NULL::text AS "status" FROM "CalendarEntry" WHERE "id" IN (${ids(list)}) ORDER BY "id" FOR UPDATE`,
+};
+/** Lock (in a fixed order) the source tasks that will be moved or abandoned: one statement per kind of task. */
+async function lockSourceTasks(tx: Prisma.TransactionClient, rows: readonly OutcomeRow[]): Promise<Map<string, SourceTask>> {
+  const out = new Map<string, SourceTask>();
+  for (const unitType of Object.keys(SOURCE_LOCK_SQL) as Exclude<OutcomeUnitType, "MANUAL_ROW">[]) {
+    const wanted = rows.filter((r) => r.unitType === unitType && (r.outcome === "RESCHEDULED" || r.outcome === "ABANDONED")).map((r) => r.unitId);
+    if (wanted.length === 0) continue;
+    for (const t of await tx.$queryRaw<(SourceTask & { id: string })[]>(SOURCE_LOCK_SQL[unitType](wanted))) out.set(`${unitType}:${t.id}`, t);
   }
-  if (row.unitType === "CN_PAYMENT") {
-    const t = (await tx.$queryRaw<{ taskDate: string | null; entryId: string | null; status: string | null }[]>(Prisma.sql`SELECT "taskDate"::text AS "taskDate", "dailyWorkEntryId" AS "entryId", "taskStatus" AS "status" FROM "CnPaymentEvent" WHERE "id" = ${row.unitId} FOR UPDATE`))[0];
-    if (!t || t.entryId !== row.entryId || t.status !== "SCHEDULED" || !t.taskDate) throw changed(L);
-    await tx.$executeRaw(Prisma.sql`UPDATE "CnPaymentEvent" SET "taskDate" = ${next}::date, "taskStatus" = 'SCHEDULED', "taskRescheduled" = true, "dailyWorkEntryId" = NULL, "dailyWorkContribution" = NULL, "dailyWorkConfirmed" = false WHERE "id" = ${row.unitId}`);
-    await move("CN_PAYMENT", t.taskDate);
-    return null;
-  }
-  if (row.unitType === "CN_LEGACY") {
-    const t = (await tx.$queryRaw<{ taskDate: string | null; entryId: string | null; abandoned: boolean }[]>(Prisma.sql`SELECT "taskDate"::text AS "taskDate", "legacyDailyWorkEntryId" AS "entryId", ("legacyTaskAbandonedAt" IS NOT NULL) AS "abandoned" FROM "CnRequest" WHERE "id" = ${row.unitId} FOR UPDATE`))[0];
-    if (!t || t.entryId !== row.entryId || t.abandoned || !t.taskDate) throw changed(L);
-    await tx.$executeRaw(Prisma.sql`UPDATE "CnRequest" SET "taskDate" = ${next}::date, "legacyDailyWorkEntryId" = NULL, "legacyDailyWorkContribution" = NULL, "legacyDailyWorkConfirmed" = false, "updatedAt" = NOW() WHERE "id" = ${row.unitId}`);
-    await move("CN_LEGACY", t.taskDate);
-    return null;
-  }
-  if (row.unitType === "CALENDAR_ENTRY") {
-    const t = (await tx.$queryRaw<{ date: string; entryId: string | null; abandoned: boolean }[]>(Prisma.sql`SELECT "date"::text AS "date", "dailyWorkEntryId" AS "entryId", ("abandonedAt" IS NOT NULL) AS "abandoned" FROM "CalendarEntry" WHERE "id" = ${row.unitId} FOR UPDATE`))[0];
-    if (!t || t.entryId !== row.entryId || t.abandoned) throw changed(L);
-    await tx.$executeRaw(Prisma.sql`UPDATE "CalendarEntry" SET "date" = ${next}::date, "dailyWorkEntryId" = NULL, "dailyWorkContribution" = NULL, "materializedAt" = NULL, "updatedAt" = NOW() WHERE "id" = ${row.unitId}`);
-    await move("CALENDAR_ENTRY", t.date);
-    return null;
-  }
-  // MANUAL_ROW: a task typed straight into Daily Work has no source row of its own; it continues as ONE Calendar task (a Manual task, created by the officer) on the next date.
-  const created = await tx.calendarEntry.create({
-    data: { ownerId: row.officerId, createdById: ctx.userId, date: new Date(`${next}T00:00:00.000Z`), kind: "TASK", taskSection: row.section, dealerId: entry.dealerId, amount: Number(row.plannedAmount), entryType: entry.entryType, schemeId: entry.entryType === "SCHEME" ? entry.schemeId : null } as never,
-    select: { id: true },
-  });
-  await recordTaskReschedule(tx, ctx, { sourceType: "CALENDAR_ENTRY", sourceId: created.id, ownerId: row.officerId, previousDate: row.workDate, newDate: next });
-  return { type: "CALENDAR_ENTRY", id: created.id };
+  return out;
 }
-
-/** Abandon ends the FOLLOW-UP task only: nothing is written off, received or resolved. A manual row has no future occurrence to stop. */
-async function abandon(tx: Prisma.TransactionClient, row: OutcomeRow, L: Labels): Promise<void> {
-  if (row.unitType === "BILLING_EXCEPTION") {
-    const n = await tx.$executeRaw(Prisma.sql`UPDATE "BillingExceptionTask" SET "abandonedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = ${row.unitId} AND "abandonedAt" IS NULL AND "dailyWorkEntryId" = ${row.entryId}`);
-    if (Number(n) !== 1) throw changed(L);
-  } else if (row.unitType === "CN_PAYMENT") {
-    const n = await tx.$executeRaw(Prisma.sql`UPDATE "CnPaymentEvent" SET "taskStatus" = 'ABANDONED' WHERE "id" = ${row.unitId} AND "taskStatus" = 'SCHEDULED' AND "dailyWorkEntryId" = ${row.entryId}`);
-    if (Number(n) !== 1) throw changed(L);
-  } else if (row.unitType === "CN_LEGACY") {
-    const n = await tx.$executeRaw(Prisma.sql`UPDATE "CnRequest" SET "legacyTaskAbandonedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = ${row.unitId} AND "legacyTaskAbandonedAt" IS NULL AND "legacyDailyWorkEntryId" = ${row.entryId}`);
-    if (Number(n) !== 1) throw changed(L);
-  } else if (row.unitType === "CALENDAR_ENTRY") {
-    const n = await tx.$executeRaw(Prisma.sql`UPDATE "CalendarEntry" SET "abandonedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = ${row.unitId} AND "abandonedAt" IS NULL AND "dailyWorkEntryId" = ${row.entryId}`);
-    if (Number(n) !== 1) throw changed(L);
-  }
+const changed = (L: Labels) => new ApiError(409, L["daily_work.outcome.error.task_changed"] ?? "task_changed");
+/** The task must still be the one this row planned (same links, not abandoned, still scheduled). Returns its CURRENT date (the date it is moved from). */
+function assertCanReschedule(t: SourceTask | undefined, row: OutcomeRow, L: Labels): string {
+  if (!t || t.entryId !== row.entryId || t.abandoned) throw changed(L);
+  if ((row.unitType === "CN_PAYMENT" && t.status !== "SCHEDULED") || ((row.unitType === "CN_PAYMENT" || row.unitType === "CN_LEGACY") && !t.date)) throw changed(L);
+  return t.date as string;
+}
+function assertCanAbandon(t: SourceTask | undefined, row: OutcomeRow, L: Labels): void {
+  if (!t || t.entryId !== row.entryId || t.abandoned || (row.unitType === "CN_PAYMENT" && t.status !== "SCHEDULED")) throw changed(L);
+}
+const recordset = (list: readonly object[]) => Prisma.sql`jsonb_to_recordset(${JSON.stringify(list)}::jsonb)`;
+/** Move the SAME tasks to their next dates. Source tasks keep their id, amount, owner, source links and original date. */
+async function applyReschedules(tx: Prisma.TransactionClient, moves: readonly { row: OutcomeRow; next: string }[]): Promise<void> {
+  const of = (type: OutcomeUnitType) => moves.filter((m) => m.row.unitType === type).map((m) => ({ id: m.row.unitId, d: m.next }));
+  const be = of("BILLING_EXCEPTION"), cnp = of("CN_PAYMENT"), cnl = of("CN_LEGACY"), cal = of("CALENDAR_ENTRY");
+  if (be.length) await tx.$executeRaw(Prisma.sql`UPDATE "BillingExceptionTask" x SET "taskDate" = v."d", "rescheduled" = true, "dailyWorkEntryId" = NULL, "dailyWorkContribution" = NULL, "dailyWorkConfirmed" = false, "materializedAt" = NULL, "updatedAt" = NOW() FROM ${recordset(be)} AS v("id" text, "d" date) WHERE x."id" = v."id"`);
+  if (cnp.length) await tx.$executeRaw(Prisma.sql`UPDATE "CnPaymentEvent" x SET "taskDate" = v."d", "taskStatus" = 'SCHEDULED', "taskRescheduled" = true, "dailyWorkEntryId" = NULL, "dailyWorkContribution" = NULL, "dailyWorkConfirmed" = false FROM ${recordset(cnp)} AS v("id" text, "d" date) WHERE x."id" = v."id"`);
+  if (cnl.length) await tx.$executeRaw(Prisma.sql`UPDATE "CnRequest" x SET "taskDate" = v."d", "legacyDailyWorkEntryId" = NULL, "legacyDailyWorkContribution" = NULL, "legacyDailyWorkConfirmed" = false, "updatedAt" = NOW() FROM ${recordset(cnl)} AS v("id" text, "d" date) WHERE x."id" = v."id"`);
+  if (cal.length) await tx.$executeRaw(Prisma.sql`UPDATE "CalendarEntry" x SET "date" = v."d", "dailyWorkEntryId" = NULL, "dailyWorkContribution" = NULL, "materializedAt" = NULL, "updatedAt" = NOW() FROM ${recordset(cal)} AS v("id" text, "d" date) WHERE x."id" = v."id"`);
+}
+/** Abandon ends the FOLLOW-UP task only: nothing is written off, received or resolved. A manual row has no future occurrence to stop. Each write re-asserts its row's conditions and must hit every row. */
+async function applyAbandons(tx: Prisma.TransactionClient, rows: readonly OutcomeRow[], L: Labels): Promise<void> {
+  const of = (type: OutcomeUnitType) => rows.filter((r) => r.unitType === type).map((r) => ({ id: r.unitId, e: r.entryId }));
+  const run = async (list: { id: string; e: string }[], sql: Prisma.Sql) => { if (list.length && Number(await tx.$executeRaw(sql)) !== list.length) throw changed(L); };
+  const be = of("BILLING_EXCEPTION"), cnp = of("CN_PAYMENT"), cnl = of("CN_LEGACY"), cal = of("CALENDAR_ENTRY");
+  await run(be, Prisma.sql`UPDATE "BillingExceptionTask" x SET "abandonedAt" = NOW(), "updatedAt" = NOW() FROM ${recordset(be)} AS v("id" text, "e" text) WHERE x."id" = v."id" AND x."abandonedAt" IS NULL AND x."dailyWorkEntryId" = v."e"`);
+  await run(cnp, Prisma.sql`UPDATE "CnPaymentEvent" x SET "taskStatus" = 'ABANDONED' FROM ${recordset(cnp)} AS v("id" text, "e" text) WHERE x."id" = v."id" AND x."taskStatus" = 'SCHEDULED' AND x."dailyWorkEntryId" = v."e"`);
+  await run(cnl, Prisma.sql`UPDATE "CnRequest" x SET "legacyTaskAbandonedAt" = NOW(), "updatedAt" = NOW() FROM ${recordset(cnl)} AS v("id" text, "e" text) WHERE x."id" = v."id" AND x."legacyTaskAbandonedAt" IS NULL AND x."legacyDailyWorkEntryId" = v."e"`);
+  await run(cal, Prisma.sql`UPDATE "CalendarEntry" x SET "abandonedAt" = NOW(), "updatedAt" = NOW() FROM ${recordset(cal)} AS v("id" text, "e" text) WHERE x."id" = v."id" AND x."abandonedAt" IS NULL AND x."dailyWorkEntryId" = v."e"`);
 }

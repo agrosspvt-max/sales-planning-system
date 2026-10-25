@@ -4,12 +4,13 @@
  * hydration, and — critically — that a FAILED save never loops (bounded backoff; 409 stops and reconciles).
  */
 import assert from "node:assert/strict";
-import { AutosaveController } from "./autosave-controller";
+import { AutosaveController, type AutosaveHost } from "./autosave-controller";
+import { ApiNetworkError } from "@/lib/api-client";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 /** A fake single-slot timer (the controller only ever keeps one timer) + a manually-settled save. */
-function harness(opts: { conflictStatus?: number } = {}) {
+function harness(opts: { conflictStatus?: number; runExclusive?: AutosaveHost["runExclusive"] } = {}) {
   let pending: (() => void) | null = null;
   let latest = ""; // the "current payload" the host would serialize at save time
   const saved: string[] = []; // snapshot captured on each save call
@@ -23,10 +24,11 @@ function harness(opts: { conflictStatus?: number } = {}) {
     save: () => {
       saved.push(latest);
       if (autoMode === "resolve") return Promise.resolve();
-      if (autoMode === "reject") return Promise.reject(new Error("transient"));
+      if (autoMode === "reject") return Promise.reject(new ApiNetworkError(new Error("offline")));
       if (autoMode === "conflict") return Promise.reject(Object.assign(new Error("conflict"), { status: opts.conflictStatus ?? 409 }));
       return new Promise<void>((resolve, reject) => deferreds.push({ resolve, reject }));
     },
+    runExclusive: opts.runExclusive,
     onState: (s) => { state.saving = s.saving; state.savedAt = s.savedAt; state.failed = s.failed; },
     onConflict: () => { conflicts += 1; },
     now: () => ++clock,
@@ -43,7 +45,7 @@ function harness(opts: { conflictStatus?: number } = {}) {
     saved,
     state,
     conflicts: () => conflicts,
-    settle: (i: number, ok: boolean) => { if (ok) deferreds[i].resolve(); else deferreds[i].reject(new Error("transient")); },
+    settle: (i: number, ok: boolean) => { if (ok) deferreds[i].resolve(); else deferreds[i].reject(new ApiNetworkError(new Error("offline"))); },
     setMode: (m: typeof autoMode) => { autoMode = m; },
   };
 }
@@ -169,6 +171,66 @@ async function main() {
     h.settle(1, true);
     await draining;
     assert.equal(h.hasTimer(), false, "the section is clean before unmount disposal");
+  }
+
+  // 8) Only TRANSIENT failures are retried: a rejected request (422 / 403 / 404 …) is not re-sent until the person edits; 5xx, 429 and network errors are (bounded).
+  for (const [status, retries] of [[422, false], [403, false], [404, false], [500, true], [503, true], [408, true], [429, true], [undefined, false]] as const) {
+    let pending: (() => void) | null = null; const calls: number[] = [];
+    const c = new AutosaveController({
+      save: () => { calls.push(1); return Promise.reject(Object.assign(new Error("fail"), status === undefined ? {} : { status })); },
+      setTimer: (fn) => { pending = fn; return 1; }, clearTimer: () => { pending = null; }, maxRetries: 3,
+    });
+    c.setEnabled(true); c.hydrate("a"); c.update("b");
+    { const fire = pending as (() => void) | null; pending = null; fire?.(); }
+    await flush(); await flush();
+    assert.equal(pending !== null, retries, `status ${status ?? "programming error"}: ${retries ? "a bounded retry is scheduled" : "no automatic retry"}`);
+    assert.equal(calls.length, 1);
+    c.update("c"); // a genuine edit always re-arms autosave
+    assert.equal(pending !== null, true, "a new edit schedules a save again");
+  }
+
+  // 9) Saves of different sections for the same day go through one queue: they never overlap, and a failed one does not block the next.
+  {
+    const { serializeDaySave } = await import("./use-daily-autosave");
+    const order: string[] = []; let release!: () => void;
+    const first = serializeDaySave(() => new Promise<void>((resolve) => { order.push("a-start"); release = () => { order.push("a-end"); resolve(); }; }));
+    const second = serializeDaySave(async () => { order.push("b-start"); });
+    await flush(); assert.deepEqual(order, ["a-start"], "the second save waits for the first");
+    release(); await first; await second; assert.deepEqual(order, ["a-start", "a-end", "b-start"]);
+    const failing = serializeDaySave(() => Promise.reject(new Error("boom")));
+    await assert.rejects(failing);
+    assert.equal(await serializeDaySave(async () => "next"), "next", "a failed save does not block the queue");
+  }
+
+  // A different section holds the queue: only the latest queued snapshot is sent and marked saved.
+  {
+    const { serializeDaySave } = await import("./use-daily-autosave");
+    for (const scenario of ["edit", "revert", "lock"] as const) {
+      let release!: () => void;
+      const blocker = serializeDaySave(() => new Promise<void>((resolve) => { release = resolve; }));
+      await flush();
+      const h = harness({ runExclusive: serializeDaySave }); h.setMode("resolve");
+      h.controller.setEnabled(true); h.controller.hydrate("base");
+      h.setLatest("queued"); h.controller.update("queued"); h.tick(); await flush();
+      assert.equal(h.saved.length, 0, "no request before its queue slot");
+      if (scenario === "lock") h.controller.setEnabled(false);
+      else { h.setLatest(scenario === "edit" ? "latest" : "base"); h.controller.update(scenario === "edit" ? "latest" : "base"); }
+      release(); await blocker; await flush();
+      assert.deepEqual(h.saved, scenario === "edit" ? ["latest"] : [], "queued work coalesces edits, skips reversions and respects a newly locked view");
+      assert.equal(h.hasTimer(), false, "no redundant trailing save for an already-persisted queued snapshot");
+      assert.equal(h.state.saving, false);
+      await h.controller.flush();
+      assert.equal(h.saved.length, scenario === "edit" ? 1 : 0, "Save Draft does not resend the captured snapshot");
+      h.controller.dispose();
+    }
+  }
+  // A local serialization/logic error is not mistaken for a network outage.
+  for (const error of [new SyntaxError("bad JSON"), new TypeError("bad payload"), new Error("logic bug"), Object.assign(new Error("cancelled"), { name: "AbortError" })]) {
+    let pending: (() => void) | null = null;
+    const c = new AutosaveController({ save: async () => { throw error; }, setTimer: (fn) => { pending = fn; return 1; }, clearTimer: () => { pending = null; } });
+    c.setEnabled(true); c.hydrate("a"); c.update("b"); await c.flush();
+    assert.equal(pending, null, `${error.name} does not schedule a retry`);
+    c.dispose();
   }
 
   console.log("autosave-controller.test.ts — all assertions passed");

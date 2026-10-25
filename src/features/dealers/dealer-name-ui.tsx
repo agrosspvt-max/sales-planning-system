@@ -1,9 +1,31 @@
 "use client";
 
-import { createContext, useContext, useMemo, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useEffect, useRef, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { DealerMarkerMap } from "@/lib/dealer-tags";
+import { pollingInterval } from "@/lib/polling";
+
+type DealerNameFeed = { overrides: Record<string, string>; tags: DealerMarkerMap };
+
+/** Dealers whose alias name or tag markers were added, changed or removed between two feeds. Pure, for tests. */
+export function changedDealerIds(before: DealerNameFeed, after: DealerNameFeed): Set<string> {
+  const out = new Set<string>();
+  const diff = (a: Record<string, unknown>, b: Record<string, unknown>) => {
+    for (const id of new Set([...Object.keys(a), ...Object.keys(b)])) if (JSON.stringify(a[id]) !== JSON.stringify(b[id])) out.add(id);
+  };
+  diff(before.overrides, after.overrides);
+  diff(before.tags as Record<string, unknown>, after.tags as Record<string, unknown>);
+  return out;
+}
+
+/** Whether a cached query result shows one of these dealers (by id). A query without data yet is refreshed (it may show them once loaded). */
+export function queryMentionsDealer(data: unknown, dealerIds: ReadonlySet<string>): boolean {
+  if (data === undefined) return true;
+  const text = JSON.stringify(data);
+  for (const id of dealerIds) if (text.includes(`"${id}"`)) return true;
+  return false;
+}
 
 /**
  * DEALER DISPLAY-NAME provider — the ONE client-side source for what a dealer is CALLED on screen.
@@ -25,22 +47,30 @@ const EMPTY_TAGS: DealerMarkerMap = {};
 
 export function DealerNameProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
-  const { data } = useQuery<{ overrides: Record<string, string>; tags: DealerMarkerMap }>({
+  const { data } = useQuery<DealerNameFeed>({
     queryKey: ["dealer-display-names"],
     queryFn: () => api.get("/api/dealer-display-names"),
     // Polled while the tab is visible only. It loads every alias and the caller's tag markers, so it must not hammer a slow database: 30 s (was 15 s). A change the
-    // user makes themselves refreshes immediately (refreshDealerTags), so only OTHER people's alias / tag changes arrive on the poll.
+    // user makes themselves refreshes immediately (refreshDealerTags), so only OTHER people's alias / tag changes arrive on the poll. While the server is failing the
+    // poll backs off (capped) and keeps probing, so it resumes by itself.
     staleTime: 30_000,
-    refetchInterval: 30_000,
+    refetchInterval: pollingInterval(30_000),
   });
-  // Paginated dealer lists must refetch their complete server ordering when metadata changes;
-  // reordering only an already-loaded page would miss tagged dealers on other pages.
-  // React Query's structural sharing keeps unchanged responses stable between polling ticks.
+  // Lists / plans / reports whose server-side names or tag ORDER depend on this data refetch only when it actually CHANGED — never on its first arrival (those
+  // screens already loaded their own alias-resolved names from the server, so refetching them then only doubled the page's heaviest request). React Query's structural sharing keeps an unchanged poll result the same object, so `data` changes only on real changes.
+  const previous = useRef<DealerNameFeed | undefined>(undefined);
   useEffect(() => {
     if (!data) return;
+    const before = previous.current;
+    previous.current = data;
+    if (!before || before === data) return;
+    const changed = changedDealerIds(before, data);
+    if (changed.size === 0) return;
+    // Paginated dealer lists and reports order by tags across ALL pages, so a change anywhere can move rows onto the current page: they always refresh.
     void queryClient.invalidateQueries({ queryKey: ["resource", "dealers"] });
     void queryClient.invalidateQueries({ queryKey: ["report"] });
-    void queryClient.invalidateQueries({ queryKey: ["plan"] });
+    // A plan holds all of its dealers, so only a plan that shows an affected dealer needs its server-resolved names again.
+    void queryClient.invalidateQueries({ queryKey: ["plan"], predicate: (query) => queryMentionsDealer(query.state.data, changed) });
   }, [data, queryClient]);
   const overrides = data?.overrides ?? EMPTY_NAMES;
   const tags = data?.tags ?? EMPTY_TAGS;

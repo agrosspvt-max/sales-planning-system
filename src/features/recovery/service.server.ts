@@ -1,10 +1,12 @@
 import "server-only";
+import { recoveryDealerCompleted } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 import { recoveryCalendar, type MonthIdentity } from "@/lib/season-calendar";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { Role, PlanStatus } from "@prisma/client";
+import { Prisma, Role, PlanStatus } from "@prisma/client";
+import { lockRecoveryPlan, type LockedRecoveryPlan } from "@/lib/plan-row-lock.server";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { loadDealerResolver, type MatchType } from "@/lib/dealer-resolver";
@@ -197,13 +199,13 @@ async function dueByWeekForPlan(planId: string): Promise<Map<string, Record<1 | 
 }
 
 /** EFFECTIVE lock for one week (admin override wins, else date-based). Used to guard saves + drive toggles. */
-async function effectiveWeekLocked(planId: string, weekNo: number): Promise<boolean> {
-  const override = (await prisma.recoveryWeekLock.findUnique({
+async function effectiveWeekLocked(planId: string, weekNo: number, db: Tx = prisma): Promise<boolean> {
+  const override = (await db.recoveryWeekLock.findUnique({
     where: { recoveryPlanId_weekNo: { recoveryPlanId: planId, weekNo } },
     select: { locked: true },
   })) as { locked: boolean } | null;
   if (override) return override.locked;
-  const meta = (await prisma.recoveryPlan.findUnique({
+  const meta = (await db.recoveryPlan.findUnique({
     where: { id: planId },
     select: { cutoffDate: true, seasonMonth: { select: { order: true, calendarMonth: true, calendarYear: true } }, season: { select: { startMonth: true, startYear: true } } },
   })) as { cutoffDate: Date; seasonMonth: MonthIdentity & { order: number }; season: { startMonth: number | null; startYear: number | null } } | null;
@@ -821,7 +823,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         noPlan: d.noPlan,
         noPlanReason: d.noPlanReason,
         noPlanReasonDetail: (d as { noPlanReasonDetail?: string | null }).noPlanReasonDetail ?? null,
-        completed: monthRecoveryPlan > 0 || monthRunningRecovery > 0,
+        completed: recoveryDealerCompleted(monthRecoveryPlan, monthRunningRecovery), // shared with the editor cache update (src/lib/recovery-plan-cache.ts)
         weeks,
         // Month's Due split across the four business weeks by due date (Week View uses the selected
         // week; Month View keeps the aggregate `due`).
@@ -856,10 +858,10 @@ const weekSchema = z.object({
  * Manager may edit a RETURNED plan of an officer on THEIR team (group scope) — so an RM can correct and
  * resubmit a plan sent back to the team. Any other status keeps the existing owner/admin-only rule.
  */
-async function canManageRecovery(ctx: AuthContext, officerId: string, status: PlanStatus): Promise<boolean> {
+async function canManageRecovery(ctx: AuthContext, officerId: string, status: PlanStatus, db: Tx = prisma): Promise<boolean> {
   if (isAdministrativeRole(ctx.role) || isPlanOwner(ctx, officerId)) return true;
   if (ctx.role === Role.REGIONAL_MANAGER && status === PlanStatus.RETURNED) {
-    const scope = await getOfficerScope(ctx);
+    const scope = await getOfficerScope(ctx, db);
     return scope.all || scope.ids.includes(officerId);
   }
   return false;
@@ -881,47 +883,61 @@ function assertRecoveryLive(plan: { lifecycleState: string; seasonPlan?: { lifec
   assertLifecycleEditable(plan.lifecycleState, "This recovery plan");
 }
 
+/** Bounded limits for the short officer write transactions (a constant number of statements; nothing waits on the browser inside them). */
+const RECOVERY_WRITE_TRANSACTION = { maxWait: 10_000, timeout: 15_000 };
+
+/**
+ * The plan row, LOCKED for this transaction, plus the same permission rule as loadEditablePlan — evaluated on the locked status, so a save, No Plan
+ * or Submit of the same plan never interleave (see plan-row-lock.server.ts). Every caller re-checks the status it needs right after.
+ */
+async function lockEditablePlan(tx: Tx, ctx: AuthContext, id: string): Promise<LockedRecoveryPlan & { seasonPlan: { lifecycleState: string } | null }> {
+  const plan = await lockRecoveryPlan(tx, id);
+  if (!plan) throw new ApiError(404, "Recovery plan not found");
+  if (!(await canManageRecovery(ctx, plan.officerId, plan.status, tx))) throw new ApiError(403, "You cannot edit this recovery plan");
+  return { ...plan, seasonPlan: plan.parentLifecycleState == null ? null : { lifecycleState: plan.parentLifecycleState } };
+}
+const decimalText = (n: number | undefined): string | null => (n === undefined ? null : String(n));
+
 export async function saveRecoveryMonth(ctx: AuthContext, id: string, raw: unknown) {
-  const { entries } = monthSchema.parse(raw);
-  const plan = await loadEditablePlan(ctx, id);
-  if (!EDITABLE.includes(plan.status as PlanStatus)) throw new ApiError(409, "Month View is locked in this state");
-  assertRecoveryLive(plan);
-  // Row-lock inputs: Overdue + Due (threshold) and the currently STORED plan (to detect Due edits).
-  const dealerRows = (await prisma.recoveryPlanDealer.findMany({
-    where: { recoveryPlanId: id },
-    select: { dealerId: true, overdue: true, due: true, monthRecoveryPlan: true, dealer: { select: { name: true } } },
-  })) as { dealerId: string; overdue: unknown; due: unknown; monthRecoveryPlan: unknown; dealer: { name: string } }[];
-  const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
-  // Validate the Due↔Running row-lock for every entry BEFORE writing (all-or-nothing) — but ONLY when the
-  // admin setting "Enable Due Recovery Validation" is ON (global, DB-backed, default ON).
-  if ((await getRecoveryConfig()).dueValidation) {
-    for (const e of entries) {
-      const row = rowByDealer.get(e.dealerId);
-      if (!row) continue;
-      const threshold = num(row.overdue) + num(row.due);
-      assertRowLock(e.monthRecoveryPlan ?? num(row.monthRecoveryPlan), e.monthRunningRecovery ?? 0, num(row.monthRecoveryPlan), threshold, row.dealer.name);
-    }
-  }
-  const dealerIds = new Set(dealerRows.map((d) => d.dealerId));
-  await prisma.$transaction(
-    async (tx: Tx) => {
-      const CHUNK = 100;
-      for (let i = 0; i < entries.length; i += CHUNK) {
-        await Promise.all(
-          entries.slice(i, i + CHUNK).map((e) => {
-            if (!dealerIds.has(e.dealerId)) return Promise.resolve();
-            return tx.recoveryPlanDealer.update({
-              where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId: e.dealerId } },
-              data: { monthRecoveryPlan: e.monthRecoveryPlan, monthRunningRecovery: e.monthRunningRecovery },
-            });
-          }),
-        );
+  const { entries: sent } = monthSchema.parse(raw);
+  // The same dealer sent twice in one request: the later entry wins (as the former one-by-one writes did).
+  const entries = [...new Map(sent.map((e) => [e.dealerId, e])).values()];
+  // Validate the Due↔Running row-lock only when the admin setting "Enable Due Recovery Validation" is ON (global, DB-backed, default ON).
+  const { dueValidation } = await getRecoveryConfig();
+  return prisma.$transaction(async (tx: Tx) => {
+    // Editability is checked on the LOCKED plan row: a Submit waits for this save, and a save that arrives after Submit is refused.
+    const plan = await lockEditablePlan(tx, ctx, id);
+    if (!EDITABLE.includes(plan.status as PlanStatus)) throw new ApiError(409, "Month View is locked in this state");
+    assertRecoveryLive(plan);
+    // Row-lock inputs (Overdue + Due threshold, the currently STORED plan) for the sent dealers only — never the whole plan.
+    const ids = entries.map((e) => e.dealerId);
+    const dealerRows = ids.length === 0 ? [] : await (tx as Prisma.TransactionClient).$queryRaw<{ dealerId: string; overdue: string; due: string; monthRecoveryPlan: string | null; dealerName: string }[]>(Prisma.sql`
+      SELECT r."dealerId", r."overdue"::text AS "overdue", r."due"::text AS "due", r."monthRecoveryPlan"::text AS "monthRecoveryPlan", d."name" AS "dealerName"
+      FROM "RecoveryPlanDealer" r JOIN "Dealer" d ON d."id" = r."dealerId"
+      WHERE r."recoveryPlanId" = ${id} AND r."dealerId" = ANY(${ids}::text[])`);
+    const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
+    // Validate every entry BEFORE writing (all-or-nothing).
+    if (dueValidation) {
+      for (const e of entries) {
+        const row = rowByDealer.get(e.dealerId);
+        if (!row) continue;
+        const threshold = num(row.overdue) + num(row.due);
+        assertRowLock(e.monthRecoveryPlan ?? num(row.monthRecoveryPlan ?? 0), e.monthRunningRecovery ?? 0, num(row.monthRecoveryPlan ?? 0), threshold, row.dealerName);
       }
-    },
-    { timeout: 60000, maxWait: 10000 },
-  );
-  const saved = await prisma.recoveryPlan.update({ where: { id }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } });
-  return { saved: true, lastSavedAt: saved.lastSavedAt };
+    }
+    // ONE statement for every saved row (a value the request leaves out keeps its stored value); the stored values come back as the database holds
+    // them, so the editor updates its cached plan instead of re-reading it. Dealers that are not part of the plan are ignored, as before.
+    const known = entries.filter((e) => rowByDealer.has(e.dealerId));
+    const written = known.length === 0 ? [] : await (tx as Prisma.TransactionClient).$queryRaw<{ dealerId: string; monthRecoveryPlan: string | null; monthRunningRecovery: string | null }[]>(Prisma.sql`
+      UPDATE "RecoveryPlanDealer" r
+      SET "monthRecoveryPlan" = COALESCE(v."plan", r."monthRecoveryPlan"), "monthRunningRecovery" = COALESCE(v."running", r."monthRunningRecovery")
+      FROM unnest(${known.map((e) => e.dealerId)}::text[], ${known.map((e) => decimalText(e.monthRecoveryPlan))}::numeric[], ${known.map((e) => decimalText(e.monthRunningRecovery))}::numeric[]) AS v("dealerId", "plan", "running")
+      WHERE r."recoveryPlanId" = ${id} AND r."dealerId" = v."dealerId"
+      RETURNING r."dealerId", r."monthRecoveryPlan"::text AS "monthRecoveryPlan", r."monthRunningRecovery"::text AS "monthRunningRecovery"`);
+    const saved = await tx.recoveryPlan.update({ where: { id }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } });
+    const dealers = written.map((r) => ({ dealerId: r.dealerId, monthRecoveryPlan: num(r.monthRecoveryPlan ?? 0), monthRunningRecovery: num(r.monthRunningRecovery ?? 0) }));
+    return { saved: true, lastSavedAt: saved.lastSavedAt as Date, dealers };
+  }, RECOVERY_WRITE_TRANSACTION);
 }
 
 /**
@@ -932,82 +948,88 @@ export async function saveRecoveryMonth(ctx: AuthContext, id: string, raw: unkno
 export async function toggleRecoveryWeekLock(ctx: AuthContext, id: string, raw: unknown): Promise<{ weekNo: number; locked: boolean }> {
   assertAdmin(ctx);
   const { weekNo } = z.object({ weekNo: z.coerce.number().int().min(1).max(BUSINESS_WEEK_COUNT) }).parse(raw);
-  const plan = (await prisma.recoveryPlan.findUnique({ where: { id }, select: { id: true } })) as { id: string } | null;
-  if (!plan) throw new ApiError(404, "Recovery plan not found");
-  const next = !(await effectiveWeekLocked(id, weekNo)); // flip whatever the week currently resolves to
-  await prisma.recoveryWeekLock.upsert({
-    where: { recoveryPlanId_weekNo: { recoveryPlanId: id, weekNo } },
-    create: { recoveryPlanId: id, weekNo, locked: next },
-    update: { locked: next },
-  });
-  await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "recoveryPlan", entityId: id, summary: `Week ${weekNo} manually ${next ? "locked" : "unlocked"} (admin override)` });
-  return { weekNo, locked: next };
+  // Under the plan row lock (the same lock a Week save takes), so a save never passes the lock check while the week is being locked.
+  return prisma.$transaction(async (tx: Tx) => {
+    if (!(await lockRecoveryPlan(tx, id))) throw new ApiError(404, "Recovery plan not found");
+    const next = !(await effectiveWeekLocked(id, weekNo, tx)); // flip whatever the week currently resolves to
+    await tx.recoveryWeekLock.upsert({
+      where: { recoveryPlanId_weekNo: { recoveryPlanId: id, weekNo } },
+      create: { recoveryPlanId: id, weekNo, locked: next },
+      update: { locked: next },
+    });
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "recoveryPlan", entityId: id, summary: `Week ${weekNo} manually ${next ? "locked" : "unlocked"} (admin override)` }, tx);
+    return { weekNo, locked: next };
+  }, RECOVERY_WRITE_TRANSACTION);
 }
 
 export async function saveRecoveryWeek(ctx: AuthContext, id: string, raw: unknown) {
-  const { weekNo, entries } = weekSchema.parse(raw);
-  const plan = await loadEditablePlan(ctx, id);
-  const pending = plan.status === PlanStatus.PENDING_RM || plan.status === PlanStatus.PENDING_ADMIN;
-  if (pending || !plan.weeklyEditEnabled) throw new ApiError(409, "Week View is locked");
-  assertRecoveryLive(plan);
-  // Per-week lock (date-based, admin override wins) — a locked week is read-only; an admin must unlock it.
-  if (await effectiveWeekLocked(id, weekNo)) throw new ApiError(409, "This week is locked — ask an admin to unlock it before editing.");
-  const dealerRows = (await prisma.recoveryPlanDealer.findMany({
-    where: { recoveryPlanId: id },
-    select: { id: true, dealerId: true, overdue: true, dealer: { select: { name: true } }, weekPlans: { where: { weekNo }, select: { weekRecoveryPlan: true } } },
-  })) as { id: string; dealerId: string; overdue: unknown; dealer: { name: string }; weekPlans: { weekRecoveryPlan: unknown }[] }[];
-  const byDealer = new Map(dealerRows.map((d) => [d.dealerId, d.id]));
-  const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
-  // Threshold per row = Overdue + THIS WEEK'S Due (same figure the Week View shows). Gated on the global
-  // "Enable Due Recovery Validation" setting (default ON).
-  if ((await getRecoveryConfig()).dueValidation) {
-    const dueByWeek = await dueByWeekForPlan(id);
-    for (const e of entries) {
-      const row = rowByDealer.get(e.dealerId);
-      if (!row) continue;
-      const storedPlan = num(row.weekPlans[0]?.weekRecoveryPlan ?? 0);
-      const threshold = num(row.overdue) + (dueByWeek.get(e.dealerId)?.[weekNo as 1 | 2 | 3 | 4] ?? 0);
-      assertRowLock(e.weekRecoveryPlan ?? storedPlan, e.weekRunningRecovery ?? 0, storedPlan, threshold, row.dealer.name);
-    }
-  }
-  await prisma.$transaction(
-    async (tx: Tx) => {
-      const CHUNK = 100;
-      for (let i = 0; i < entries.length; i += CHUNK) {
-        await Promise.all(
-          entries.slice(i, i + CHUNK).map((e) => {
-            const rpdId = byDealer.get(e.dealerId);
-            if (!rpdId) return Promise.resolve();
-            return tx.recoveryWeekPlan.upsert({
-              where: { recoveryPlanDealerId_weekNo: { recoveryPlanDealerId: rpdId, weekNo } },
-              create: { recoveryPlanDealerId: rpdId, weekNo, weekRecoveryPlan: e.weekRecoveryPlan, weekRunningRecovery: e.weekRunningRecovery },
-              update: { weekRecoveryPlan: e.weekRecoveryPlan, weekRunningRecovery: e.weekRunningRecovery },
-            });
-          }),
-        );
+  const { weekNo, entries: sent } = weekSchema.parse(raw);
+  const entries = [...new Map(sent.map((e) => [e.dealerId, e])).values()]; // the later entry for a dealer wins
+  // Threshold per row = Overdue + THIS WEEK'S Due (same figure the Week View shows), gated on the global "Enable Due Recovery Validation" setting
+  // (default ON). The Due comes from the aging snapshot (not plan state), so it is read before the transaction.
+  const { dueValidation } = await getRecoveryConfig();
+  const dueByWeek = dueValidation ? await dueByWeekForPlan(id) : null;
+  return prisma.$transaction(async (tx: Tx) => {
+    const plan = await lockEditablePlan(tx, ctx, id);
+    const pending = plan.status === PlanStatus.PENDING_RM || plan.status === PlanStatus.PENDING_ADMIN;
+    if (pending || !plan.weeklyEditEnabled) throw new ApiError(409, "Week View is locked");
+    assertRecoveryLive(plan);
+    // Per-week lock (date-based, admin override wins) — a locked week is read-only; an admin must unlock it.
+    if (await effectiveWeekLocked(id, weekNo, tx)) throw new ApiError(409, "This week is locked — ask an admin to unlock it before editing.");
+    const ids = entries.map((e) => e.dealerId);
+    const dealerRows = ids.length === 0 ? [] : await (tx as Prisma.TransactionClient).$queryRaw<{ id: string; dealerId: string; overdue: string; dealerName: string; weekRecoveryPlan: string | null }[]>(Prisma.sql`
+      SELECT r."id", r."dealerId", r."overdue"::text AS "overdue", d."name" AS "dealerName", w."weekRecoveryPlan"::text AS "weekRecoveryPlan"
+      FROM "RecoveryPlanDealer" r
+      JOIN "Dealer" d ON d."id" = r."dealerId"
+      LEFT JOIN "RecoveryWeekPlan" w ON w."recoveryPlanDealerId" = r."id" AND w."weekNo" = ${weekNo}
+      WHERE r."recoveryPlanId" = ${id} AND r."dealerId" = ANY(${ids}::text[])`);
+    const rowByDealer = new Map(dealerRows.map((d) => [d.dealerId, d]));
+    if (dueByWeek) {
+      for (const e of entries) {
+        const row = rowByDealer.get(e.dealerId);
+        if (!row) continue;
+        const storedPlan = num(row.weekRecoveryPlan ?? 0);
+        const threshold = num(row.overdue) + (dueByWeek.get(e.dealerId)?.[weekNo as 1 | 2 | 3 | 4] ?? 0);
+        assertRowLock(e.weekRecoveryPlan ?? storedPlan, e.weekRunningRecovery ?? 0, storedPlan, threshold, row.dealerName);
       }
-    },
-    { timeout: 60000, maxWait: 10000 },
-  );
-  const saved = await prisma.recoveryPlan.update({ where: { id }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } });
-  return { saved: true, lastSavedAt: saved.lastSavedAt };
+    }
+    // ONE upsert for every saved row; a value the request leaves out keeps its stored value (a new row stores none), as the former upsert did.
+    const known = entries.filter((e) => rowByDealer.has(e.dealerId));
+    const written = known.length === 0 ? [] : await (tx as Prisma.TransactionClient).$queryRaw<{ recoveryPlanDealerId: string; weekRecoveryPlan: string | null; weekRunningRecovery: string | null }[]>(Prisma.sql`
+      INSERT INTO "RecoveryWeekPlan" ("id", "recoveryPlanDealerId", "weekNo", "weekRecoveryPlan", "weekRunningRecovery")
+      SELECT v."id", v."rpd", ${weekNo}, v."plan", v."running"
+      FROM unnest(${known.map(() => randomUUID())}::text[], ${known.map((e) => rowByDealer.get(e.dealerId)!.id)}::text[], ${known.map((e) => decimalText(e.weekRecoveryPlan))}::numeric[], ${known.map((e) => decimalText(e.weekRunningRecovery))}::numeric[])
+        AS v("id", "rpd", "plan", "running")
+      ON CONFLICT ("recoveryPlanDealerId", "weekNo") DO UPDATE SET
+        "weekRecoveryPlan" = COALESCE(EXCLUDED."weekRecoveryPlan", "RecoveryWeekPlan"."weekRecoveryPlan"),
+        "weekRunningRecovery" = COALESCE(EXCLUDED."weekRunningRecovery", "RecoveryWeekPlan"."weekRunningRecovery")
+      RETURNING "recoveryPlanDealerId", "weekRecoveryPlan"::text AS "weekRecoveryPlan", "weekRunningRecovery"::text AS "weekRunningRecovery"`);
+    const dealerByRpd = new Map(dealerRows.map((d) => [d.id, d.dealerId]));
+    const saved = await tx.recoveryPlan.update({ where: { id }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } });
+    // Returned: the stored week values.
+    const dealers = written.map((r) => ({ dealerId: dealerByRpd.get(r.recoveryPlanDealerId)!, weekRecoveryPlan: num(r.weekRecoveryPlan ?? 0), weekRunningRecovery: num(r.weekRunningRecovery ?? 0) }));
+    return { saved: true, lastSavedAt: saved.lastSavedAt as Date, weekNo, dealers };
+  }, RECOVERY_WRITE_TRANSACTION);
 }
 
 export async function setRecoveryDealerNoPlan(ctx: AuthContext, id: string, dealerId: string, noPlan: boolean, reason?: string, reasonDetail?: string) {
-  const plan = await loadEditablePlan(ctx, id);
-  if (!EDITABLE.includes(plan.status as PlanStatus)) throw new ApiError(409, "This recovery plan is not editable");
-  assertRecoveryLive(plan);
   const noPlanReason = noPlan ? reason?.trim() || null : null;
   // Detail is kept ONLY for the "Other" reason; cleared otherwise (and when un-marking No Plan). When
   // "Other" is chosen the custom detail is required.
   const isOther = noPlan && noPlanReason === "Other";
   const detail = isOther ? reasonDetail?.trim() || null : null;
-  if (isOther && !detail) throw new ApiError(422, "Enter a reason when 'Other' is selected");
-  await prisma.recoveryPlanDealer.update({
-    where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId } },
-    data: { noPlan, noPlanReason, noPlanReasonDetail: detail },
-  });
-  return { noPlan, noPlanReason, noPlanReasonDetail: detail };
+  // No Plan changes completion, so it follows the same locked-row rule as saves and Submit.
+  return prisma.$transaction(async (tx: Tx) => {
+    const plan = await lockEditablePlan(tx, ctx, id);
+    if (!EDITABLE.includes(plan.status as PlanStatus)) throw new ApiError(409, "This recovery plan is not editable");
+    assertRecoveryLive(plan);
+    if (isOther && !detail) throw new ApiError(422, "Enter a reason when 'Other' is selected");
+    await tx.recoveryPlanDealer.update({
+      where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId } },
+      data: { noPlan, noPlanReason, noPlanReasonDetail: detail },
+    });
+    return { noPlan, noPlanReason, noPlanReasonDetail: detail };
+  }, RECOVERY_WRITE_TRANSACTION);
 }
 
 /* ---------------------- Weekly re-upload + change tracking ----------------- */

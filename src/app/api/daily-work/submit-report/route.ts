@@ -2,6 +2,8 @@ import { type NextRequest } from "next/server";
 import { handle, ok, requireAuth } from "@/lib/http";
 import { submitDailyReport, resolveReportDateForOwner } from "@/features/daily-work/service.server";
 
+export const maxDuration = 60; // seconds — not shorter than the transaction limit (DAILY_WORK_FINAL_TRANSACTION), on platforms that enforce a route limit
+
 // POST /api/daily-work/submit-report — final once-per-day report submission + Self Rating (today, or yesterday until its 12:00 PM deadline).
 export async function POST(req: NextRequest) {
   return handle(async () => {

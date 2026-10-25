@@ -897,8 +897,14 @@ model DailyWorkEntry {
   batchId              String             @default("")
   actualDealerVisits   Int?
   actualNewPartyVisits Int?
+  /// Daily Report: explicit VISITED / NOT_VISITED choices keyed by dealer id on the owning submitted SUMMARY batch.
+  dealerVisitResults   Json?
   planSubmittedAt      DateTime?
   paymentMode          String?
+  /// Sales / Recovery manual entries: VISIT | TELEPHONIC (null for older rows and automatic / calendar task rows). On the day's SUMMARY row, DERIVED marks that its dealerVisits count is derived from the dealer rows.
+  followUpType         String?
+  /// Relationship visit (section RELATIONSHIP, rowKey = dealer id): the compulsory purpose.
+  purpose              String?
   /// Dealer Appointment (Daily Work): the approved Monthly Party Planning entry this row plans, its market (stable ids; `marketName` is the display snapshot), and the monthly
   /// status event the "Appointed" result initiated (null until/unless that happened). Legacy typed rows have none of these.
   monthlyPlanId        String?

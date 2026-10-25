@@ -81,7 +81,7 @@ const overrides: Record<string, unknown> = {
         ...queryOverride,
       },
     }),
-    useQueryClient: () => ({ invalidateQueries: () => {} }),
+    useQueryClient: () => ({ invalidateQueries: () => {}, getQueryData: () => undefined, setQueryData: () => {} }),
     useMutation: () => ({ isPending: false, mutate: () => { submitMutations += 1; } }),
   },
   "@/components/ui/button": {

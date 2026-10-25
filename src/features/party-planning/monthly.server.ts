@@ -92,10 +92,8 @@ function toSheetDto(ctx: AuthContext, r: SheetRow, teamIds: readonly string[] = 
   };
 }
 /** The owner always; an RM their team's; Admin everyone's. Anyone else cannot tell it exists. */
-async function sheetVisible(ctx: AuthContext, ownerId: string): Promise<boolean> {
-  if (ownerId === ctx.userId) return true;
-  const scope = await getOfficerScope(ctx);
-  return scope.all || scope.ids.includes(ownerId);
+function sheetVisible(ctx: AuthContext, scope: Awaited<ReturnType<typeof getOfficerScope>>, ownerId: string): boolean {
+  return ownerId === ctx.userId || scope.all || scope.ids.includes(ownerId);
 }
 
 export interface MonthlySeasonOption extends SeasonInfo { eligibleCount: number; takenMonthIds: string[] }
@@ -175,14 +173,18 @@ export interface MonthlySheetDetail { sheet: MonthlySheetDto; season: SeasonInfo
 export async function getMonthlySheet(ctx: AuthContext, id: string, stage?: string): Promise<MonthlySheetDetail> {
   assertReader(ctx);
   const sheet = await prisma.partyMonthlySheet.findUnique({ where: { id }, include: sheetInclude });
-  if (!sheet || !(await sheetVisible(ctx, sheet.ownerId))) throw new ApiError(404, "Monthly Plan not found");
+  if (!sheet) throw new ApiError(404, "Monthly Plan not found");
+  // The caller's scope is read ONCE for this request: visibility, the plan rows and the sheet DTO all use it.
+  const scope = await getOfficerScope(ctx);
+  if (!sheetVisible(ctx, scope, sheet.ownerId)) throw new ApiError(404, "Monthly Plan not found");
   const season = await getSeasonInfo(sheet.seasonId);
   const month = season?.months.find((m) => m.id === sheet.seasonMonthId);
   if (!season || !month) throw new ApiError(404, "Monthly Plan not found");
   // The plan is one logical plan; each lifecycle section shows only ITS entries (Create = editable ones, Submitted = awaiting review, Approved = approved; Older Plans = all, read-only).
   const inStage = STAGE_ROW_STATUSES[stage ?? ""];
   const rows = await prisma.partyMonthlyPlan.findMany({ where: { sheetId: id, ...(inStage ? { approvalStatus: { in: [...inStage] } } : {}) }, include, take: 1000 });
-  const plans = (await toDtos(ctx, rows, (await getOfficerScope(ctx)).ids)).sort((a, b) => a.marketName.localeCompare(b.marketName));
+  const scopeIds = scope.ids;
+  const plans = (await toDtos(ctx, rows, scopeIds)).sort((a, b) => a.marketName.localeCompare(b.marketName));
   const own = sheet.ownerId === ctx.userId && planner(ctx);
   const usedRows = await prisma.partyMonthlyPlan.findMany({ where: { sheetId: id }, select: { seasonalPlanId: true } }); // a market already planned this month (in ANY section) is not offered again
   const approved = own && (!stage || stage === "create")
@@ -190,7 +192,7 @@ export async function getMonthlySheet(ctx: AuthContext, id: string, stage?: stri
     : [];
   const used = new Set(usedRows.map((r) => r.seasonalPlanId));
   return {
-    sheet: toSheetDto(ctx, sheet, (await getOfficerScope(ctx)).ids), season, month, plans,
+    sheet: toSheetDto(ctx, sheet, scopeIds), season, month, plans,
     seasonalPlans: approved.filter((p) => !used.has(p.id)).map((p) => ({ id: p.id, marketName: p.market.name, marketPotential: shownMarketPotential(p, p.market), type: derivedType(shownMarketSource(p, p.market)) })),
   };
 }

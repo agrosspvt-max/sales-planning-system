@@ -2,6 +2,8 @@ import { type NextRequest } from "next/server";
 import { handle, ok, requireAuth } from "@/lib/http";
 import { enterTaskOutcomes, enterAppointmentStatus, enterConversionAchievability, enterVisitsActual, assertDailyWorkSectionWritable, resolveReportDateForOwner } from "@/features/daily-work/service.server";
 
+export const maxDuration = 60; // seconds — not shorter than the transaction limit (DAILY_WORK_SAVE_TRANSACTION), on platforms that enforce a route limit
+
 // POST /api/daily-work/actual — exact frozen-entry actual/result update, dispatched by section.
 export async function POST(req: NextRequest) {
   return handle(async () => {

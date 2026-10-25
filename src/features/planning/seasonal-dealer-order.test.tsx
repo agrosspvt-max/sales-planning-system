@@ -23,7 +23,7 @@ const load = testLoader({
   "@tanstack/react-query": { useQuery: () => ({ data: globalData }), useQueryClient: () => ({ invalidateQueries: async () => {} }), useMutation: () => ({}) },
   "@/lib/use-categories": { useCategories: () => [] },
   "./use-autosave-map": { useAutosaveMap: (seed: unknown) => ({ values: seed, saving: false, update: () => {}, flush: async () => {} }) },
-  "@/features/labels/label-ui": { Th: ({ labelKey, ...props }: { labelKey: string }) => <th {...props}>{labelKey}</th>, LabelSectionHeaderRow: empty },
+  "@/features/labels/label-ui": { useLabel: (k: string) => k, Th: ({ labelKey, ...props }: { labelKey: string }) => <th {...props}>{labelKey}</th>, LabelSectionHeaderRow: empty },
   "./admin-edit-ui": { AdminEditBar: empty, EditPlanButton: empty, ChangeReviewDialog: empty },
   "./dealer-completion": { DealerProgressBar: empty, NoPlanDialog: empty, dealerStatusOf: () => "REMAINING" },
   "./seasonal-monthly-view": { SeasonalMonthlyView: ({ seasonalTable }: { seasonalTable: React.ReactNode }) => seasonalTable },

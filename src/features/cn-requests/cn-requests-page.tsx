@@ -1,4 +1,5 @@
 "use client";
+import { pollingInterval } from "@/lib/polling";
 import { CnBypassDialog, CnProcessingDialog } from "./cn-review-ui";
 import { cnReviewStatusKey, type CnReview } from "@/lib/cn-review";
 import { useAdminPermission } from "@/features/accounts/permission-ui";
@@ -216,7 +217,8 @@ export function CnRequestsPage({ role, userId }: { role: Role; userId: string })
 
   const { data: rows, isLoading } = useQuery<CnRequest[]>({
     queryKey: ["cn-requests", view],
-    refetchInterval: view === "under-process" ? 15000 : false,
+    // Under Process only (its dependency results arrive from other people); backs off while failing, resumes by itself.
+    refetchInterval: pollingInterval(15_000, () => view === "under-process"),
     queryFn: () => api.get<CnRequest[]>(`/api/cn-requests?view=${encodeURIComponent(view)}`),
   });
   const filteredRows = filterCnRequests(rows ?? [], filters);

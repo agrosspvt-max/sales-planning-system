@@ -12,14 +12,19 @@
  *  - A FAILED save never loops. Transient failures retry with bounded exponential backoff up to `maxRetries`,
  *    then stop (the draft stays dirty; the next genuine edit re-arms autosave). A 409 conflict stops
  *    immediately and calls `onConflict` (the host reloads the current batch) — the stale payload is never
- *    re-sent. This is the fix for the retry-storm that exhausted the DB pool.
+ *    re-sent. This is the fix for the retry-storm that exhausted the DB pool. Only TRANSIENT failures are retried (network error, 5xx, 408, 429): a rejected request (validation,
+ *    permission, deadline …) is not sent again until the person changes something.
  *  - When `enabled` is false (finalized/report view) no save is scheduled or run.
  */
 export interface AutosaveHost {
   save: () => Promise<void>;
+  /** Serialize sections before capturing the payload key, so edits made while waiting coalesce. */
+  runExclusive?: <T>(operation: () => Promise<T>) => Promise<T>;
   onState?: (s: AutosaveState) => void;
   onConflict?: () => void;
   isConflict?: (err: unknown) => boolean;
+  /** Whether a failed save may succeed if repeated: explicit transport error or HTTP 5xx / 408 / 429. */
+  isTransient?: (err: unknown) => boolean;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -37,6 +42,11 @@ export interface AutosaveState {
 type RunResult = "SKIPPED" | "SAVED" | "FAILED";
 
 const defaultConflict = (err: unknown): boolean => (err as { status?: number } | null)?.status === 409;
+const defaultTransient = (err: unknown): boolean => {
+  const failure = err as { status?: number; code?: string } | null;
+  const status = failure?.status;
+  return failure?.code === "API_NETWORK_ERROR" || (typeof status === "number" && status >= 500 && status <= 599) || status === 408 || status === 429;
+};
 const defaultBackoff = (attempt: number): number => Math.min(8000, 2000 * 2 ** (attempt - 1)); // 2s, 4s, 8s
 
 export class AutosaveController {
@@ -99,8 +109,18 @@ export class AutosaveController {
     if (this.inFlight) return this.inFlight;
     if (this.disposed || !this.enabled) return Promise.resolve("SKIPPED");
     if (this.savedKey === null || this.currentKey === null || this.currentKey === this.savedKey) return Promise.resolve("SKIPPED");
-    const target = this.currentKey;
-    const operation = this.performSave(target);
+    const execute = () => {
+      this.clear(); // the queued save consumes the latest pending edit's debounce
+      // Another section may have held the queue while this draft changed, reverted, or became locked.
+      // Capture the key immediately before the host synchronously captures the matching payload.
+      if (this.disposed || !this.enabled || this.currentKey === null || this.currentKey === this.savedKey) {
+        this.emit(false, false);
+        return Promise.resolve<RunResult>("SKIPPED");
+      }
+      return this.performSave(this.currentKey);
+    };
+    if (this.host.runExclusive) this.emit(true, false);
+    const operation = this.host.runExclusive ? this.host.runExclusive(execute) : execute();
     this.inFlight = operation;
     void operation.finally(() => {
       if (this.inFlight === operation) this.inFlight = null;
@@ -123,7 +143,7 @@ export class AutosaveController {
       }
       // Transient/other failure: bounded backoff, then stop (draft stays dirty until the next edit).
       this.attempts += 1;
-      if (this.enabled && this.attempts <= this.maxRetries) {
+      if (this.enabled && this.attempts <= this.maxRetries && (this.host.isTransient ?? defaultTransient)(err)) {
         this.schedule((this.host.backoff ?? defaultBackoff)(this.attempts));
       }
       return "FAILED";

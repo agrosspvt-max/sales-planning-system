@@ -21,6 +21,15 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** A transport failure, explicitly distinguished from a payload/JSON/programming error. */
+export class ApiNetworkError extends Error {
+  readonly code = "API_NETWORK_ERROR";
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Network request failed");
+    this.name = "ApiNetworkError";
+  }
+}
+
 // Guards against firing multiple sign-outs when several requests 401 at once (e.g. Recovery +
 // Notifications + Labels all firing on one page after the session became invalid).
 let signingOut = false;
@@ -43,12 +52,25 @@ async function handleUnauthenticated(): Promise<void> {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  const text = await res.text();
-  const body = text ? JSON.parse(text) : {};
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    });
+    text = await res.text();
+  } catch (error) {
+    // Explicit cancellation must not be turned into a retryable network failure.
+    if ((error as { name?: string } | null)?.name === "AbortError") throw error;
+    throw new ApiNetworkError(error);
+  }
+  let body: ApiErrorBody | T = {} as T;
+  try { body = text ? JSON.parse(text) : {}; }
+  catch (error) {
+    // Proxies can return HTML for a genuine HTTP failure. Retain its status for bounded retry.
+    if (res.ok) throw error;
+  }
   if (!res.ok) {
     const err = body as ApiErrorBody;
     if (res.status === 401) void handleUnauthenticated();

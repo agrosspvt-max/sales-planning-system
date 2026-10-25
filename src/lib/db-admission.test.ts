@@ -39,11 +39,13 @@ async function main() {
 
   // With a limit of ONE, statements inside a transaction must not wait for a second slot.
   const runtime = { admission: new DatabaseAdmission(1), transaction: new AsyncLocalStorage<boolean>() };
+  const seenOptions: unknown[] = [];
   let hook!: (input: { args: unknown; query: (args: unknown) => Promise<unknown> }) => Promise<unknown>;
   const query = () => hook({ args: {}, query: async () => 1 });
   const fake = { $extends(extension: { query: { $allOperations: typeof hook } }) {
     hook = extension.query.$allOperations;
-    return { query, $transaction: async (input: ((tx: { query: typeof query }) => Promise<unknown>) | unknown[]) => {
+    return { query, $transaction: async (input: ((tx: { query: typeof query }) => Promise<unknown>) | unknown[], options?: unknown) => {
+      seenOptions.push(options);
       assert.equal(runtime.admission.stats.active, 1);
       assert.equal(runtime.transaction.getStore(), true);
       return typeof input === "function" ? input({ query }) : Promise.all(input);
@@ -53,6 +55,10 @@ async function main() {
   assert.equal(await client.$transaction(async (tx) => { await tx.query(); return tx.query(); }), 1);
   await assert.rejects(client.$transaction(async tx => { await tx.query(); throw Error("rollback"); }), /rollback/);
   assert.equal(await client.query(), 1); assert.equal(runtime.admission.stats.active, 0);
+  // Explicit transaction limits (timeout / maxWait) pass through the admission wrapper to Prisma unchanged; the wrapper holds ONE slot for the whole transaction.
+  const limits = { timeout: 15_000, maxWait: 10_000 };
+  await (client as unknown as { $transaction: (fn: (tx: { query: typeof query }) => Promise<unknown>, o: unknown) => Promise<unknown> }).$transaction(async (tx) => tx.query(), limits);
+  assert.equal(seenOptions.at(-1), limits, "transaction options reach Prisma");
   console.log("db-admission.test.ts — all assertions passed");
 }
 void main().catch(e => { console.error(e); process.exitCode = 1; });

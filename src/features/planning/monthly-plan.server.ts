@@ -5,7 +5,9 @@ import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 import { SEASON_MONTH_ORDER, calendarRows } from "@/lib/season-calendar";
 import { z } from "zod";
-import { PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
+import { Prisma, PlanStatus, ApprovalActionType, Role, NotificationType } from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import { lockMonthlyPlan, type LockedMonthlyPlan } from "@/lib/plan-row-lock.server";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { assertOfficerInScope, getCurrentManagerId, getOfficerScope, isDealerOwnerRole, isPlanOwner } from "@/lib/scope";
@@ -365,19 +367,23 @@ export async function setMonthlyDealerNoPlan(
   noPlan: boolean,
   reason?: string,
 ): Promise<{ noPlan: boolean; noPlanReason: string | null }> {
-  const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  const isOwner = isPlanOwner(ctx, mp.officerId);
-  if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
-  if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
-  assertMonthlyLive(mp);
-
   const noPlanReason = noPlan ? reason?.trim() || null : null;
-  await prisma.monthlyPlanDealer.upsert({
-    where: { monthlyPlanId_dealerId: { monthlyPlanId, dealerId } },
-    create: { monthlyPlanId, dealerId, noPlan, noPlanReason },
-    update: { noPlan, noPlanReason },
-  });
-  return { noPlan, noPlanReason };
+  // No Plan changes completion, so it follows the same locked-row rule as saves and Submit.
+  return prisma.$transaction(async (tx) => {
+    const mp = await lockMonthlyPlan(tx, monthlyPlanId);
+    if (!mp) throw new ApiError(404, "Monthly plan not found");
+    const isOwner = isPlanOwner(ctx, mp.officerId);
+    if (!(isOwner || isAdministrativeRole(ctx.role))) throw new ApiError(403, "You cannot change this monthly plan");
+    if (!EDITABLE.includes(mp.status)) throw new ApiError(409, "This monthly plan is not editable");
+    assertLifecycleEditable(mp.parentLifecycleState, "The parent seasonal plan");
+    assertLifecycleEditable(mp.lifecycleState, "This monthly plan");
+    await tx.monthlyPlanDealer.upsert({
+      where: { monthlyPlanId_dealerId: { monthlyPlanId, dealerId } },
+      create: { monthlyPlanId, dealerId, noPlan, noPlanReason },
+      update: { noPlan, noPlanReason },
+    });
+    return { noPlan, noPlanReason };
+  }, MONTHLY_WRITE_TRANSACTION);
 }
 
 /**
@@ -429,60 +435,90 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
 
 /* -------------------------------- Saving ---------------------------------- */
 
-export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: string, raw: unknown) {
-  const { entries } = saveMonthlySchema.parse(raw);
-  const mp = await loadMonthlyPlanOr404(monthlyPlanId);
+/** Bounded limits for the short officer write transactions (a constant number of statements; nothing waits on the browser inside them). */
+const MONTHLY_WRITE_TRANSACTION = { maxWait: 10_000, timeout: 15_000 };
+
+/** The editability rule every write of a monthly plan shares, checked on the LOCKED row inside the write's own transaction. */
+function assertMonthlyWritable(mp: LockedMonthlyPlan | null, ctx: AuthContext, refused: string, ownerOnly = false): asserts mp is LockedMonthlyPlan {
+  if (!mp) throw new ApiError(404, "Monthly plan not found");
   const isOwner = isPlanOwner(ctx, mp.officerId);
-  if (!(isOwner || isAdministrativeRole(ctx.role))) {
-    throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can enter monthly figures");
+  if (!(isOwner || (!ownerOnly && isAdministrativeRole(ctx.role)))) {
+    throw new ApiError(403, ownerOnly ? "Only the owning Sales Officer can submit this monthly plan" : "Only the owning Sales Officer or a Super Admin can enter monthly figures");
   }
-  if (!EDITABLE.includes(mp.status)) {
-    throw new ApiError(409, "This monthly plan is not editable in its current state");
-  }
-  assertMonthlyLive(mp);
+  if (!EDITABLE.includes(mp.status)) throw new ApiError(409, refused);
+  assertLifecycleEditable(mp.parentLifecycleState, "The parent seasonal plan");
+  assertLifecycleEditable(mp.lifecycleState, "This monthly plan");
+}
 
-  const validLines = new Set(
-    (await prisma.planLine.findMany({ where: { planDealer: { seasonPlanId: mp.seasonPlanId } }, select: { id: true } })).map(
-      (l) => l.id,
-    ),
-  );
+/** One stored monthly entry as the monthly read shows it (the read's own rule: value modes use planValue, quantity modes planQty). */
+export interface SavedMonthlyEntry { planLineId: string; seasonMonthId: string; planQty: number; planValue: number | null }
 
-  await prisma.$transaction(async (tx) => {
+export async function saveMonthlyPlanEntries(ctx: AuthContext, monthlyPlanId: string, raw: unknown) {
+  const { entries: sent } = saveMonthlySchema.parse(raw);
+  // The same cell sent twice in one request: the later entry wins (as the former one-by-one writes did).
+  const entries = [...new Map(sent.map((e) => [`${e.planLineId}|${e.seasonMonthId}`, e])).values()];
+
+  return prisma.$transaction(async (tx) => {
+    // Editability is checked on the LOCKED monthly plan: a Submit waits for this save, and a save that arrives after Submit is refused.
+    const mp = await lockMonthlyPlan(tx, monthlyPlanId);
+    assertMonthlyWritable(mp, ctx, "This monthly plan is not editable in its current state");
+
+    const ids = [...new Set(entries.map((e) => e.planLineId))];
+    const valid = new Set(ids.length === 0 ? [] : (await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT l."id" FROM "PlanLine" l JOIN "PlanDealer" d ON d."id" = l."planDealerId"
+      WHERE d."seasonPlanId" = ${mp.seasonPlanId} AND l."id" = ANY(${ids}::text[])`)).map((r) => r.id));
     for (const e of entries) {
-      if (!validLines.has(e.planLineId)) throw new ApiError(422, "Plan line is not part of this plan");
+      if (!valid.has(e.planLineId)) throw new ApiError(422, "Plan line is not part of this plan");
       // A monthly plan owns exactly ONE month — reject stray months defensively.
-      if (e.seasonMonthId !== mp.seasonMonthId) {
-        throw new ApiError(422, "Entry month does not match this monthly plan");
-      }
-      const where = { planLineId_seasonMonthId: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId } };
-      const existing = (await tx.monthlyEntry.findUnique({ where })) as
-        | { planQty: number; planValue: unknown }
-        | null;
-      const mode = (e.mode ?? "PACK_SIZE") as PlanningMode;
-
-      // Monthly planning writes ONLY the plan fields. Actual sales (saleQty / saleValue) are
-      // owned exclusively by the Sales Upload and must never be modified here — so an upsert on
-      // an existing entry preserves whatever actuals the upload wrote.
-      if (isQuantityMode(mode)) {
-        const planQty = e.planQty ?? existing?.planQty ?? 0;
-        await tx.monthlyEntry.upsert({
-          where,
-          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, planQty },
-          update: { planQty },
-        });
-      } else {
-        const planValue = e.planValue ?? num(existing?.planValue ?? 0);
-        await tx.monthlyEntry.upsert({
-          where,
-          create: { planLineId: e.planLineId, seasonMonthId: e.seasonMonthId, inputMode: mode, planValue },
-          update: { inputMode: mode, planValue },
-        });
-      }
+      if (e.seasonMonthId !== mp.seasonMonthId) throw new ApiError(422, "Entry month does not match this monthly plan");
     }
-  });
 
-  const saved = await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } });
-  return { saved: true, lastSavedAt: saved.lastSavedAt };
+    // Monthly planning writes ONLY the plan fields. Actual sales (saleQty / saleValue) are owned exclusively by the Sales Upload and are never
+    // modified here. A field the request leaves out keeps its stored value (a new entry starts at 0). One statement per group, whatever the count.
+    const month = mp.seasonMonthId;
+    const qtyWith = entries.filter((e) => isQuantityMode((e.mode ?? "PACK_SIZE") as PlanningMode) && e.planQty !== undefined);
+    const qtyWithout = entries.filter((e) => isQuantityMode((e.mode ?? "PACK_SIZE") as PlanningMode) && e.planQty === undefined);
+    const valueWith = entries.filter((e) => !isQuantityMode((e.mode ?? "PACK_SIZE") as PlanningMode) && e.planValue !== undefined);
+    const valueWithout = entries.filter((e) => !isQuantityMode((e.mode ?? "PACK_SIZE") as PlanningMode) && e.planValue === undefined);
+    const stored: { planLineId: string; planQty: number; planValue: string | null }[] = [];
+    const ret = Prisma.sql`RETURNING "planLineId", "planQty", "planValue"::text AS "planValue"`;
+    if (qtyWith.length > 0) stored.push(...await tx.$queryRaw<typeof stored>(Prisma.sql`
+      INSERT INTO "MonthlyEntry" ("id", "planLineId", "seasonMonthId", "planQty", "updatedAt")
+      SELECT v."id", v."planLineId", ${month}, v."planQty", NOW() FROM unnest(${qtyWith.map(() => randomUUID())}::text[], ${qtyWith.map((e) => e.planLineId)}::text[], ${qtyWith.map((e) => e.planQty!)}::int[]) AS v("id", "planLineId", "planQty")
+      ON CONFLICT ("planLineId", "seasonMonthId") DO UPDATE SET "planQty" = EXCLUDED."planQty", "updatedAt" = NOW()
+      ${ret}`));
+    if (qtyWithout.length > 0) stored.push(...await tx.$queryRaw<typeof stored>(Prisma.sql`
+      INSERT INTO "MonthlyEntry" ("id", "planLineId", "seasonMonthId", "planQty", "updatedAt")
+      SELECT v."id", v."planLineId", ${month}, 0, NOW() FROM unnest(${qtyWithout.map(() => randomUUID())}::text[], ${qtyWithout.map((e) => e.planLineId)}::text[]) AS v("id", "planLineId")
+      ON CONFLICT ("planLineId", "seasonMonthId") DO UPDATE SET "updatedAt" = NOW()
+      ${ret}`));
+    if (valueWith.length > 0) stored.push(...await tx.$queryRaw<typeof stored>(Prisma.sql`
+      INSERT INTO "MonthlyEntry" ("id", "planLineId", "seasonMonthId", "inputMode", "planValue", "updatedAt")
+      SELECT v."id", v."planLineId", ${month}, v."mode", v."planValue", NOW()
+      FROM unnest(${valueWith.map(() => randomUUID())}::text[], ${valueWith.map((e) => e.planLineId)}::text[], ${valueWith.map((e) => e.mode!)}::text[], ${valueWith.map((e) => String(e.planValue))}::numeric[]) AS v("id", "planLineId", "mode", "planValue")
+      ON CONFLICT ("planLineId", "seasonMonthId") DO UPDATE SET "inputMode" = EXCLUDED."inputMode", "planValue" = EXCLUDED."planValue", "updatedAt" = NOW()
+      ${ret}`));
+    if (valueWithout.length > 0) stored.push(...await tx.$queryRaw<typeof stored>(Prisma.sql`
+      INSERT INTO "MonthlyEntry" ("id", "planLineId", "seasonMonthId", "inputMode", "planValue", "updatedAt")
+      SELECT v."id", v."planLineId", ${month}, v."mode", 0, NOW()
+      FROM unnest(${valueWithout.map(() => randomUUID())}::text[], ${valueWithout.map((e) => e.planLineId)}::text[], ${valueWithout.map((e) => e.mode!)}::text[]) AS v("id", "planLineId", "mode")
+      ON CONFLICT ("planLineId", "seasonMonthId") DO UPDATE SET "inputMode" = EXCLUDED."inputMode", "updatedAt" = NOW()
+      ${ret}`));
+
+    // Completion of every dealer touched by this save, with the monthly read's rule (≥1 planned value this month) on the SAVED state — the editor
+    // patches its cached plan (progress, ticks, Submit gate) from this instead of re-reading the whole monthly plan.
+    const dealers = ids.length === 0 ? [] : await tx.$queryRaw<{ dealerId: string; completed: boolean }[]>(Prisma.sql`
+      SELECT d."dealerId", COALESCE(BOOL_OR(CASE WHEN ${!isQuantityMode(mp.monthlyMode as PlanningMode)} THEN e."planValue" > 0 ELSE e."planQty" > 0 END), false) AS "completed"
+      FROM "PlanDealer" d
+      JOIN "PlanLine" l ON l."planDealerId" = d."id"
+      LEFT JOIN "MonthlyEntry" e ON e."planLineId" = l."id" AND e."seasonMonthId" = ${month}
+      WHERE d."seasonPlanId" = ${mp.seasonPlanId}
+        AND d."id" IN (SELECT l2."planDealerId" FROM "PlanLine" l2 WHERE l2."id" = ANY(${ids}::text[]))
+      GROUP BY d."dealerId"`);
+    const saved = await tx.monthlyPlan.update({ where: { id: mp.id }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } });
+    const savedEntries: SavedMonthlyEntry[] = stored.map((r) => ({ planLineId: r.planLineId, seasonMonthId: month, planQty: r.planQty, planValue: r.planValue == null ? null : Number(r.planValue) }));
+    return { saved: true, lastSavedAt: saved.lastSavedAt, entries: savedEntries, dealers };
+  }, MONTHLY_WRITE_TRANSACTION);
 }
 
 /* --------------------- Additional products & new dealers ------------------ */
@@ -858,59 +894,45 @@ export async function updateMonthlyDealer(ctx: AuthContext, monthlyPlanId: strin
 /* ------------------------------- Workflow --------------------------------- */
 
 export async function submitMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
-  const mp = await loadMonthlyPlanOr404(monthlyPlanId);
-  if (!(isPlanOwner(ctx, mp.officerId))) {
-    throw new ApiError(403, "Only the owning Sales Officer can submit this monthly plan");
-  }
-  if (!EDITABLE.includes(mp.status)) {
-    throw new ApiError(409, "This monthly plan cannot be submitted in its current state");
-  }
-  assertMonthlyLive(mp);
+  // Status, completion and the status change are decided on the LOCKED monthly plan: a save still running finishes first (its values count), a later
+  // save is refused, and a second Submit waits and then gets the already-submitted answer — exactly one submission.
+  const { mp, nextStatus, managerId } = await prisma.$transaction(async (tx) => {
+    const mp = await lockMonthlyPlan(tx, monthlyPlanId);
+    assertMonthlyWritable(mp, ctx, "This monthly plan cannot be submitted in its current state", true);
 
-  // Dealer completion gate — mirrors the Seasonal submit gate: every dealer in the monthly view
-  // must be Completed (≥1 monthly plan value entered) or explicitly marked "No Plan".
-  const [gatePlanDealers, gateNoPlan, gateSeason] = await Promise.all([
-    prisma.planDealer.findMany({
-      // Use the SAME eligibility rule as the monthly view/draft (getMonthlyPlan): only dealers that are
-      // currently plannable (Active, non-Defaulter) must be accounted for. An Inactive/Defaulter dealer
-      // is hidden from the planning UI, so it must not count as a "required" dealer here — otherwise a
-      // deactivated dealer that still has a historical PlanDealer row would block submission with no way
-      // to plan or mark it "No Plan". Historical rows are preserved; they are only excluded from the gate.
-      where: { seasonPlanId: mp.seasonPlanId, dealer: { isActive: true, status: { not: "DEFAULTER" } } },
-      include: {
-        dealer: { select: { name: true } },
-        lines: {
-          include: {
-            product: { select: { name: true, rate: true, nbvPercent: true } },
-            packs: { select: { quantity: true } },
-            monthlyEntries: { where: { seasonMonthId: mp.seasonMonthId } },
-          },
-        },
-      },
-    }),
-    prisma.monthlyPlanDealer.findMany({ where: { monthlyPlanId: mp.id, noPlan: true }, select: { dealerId: true } }),
-    prisma.season.findUnique({ where: { id: mp.seasonPlan.seasonId }, select: { monthlyMode: true } }),
-  ]);
-  const gateNoPlanSet = new Set((gateNoPlan as { dealerId: string }[]).map((r) => r.dealerId));
-  // This gate only checks per-dealer "has a planned value" membership — product identity is irrelevant,
-  // so an identity (no-op) effective resolver avoids an unnecessary merge-map query.
-  const gateBuilt = buildMonthlyDealers(gatePlanDealers, [{ id: mp.seasonMonthId }], (gateSeason?.monthlyMode ?? "PACK_SIZE") as PlanningMode, { effId: (id) => id, meta: () => null, hasMerges: false });
-  const remaining = gateBuilt.filter(
-    (d) => !gateNoPlanSet.has(d.dealerId) && !d.products.some((p) => (p.monthly[mp.seasonMonthId]?.plan ?? 0) > 0),
-  );
-  if (remaining.length > 0) {
-    throw new ApiError(
-      422,
-      `Every dealer must be planned or marked "No Plan". Not yet accounted for: ${remaining.map((r) => r.dealerName).join(", ")}`,
-    );
-  }
+    // Dealer completion gate — mirrors the Seasonal submit gate: every dealer in the monthly view must be Completed (≥1 monthly plan value entered)
+    // or explicitly marked "No Plan". Use the SAME eligibility rule as the monthly view/draft (getMonthlyPlan): only dealers that are currently
+    // plannable (Active, non-Defaulter) must be accounted for — a deactivated dealer that still has a historical PlanDealer row must not block
+    // submission. One aggregate over the stored entries (value modes count planValue, quantity modes planQty — the read's own rule).
+    const gate = await tx.$queryRaw<{ dealerName: string; noPlan: boolean; completed: boolean }[]>(Prisma.sql`
+      SELECT dl."name" AS "dealerName",
+             EXISTS (SELECT 1 FROM "MonthlyPlanDealer" n WHERE n."monthlyPlanId" = ${mp.id} AND n."dealerId" = d."dealerId" AND n."noPlan" = true) AS "noPlan",
+             COALESCE(BOOL_OR(CASE WHEN ${!isQuantityMode(mp.monthlyMode as PlanningMode)} THEN e."planValue" > 0 ELSE e."planQty" > 0 END), false) AS "completed"
+      FROM "PlanDealer" d
+      JOIN "Dealer" dl ON dl."id" = d."dealerId"
+      LEFT JOIN "PlanLine" l ON l."planDealerId" = d."id"
+      LEFT JOIN "MonthlyEntry" e ON e."planLineId" = l."id" AND e."seasonMonthId" = ${mp.seasonMonthId}
+      WHERE d."seasonPlanId" = ${mp.seasonPlanId} AND dl."isActive" = true AND dl."status" <> 'DEFAULTER'
+      GROUP BY d."id", d."dealerId", dl."name"
+      ORDER BY dl."name"`);
+    const remaining = gate.filter((d) => !d.noPlan && !d.completed);
+    if (remaining.length > 0) {
+      throw new ApiError(
+        422,
+        `Every dealer must be planned or marked "No Plan". Not yet accounted for: ${remaining.map((r) => r.dealerName).join(", ")}`,
+      );
+    }
 
-  const managerId = await getCurrentManagerId(mp.officerId);
-  const nextStatus = managerId ? PlanStatus.PENDING_RM : PlanStatus.PENDING_ADMIN;
-  await prisma.monthlyPlan.update({ where: { id: mp.id }, data: { status: nextStatus, submittedAt: new Date() } });
-  await recordMonthlyAction(mp, ctx, ApprovalActionType.SUBMIT, mp.status, nextStatus);
+    const managerId = await getCurrentManagerId(mp.officerId, tx);
+    const nextStatus = managerId ? PlanStatus.PENDING_RM : PlanStatus.PENDING_ADMIN;
+    await tx.monthlyPlan.update({ where: { id: mp.id }, data: { status: nextStatus, submittedAt: new Date() } });
+    // The approval history entry commits together with the status change.
+    await tx.approvalAction.create({ data: { seasonPlanId: mp.seasonPlanId, monthlyPlanId: mp.id, actorId: ctx.userId, ...(ctx.designation ? { actorDesignation: ctx.designation } : {}), action: ApprovalActionType.SUBMIT, fromStatus: mp.status, toStatus: nextStatus } });
+    return { mp, nextStatus, managerId };
+  }, MONTHLY_WRITE_TRANSACTION);
 
-  const label = await monthlyLabel(mp);
+  // Notifications are sent after the commit (as before, a notification failure must not undo a recorded submission).
+  const label = await monthlyLabel(await loadMonthlyPlanOr404(mp.id));
   if (nextStatus === PlanStatus.PENDING_RM && managerId) {
     await createNotification({
       userId: managerId,

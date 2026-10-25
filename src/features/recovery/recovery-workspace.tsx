@@ -1,4 +1,6 @@
 "use client";
+import { AutosaveStatus } from "@/features/planning/autosave-status";
+import { applySavedMonth, applySavedWeek } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { formatDMY } from "@/lib/date-format";
 
@@ -387,10 +389,13 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
 
   const persist = async (keys: string[], snap: Record<string, { plan: number; running: number }>) => {
     const entries = keys.map((dealerId) => ({ dealerId, monthRecoveryPlan: snap[dealerId]?.plan ?? 0, monthRunningRecovery: snap[dealerId]?.running ?? 0 }));
-    await api.patch(`/api/recovery/plans/${detail.id}/month`, { entries });
-    qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] });
+    const res = await api.patch<{ dealers?: { dealerId: string; monthRecoveryPlan: number; monthRunningRecovery: number }[] }>(`/api/recovery/plans/${detail.id}/month`, { entries });
+    // The response carries the stored values: update the cached plan (values + Completed status) instead of re-reading the whole plan. The editable grid is
+    // seeded once per plan, so this never overwrites newer local edits. (An older server without `dealers` → the previous full refresh.)
+    if (res?.dealers) qc.setQueryData<RecoveryDetail>(["recovery-plan", detail.id], (prev) => (prev ? applySavedMonth(prev, res.dealers!) : prev));
+    else qc.invalidateQueries({ queryKey: ["recovery-plan", detail.id] });
   };
-  const { values, saving, update, flush } = useAutosaveMap<{ plan: number; running: number }>(seed, persist);
+  const { values, saving, failed: saveFailed, error: saveError, pending: savePending, update, flush } = useAutosaveMap<{ plan: number; running: number }>(seed, persist);
 
   const [noPlanFor, setNoPlanFor] = useState<RecoveryDealer | null>(null);
   const noPlanMut = useMutation({
@@ -485,8 +490,8 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
       />
       {editable && (
         <div className="flex items-center justify-end gap-3 text-sm text-muted-foreground">
-          <span>{saving ? "Saving…" : "Saved"}</span>
-          <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
+          <AutosaveStatus saving={saving} failed={saveFailed} error={saveError} pending={savePending} />
+          <Button size="sm" variant="outline" onClick={() => void flush().catch(() => undefined)} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
         </div>
       )}
       <div className="w-max min-w-full rounded-lg border bg-background">
@@ -638,7 +643,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
           saving={noPlanMut.isPending}
           reasons={RECOVERY_NO_PLAN_REASONS}
           captureDetail
-          onConfirm={(reason, detail) => { void flush().then(() => noPlanMut.mutate({ dealerId: noPlanFor.dealerId, noPlan: true, reason, reasonDetail: detail })); }}
+          onConfirm={(reason, detail) => { void flush().then(() => noPlanMut.mutate({ dealerId: noPlanFor.dealerId, noPlan: true, reason, reasonDetail: detail })).catch(() => undefined); /* a failed save keeps the edits and shows "Not saved"; No Plan waits */ }}
         />
       )}
       {cnRequestDealer && (
@@ -753,10 +758,12 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
 
   const persist = async (keys: string[], snap: Record<string, { plan: number; running: number }>) => {
     const entries = keys.map((dealerId) => ({ dealerId, weekRecoveryPlan: snap[dealerId]?.plan ?? 0, weekRunningRecovery: snap[dealerId]?.running ?? 0 }));
-    await api.patch(`/api/recovery/plans/${detail.id}/week`, { weekNo, entries });
-    onSaved();
+    const res = await api.patch<{ dealers?: { dealerId: string; weekRecoveryPlan: number; weekRunningRecovery: number }[] }>(`/api/recovery/plans/${detail.id}/week`, { weekNo, entries });
+    // Stored week values → cached plan; no full re-read (older server without `dealers` → the previous refresh).
+    if (res?.dealers) qc.setQueryData<RecoveryDetail>(["recovery-plan", detail.id], (prev) => (prev ? applySavedWeek(prev, weekNo, res.dealers!) : prev));
+    else onSaved();
   };
-  const { values, saving, update, flush } = useAutosaveMap<{ plan: number; running: number }>(seed, persist);
+  const { values, saving, failed: saveFailed, error: saveError, pending: savePending, update, flush } = useAutosaveMap<{ plan: number; running: number }>(seed, persist);
   const qc = useQueryClient();
   // Admin Edit Mode overlay (staged, separate from the officer autosave path).
   const canAdminEdit = !!detail.canAdminEdit;
@@ -853,8 +860,8 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
       />
       {editable && (
         <div className="flex items-center justify-end gap-3 text-sm text-muted-foreground">
-          <span>{saving ? "Saving…" : "Saved"}</span>
-          <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
+          <AutosaveStatus saving={saving} failed={saveFailed} error={saveError} pending={savePending} />
+          <Button size="sm" variant="outline" onClick={() => void flush().catch(() => undefined)} disabled={saving}><Save className="h-4 w-4" /> Save</Button>
         </div>
       )}
       <div className="w-max min-w-full rounded-lg border bg-background">

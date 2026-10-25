@@ -31,6 +31,8 @@ export interface MonthlyEditContextValue {
   qtyMode: boolean;
   values: ValueMap;
   saving: boolean;
+  /** Autosave status: the last save failed (edits kept, still pending) / how many cells are not confirmed yet. */
+  saveStatus: { failed: boolean; error: string | null; pending: number };
   cellFor: (planLineId: string, monthId: string) => Cell;
   monthEditable: (monthId: string) => boolean;
   setCell: (planLineId: string, monthId: string, field: "plan" | "sale", n: number) => void;
@@ -124,7 +126,7 @@ export function MonthlyEditProvider({
     [qtyMode, data.monthlyMode, persistUrl, invalidateKey, qc],
   );
 
-  const { values, saving, update, flush } = useAutosaveMap<Cell>(seed, persist);
+  const { values, saving, failed: saveFailed, error: saveError, pending: savePending, update, flush } = useAutosaveMap<Cell>(seed, persist);
 
   const setCell = useCallback(
     (planLineId: string, monthId: string, field: "plan" | "sale", n: number) => {
@@ -205,9 +207,10 @@ export function MonthlyEditProvider({
     }
   }, [initial, adminEdits, qtyMode, data.monthlyMode, monthlyPlanId, invalidateKey, qc]);
 
+  const saveStatus = useMemo(() => ({ failed: saveFailed, error: saveError, pending: savePending }), [saveFailed, saveError, savePending]);
   const value = useMemo<MonthlyEditContextValue>(
-    () => ({ planId, monthlyPlanId, data, monthlyMode: data.monthlyMode, qtyMode, values, saving, cellFor, monthEditable, setCell, flush, additionalOpen, setAdditionalOpen, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave }),
-    [planId, monthlyPlanId, data, qtyMode, values, saving, cellFor, monthEditable, setCell, flush, additionalOpen, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave],
+    () => ({ planId, monthlyPlanId, data, monthlyMode: data.monthlyMode, qtyMode, values, saving, saveStatus, cellFor, monthEditable, setCell, flush, additionalOpen, setAdditionalOpen, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave }),
+    [planId, monthlyPlanId, data, qtyMode, values, saving, saveStatus, cellFor, monthEditable, setCell, flush, additionalOpen, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

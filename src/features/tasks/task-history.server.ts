@@ -25,3 +25,25 @@ export async function recordTaskReschedule(
   });
   return true;
 }
+
+/**
+ * The same history rows as recordTaskReschedule for SEVERAL tasks in one statement (a final Daily Report can move many tasks): same no-op rule (previous === new writes nothing),
+ * same fields, same transaction — and the actor's name is supplied by the caller instead of being read again for every task. Returns how many history rows were written.
+ */
+export async function recordTaskReschedules(
+  tx: Pick<Prisma.TransactionClient, "taskRescheduleEvent">,
+  ctx: AuthContext,
+  actorName: string,
+  moves: readonly { sourceType: TaskSourceType; sourceId: string; ownerId: string; previousDate: string; newDate: string; reason?: string | null }[],
+): Promise<number> {
+  const real = moves.filter((m) => m.previousDate !== m.newDate);
+  if (real.length === 0) return 0;
+  const created = await tx.taskRescheduleEvent.createMany({
+    data: real.map((m) => ({
+      sourceType: m.sourceType, sourceId: m.sourceId, ownerId: m.ownerId,
+      previousDate: new Date(`${m.previousDate}T00:00:00.000Z`), newDate: new Date(`${m.newDate}T00:00:00.000Z`),
+      actorId: ctx.userId, actorName, actorRole: String(ctx.role), reason: m.reason?.trim() || null,
+    })),
+  });
+  return created.count;
+}

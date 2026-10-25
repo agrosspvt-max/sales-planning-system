@@ -86,7 +86,7 @@ async function main() {
   assert.ok((await prisma.dailyReportRollout.findMany()).length === 1, "the rollout cutoff is persisted");
 
   const plan = async (c: AuthContext, date: string, dealer: string, amount = 1000) => {
-    await svc.saveDailyWork(c, { section: "SALES", workDate: date, rows: [{ dealerId: dealer, todaysPlan: amount, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(c, { section: "SALES", workDate: date, rows: [{ followUpType: "TELEPHONIC", dealerId: dealer, todaysPlan: amount, entryType: "REGULAR" }] });
     await noPlan(c, date, ["RECOVERY", ...ALL]);
     await svc.submitDailyWorkDay(c, { workDate: date });
   };
@@ -106,7 +106,7 @@ async function main() {
   same([p19?.version, ist(p19!.deadline.toISOString())], ["SO_MIDNIGHT", "2026-10-20 00:00:00"], "SO: the report closes at 00:00 IST of the next day");
   assert.equal(await policy("rm", "2026-10-19"), null, "an RM has no new-policy row: the previous noon rule stands");
   at("2026-10-19", "18:00:00");
-  await svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-19", rows: [{ dealerId: "B", todaysPlan: 50, entryType: "REGULAR" }] }); // a second batch of the day
+  await svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-19", rows: [{ followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 50, entryType: "REGULAR" }] }); // a second batch of the day
   await noPlan(SO1, "2026-10-19", ["RECOVERY", ...ALL]);
   await svc.submitDailyWorkDay(SO1, { workDate: "2026-10-19" });
   same(ist((await policy("so1", "2026-10-19"))!.deadline.toISOString()), "2026-10-20 00:00:00", "a later batch of the same date neither changes the policy nor restarts the window");
@@ -131,7 +131,7 @@ async function main() {
   const status = await svc.getDailyStatus(SO1, "2026-10-22");
   same([status.outstandingReport?.date, status.canSubmit, status.outstandingReport?.canRequest], ["2026-10-19", false, true]);
   const blocked = [
-    code(svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-22", rows: [{ dealerId: "A", todaysPlan: 5, entryType: "REGULAR" }] })),
+    code(svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-22", rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5, entryType: "REGULAR" }] })),
     code(svc.setDailyNoPlan(SO1, { workDate: "2026-10-22", section: "RECOVERY", noPlan: true })),
     code(svc.submitDailyWorkDay(SO1, { workDate: "2026-10-22" })),
   ];
@@ -190,9 +190,9 @@ async function main() {
   at("2026-10-23", "08:00:00"); // another midnight has passed
   const w = await svc.getDailyStatus(SO1, "2026-10-19");
   same([w.reportApproved, w.reportDeadlinePassed, w.reportMissed], [true, false, true], "approved → editable; it still counts as Missed until submitted");
-  assert.equal(await code(svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-23", rows: [{ dealerId: "A", todaysPlan: 5, entryType: "REGULAR" }] })), 423, "the current plan stays blocked while the approval is outstanding");
+  assert.equal(await code(svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-23", rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5, entryType: "REGULAR" }] })), 423, "the current plan stays blocked while the approval is outstanding");
   // Approval does not unlock the original plan: its dealers / planned amounts cannot be edited.
-  assert.notEqual(await code(svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-19", rows: [{ dealerId: "A", todaysPlan: 9999, entryType: "REGULAR" }] })), 0, "the original plan is not editable");
+  assert.notEqual(await code(svc.saveDailyWork(SO1, { section: "SALES", workDate: "2026-10-19", rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 9999, entryType: "REGULAR" }] })), 0, "the original plan is not editable");
   assert.equal(Number((await prisma.dailyWorkEntry.findFirstOrThrow({ where: { officerId: "so1", workDate: new Date("2026-10-19T00:00:00Z"), dealerId: "A" } })).todaysPlan), 1000);
   // A reschedule date must be after the ACTUAL current business date (23 Oct), not after the report's own date.
   const one = (outcome: string | null, extra: Record<string, unknown> = {}) => svc.enterTaskOutcomes(SO1, { section: "SALES", workDate: "2026-10-19", entries: [{ entryId: kept[0]!.entryId, units: [{ unitType: "MANUAL_ROW", unitId: kept[0]!.entryId, outcome, ...extra }] }] });
@@ -244,7 +244,7 @@ async function main() {
   await prisma.dealerAssignment.create({ data: { dealerId: "S", officerId: SURESH.userId, effectiveFrom: new Date("2024-01-01") } });
   await prisma.$executeRaw`UPDATE "DailyReportRollout" SET "effectiveAt" = ${new Date("2026-10-19T10:49:19.771Z")} WHERE "id" = 'SO_MIDNIGHT'`;
   at("2026-10-22", "10:38:26.380");
-  await svc.saveDailyWork(SURESH, { section: "RECOVERY", workDate: "2026-10-22", rows: [{ dealerId: "S", todaysPlan: 500, entryType: "REGULAR" }] });
+  await svc.saveDailyWork(SURESH, { section: "RECOVERY", workDate: "2026-10-22", rows: [{ followUpType: "TELEPHONIC", dealerId: "S", todaysPlan: 500, entryType: "REGULAR" }] });
   await noPlan(SURESH, "2026-10-22", ["SALES", ...ALL]);
   await svc.submitDailyWorkDay(SURESH, { workDate: "2026-10-22" });
   // Reproduce only the audited missing metadata, not any deleted plan or report.

@@ -225,6 +225,11 @@ async function main() {
     assert.ok((await service.listMonthlySheets(ADMIN)).some((s) => s.id === adm.id), "Admin's own plan appears in Admin's list");
     assert.equal(await status(() => service.getMonthlySheet(ADMIN, adm.id)), 0, "Admin opens their own plan");
     assert.equal(await status(() => service.getMonthlySheet(ADMIN, june.id)), 0, "Admin opens an officer's plan");
+    // Scope is read once per request and used for visibility AND the rows / DTO: out-of-scope looks the same as missing.
+    assert.equal(await status(() => service.getMonthlySheet(SO2, june.id)), 404, "another officer's plan is not visible to an SO");
+    assert.equal(await status(() => service.getMonthlySheet(ctxOf("so3"), june.id)), 404, "…nor to an SO of another group");
+    assert.equal(await status(() => service.getMonthlySheet(RM1, june.id)), 0, "the RM opens a plan of their group's SO");
+    assert.equal(await status(() => service.getMonthlySheet(SO1, "missing")), 404);
     assert.equal(await status(() => service.createMonthlyPlan(ADMIN, { sheetId: adm.id, seasonalPlanId: "sp-so1-new", option1Party: "P" })), 403, "rows stay SO/RM-owned");
     assert.ok((await service.listMonthlySheets(SO1)).every((s) => s.ownerId === "so1"), "an SO still sees only their own (not Admin's)");
     const spoof = plain(await service.createMonthlySheet(SO2, { seasonId: "s-kharif", seasonMonthId: "sm-july", ownerId: "so1", status: "Completed", itemCount: 5 }));

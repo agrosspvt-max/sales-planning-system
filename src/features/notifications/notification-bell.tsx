@@ -1,5 +1,6 @@
 "use client";
 
+import { pollingInterval } from "@/lib/polling";
 import { useState } from "react";
 import { localizeDatesInText } from "@/lib/date-format";
 import Link from "next/link";
@@ -44,7 +45,7 @@ export function NotificationBell() {
   const { data } = useQuery<Feed>({
     queryKey: ["notifications"],
     queryFn: () => api.get<Feed>("/api/notifications"),
-    refetchInterval: 60_000,
+    refetchInterval: pollingInterval(60_000), // backs off while the server is failing; keeps probing and resumes by itself
   });
 
   const readOne = useMutation({

@@ -22,15 +22,22 @@ export async function loadDailyWorkDay(db: DailyWorkDb, officerId: string, workD
   return rows[0] ?? null;
 }
 
-/** One concurrency gate for every Daily Work mutation, including Auto Task materialization/rescheduling. */
+/**
+ * One concurrency gate for every Daily Work mutation, including Auto Task materialization/rescheduling. The day row almost always exists already, so the common case is ONE statement
+ * (lock + read); only a day's first mutation also inserts the row (ON CONFLICT DO NOTHING makes two first requests safe) and locks it. Every statement is a network round trip.
+ */
 export async function lockDailyWorkDay(tx: Prisma.TransactionClient, officerId: string, workDate: string): Promise<DailyWorkDayState> {
-  await tx.$executeRaw(Prisma.sql`
-    INSERT INTO "DailyWorkDay" ("id","officerId","workDate","currentBatchId","status","createdAt","updatedAt")
-    VALUES (${randomUUID()}, ${officerId}, ${workDate}::date, ${draftBatchId(officerId, workDate)}, 'OPEN', NOW(), NOW())
-    ON CONFLICT ("officerId","workDate") DO NOTHING`);
-  const rows = await tx.$queryRaw<DailyWorkDayState[]>(Prisma.sql`
+  const select = () => tx.$queryRaw<DailyWorkDayState[]>(Prisma.sql`
     SELECT "currentBatchId", "status", "selfRating", "finalizedAt"
     FROM "DailyWorkDay" WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date FOR UPDATE`);
+  let rows = await select();
+  if (!rows[0]) {
+    await tx.$executeRaw(Prisma.sql`
+      INSERT INTO "DailyWorkDay" ("id","officerId","workDate","currentBatchId","status","createdAt","updatedAt")
+      VALUES (${randomUUID()}, ${officerId}, ${workDate}::date, ${draftBatchId(officerId, workDate)}, 'OPEN', NOW(), NOW())
+      ON CONFLICT ("officerId","workDate") DO NOTHING`);
+    rows = await select();
+  }
   const day = rows[0];
   if (!day) throw new ApiError(500, "Daily Work day could not be initialized");
   return day;

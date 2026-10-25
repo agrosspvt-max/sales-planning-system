@@ -1,4 +1,5 @@
 "use client";
+import { pollingInterval } from "@/lib/polling";
 import { useState } from "react";
 import { accountSnapshotName } from "@/features/accounts/identity";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -175,7 +176,8 @@ export function CnProcessingDialog({
   const history = useQuery<CnReview[]>({
     queryKey: ["cn-review-history", requestId],
     queryFn: () => api.get(`/api/cn-reviews/requests/${requestId}`),
-    refetchInterval: underProcess ? 15000 : false,
+    // Only while the review is Under Process; backs off while the server is failing and resumes by itself.
+    refetchInterval: pollingInterval(15_000, () => underProcess),
   });
   const last = history.data?.at(-1);
   const mutation = useMutation({
@@ -349,7 +351,7 @@ export function CnReviewInbox() {
   const { data, error, isLoading } = useQuery<CnReview[]>({
     queryKey: ["cn-review-inbox"],
     queryFn: () => api.get("/api/cn-reviews/inbox"),
-    refetchInterval: 30000,
+    refetchInterval: pollingInterval(30_000),
   });
   const [selected, setSelected] = useState<CnReview | null>(null);
   return (

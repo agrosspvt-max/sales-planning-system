@@ -38,6 +38,37 @@ function seedValue(l: PlanLineDetail, mode: PlanningMode): number {
   return 0;
 }
 
+/** The lines save response: `lines` are the values exactly as stored (see saveLines). */
+export interface SaveLinesResponse {
+  lastSavedAt: string;
+  lines?: { dealerId: string; productId: string; inputMode: PlanningMode | null; inputValue: number | null; packs: Record<string, number> }[];
+}
+
+/**
+ * The cached plan after a successful lines save — the same stored fields getPlanDetail returns for those lines: a pack-size save merges the saved pack
+ * quantities into the line's stored packs and clears the single value; a single-value save stores mode + value and keeps the packs. Nothing else changes.
+ */
+export function applySavedLines(detail: PlanDetail, saved: NonNullable<SaveLinesResponse["lines"]>, lastSavedAt: string): PlanDetail {
+  const byKey = new Map(saved.map((l) => [key(l.dealerId, l.productId), l]));
+  return {
+    ...detail,
+    lastSavedAt,
+    dealers: detail.dealers.map((d) => {
+      if (!d.lines.some((l) => byKey.has(key(d.dealerId, l.productId)))) return d;
+      return {
+        ...d,
+        lines: d.lines.map((l) => {
+          const s = byKey.get(key(d.dealerId, l.productId));
+          if (!s) return l;
+          return s.inputMode === null
+            ? { ...l, inputMode: null, inputValue: null, packs: { ...l.packs, ...s.packs } }
+            : { ...l, inputMode: s.inputMode, inputValue: s.inputValue };
+        }),
+      };
+    }),
+  };
+}
+
 export interface PlanEditContextValue {
   detail: PlanDetail;
   mode: PlanningMode;
@@ -46,6 +77,8 @@ export interface PlanEditContextValue {
   packIds: string[];
   editable: boolean;
   saving: boolean;
+  /** Autosave status: the last save failed (edits kept, still pending) / how many cells are not confirmed yet. */
+  saveStatus: { failed: boolean; error: string | null; pending: number };
   lastSaved: string;
   cells: ValueMap;
   setPack: (dealerId: string, productId: string, packSizeId: string, n: number) => void;
@@ -130,18 +163,20 @@ export function PlanEditProvider({ detail, children }: { detail: PlanDetail; chi
         }
         return { dealerId: dId, productId: pId, mode, value: cell.value };
       });
-      const res = await api.patch<{ lastSavedAt: string }>(`/api/planning/season-plans/${detail.id}/lines`, { lines });
+      const res = await api.patch<SaveLinesResponse>(`/api/planning/season-plans/${detail.id}/lines`, { lines });
       // Only after the save succeeds do these keys count as "saved".
       for (const k of keys) savedRef.current = { ...savedRef.current, [k]: snapshot[k] };
       setLastSaved(res.lastSavedAt);
-      // Refresh the plan so completion-based gating (submit) sees live saved state. Safe:
-      // the editable cells are seeded per plan identity, so a refetch never wipes edits.
-      qc.invalidateQueries({ queryKey: ["plan", detail.id] });
+      // Completion-based gating (Submit) reads the cached plan's stored quantities. The server returns exactly what it stored, so the cached plan is
+      // updated from that instead of re-reading the whole plan. (An older server without `lines` → the previous full refresh.) The editable cells are
+      // seeded once per plan identity, so neither path can overwrite newer local edits.
+      if (res.lines) qc.setQueryData<PlanDetail>(["plan", detail.id], (prev) => (prev ? applySavedLines(prev, res.lines!, res.lastSavedAt) : prev));
+      else qc.invalidateQueries({ queryKey: ["plan", detail.id] });
     },
     [packMode, packIds, mode, detail.id, qc],
   );
 
-  const { values: cells, saving, update, flush } = useAutosaveMap<Cell>(seed, persist);
+  const { values: cells, saving, failed: saveFailed, error: saveError, pending: savePending, update, flush } = useAutosaveMap<Cell>(seed, persist);
 
   // The active cell for a line: the admin overlay while in Admin Edit Mode, otherwise the autosave cell.
   const cellAt = useCallback(
@@ -273,9 +308,10 @@ export function PlanEditProvider({ detail, children }: { detail: PlanDetail; chi
   }, [detail, adminEdits, initial, packMode, packIds, mode, qc]);
 
   // Memoized so consumers only re-render when a dependency actually changes.
+  const saveStatus = useMemo(() => ({ failed: saveFailed, error: saveError, pending: savePending }), [saveFailed, saveError, savePending]);
   const value = useMemo<PlanEditContextValue>(
-    () => ({ detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, flush, cellAt, cellInput, lineFig, dealerCompleted, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave }),
-    [detail, mode, packMode, packColumns, packIds, editable, saving, lastSaved, cells, setPack, setValue, flush, cellAt, cellInput, lineFig, dealerCompleted, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave],
+    () => ({ detail, mode, packMode, packColumns, packIds, editable, saving, saveStatus, lastSaved, cells, setPack, setValue, flush, cellAt, cellInput, lineFig, dealerCompleted, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave }),
+    [detail, mode, packMode, packColumns, packIds, editable, saving, saveStatus, lastSaved, cells, setPack, setValue, flush, cellAt, cellInput, lineFig, dealerCompleted, canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave],
   );
 
   return <Ctx.Provider value={value}><DealerMarkerScope tags={detail.dealerTags}>{children}</DealerMarkerScope></Ctx.Provider>;

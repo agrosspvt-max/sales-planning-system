@@ -109,6 +109,27 @@ function makeFake(opts: FakeOpts) {
       for (const r of store) if (r.id === entryId && r.officerId === officerId && r.section === section && r.workDate === workDate && r.batchId !== currentBatchId && r.status === "PLAN_SUBMITTED") { r.todaysActual = String(actual); if (mode !== undefined) r.paymentMode = mode; n++; }
       return n;
     }
+    // Dealer Visits derivation (this suite covers Sales / Recovery only): the manual rows with their Follow-up Type, and no visit sources.
+    if (text.startsWith('SELECT "dealerId", "followUpType", "todaysPlan"::text AS "todaysPlan"')) {
+      const [officerId, workDate, batchId, section] = v as string[];
+      return store.filter((r) => r.officerId === officerId && r.workDate === workDate && r.batchId === batchId && r.section === section && r.dealerId && !String((r as { rowKey?: string }).rowKey ?? "").startsWith("t:"))
+        .map((r) => ({ dealerId: r.dealerId, followUpType: (r as { followUpType?: string }).followUpType ?? null, todaysPlan: r.todaysPlan, entryType: r.entryType, schemeId: r.schemeId }));
+    }
+    if (text.startsWith('SELECT \'S\' AS "k"')) return [];
+    // Replace-set write: ONE statement deletes the removed manual rows and upserts the others from a JSON recordset.
+    if (text.startsWith('WITH gone AS ( DELETE FROM "DailyWorkEntry"')) {
+      const jsonAt = v.findIndex((x) => typeof x === "string" && x.startsWith("["));
+      const [officerId, section, workDate, batchId] = v as string[];
+      const keep = (jsonAt < 0 ? v.slice(4) : v.slice(4, jsonAt - 4)) as string[];
+      store = store.filter((r) => !(r.officerId === officerId && r.section === section && r.workDate === workDate && r.batchId === batchId && !keep.includes(r.dealerId)));
+      if (jsonAt >= 0) for (const j of JSON.parse(v[jsonAt] as string) as { id: string; d: string; p: number | null; t: string; s: string | null; f: string | null }[]) {
+        const existing = store.find((r) => r.officerId === officerId && r.workDate === workDate && r.batchId === batchId && r.section === section && r.dealerId === j.d);
+        const todaysPlan = j.p == null ? null : String(j.p);
+        if (existing) { existing.todaysPlan = todaysPlan; existing.entryType = j.t; existing.schemeId = j.s; (existing as { followUpType?: string | null }).followUpType = j.f ?? (existing as { followUpType?: string | null }).followUpType ?? null; }
+        else store.push({ id: j.id, officerId, dealerId: j.d, workDate, batchId, section, todaysPlan, todaysActual: null, entryType: j.t, schemeId: j.s, status: "DRAFT", followUpType: j.f } as never);
+      }
+      return 1;
+    }
     // The dealers that already hold a directly entered row in this batch (manual-entry eligibility).
     if (text.startsWith('SELECT "dealerId" FROM "DailyWorkEntry"') && text.includes('"rowKey" NOT LIKE')) {
       const [officerId, workDate, batchId, section] = v as string[];
@@ -116,6 +137,8 @@ function makeFake(opts: FakeOpts) {
     }
     // Automatic (CN / Billing Exception) contribution lookups: this fake has none.
     if (text.startsWith('SELECT t."entryId", SUM(t."contribution")') || text.startsWith('SELECT e."dealerId", SUM(t."contribution")::text AS "contribution" FROM (')) return [];
+    // The report completion a report save returns (reportCompletion): this suite does not model it, so it reports no submitted batches.
+    if (text.startsWith('SELECT "section", "batchId", "todaysActual"::text AS "todaysActual", "resultStatus"')) return [];
     throw new Error("Unhandled raw SQL: " + text);
   }
 
@@ -241,7 +264,7 @@ async function main() {
     } });
     const svc = loadService(f, { assignedDealerIds: ["dk", "gothi"] });
     await svc.saveDailyWork(SO, { section: "SALES", workDate: "2026-09-21", rows: [
-      { dealerId: "dk", todaysPlan: 50000, entryType: "REGULAR" }, { dealerId: "gothi", todaysPlan: 40000, entryType: "REGULAR" },
+      { followUpType: "TELEPHONIC", dealerId: "dk", todaysPlan: 50000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "gothi", todaysPlan: 40000, entryType: "REGULAR" },
     ] });
     const p = await svc.getDailyWork(SO, "SALES", "2026-09-21");
     assert.equal(p.monthName, "September", "month derived from the Daily Work date");
@@ -268,13 +291,13 @@ async function main() {
       dk: { September: [{ plan: 48230, rate: 15, nbvPercent: 0.2, saleAmount: 386508 }] }, // no October entry
     } });
     const svcSep = loadService(f, { assignedDealerIds: ["dk"] });
-    await svcSep.saveDailyWork(SO, { section: "SALES", workDate: "2026-09-21", rows: [{ dealerId: "dk", entryType: "REGULAR" }] });
+    await svcSep.saveDailyWork(SO, { section: "SALES", workDate: "2026-09-21", rows: [{ followUpType: "TELEPHONIC", dealerId: "dk", entryType: "REGULAR" }] });
     const sep = await svcSep.getDailyWork(SO, "SALES", "2026-09-21");
     assert.equal(sep.dealers.find((d) => d.dealerId === "dk")!.monthlyPlan, 723450, "September plan present");
 
     // October: a fresh section+date. Save then read for 15 Oct → month "October" has no data → ₹0.
     const svcOct = loadService(f, { assignedDealerIds: ["dk"] });
-    await svcOct.saveDailyWork(SO, { section: "SALES", workDate: "2026-10-15", rows: [{ dealerId: "dk", entryType: "REGULAR" }] });
+    await svcOct.saveDailyWork(SO, { section: "SALES", workDate: "2026-10-15", rows: [{ followUpType: "TELEPHONIC", dealerId: "dk", entryType: "REGULAR" }] });
     const oct = await svcOct.getDailyWork(SO, "SALES", "2026-10-15");
     assert.equal(oct.monthName, "October", "month derived from 15 Oct");
     assert.equal(oct.dealers.find((d) => d.dealerId === "dk")!.monthlyPlan, 0, "October has no plan → ₹0 (no leak from September)");
@@ -286,7 +309,7 @@ async function main() {
       d1: { September: [{ plan: 500000, rate: 0, nbvPercent: 0.2, saleAmount: 300000 }] },
     } });
     const svc = loadService(f, { assignedDealerIds: ["d1"] });
-    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", entryType: "REGULAR" }] });
+    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", entryType: "REGULAR" }] });
     const p = await svc.getDailyWork(SO, "SALES", DATE);
     const d1 = p.dealers.find((d) => d.dealerId === "d1")!;
     assert.equal(d1.monthlyPlan, 500000, "value-mode plan uses the entered amount");
@@ -315,7 +338,7 @@ async function main() {
       d2: { September: [{ plan: 25, rate: 10000, nbvPercent: 0.2, saleAmount: 190000 }] }, // ₹250000 plan
     } });
     const svc = loadService(f, { assignedDealerIds: ["d1", "d2"] });
-    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }, { dealerId: "d2", todaysPlan: 20000, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "d2", todaysPlan: 20000, entryType: "REGULAR" }] });
     const p = await svc.getDailyWork(SO, "SALES", DATE);
     const combined = svc.combineDailyWork(p.dealers);
     assert.equal(combined.dealerCount, 2);
@@ -338,14 +361,14 @@ async function main() {
     const svc = loadService(f, { assignedDealerIds: ["d1", "d2"] });
 
     // Omitting entryType preserves the existing server default for a newly saved Recovery row.
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000 }] });
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000 }] });
     assert.equal(f.store()[0].entryType, "REGULAR", "new Recovery rows default to Regular");
 
     // Regular → Scheme: only the dealer's existing scheme-recovery option is exposed and accepted.
     const beforeSave = await svc.getDailyWork(SO, "RECOVERY", DATE);
     assert.equal(JSON.stringify(beforeSave.applicableSchemesByDealer.d1), JSON.stringify([{ id: "sc1", name: "Scheme One" }]));
     assert.equal(beforeSave.applicableSchemesByDealer.d2, undefined, "dealer without scheme recovery has no Scheme option");
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, entryType: "SCHEME", schemeId: "sc1" }] });
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000, entryType: "SCHEME", schemeId: "sc1" }] });
     assert.equal(f.store()[0].entryType, "SCHEME", "draft stores Scheme recovery type");
     assert.equal(f.store()[0].schemeId, "sc1", "draft stores the selected scheme");
     const draft = await svc.getDailyWork(SO, "RECOVERY", DATE);
@@ -353,15 +376,15 @@ async function main() {
     assert.equal(draft.dealers[0].schemeId, "sc1", "draft reload preserves scheme reference");
 
     // A scheme from another/no eligible dealer is rejected by the same server-side applicability rule.
-    await expectStatus(() => svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d2", entryType: "SCHEME", schemeId: "sc1" }] }), 422, "scheme recovery requires an applicable dealer scheme");
+    await expectStatus(() => svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d2", entryType: "SCHEME", schemeId: "sc1" }] }), 422, "scheme recovery requires an applicable dealer scheme");
 
     // Scheme → Regular keeps the row and clears the no-longer-applicable scheme reference.
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }] });
     assert.equal(f.store()[0].entryType, "REGULAR", "Scheme can be changed back to Regular");
     assert.equal(f.store()[0].schemeId, null, "Regular recovery does not retain a stale scheme reference");
 
     // A frozen planning batch preserves the Scheme selection in Daily Report and never resets it.
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, entryType: "SCHEME", schemeId: "sc1" }] });
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000, entryType: "SCHEME", schemeId: "sc1" }] });
     f.freezeCurrent("so1", DATE);
     const submitted = await svc.getDailyWork(SO, "RECOVERY", DATE, undefined, "REPORT");
     assert.equal(submitted.dealers[0].status, "PLAN_SUBMITTED");
@@ -384,13 +407,13 @@ async function main() {
     const f = makeFake({ assignedDealerIds: ["d1", "d2"], dealers });
     const svc = loadService(f, { assignedDealerIds: ["d1", "d2"] });
     // Plan: a paymentMode sent by an older client is ignored (stripped), never stored, never returned.
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, paymentMode: "CASH" }, { dealerId: "d2", todaysPlan: 5000 }] });
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000, paymentMode: "CASH" }, { followUpType: "TELEPHONIC", dealerId: "d2", todaysPlan: 5000 }] });
     assert.equal(f.store()[0].paymentMode, undefined, "Daily Plan save stores no Payment Mode");
     assert.equal("paymentMode" in (await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[0], false, "Daily Plan read has no Payment Mode");
     // A legacy plan-time value already in the database is never shown on the Plan, and a re-save leaves it alone.
     f.store()[0].paymentMode = "UPI";
     assert.equal("paymentMode" in (await svc.getDailyWork(SO, "RECOVERY", DATE)).dealers[0], false, "legacy value is not displayed in Plan");
-    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 31000 }, { dealerId: "d2", todaysPlan: 5000 }] });
+    await svc.saveDailyWork(SO, { section: "RECOVERY", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 31000 }, { followUpType: "TELEPHONIC", dealerId: "d2", todaysPlan: 5000 }] });
     assert.equal(f.store()[0].todaysPlan, "31000", "Plan save still works");
     f.store()[0].paymentMode = undefined;
     f.freezeCurrent("so1", DATE);
@@ -424,7 +447,7 @@ async function main() {
     await svc.enterDailyActual(SO, { section: "RECOVERY", workDate: DATE, entries: [{ entryId: d1, todaysActual: 5000 }] });
     assert.equal((await entry(0)).paymentMode, null, "0 -> positive starts blank");
     // Sales actuals never carry a Payment Mode.
-    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 100 }] });
+    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 100 }] });
     assert.equal("paymentMode" in (await svc.getDailyWork(SO, "SALES", DATE)).dealers[0], false, "Sales DTO remains unchanged");
   }
 
@@ -432,17 +455,17 @@ async function main() {
   {
     const f = makeFake({ assignedDealerIds: ["d1", "d2"], dealers });
     const svc = loadService(f, { assignedDealerIds: ["d1", "d2"] });
-    const res = await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }, { dealerId: "d2", todaysPlan: 20000, entryType: "REGULAR" }] });
+    const res = await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "d2", todaysPlan: 20000, entryType: "REGULAR" }] });
     assert.equal(res.count, 2);
     assert.equal(f.store().filter((r) => r.status === "DRAFT").length, 2);
-    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "dX", todaysPlan: 100, entryType: "REGULAR" }] }), 403, "unauthorized dealer");
+    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "dX", todaysPlan: 100, entryType: "REGULAR" }] }), 403, "unauthorized dealer");
   }
 
   // 5) Duplicate dealer rows rejected.
   {
     const f = makeFake({ assignedDealerIds: ["d1"], dealers });
     const svc = loadService(f, { assignedDealerIds: ["d1"] });
-    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", entryType: "REGULAR" }, { dealerId: "d1", entryType: "REGULAR" }] }), 422, "duplicate dealer");
+    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "d1", entryType: "REGULAR" }] }), 422, "duplicate dealer");
   }
 
   // 6) Scheme validation: one applicable auto-ok; unknown scheme rejected; none rejected.
@@ -451,19 +474,19 @@ async function main() {
     const f = makeFake({ assignedDealerIds: ["d1"], dealers });
     const svc = loadService(f, { assignedDealerIds: ["d1"], schemes });
     // valid scheme id
-    const ok = await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", entryType: "SCHEME", schemeId: "sc1" }] });
+    const ok = await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", entryType: "SCHEME", schemeId: "sc1" }] });
     assert.equal(ok.count, 1);
     assert.equal(f.store()[0].schemeId, "sc1");
     // unknown scheme id → 422
-    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", entryType: "SCHEME", schemeId: "nope" }] }), 422, "unknown scheme");
+    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", entryType: "SCHEME", schemeId: "nope" }] }), 422, "unknown scheme");
     // scheme type with no schemeId → 422
-    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", entryType: "SCHEME" }] }), 422, "missing scheme");
+    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", entryType: "SCHEME" }] }), 422, "missing scheme");
   }
   {
     // No applicable schemes at all → scheme row rejected.
     const f = makeFake({ assignedDealerIds: ["d1"], dealers });
     const svc = loadService(f, { assignedDealerIds: ["d1"], schemes: [] });
-    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", entryType: "SCHEME", schemeId: "x" }] }), 422, "no applicable schemes");
+    await expectStatus(() => svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", entryType: "SCHEME", schemeId: "x" }] }), 422, "no applicable schemes");
   }
 
   // 7) Submit flips DRAFT → SUBMITTED; 8) Today's Actual gating.
@@ -471,7 +494,7 @@ async function main() {
     const f = makeFake({ assignedDealerIds: ["d1"], dealers });
     const svc = loadService(f, { assignedDealerIds: ["d1"] });
     // Actual BEFORE submit → 409 (nothing submitted).
-    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 30000, entryType: "REGULAR" }] });
     const entryId = f.store()[0].id;
     await expectStatus(() => svc.enterDailyActual(SO, { section: "SALES", workDate: DATE, entries: [{ entryId, todaysActual: 25000 }] }), 409, "actual before submit");
     // Freeze the planning batch; the exact entry then accepts its report actual.
@@ -491,7 +514,7 @@ async function main() {
       { id: "2", officerId: "so1", dealerId: "d2", workDate: DATE, section: "SALES", todaysPlan: "2", todaysActual: null, entryType: "REGULAR", schemeId: null, status: "DRAFT" },
     ] });
     const svc = loadService(f, { assignedDealerIds: ["d1", "d2"] });
-    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ dealerId: "d1", todaysPlan: 5, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(SO, { section: "SALES", workDate: DATE, rows: [{ followUpType: "TELEPHONIC", dealerId: "d1", todaysPlan: 5, entryType: "REGULAR" }] });
     assert.deepEqual(f.store().map((r) => r.dealerId), ["d1"], "d2 removed on save");
     assert.equal(f.store()[0].todaysPlan, "5", "d1 updated in place (no duplicate)");
   }

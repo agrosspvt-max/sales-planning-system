@@ -119,7 +119,7 @@ function makeFake() {
       const row = entries.find((entry) => entry.officerId === officerId && entry.workDate === workDate && entry.batchId === batchId && entry.section === "SUMMARY" && entry.status === "DRAFT");
       return row ? [{ noPlanSections: row.noPlanSections }] : [];
     }
-    if (text.startsWith('SELECT "section", "batchId"')) {
+    if (text.startsWith('SELECT "section", "batchId"') || text.startsWith('SELECT "id", "section", "batchId", "dealerId"')) {
       const officerId = v[0] as string, workDate = v[1] as string, currentBatchId = v[2] as string;
       return entries.filter((row) => row.officerId === officerId && row.workDate === workDate && row.batchId !== currentBatchId && ["PLAN_SUBMITTED", "FINALIZED", "SUBMITTED"].includes(row.status)
         && (row.section !== "APPOINTMENT" || row.monthlyPlanId || (row.typedDealerName ?? "").trim() || (row.marketName ?? "").trim())).map((row) => ({ ...row }));
@@ -171,6 +171,24 @@ function makeFake() {
       row.actualNewPartyVisits = v[1] as number;
       return 1;
     }
+    if (text.startsWith('UPDATE "DailyWorkEntry" e SET "actualDealerVisits"')) {
+      const updates = JSON.parse(v[0] as string) as { id: string; dealer: number | null; newParty: number | null }[];
+      const officerId = v[1] as string, workDate = v[2] as string, currentBatchId = v[3] as string;
+      let count = 0;
+      for (const update of updates) {
+        const row = entries.find((entry) => entry.id === update.id && entry.officerId === officerId && entry.workDate === workDate && entry.batchId !== currentBatchId && entry.status === "PLAN_SUBMITTED" && entry.section === "SUMMARY");
+        if (row) { row.actualDealerVisits = update.dealer; row.actualNewPartyVisits = update.newParty; count++; }
+      }
+      return count;
+    }
+    // Final submission finalizes the day and its submitted entries in ONE statement (a data-modifying CTE): same effects as the two separate statements below.
+    if (text.startsWith('WITH day AS ( UPDATE "DailyWorkDay" SET "status" = \'FINALIZED\'')) {
+      const day = days.get(dayKey(v[1] as string, v[2] as string))!;
+      if (day.status === "OPEN") { day.status = "FINALIZED"; day.selfRating = v[0] as number; day.finalizedAt = new Date(); }
+      let count = 0;
+      for (const row of entries) if (row.officerId === v[3] && row.workDate === v[4] && row.status === "PLAN_SUBMITTED") { row.status = "FINALIZED"; count++; }
+      return count;
+    }
     if (text.startsWith('UPDATE "DailyWorkDay" SET "status" = \'FINALIZED\'')) {
       const day = days.get(dayKey(v[1] as string, v[2] as string))!;
       if (day.status !== "OPEN") return 0;
@@ -185,6 +203,8 @@ function makeFake() {
       for (const row of entries) if (row.officerId === officerId && row.workDate === workDate && row.status === "PLAN_SUBMITTED") { row.status = "FINALIZED"; count++; }
       return count;
     }
+    // Dealer Visits derivation: no dealer rows exist in this suite, so there are no visit sources and nothing to derive.
+    if (text.startsWith('SELECT \'S\' AS "k"')) return [];
     if (text.startsWith('SELECT t."entryId", SUM(t."contribution")')) return []; // automatic (CN / Billing Exception) contribution lookup: none in this fake
     throw new Error(`Unhandled SQL: ${text}`);
   }
@@ -564,7 +584,40 @@ async function appointmentPlanValidation() {
   assert.equal((await svc.submitDailyReport(SO, { workDate: DATE, selfRating: 7 })).ok, true, "no result is required for a wholly empty historical row");
 }
 
+async function reportTabIndicators() {
+  at("2026-09-21T10:00:00+05:30");
+  const f = makeFake(), svc = await readyToday(f);
+  const section = async (name: string) => (await svc.getDailyStatus(SO, DATE)).reportSections.find((s) => s.section === name)!;
+  assert.equal((await section("SALES")).planStatus, "REMAINING", "unsent drafts do not create a Report tick");
+  await svc.submitDailyWorkDay(SO, { workDate: DATE });
+  assert.equal((await svc.getDailyStatus(SO, DATE)).sections.find((s) => s.section === "SALES")!.status, "REMAINING", "submission rotates to an empty draft");
+  assert.equal((await section("SALES")).planStatus, "FILLED", "Report retains the submitted plan tick after draft rotation");
+  assert.equal((await section("SALES")).reported, false, "blank actual is not complete");
+  assert.equal((await section("RECOVERY")).planStatus, "NO_PLAN");
+  assert.equal((await section("RECOVERY")).reported, false, "vacuous report completion is not a green tick");
+  const sales = f.entries.find((r) => r.section === "SALES")!;
+  sales.todaysActual = "0";
+  assert.equal((await section("SALES")).reported, true, "explicit zero is a valid report answer");
+  f.addPlan({ salesPlan: 200 });
+  await svc.submitDailyWorkDay(SO, { workDate: DATE });
+  assert.equal((await section("SALES")).reported, false, "one unanswered row in a later batch restores the single tick");
+  f.entries.filter((r) => r.section === "SALES").forEach((r) => { r.todaysActual = "0"; });
+  assert.equal((await section("SALES")).reported, true, "all submitted batches must be answered");
+  f.entries.push({ ...sales, id: "rec-indicator", section: "RECOVERY", todaysActual: "10", paymentMode: null } as typeof sales);
+  assert.equal((await section("RECOVERY")).planStatus, "FILLED", "real entries override No Plan from other batches");
+  assert.equal((await section("RECOVERY")).reported, false, "positive recovery needs its payment mode before a double tick");
+  Object.assign(f.entries.at(-1)!, { paymentMode: "CASH" });
+  assert.equal((await section("RECOVERY")).reported, true);
+  const summary = f.entries.find((r) => r.section === "SUMMARY")!;
+  summary.others = "Discussed new stock";
+  assert.equal((await section("OTHERS")).planStatus, "FILLED", "a submitted Others note carries its single tick");
+  assert.equal((await section("OTHERS")).reported, false, "read-only Others waits for final report submission");
+  summary.others = "   ";
+  assert.equal((await section("OTHERS")).planStatus, "NO_PLAN", "whitespace is not real plan content");
+}
+
 async function main() {
+  await reportTabIndicators();
   await appointmentPlanValidation();
   await todaysPlanRules();
   at("2026-09-22T09:00:00+05:30"); // the legacy scenarios below submit DATE's report the next morning, inside its window

@@ -21,6 +21,18 @@ export interface DailyAutosave {
   flush: () => Promise<void>;
 }
 
+/**
+ * Every draft save of this browser tab goes through ONE queue. The sections (Sales, Recovery, Visits …) each have their own autosave controller; without this a section switch
+ * (the old section's pending edit is flushed while the new one loads) would overlap saves for the same day, and the server runs them one after the other under the day lock anyway —
+ * the waiting request would just spend its transaction budget queued behind the first. A failed save does not block the next one.
+ */
+let saveQueue: Promise<unknown> = Promise.resolve();
+export function serializeDaySave<T>(run: () => Promise<T>): Promise<T> {
+  const next = saveQueue.then(run, run);
+  saveQueue = next.catch(() => undefined);
+  return next;
+}
+
 export function useDailyAutosave(
   key: string,
   enabled: boolean,
@@ -37,7 +49,8 @@ export function useDailyAutosave(
   const controllerRef = useRef<AutosaveController | null>(null);
   if (controllerRef.current === null) {
     controllerRef.current = new AutosaveController({
-      save: async () => { await saveRef.current(); }, // rethrows ApiRequestError (carries .status for 409 detection)
+      save: async () => { await saveRef.current(); }, // preserves HTTP status / explicit transport errors
+      runExclusive: serializeDaySave,
       onState: setState,
       onConflict: () => onConflictRef.current?.(),
       delay: opts?.delay,

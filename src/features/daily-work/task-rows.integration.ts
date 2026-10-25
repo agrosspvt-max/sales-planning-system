@@ -110,23 +110,23 @@ async function main() {
 
   /* ---- 2. The dealer stays selectable and gets ONE directly entered task per section ---- */
   assert.ok((await svc.getDailyWork(so1, "RECOVERY", D, undefined, "PLAN")).availableDealers.some((d) => d.id === "A"), "A has only scheduled tasks → still in Add Dealer");
-  await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 3000, entryType: "REGULAR" }] });
-  await svc.saveDailyWork(so1, { section: "SALES", workDate: D, rows: [{ dealerId: "A", todaysPlan: 300, entryType: "REGULAR" }] });
+  await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 3000, entryType: "REGULAR" }] });
+  await svc.saveDailyWork(so1, { section: "SALES", workDate: D, rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 300, entryType: "REGULAR" }] });
   const rec = await rowsOf("RECOVERY", D), sal = await rowsOf("SALES", D);
   eq(brief(rec).filter((x) => x.startsWith("A:")), ["A:MANUAL:5000", "A:TASK:11111", "A:TASK:12444"], "Recovery: 12,444 + 11,111 scheduled + one directly entered 5,000 = three rows");
   eq(brief(sal), ["A:MANUAL:300", "A:TASK:700"], "Sales is independent: its own manual row next to the Sales task");
   eq([rec.filter((r) => r.dealerId === "A").length, new Set(rec.map((r) => r.dealerId)).size], [3, 3], "3 rows / 1 dealer for A");
-  assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }, { dealerId: "A", todaysPlan: 2, entryType: "REGULAR" }] })), 422);
+  assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 2, entryType: "REGULAR" }] })), 422);
   const before = await prisma.dailyWorkEntry.count();
-  await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ dealerId: "B", todaysPlan: 3000, entryType: "REGULAR" }] }); // the editor removes the manual A row
+  await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 3000, entryType: "REGULAR" }] }); // the editor removes the manual A row
   eq(brief(await rowsOf("RECOVERY", D)).filter((x) => x.startsWith("A:")), ["A:TASK:11111", "A:TASK:12444"], "deleting the manual draft removes only that row");
   assert.equal(await prisma.dailyWorkEntry.count(), before - 1);
-  await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 3000, entryType: "REGULAR" }] });
+  await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 3000, entryType: "REGULAR" }] });
 
   /* ---- 3. Submit the plan; the limit spans planning batches; then the REPORT: each row is its own task with its own outcome ---- */
   await noPlan(so1, D, ["APPOINTMENT", "VISITS", "OTHERS"]);
   await svc.submitDailyWorkDay(so1, { workDate: D });
-  eq(await Promise.all([1, 2, 3].map(() => code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ dealerId: "A", todaysPlan: 9, entryType: "REGULAR" }] })))), [409, 409, 409], "a second directly entered A task is rejected after submission, concurrent or not");
+  eq(await Promise.all([1, 2, 3].map(() => code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: D, rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 9, entryType: "REGULAR" }] })))), [409, 409, 409], "a second directly entered A task is rejected after submission, concurrent or not");
   eq((await svc.getDailyWork(so1, "RECOVERY", D, undefined, "PLAN")).availableDealers.some((d) => d.id === "A"), false);
   const repRec = await rowsOf("RECOVERY", D, "REPORT"), repSales = await rowsOf("SALES", D, "REPORT");
   assert.ok([...repRec, ...repSales].every((r) => (r.tasks ?? []).length === 1), "every row is exactly one task (one unit)");

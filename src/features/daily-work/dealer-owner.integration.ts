@@ -110,7 +110,7 @@ async function main() {
 
   /* ---- manual entry: eligibility on the server; the task stays the RM's ---- */
   const save = (c: AuthContext, section: "SALES" | "RECOVERY", rows: Record<string, unknown>[]) => svc.saveDailyWork(c, { section, workDate: D, rows });
-  const base = { entryType: "REGULAR" };
+  const base = { entryType: "REGULAR", followUpType: "TELEPHONIC" };
   assert.equal(await code(save(RM, "RECOVERY", [{ dealerId: "X", todaysPlan: 10, ...base }])), 403, "another group's dealer is refused");
   assert.equal(await code(save(RM, "RECOVERY", [{ dealerId: "Z", todaysPlan: 10, ...base }])), 403, "an unassigned dealer is refused");
   assert.equal(await code(save(RM, "RECOVERY", [{ dealerId: "C", todaysPlan: 10, ...base }])), 403, "a dealer of an inactive officer is out of scope");

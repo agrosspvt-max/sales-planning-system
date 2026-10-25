@@ -1,5 +1,7 @@
 "use client";
 
+import { useLabel } from "@/features/labels/label-ui";
+import { AutosaveStatus } from "@/features/planning/autosave-status";
 import { DealerOptionName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -48,7 +50,8 @@ const fmtNum = (n: number | null) => (n === null ? "—" : String(Math.round(n))
  * live cells). Autosave and the mode-aware calc engine are reused unchanged.
  */
 export function PlanGrid() {
-  const { detail, mode, packMode, packColumns, editable, saving, lastSaved, setPack, setValue, cellAt, lineFig, dealerCompleted, flush,
+  const savedPrefix = useLabel("sales_planning.autosave.saved");
+  const { detail, mode, packMode, packColumns, editable, saving, saveStatus, lastSaved, setPack, setValue, cellAt, lineFig, dealerCompleted, flush,
     canAdminEdit, adminMode, adminSaving, adminError, enterAdminMode, cancelAdminMode, adminChanges, adminSave } =
     usePlanEdit();
   const qc = useQueryClient();
@@ -224,7 +227,7 @@ export function PlanGrid() {
         </div>
         {editable && (
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
-            <span>{saving ? "Saving…" : `Saved ${new Date(lastSaved).toLocaleTimeString()}`}</span>
+            <AutosaveStatus saving={saving} {...saveStatus} savedText={`${savedPrefix} ${new Date(lastSaved).toLocaleTimeString()}`} />
           </div>
         )}
       </div>
@@ -445,7 +448,7 @@ export function PlanGrid() {
 function SaveHint() {
   const { flush, saving } = usePlanEdit();
   return (
-    <Button size="sm" variant="outline" onClick={() => flush()} disabled={saving}>
+    <Button size="sm" variant="outline" onClick={() => void flush().catch(() => undefined)} disabled={saving}>
       <Save className="h-4 w-4" /> Save now
     </Button>
   );

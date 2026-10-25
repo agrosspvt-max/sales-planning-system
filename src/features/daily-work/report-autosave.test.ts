@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { AutosaveController } from "./autosave-controller";
+import { ApiNetworkError } from "@/lib/api-client";
 
 const read = (p: string) => readFileSync(p, "utf8");
 const page = read("src/features/daily-work/daily-work-page.tsx");
@@ -27,7 +28,8 @@ assert.ok(hook.includes("new AutosaveController"), "the engine still lives only 
 
 for (const [name, src, section] of [["Sales/Recovery", sales, "section"], ["Appointment", appt, 'section: "APPOINTMENT"'], ["Visits", visits, 'section: "VISITS"']] as const) {
   assert.ok(src.includes("isReport"), `${name}: Report mode is handled`);
-  assert.ok(src.includes(`api.post("/api/daily-work/actual", { ${section}`), `${name}: Report autosave posts actuals to the existing /actual endpoint`);
+  assert.ok(src.includes(`("/api/daily-work/actual", { ${section}`) && /api\.post(<[^>]*>)?\("\/api\/daily-work\/actual"/.test(src), `${name}: Report autosave posts actuals to the existing /actual endpoint`);
+  assert.ok(name === "Sales/Recovery" || name === "Appointment" || name === "Visits" ? src.includes("refreshAfterReportSave(qc, workDate,") : true, `${name}: the report save updates the status from its response`);
   assert.ok(name === "Appointment" ? src.includes("const draftKey = `${partyPlanningEnabled}|") : /draftKey = isReport \? `R\|/.test(src), `${name}: Report has its own dirty-key (payload of the editable actuals)`);
   assert.ok(src.includes("useRegisterSaveDraft(autosaveEnabled"), `${name}: Report publishes the same Save Draft handle/state`);
   assert.ok(!/saveActuals\b.*Button|statusMut|actualMut\.mutate|achMut/.test(src.replace(/saveActuals: useLabel[^\n]*/g, "")), `${name}: the manual Save Actuals mutation/button is gone`);
@@ -40,9 +42,9 @@ assert.ok(visits.includes("reportEditable && !locked"));
 assert.ok(visits.includes('disabled={busy || locked || view === DailyWorkView.REPORT}'), "Others stays read-only in Report");
 assert.ok(visits.includes('isReport && focus === "VISITS"'), "only Visits actuals autosave in Report");
 // Plan behaviour is unchanged: same endpoint and payloads, enabled only in PLAN view.
-assert.ok(sales.includes('api.post("/api/daily-work/save", { section, workDate, rows: payloadRows() })'));
+assert.ok(sales.includes("const sent = payloadRows();") && sales.includes('api.post("/api/daily-work/save", { section, workDate, rows: sent })'), "Sales/Recovery captures the saved snapshot for visit invalidation");
 assert.ok(appt.includes('api.post("/api/daily-work/save", { section: "APPOINTMENT", workDate, partyPlanningEnabled, rows: payloadRows() })'));
-assert.ok(visits.includes('api.post("/api/daily-work/save", body())'));
+assert.ok(visits.includes('api.post("/api/daily-work/save", body())') && visits.includes('api.post("/api/daily-work/save", relationshipBody())'), "Visits autosave saves the Relationship visits and then the summary");
 assert.ok(sales.includes(": view === DailyWorkView.PLAN && !locked") && appt.includes(": view === DailyWorkView.PLAN && !locked") && visits.includes(": view === DailyWorkView.PLAN && !locked"));
 // Never submits / finalizes / reviews from autosave.
 for (const [name, src] of [["Sales/Recovery", sales], ["Appointment", appt], ["Visits", visits]] as const) {
@@ -75,8 +77,8 @@ function harness() {
     save: () => {
       posts.push(latest);
       if (mode === "resolve") return Promise.resolve();
-      if (mode === "reject") return Promise.reject(new Error("network"));
-      return new Promise<void>((ok, fail) => waiting.push({ ok, fail: () => fail(new Error("network")) }));
+      if (mode === "reject") return Promise.reject(new ApiNetworkError(new Error("offline")));
+      return new Promise<void>((ok, fail) => waiting.push({ ok, fail: () => fail(new ApiNetworkError(new Error("offline"))) }));
     },
     onState: (s) => Object.assign(state, s),
     setTimer: (fn) => { timer = fn; return 1; }, clearTimer: () => { timer = null; },

@@ -1,4 +1,5 @@
 import { getTaskActivity } from "@/features/tasks/task-analysis.server";
+import { additionalVisitActual, dealerVisitReportRows, visitResultMap, type DealerVisitReportRow, type VisitReportRecord } from "./dealer-visit-report";
 import { compareListRows } from "@/lib/task-analysis";
 import { PERFORMANCE_MAX_RANGE_DAYS } from "@/lib/date-range";
 import { loadReschedulingReview } from "./reschedule-review.server";
@@ -27,7 +28,7 @@ import { cnTasksForOfficerDate, materializedCnTasksForEntries, countUnconfirmedM
 import { getAutoTasksEnabled, getAppointmentPartyPlanningEnabled } from "@/lib/recovery-config";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { type CnTaskDto } from "@/lib/cn-request";
-import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient } from "./day-lock.server";
+import { assertDayOpen, lockDailyWorkDay, readBatchContext, type DailyWorkDb as DbClient, type DailyWorkDayState } from "./day-lock.server";
 import { rolloutEffectiveAt, createLateReportRequest, decideLateReportRequest, listLateRequests, myLateRequests, type LateRequestDto, assertPlanWritable, assertReportWritable, completeLateRequest, loadLateRequestFacts, loadPolicyDeadlines, outstandingReport, recordPolicyOnFirstSubmit, reportWindow } from "./report-policy.server";
 import { hasCombinedDraftRows, isTaskRowKey, splitCombinedDraftRows, submittedManualDealerIds } from "./task-rows.server";
 import { commitTaskOutcomes, readRowUnits, rescheduleCountsByEntry, writeOutcomeDraftBatch, type EntryFacts, type TaskUnitDto } from "./task-outcome.server";
@@ -66,6 +67,10 @@ import {
 
 const num = (v: unknown): number => (v == null ? 0 : Number(v.toString()));
 const SECTIONS = ["SALES", "RECOVERY"] as const;
+/** Follow-up Type of a manual Sales / Recovery entry: a VISIT links the dealer into Dealer Visits; TELEPHONIC does not. (DERIVED is only ever written to a SUMMARY row, as an internal marker.) */
+const FOLLOW_UP_TYPES = ["VISIT", "TELEPHONIC"] as const;
+const DERIVED_MARK = "DERIVED";
+export type FollowUpType = (typeof FOLLOW_UP_TYPES)[number];
 
 /* --------------------------------- Input schemas --------------------------------- */
 
@@ -89,6 +94,14 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     /** Recovery: the automatic amount the editor was showing for this row — a stale draft (a task was rescheduled meanwhile) is refused. */
     autoAmount: z.coerce.number().min(0).max(1e12).optional(),
     /** A Regional Manager adding a Sales Officer's dealer: that officer's id. Never trusted — it must be the dealer's CURRENT owner and inside the RM's scope (the task stays the RM's own). */
+    ownerId: z.string().min(1).max(64).optional(),
+    /** Sales / Recovery manual entries: how the dealer is followed up. Required for a NEW entry (validated in saveDailyWork); an older draft entry may omit it. */
+    followUpType: z.enum(FOLLOW_UP_TYPES, { errorMap: () => ({ message: L["daily_work.validation.follow_up_required"] }) }).optional(),
+  });
+  /** A manually added Relationship visit: a dealer plus a compulsory (non-blank) purpose. */
+  const relationshipRowSchema = z.object({
+    dealerId: z.string().min(1, L["daily_work.placeholder.select_dealer"]),
+    purpose: z.string({ required_error: L["daily_work.validation.purpose_required"], invalid_type_error: L["daily_work.validation.purpose_required"] }).trim().min(1, L["daily_work.validation.purpose_required"]).max(1000, L["daily_work.validation.purpose_length"]),
     ownerId: z.string().min(1).max(64).optional(),
   });
   /** The dealer name reported with an Appointed result: trimmed, blank = none. */
@@ -132,14 +145,18 @@ function dailyWorkSchemas(L: ResolvedLabels) {
     conversionAchievability: z.object({ workDate: dateStr, entries: maxRows(z.object({ entryId: z.string().min(1, L["daily_work.validation.invalid_option"]), achievability: z.enum(["YES", "NO"], invalidOption) })) }),
     visitsActual: z.object({ workDate: dateStr, entries: maxRows(z.object({
       entryId: z.string().min(1, L["daily_work.validation.invalid_option"]),
-      actualDealerVisits: wholeCount,
-      actualNewPartyVisits: wholeCount,
+      actualDealerVisits: wholeCount.nullable().optional(),
+      actualNewPartyVisits: wholeCount.nullable().optional(),
+      additionalDealerVisits: wholeCount.nullable().optional(),
+      dealerVisitResults: maxRows(z.object({ dealerId: z.string().min(1), result: z.enum(["VISITED", "NOT_VISITED"], invalidOption).nullable() })).optional(),
     })) }),
+    relationshipSave: z.object({ workDate: dateStr, rows: maxRows(relationshipRowSchema) }),
     summarySave: z.object({
       workDate: dateStr,
       // Which fields this save touches: VISITS writes the visit columns, OTHERS writes the note, BOTH writes all.
       focus: z.enum(["VISITS", "OTHERS", "BOTH"], invalidOption).optional().default("BOTH"),
-      dealerVisits: wholeCount.optional().default(0),
+      // Dealer Visits is derived from the dealer rows; an older client may still post a number, a current one omits it (then the stored value is left alone).
+      dealerVisits: wholeCount.optional(),
       newPartyVisits: wholeCount.optional().default(0),
       others: z.string().max(5000, L["daily_work.validation.others_length"]).optional().default(""),
     }),
@@ -194,6 +211,8 @@ export interface DailyWorkDealerDto {
   amountLocked?: boolean;
   /** TASK = the row of ONE scheduled task (Billing Exception / CN / Calendar): its dealer, amount, type and source are fixed and it is never merged with another. MANUAL = the dealer's directly entered task. */
   rowKind: "MANUAL" | "TASK";
+  /** Manual rows only: VISIT | TELEPHONIC (null for older rows and task rows — nothing is invented for them). */
+  followUpType?: FollowUpType | null;
   paymentMode?: RecoveryPaymentMode | null; // Recovery Daily REPORT only (the ACTUAL receipt mode); never part of the Daily Plan
   /** Daily REPORT only: the identifiable tasks inside this row, each with its own outcome. Empty for a legacy row (reported before outcomes existed — read-only). */
   tasks?: TaskUnitDto[];
@@ -547,15 +566,15 @@ async function plannedSchemesByDealer(officerId: string): Promise<Map<string, Pl
 interface DailyRow {
   id: string; batchId: string; dealerId: string | null; rowKey: string; typedDealerName: string | null; marketName: string | null;
   todaysPlan: string | null; todaysActual: string | null; resultStatus: string | null; entryType: string; schemeId: string | null; status: string;
-  paymentMode: RecoveryPaymentMode | null;
+  paymentMode: RecoveryPaymentMode | null; followUpType: string | null;
   monthlyPlanId: string | null; marketId: string | null; resultEventId: string | null; reportedDealerName: string | null;
 }
 /** Current editable rows for PLAN, or every frozen immutable batch row for REPORT. */
-async function loadDailyRows(officerId: string, section: DailyWorkSection, workDate: string, mode: DailyWorkMode): Promise<DailyRow[]> {
-  const { day } = await readBatchContext(officerId, workDate);
+async function loadDailyRows(officerId: string, section: DailyWorkSection, workDate: string, mode: DailyWorkMode, known?: DailyWorkDayState): Promise<DailyRow[]> {
+  const day = known ?? (await readBatchContext(officerId, workDate)).day;
   const rows = await prisma.$queryRaw<DailyRow[]>(Prisma.sql`
     SELECT "id", "batchId", "dealerId", "rowKey", "typedDealerName", "marketName",
-           "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "resultStatus", "entryType", "schemeId", "status", "paymentMode",
+           "todaysPlan"::text AS "todaysPlan", "todaysActual"::text AS "todaysActual", "resultStatus", "entryType", "schemeId", "status", "paymentMode", "followUpType",
            "monthlyPlanId", "marketId", "resultEventId", "reportedDealerName"
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "section" = ${section} AND "workDate" = ${workDate}::date
@@ -598,8 +617,8 @@ async function autoContributionByEntry(entryIds: string[]): Promise<Map<string, 
 }
 
 /** Read-path entry: separate any combined legacy draft rows of the officer's editable batch (own plan, under the day lock), exactly from their source links. */
-async function splitCombinedDraftRowsForRead(officerId: string, workDate: string): Promise<number> {
-  const { day } = await readBatchContext(officerId, workDate);
+async function splitCombinedDraftRowsForRead(officerId: string, workDate: string, known?: DailyWorkDayState): Promise<number> {
+  const day = known ?? (await readBatchContext(officerId, workDate)).day;
   if (day.status === "FINALIZED" || !(await hasCombinedDraftRows(officerId, workDate, day.currentBatchId))) return 0;
   return prisma.$transaction(async (tx) => splitCombinedDraftRows(tx, officerId, workDate, await lockDailyWorkDay(tx, officerId, workDate)), { timeout: 15_000 });
 }
@@ -621,10 +640,12 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
 
   await materializeCalendarForRead(ctx, officerId, workDate, mode);
   // Historical combined draft rows (one row for several scheduled tasks of a dealer) are separated into one row per task, exactly from their own source links.
-  if (mode === "PLAN" && officerId === ctx.userId) await splitCombinedDraftRowsForRead(officerId, workDate);
+  // The day / batch context is read ONCE for this request (after the materialization above, which never changes the batch id) and shared below.
+  const { day } = await readBatchContext(officerId, workDate);
+  if (mode === "PLAN" && officerId === ctx.userId) await splitCombinedDraftRowsForRead(officerId, workDate, day);
   const [{ map: figures, monthName }, dailyRows, assignedIds, schemes, recoverySchemes, cnTasks] = await Promise.all([
     sourcedFigures(ctx, officerId, section, workDate),
-    loadDailyRows(officerId, section, workDate, mode),
+    loadDailyRows(officerId, section, workDate, mode, day),
     getCurrentDealerIds(officerId),
     section === "SALES" ? runningSchemes(ctx) : Promise.resolve([]),
     section === "RECOVERY" ? recoverySchemesByDealer(officerId) : Promise.resolve(new Map<string, DailyWorkSchemeOption[]>()),
@@ -674,6 +695,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
         ...(section === "RECOVERY" && mode === "REPORT" ? { paymentMode: r.paymentMode ?? null } : {}),
         schemeId: r.schemeId,
         rowKind: isTaskRowKey(r.rowKey) ? "TASK" : "MANUAL",
+        followUpType: !isTaskRowKey(r.rowKey) && (r.followUpType === "VISIT" || r.followUpType === "TELEPHONIC") ? r.followUpType : null,
         status: (r.status as DailyWorkDealerDto["status"]) ?? "DRAFT",
       };
     })
@@ -681,8 +703,7 @@ export async function getDailyWork(ctx: AuthContext, rawSection: string, rawDate
     .sort((a, b) => a.dealerName.localeCompare(b.dealerName) || (a.rowKind === b.rowKind ? 0 : a.rowKind === "TASK" ? -1 : 1));
 
   // The ONE directly entered manual task per dealer / date / section: only a MANUAL row (or one in an earlier submitted batch) uses the slot — scheduled and rescheduled tasks never do.
-  const batchContext = mode === "PLAN" ? await readBatchContext(officerId, workDate) : null;
-  const manualDealerIds = batchContext ? await submittedManualDealerIds(prisma, officerId, section, workDate, batchContext.day.currentBatchId) : [];
+  const manualDealerIds = mode === "PLAN" ? await submittedManualDealerIds(prisma, officerId, section, workDate, day.currentBatchId) : [];
   // The dropdown lists every dealer whose slot is free in SUBMITTED batches; the editor additionally hides dealers with a manual row it is currently holding (so a removed draft row reappears at once).
   const usedIds = new Set(manualDealerIds);
   const availableDealers = mode === "REPORT" ? [] : assignedIds
@@ -777,7 +798,7 @@ export async function decideLateReport(ctx: AuthContext, id: string, raw: unknow
 /* --------------------------------- Add Dealer choices (Sales / Recovery) --------------------------------- */
 
 export interface DealerChoicesPayload {
-  section: DailyWorkSection;
+  section: DailyWorkSection | "VISITS";
   /** Regional Manager only: the active Sales Officers of the RM's own group (alphabetical). "My Dealers" is the caller's own and is selected by default. Empty for everyone else. */
   owners: { id: string; name: string }[];
   /** The owner whose dealers are listed: the caller (My Dealers) or an authorized Sales Officer. */
@@ -794,6 +815,7 @@ export interface DealerChoicesPayload {
 export async function getDealerChoices(ctx: AuthContext, rawSection: string, rawOwnerId?: string | null): Promise<DealerChoicesPayload> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
+  const visitsPicker = rawSection === "VISITS";
   const section = (rawSection === "RECOVERY" ? "RECOVERY" : "SALES") as DailyWorkSection;
   const workDate = currentBusinessDate();
   const owners = await dealerOwnerChoices(ctx);
@@ -801,6 +823,13 @@ export async function getDealerChoices(ctx: AuthContext, rawSection: string, raw
   const ownerIdChosen = requested === "" ? ctx.userId : requested;
   if (ownerIdChosen !== ctx.userId && !owners.some((o) => o.id === ownerIdChosen)) throw new ApiError(403, L["daily_work.validation.dealer_not_assigned"]);
   const { day } = await readBatchContext(ctx.userId, workDate);
+  if (visitsPicker) {
+    // Relationship visits: the same owner-scoped dealer list, minus every dealer already represented in the day's Dealer Visits (this batch's sources and earlier batches).
+    const [assignedIds, { current, earlier }] = await Promise.all([getCurrentDealerIds(ownerIdChosen), loadVisitState(prisma, ctx.userId, workDate, day.currentBatchId)]);
+    const ids = [...new Set(assignedIds)].filter((id) => !current.has(id) && !earlier.has(id));
+    const [rows, alias] = await Promise.all([ids.length ? prisma.dealer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : Promise.resolve([]), loadDealerAliasNameMap(ids)]);
+    return { section: "VISITS", owners, ownerId: ownerIdChosen, dealers: rows.map((d) => ({ id: d.id, name: alias.get(d.id) ?? d.name, monthlyPlan: 0, actual: 0, pending: 0 })).sort((a, b) => a.name.localeCompare(b.name)) };
+  }
   const [assigned, taken, mine, fig] = await Promise.all([
     getCurrentDealerIds(ownerIdChosen),
     submittedManualDealerIds(prisma, ctx.userId, section, workDate, day.currentBatchId),
@@ -854,8 +883,9 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
   }
 
   const keepIds = rows.map((r) => r.dealerId);
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "saveDailyWork", async (tx, timer) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
+    timer.phase("lock");
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertPlanWritable(tx, ctx, workDate, L); // a Sales Officer with an unfinished earlier report cannot create / edit / save / submit a new plan
     // The payload carries ONLY the dealer's directly entered manual rows. Scheduled tasks (Billing Exception, CN, Calendar) own their rows: they are neither written nor removed
@@ -863,28 +893,51 @@ export async function saveDailyWork(ctx: AuthContext, raw: unknown): Promise<{ c
     await splitCombinedDraftRows(tx, officerId, workDate, day);
     // Eligibility (a NEW dealer must currently belong to the caller or — RM — to an authorized Sales Officer of their group; a supplied owner id must be that owner). Dealers
     // already in this batch keep their row. The row itself always belongs to the caller's own Daily Plan.
-    const inBatch = new Set((await tx.$queryRaw<Array<{ dealerId: string }>>(Prisma.sql`SELECT "dealerId" FROM "DailyWorkEntry" WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "section" = ${section} AND "rowKey" NOT LIKE 't:%' AND "dealerId" IS NOT NULL`)).map((r) => r.dealerId));
+    const existingRows = await tx.$queryRaw<Array<{ dealerId: string; followUpType: string | null; todaysPlan: string | null; entryType: string; schemeId: string | null }>>(Prisma.sql`
+      SELECT "dealerId", "followUpType", "todaysPlan"::text AS "todaysPlan", "entryType", "schemeId" FROM "DailyWorkEntry"
+      WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "section" = ${section} AND "rowKey" NOT LIKE 't:%' AND "dealerId" IS NOT NULL`);
+    const stored = new Map(existingRows.map((r) => [r.dealerId, r]));
+    const inBatch = new Set(stored.keys());
     await assertDealersEligible(ctx, officerId, rows, inBatch, L, tx);
+    // A NEW manual entry must say how the dealer is followed up. An entry already in this draft keeps its stored value when the request omits it (an older draft entry has none — nothing is invented).
+    for (const r of rows) if (!inBatch.has(r.dealerId) && !r.followUpType) throw new ApiError(422, L["daily_work.validation.follow_up_required"]);
     // ONE directly entered manual task per dealer / date / section — across every planning batch of the date (the day lock serializes concurrent requests).
     const taken = new Set(await submittedManualDealerIds(tx, officerId, section, workDate, day.currentBatchId));
     for (const r of rows) if (taken.has(r.dealerId)) throw new ApiError(409, L["daily_work.validation.manual_task_exists"]);
-    // Replace-set of the manual rows only (task rows are never deleted by a save).
-    await tx.$executeRaw(Prisma.sql`
-      DELETE FROM "DailyWorkEntry"
-      WHERE "officerId" = ${officerId} AND "section" = ${section} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "status" = 'DRAFT' AND "rowKey" NOT LIKE 't:%'
-      ${keepIds.length > 0 ? Prisma.sql`AND "dealerId" NOT IN (${Prisma.join(keepIds)})` : Prisma.empty}`);
-
-    for (const r of rows) {
-      const todaysPlan = r.todaysPlan == null ? Prisma.sql`NULL` : Prisma.sql`${r.todaysPlan}`;
-      const schemeId = r.entryType === "SCHEME" ? r.schemeId! : null;
-      // Upsert on the unique (officer, workDate, batch, section, rowKey); the manual row's rowKey is the dealer id.
-      await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId","status","createdAt","updatedAt")
-        VALUES (${randomUUID()}, ${officerId}, ${r.dealerId}, ${r.dealerId}, ${workDate}::date, ${day.currentBatchId}, ${section}, ${todaysPlan}, ${r.entryType}, ${schemeId}, 'DRAFT', NOW(), NOW())
+    timer.phase("checks"); timer.rows("rows", rows.length);
+    // What would change? An autosave that repeats what is stored (or only edits an amount) must not rewrite rows, and must not touch Dealer Visits unless the set of Visit dealers moved.
+    const effective = rows.map((r) => ({ ...r, schemeId: r.entryType === "SCHEME" ? r.schemeId ?? null : null, follow: r.followUpType ?? stored.get(r.dealerId)?.followUpType ?? null }));
+    const unchanged = effective.length === stored.size && effective.every((r) => {
+      const e = stored.get(r.dealerId);
+      return !!e && (e.todaysPlan == null ? null : Number(e.todaysPlan)) === (r.todaysPlan ?? null) && e.entryType === r.entryType && (e.schemeId ?? null) === r.schemeId && (e.followUpType ?? null) === r.follow;
+    });
+    if (!unchanged) {
+      // Replace-set of the manual rows only (task rows are never deleted by a save): the removed rows are deleted and the others upserted by ONE statement (they are disjoint sets),
+      // and an upserted row that already holds the same values is not rewritten. The manual row's rowKey is the dealer id.
+      const upsert = effective.length === 0 ? Prisma.sql`SELECT 1` : Prisma.sql`
+        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","todaysPlan","entryType","schemeId","followUpType","status","createdAt","updatedAt")
+        SELECT v."id", ${officerId}, v."d", v."d", ${workDate}::date, ${day.currentBatchId}, ${section}, v."p", v."t", v."s", v."f", 'DRAFT', NOW(), NOW()
+        FROM jsonb_to_recordset(${JSON.stringify(effective.map((r) => ({ id: randomUUID(), d: r.dealerId, p: r.todaysPlan ?? null, t: r.entryType, s: r.schemeId, f: r.followUpType ?? null })))}::jsonb)
+          AS v("id" text, "d" text, "p" numeric, "t" text, "s" text, "f" text)
         ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
-        DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId", "updatedAt" = NOW()`);
+        DO UPDATE SET "todaysPlan" = EXCLUDED."todaysPlan", "entryType" = EXCLUDED."entryType", "schemeId" = EXCLUDED."schemeId",
+          "followUpType" = COALESCE(EXCLUDED."followUpType", "DailyWorkEntry"."followUpType"), "updatedAt" = NOW()
+        WHERE ("DailyWorkEntry"."todaysPlan", "DailyWorkEntry"."entryType", "DailyWorkEntry"."schemeId", "DailyWorkEntry"."followUpType")
+          IS DISTINCT FROM (EXCLUDED."todaysPlan", EXCLUDED."entryType", EXCLUDED."schemeId", COALESCE(EXCLUDED."followUpType", "DailyWorkEntry"."followUpType"))`;
+      await tx.$executeRaw(Prisma.sql`
+        WITH gone AS (
+          DELETE FROM "DailyWorkEntry"
+          WHERE "officerId" = ${officerId} AND "section" = ${section} AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "status" = 'DRAFT' AND "rowKey" NOT LIKE 't:%'
+          ${keepIds.length > 0 ? Prisma.sql`AND "dealerId" NOT IN (${Prisma.join(keepIds)})` : Prisma.empty} RETURNING 1)
+        ${upsert}`);
+      timer.phase("write");
+      // The Visit follow-ups of this section are the Sales / Recovery sources of the day's Dealer Visits: recompute them (atomically with this save) when the set of Visit dealers changed.
+      const before = [...stored.values()].filter((e) => e.followUpType === "VISIT").map((e) => e.dealerId).sort().join(",");
+      const after = effective.filter((r) => r.follow === "VISIT").map((r) => r.dealerId).sort().join(",");
+      if (before !== after) { await syncDealerVisitsTx(tx, officerId, workDate, day.currentBatchId); timer.phase("sync"); }
     }
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Saved ${rows.length} daily ${section.toLowerCase()} row(s)` }, tx);
+    timer.phase("audit");
     return { count: rows.length };
   });
 }
@@ -905,14 +958,14 @@ export async function submitDailyWork(ctx: AuthContext, raw: unknown): Promise<{
  * Enter Today's Sales / Today's Recovery on the exact PLAN_SUBMITTED entry. A current DRAFT, finalized row,
  * foreign entry, or missing row is rejected, so duplicate dealers across batches remain independent.
  */
-export async function enterDailyActual(ctx: AuthContext, raw: unknown): Promise<{ count: number }> {
+export async function enterDailyActual(ctx: AuthContext, raw: unknown): Promise<{ count: number; report?: Awaited<ReturnType<typeof reportCompletion>> }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
   const { section, workDate, entries } = dailyWorkSchemas(L).actual.parse(raw);
   const officerId = ownerId(ctx);
   if (entries.length === 0) return { count: 0 };
 
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "enterDailyActual", async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertReportWritable(tx, officerId, workDate, L);
@@ -929,7 +982,9 @@ export async function enterDailyActual(ctx: AuthContext, raw: unknown): Promise<
     }
     if (count === 0) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Entered actuals for ${count} daily ${section.toLowerCase()} row(s)` }, tx);
-    return { count };
+    // The report completion on the SAVED state (same rules as the status read; one statement in this transaction): the screen updates its ticks and
+    // Submit Report from it instead of re-reading the whole status.
+    return { count, report: await reportCompletion(tx, officerId, workDate, day.currentBatchId) };
   });
 }
 
@@ -938,13 +993,13 @@ export async function enterDailyActual(ctx: AuthContext, raw: unknown): Promise<
  * PLAN_SUBMITTED rows. This is a DRAFT write: choices are stored (incomplete ones allowed), the row's `todaysActual` is derived from them, and NOTHING is rescheduled, abandoned or
  * paid until the report itself is submitted (commitTaskOutcomes). Replaces entering an Actual amount directly; a forged task id never matches the caller's own rows (409).
  */
-export async function enterTaskOutcomes(ctx: AuthContext, raw: unknown): Promise<{ count: number }> {
+export async function enterTaskOutcomes(ctx: AuthContext, raw: unknown): Promise<{ count: number; report?: Awaited<ReturnType<typeof reportCompletion>> }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
   const { section, workDate, entries } = dailyWorkSchemas(L).outcomes.parse(raw);
   const officerId = ownerId(ctx);
   if (entries.length === 0) return { count: 0 };
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "enterTaskOutcomes", async (tx, timer) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertReportWritable(tx, officerId, workDate, L);
@@ -962,10 +1017,14 @@ export async function enterTaskOutcomes(ctx: AuthContext, raw: unknown): Promise
       const entry: EntryFacts = { id: row.id, officerId, workDate, section, dealerId: row.dealerId, todaysPlan: row.todaysPlan == null ? 0 : num(row.todaysPlan), todaysActual: row.todaysActual == null ? null : num(row.todaysActual), entryType: row.entryType, schemeId: row.schemeId };
       return [{ entry, inputs: e.units, ...("paymentMode" in e ? { paymentMode: e.paymentMode } : {}) }];
     });
+    timer.phase("authorize"); timer.rows("entries", entries.length);
     const count = await writeOutcomeDraftBatch(tx, drafts, today, L as Record<string, string>);
+    timer.phase("write"); timer.rows("outcomes", count);
     if (count === 0 && entries.some((e) => e.units.length > 0)) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `${section}:${workDate}`, summary: `Saved task outcomes (draft) for ${entries.length} daily ${section.toLowerCase()} row(s)` }, tx);
-    return { count };
+    // The report completion on the SAVED state (same rules as the status read; one statement in this transaction): the screen updates its ticks and
+    // Submit Report from it instead of re-reading the whole status.
+    return { count, report: await reportCompletion(tx, officerId, workDate, day.currentBatchId) };
   });
 }
 
@@ -1063,7 +1122,7 @@ export async function saveDailyAppointment(ctx: AuthContext, raw: unknown): Prom
   const linkedRows = rows.filter((r) => r.monthlyPlanId);
   const legacyRows = rows.filter((r) => !r.monthlyPlanId);
 
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "saveDailyAppointment", async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertPlanWritable(tx, ctx, workDate, L); // a Sales Officer with an unfinished earlier report cannot create / edit / save / submit a new plan
@@ -1128,13 +1187,13 @@ export async function submitDailyAppointment(ctx: AuthContext, raw: unknown): Pr
 }
 
 /** Set Appointed / Not Appointed on an exact PLAN_SUBMITTED appointment entry. */
-export async function enterAppointmentStatus(ctx: AuthContext, raw: unknown): Promise<{ count: number }> {
+export async function enterAppointmentStatus(ctx: AuthContext, raw: unknown): Promise<{ count: number; report?: Awaited<ReturnType<typeof reportCompletion>> }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
   const { workDate, entries } = dailyWorkSchemas(L).appointmentStatus.parse(raw);
   const officerId = ownerId(ctx);
   if (entries.length === 0) return { count: 0 };
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "enterAppointmentStatus", async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertReportWritable(tx, officerId, workDate, L);
@@ -1172,7 +1231,9 @@ export async function enterAppointmentStatus(ctx: AuthContext, raw: unknown): Pr
     }
     if (matched === 0) throw new ApiError(409, L["daily_work.validation.appointment_after_submit"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `APPOINTMENT:${workDate}`, summary: `Set appointment status for ${count} row(s)` }, tx);
-    return { count };
+    // The report completion on the SAVED state (same rules as the status read; one statement in this transaction): the screen updates its ticks and
+    // Submit Report from it instead of re-reading the whole status.
+    return { count, report: await reportCompletion(tx, officerId, workDate, day.currentBatchId) };
   });
 }
 
@@ -1311,7 +1372,7 @@ export async function saveDailyConversion(ctx: AuthContext, raw: unknown): Promi
   }
 
   const keep = rows.map((r) => convKey(r.dealerId, r.schemeId));
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "saveDailyConversion", async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertPlanWritable(tx, ctx, workDate, L); // a Sales Officer with an unfinished earlier report cannot create / edit / save / submit a new plan
@@ -1340,13 +1401,13 @@ export async function submitDailyConversion(ctx: AuthContext, raw: unknown): Pro
 }
 
 /** Set Yes/No achievability on an exact PLAN_SUBMITTED conversion entry. Never derived from Today's Plan. */
-export async function enterConversionAchievability(ctx: AuthContext, raw: unknown): Promise<{ count: number }> {
+export async function enterConversionAchievability(ctx: AuthContext, raw: unknown): Promise<{ count: number; report?: Awaited<ReturnType<typeof reportCompletion>> }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
   const { workDate, entries } = dailyWorkSchemas(L).conversionAchievability.parse(raw);
   const officerId = ownerId(ctx);
   if (entries.length === 0) return { count: 0 };
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "enterConversionAchievability", async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertReportWritable(tx, officerId, workDate, L);
@@ -1360,7 +1421,9 @@ export async function enterConversionAchievability(ctx: AuthContext, raw: unknow
     }
     if (count === 0) throw new ApiError(409, L["daily_work.validation.achievability_after_submit"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `SCHEME_CONVERSION:${workDate}`, summary: `Set achievability for ${count} row(s)` }, tx);
-    return { count };
+    // The report completion on the SAVED state (same rules as the status read; one statement in this transaction): the screen updates its ticks and
+    // Submit Report from it instead of re-reading the whole status.
+    return { count, report: await reportCompletion(tx, officerId, workDate, day.currentBatchId) };
   });
 }
 
@@ -1369,6 +1432,156 @@ export async function enterConversionAchievability(ctx: AuthContext, raw: unknow
  * ===================================================================================== */
 
 const SUMMARY_ROWKEY = "SUMMARY";
+
+/* ---- Dealer Visits: dealer rows derived from three independent sources ----
+ * A dealer is in the day's Dealer Visits once per employee/date, however many sources link it:
+ *   RELATIONSHIP — a manually added visit (section RELATIONSHIP, rowKey = dealer id, with its compulsory purpose)
+ *   SALES        — a manual Sales entry whose Follow-up Type is VISIT
+ *   RECOVERY     — a manual Recovery entry whose Follow-up Type is VISIT
+ * The sources are never copied into a second table: every read recomputes them from the entries themselves, so removing or changing a Sales / Recovery entry removes its link and a
+ * stale save can never bring a removed link back. The day's SUMMARY.dealerVisits (what submission, reports, Performance and the review dialogs already read) is the derived count. */
+export type VisitSource = "RELATIONSHIP" | "SALES" | "RECOVERY";
+interface VisitDealer { sources: Set<VisitSource>; purpose: string | null }
+
+interface VisitState {
+  /** Dealers of the CURRENT draft batch with their sources / purpose, and dealers already planned in EARLIER submitted batches. */
+  current: Map<string, VisitDealer>;
+  earlier: Map<string, VisitDealer>;
+  /** The current batch's SUMMARY row (null when it does not exist yet): its id, New Party Visits, stored Dealer Visits, internal marker and No Plan CSV. */
+  summary: { id: string; newPartyVisits: number | null; dealerVisits: number | null; marker: string | null; noPlan: string | null } | null;
+  /** Visit COUNT contributed by Calendar Daily Tasks (plain counts with no dealer) linked to that SUMMARY row. */
+  calendarVisits: number;
+}
+const SUBMITTED_STATUSES = Prisma.sql`'PLAN_SUBMITTED','FINALIZED','SUBMITTED'`;
+
+/**
+ * Everything the Dealer Visits derivation needs, in ONE statement (three UNION ALL parts): the dealer sources of the current draft batch and of the earlier submitted batches, the
+ * current SUMMARY row, and the Calendar visit count. The day lock (held by every writer) already serializes these rows, so no row lock is needed here.
+ */
+async function loadVisitState(db: DbClient, officerId: string, workDate: string, batchId: string): Promise<VisitState> {
+  const rows = await db.$queryRaw<{ k: string; dealerId: string | null; section: string | null; purpose: string | null; cur: boolean | null; n1: number | null; n2: number | null; t: string | null; np: string | null; id: string | null }[]>(Prisma.sql`
+    SELECT 'S' AS "k", e."dealerId", e."section", e."purpose", (e."batchId" = ${batchId}) AS "cur", NULL::int AS "n1", NULL::int AS "n2", NULL::text AS "t", NULL::text AS "np", NULL::text AS "id"
+    FROM "DailyWorkEntry" e
+    WHERE e."officerId" = ${officerId} AND e."workDate" = ${workDate}::date AND e."dealerId" IS NOT NULL
+      AND ((e."batchId" = ${batchId} AND e."status" = 'DRAFT') OR (e."batchId" <> ${batchId} AND e."status" IN (${SUBMITTED_STATUSES})))
+      AND ((e."section" IN ('SALES','RECOVERY') AND e."followUpType" = 'VISIT' AND e."rowKey" NOT LIKE 't:%') OR e."section" = 'RELATIONSHIP')
+    UNION ALL
+    SELECT 'M', NULL, NULL, NULL, NULL, s."newPartyVisits", s."dealerVisits", s."followUpType", s."noPlanSections", s."id"
+    FROM "DailyWorkEntry" s
+    WHERE s."officerId" = ${officerId} AND s."workDate" = ${workDate}::date AND s."batchId" = ${batchId} AND s."section" = 'SUMMARY' AND s."rowKey" = ${SUMMARY_ROWKEY}
+    UNION ALL
+    SELECT 'C', NULL, NULL, NULL, NULL, COALESCE(SUM(ce."dealerVisits"), 0)::int, NULL, NULL, NULL, NULL
+    FROM "CalendarEntry" ce JOIN "DailyWorkEntry" s ON s."id" = ce."dailyWorkEntryId"
+    WHERE s."officerId" = ${officerId} AND s."workDate" = ${workDate}::date AND s."batchId" = ${batchId} AND s."section" = 'SUMMARY' AND s."rowKey" = ${SUMMARY_ROWKEY}
+      AND ce."kind" = 'TASK' AND ce."taskSection" = 'VISITS'`);
+  const state: VisitState = { current: new Map(), earlier: new Map(), summary: null, calendarVisits: 0 };
+  for (const r of rows) {
+    if (r.k === "M") state.summary = { id: r.id!, newPartyVisits: r.n1, dealerVisits: r.n2, marker: r.t, noPlan: r.np };
+    else if (r.k === "C") state.calendarVisits = r.n1 ?? 0;
+    else {
+      const target = r.cur ? state.current : state.earlier;
+      const entry = target.get(r.dealerId!) ?? { sources: new Set<VisitSource>(), purpose: null };
+      entry.sources.add(r.section as VisitSource);
+      if (r.section === "RELATIONSHIP") entry.purpose = r.purpose;
+      target.set(r.dealerId!, entry);
+    }
+  }
+  return state;
+}
+
+/**
+ * Recompute the current draft batch's planned Dealer Visits and store it on the SUMMARY row, inside the caller's transaction (day lock held):
+ *  • count = the batch's unique dealers that are not already counted in an earlier submitted batch of the date (so a dealer is never counted twice across batches);
+ *  • a batch with dealer rows is a real Visits entry, so a stale "No Plan" for Visits is cleared with it;
+ *  • a legacy numeric draft (no dealer rows, never derived) is left exactly as typed; once derived, removing the last source returns Visits to "not entered" (unless New Party Visits was entered).
+ * The caller may pass a state it already holds (and has brought up to date); otherwise one statement reads it. The write is ONE statement and is skipped when nothing would change.
+ */
+async function syncDealerVisitsTx(tx: Prisma.TransactionClient, officerId: string, workDate: string, batchId: string, known?: VisitState): Promise<number> {
+  const state = known ?? await loadVisitState(tx, officerId, workDate, batchId);
+  const { current, earlier, summary } = state;
+  const count = [...current.keys()].filter((id) => !earlier.has(id)).length;
+  if (!summary && current.size === 0) return 0;
+  if (summary && current.size === 0 && summary.marker !== DERIVED_MARK) return count; // legacy numeric draft (typed number and / or Calendar visits): untouched
+  // Calendar Daily Tasks for Visits add a plain visit COUNT (no dealer) to this same row; it stays part of the planned total, exactly as before.
+  const next = current.size > 0 || summary?.newPartyVisits != null || state.calendarVisits > 0 ? count + state.calendarVisits : null;
+  let noPlan = summary?.noPlan ?? null;
+  if (current.size > 0) {
+    const set = parseNoPlanSet(noPlan);
+    if (set.delete("VISITS")) noPlan = serializeNoPlanSet(set) || null;
+  }
+  if (summary && summary.dealerVisits === next && summary.marker === DERIVED_MARK && (summary.noPlan ?? null) === noPlan) return count; // already exactly right
+  await tx.$executeRaw(Prisma.sql`
+    INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","dealerVisits","followUpType","noPlanSections","status","createdAt","updatedAt")
+    VALUES (${randomUUID()}, ${officerId}, NULL, ${SUMMARY_ROWKEY}, ${workDate}::date, ${batchId}, 'SUMMARY', ${next}, ${DERIVED_MARK}, ${noPlan}, 'DRAFT', NOW(), NOW())
+    ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
+    DO UPDATE SET "dealerVisits" = ${next}, "followUpType" = ${DERIVED_MARK}, "noPlanSections" = ${noPlan}, "updatedAt" = NOW()`);
+  return count;
+}
+
+export interface DealerVisitRowDto {
+  dealerId: string;
+  dealerName: string;
+  /** Task Type: where the visit comes from — Relationship, Sales, Recovery (one or more). Not the Auto / Manual / Calendar task classification. */
+  sources: VisitSource[];
+  /** The Relationship visit's purpose (null when the dealer has no Relationship component). */
+  purpose: string | null;
+  /** The dealer is already counted in an earlier submitted batch of the date (listed here, not counted again). */
+  alreadyPlanned: boolean;
+}
+
+/**
+ * Persist the manually added Relationship visits of the current draft batch (the complete set; rows not present are removed). Every purpose is compulsory; every NEW dealer must be in the
+ * caller's dealer scope (own dealers, or — Regional Manager — an authorized Sales Officer's) and not already part of the day's Dealer Visits (any source, any batch). Sales / Recovery
+ * links are never touched here. The planned count follows atomically.
+ */
+export async function saveRelationshipVisits(ctx: AuthContext, raw: unknown): Promise<{ count: number }> {
+  const L = await getResolvedLabels();
+  await assertOwnerRole(ctx, L);
+  const { workDate, rows } = dailyWorkSchemas(L).relationshipSave.parse(raw);
+  const officerId = ownerId(ctx);
+  const seen = new Set<string>();
+  for (const r of rows) { if (seen.has(r.dealerId)) throw new ApiError(422, L["daily_work.validation.visit_duplicate"]); seen.add(r.dealerId); }
+  const keep = rows.map((r) => r.dealerId);
+  return dailyWorkTransaction(L, "save", "saveRelationshipVisits", async (tx, timer) => {
+    const day = await lockDailyWorkDay(tx, officerId, workDate);
+    timer.phase("lock");
+    assertDayOpen(day, L["daily_work.validation.day_finalized"]);
+    await assertPlanWritable(tx, ctx, workDate, L);
+    const state = await loadVisitState(tx, officerId, workDate, day.currentBatchId);
+    timer.phase("checks");
+    const { current, earlier } = state;
+    const existing = new Set([...current].filter(([, v]) => v.sources.has("RELATIONSHIP")).map(([id]) => id));
+    // A dealer already represented in the day's Dealer Visits cannot be added again (server-side twin of the dialog's exclusion).
+    for (const r of rows) if (!existing.has(r.dealerId) && (current.has(r.dealerId) || earlier.has(r.dealerId))) throw new ApiError(409, L["daily_work.validation.visit_duplicate"]);
+    await assertDealersEligible(ctx, officerId, rows, existing, L, tx);
+    timer.phase("eligibility");
+    const same = existing.size === rows.length && rows.every((r) => existing.has(r.dealerId) && current.get(r.dealerId)!.purpose === r.purpose);
+    if (!same) {
+      // Remove the visits that are gone and upsert the others in ONE statement (disjoint sets of rows).
+      const upsert = rows.length === 0 ? Prisma.sql`SELECT 1` : Prisma.sql`
+        INSERT INTO "DailyWorkEntry" ("id","officerId","dealerId","rowKey","workDate","batchId","section","purpose","status","createdAt","updatedAt")
+        SELECT v."id", ${officerId}, v."d", v."d", ${workDate}::date, ${day.currentBatchId}, 'RELATIONSHIP', v."p", 'DRAFT', NOW(), NOW()
+        FROM jsonb_to_recordset(${JSON.stringify(rows.map((r) => ({ id: randomUUID(), d: r.dealerId, p: r.purpose })))}::jsonb) AS v("id" text, "d" text, "p" text)
+        ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
+        DO UPDATE SET "purpose" = EXCLUDED."purpose", "updatedAt" = NOW() WHERE "DailyWorkEntry"."purpose" IS DISTINCT FROM EXCLUDED."purpose"`;
+      await tx.$executeRaw(Prisma.sql`
+        WITH gone AS (
+          DELETE FROM "DailyWorkEntry"
+          WHERE "officerId" = ${officerId} AND "section" = 'RELATIONSHIP' AND "workDate" = ${workDate}::date AND "batchId" = ${day.currentBatchId} AND "status" = 'DRAFT'
+          ${keep.length > 0 ? Prisma.sql`AND "dealerId" NOT IN (${Prisma.join(keep)})` : Prisma.empty} RETURNING 1)
+        ${upsert}`);
+      timer.phase("write");
+      // The dealer sources after this save are the ones just read, with the Relationship component replaced by the saved rows — no second read needed.
+      for (const [id, v] of [...current]) if (v.sources.delete("RELATIONSHIP") && v.sources.size === 0) current.delete(id); else v.purpose = null;
+      for (const r of rows) { const v = current.get(r.dealerId) ?? { sources: new Set<VisitSource>(), purpose: null }; v.sources.add("RELATIONSHIP"); v.purpose = r.purpose; current.set(r.dealerId, v); }
+      await syncDealerVisitsTx(tx, officerId, workDate, day.currentBatchId, state);
+      timer.phase("sync");
+    }
+    await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `RELATIONSHIP:${workDate}`, summary: `Saved ${rows.length} relationship visit(s)` }, tx);
+    timer.phase("audit");
+    return { count: rows.length };
+  });
+}
 
 export interface DailySummaryPayload {
   section: "SUMMARY";
@@ -1383,8 +1596,33 @@ export interface DailySummaryPayload {
   batches: {
     entryId: string; batchId: string; dealerVisits: number; newPartyVisits: number;
     actualDealerVisits: number | null; actualNewPartyVisits: number | null; others: string;
+    additionalActualDealerVisits: number | null;
+    dealerVisitsDerived: boolean;
     noPlanSections: string | null; status: string;
   }[];
+  /** Daily Plan only: the Dealer Visits table — one row per unique dealer of the current draft batch, with every source. Empty in the Daily Report. */
+  visitRows: DealerVisitRowDto[];
+  /** Daily Report: one result per unique submitted dealer/day, owned by its first planning batch. */
+  reportVisitRows: (DealerVisitReportRow & { dealerName: string })[];
+  /** Regional Manager planning their OWN day: the Add Relationship Visits dialog offers the Sales Officer filter. */
+  canPickDealerOwner: boolean;
+}
+
+interface VisitReportState extends VisitReportRecord {
+  dealerVisits: number | null; newPartyVisits: number | null;
+  actualDealerVisits: number | null; actualNewPartyVisits: number | null;
+  status: string;
+}
+
+async function loadVisitReportRecords(db: DbClient, officerId: string, workDate: string, currentBatchId: string): Promise<VisitReportState[]> {
+  return db.$queryRaw<VisitReportState[]>(Prisma.sql`
+    SELECT "id", "section", "batchId", "dealerId", "followUpType", "purpose", "noPlanSections", "dealerVisitResults",
+      "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "status"
+    FROM "DailyWorkEntry"
+    WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "batchId" <> ${currentBatchId}
+      AND "status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
+      AND "section" IN ('SUMMARY','RELATIONSHIP','SALES','RECOVERY')
+    ORDER BY COALESCE("planSubmittedAt", "createdAt"), "createdAt", "id"`);
 }
 
 /** Read the officer's Visits + Others for a date (one SUMMARY row). Empty/zero when nothing saved yet. */
@@ -1395,18 +1633,39 @@ export async function getDailySummary(ctx: AuthContext, rawDate?: string, target
   const mode = parseDailyWorkMode(rawMode);
   await materializeCalendarForRead(ctx, officerId, workDate, mode);
   const { day } = await readBatchContext(officerId, workDate);
-  const rows = await prisma.$queryRaw<{ id: string; batchId: string; dealerVisits: number | null; newPartyVisits: number | null; actualDealerVisits: number | null; actualNewPartyVisits: number | null; others: string | null; noPlanSections: string | null; status: string }[]>(Prisma.sql`
-    SELECT "id", "batchId", "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "others", "noPlanSections", "status"
+  const rows = await prisma.$queryRaw<{ id: string; batchId: string; dealerVisits: number | null; newPartyVisits: number | null; actualDealerVisits: number | null; actualNewPartyVisits: number | null; others: string | null; noPlanSections: string | null; status: string; followUpType: string | null; dealerVisitResults: unknown }[]>(Prisma.sql`
+    SELECT "id", "batchId", "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "others", "noPlanSections", "status", "followUpType", "dealerVisitResults"
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "section" = 'SUMMARY' AND "workDate" = ${workDate}::date AND "rowKey" = ${SUMMARY_ROWKEY}
       AND ${mode === "PLAN"
         ? Prisma.sql`"batchId" = ${day.currentBatchId} AND "status" = 'DRAFT'`
         : Prisma.sql`"batchId" <> ${day.currentBatchId} AND "status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')`}
-    ORDER BY COALESCE("planSubmittedAt", "createdAt"), "createdAt"`);
+    ORDER BY COALESCE("planSubmittedAt", "createdAt"), "createdAt", "id"`);
   const r = rows[0];
+  let visitRows: DealerVisitRowDto[] = [];
+  if (mode === "PLAN" && officerId === ctx.userId) {
+    const { current, earlier } = await loadVisitState(prisma, officerId, workDate, day.currentBatchId);
+    const ids = [...current.keys()];
+    const [dealerRows, alias] = await Promise.all([ids.length ? prisma.dealer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : Promise.resolve([]), loadDealerAliasNameMap(ids)]);
+    const names = new Map(dealerRows.map((d) => [d.id, alias.get(d.id) ?? d.name]));
+    const ORDER: VisitSource[] = ["RELATIONSHIP", "SALES", "RECOVERY"];
+    visitRows = ids.map((id) => ({
+      dealerId: id, dealerName: names.get(id) ?? "—", sources: ORDER.filter((x) => current.get(id)!.sources.has(x)), purpose: current.get(id)!.purpose, alreadyPlanned: earlier.has(id),
+    })).sort((a, b) => a.dealerName.localeCompare(b.dealerName) || a.dealerId.localeCompare(b.dealerId));
+  }
+  let reportVisitRows: DailySummaryPayload["reportVisitRows"] = [];
+  if (mode === "REPORT" && rows.some((row) => row.followUpType === DERIVED_MARK)) {
+    const visits = dealerVisitReportRows(await loadVisitReportRecords(prisma, officerId, workDate, day.currentBatchId));
+    const ids = visits.map((row) => row.dealerId);
+    const [dealers, aliases] = await Promise.all([ids.length ? prisma.dealer.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : Promise.resolve([]), loadDealerAliasNameMap(ids)]);
+    const names = new Map(dealers.map((dealer) => [dealer.id, aliases.get(dealer.id) ?? dealer.name]));
+    reportVisitRows = visits.map((row) => ({ ...row, dealerName: names.get(row.dealerId) ?? "—" })).sort((a, b) => a.dealerName.localeCompare(b.dealerName) || a.dealerId.localeCompare(b.dealerId));
+  }
   const batches = rows.map((row) => ({
     entryId: row.id, batchId: row.batchId, dealerVisits: row.dealerVisits ?? 0, newPartyVisits: row.newPartyVisits ?? 0,
     actualDealerVisits: row.actualDealerVisits, actualNewPartyVisits: row.actualNewPartyVisits,
+    additionalActualDealerVisits: additionalVisitActual(row.dealerVisitResults),
+    dealerVisitsDerived: row.followUpType === DERIVED_MARK,
     others: row.others ?? "", noPlanSections: row.noPlanSections, status: row.status,
   }));
   return {
@@ -1422,6 +1681,9 @@ export async function getDailySummary(ctx: AuthContext, rawDate?: string, target
     others: mode === "REPORT" ? batches.map((row) => row.others).filter(Boolean).join("\n\n") : (r?.others ?? ""),
     status: (r?.status as DailySummaryPayload["status"]) ?? "NEW",
     batches,
+    visitRows,
+    reportVisitRows,
+    canPickDealerOwner: ctx.role === Role.REGIONAL_MANAGER && officerId === ctx.userId && mode === "PLAN",
   };
 }
 
@@ -1441,11 +1703,12 @@ export async function saveDailySummary(ctx: AuthContext, raw: unknown): Promise<
   const touchOthers = focus === "OTHERS" || focus === "BOTH";
 
   // Insert seeds only the touched columns; on conflict, update only the touched columns (leave the rest as-is).
-  const dv = touchVisits ? Prisma.sql`${dealerVisits}` : Prisma.sql`NULL`;
+  const dv = touchVisits && dealerVisits !== undefined ? Prisma.sql`${dealerVisits}` : Prisma.sql`NULL`;
   const npv = touchVisits ? Prisma.sql`${newPartyVisits}` : Prisma.sql`NULL`;
   const oth = touchOthers ? Prisma.sql`${note}` : Prisma.sql`NULL`;
-  await prisma.$transaction(async (tx) => {
+  await dailyWorkTransaction(L, "save", "saveDailySummary", async (tx, timer) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
+    timer.phase("lock");
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertPlanWritable(tx, ctx, workDate, L); // a Sales Officer with an unfinished earlier report cannot create / edit / save / submit a new plan
     await tx.$executeRaw(Prisma.sql`
@@ -1453,37 +1716,81 @@ export async function saveDailySummary(ctx: AuthContext, raw: unknown): Promise<
       VALUES (${randomUUID()}, ${officerId}, NULL, ${SUMMARY_ROWKEY}, ${workDate}::date, ${day.currentBatchId}, 'SUMMARY', ${dv}, ${npv}, ${oth}, 'DRAFT', NOW(), NOW())
       ON CONFLICT ("officerId","workDate","batchId","section","rowKey")
       DO UPDATE SET
-        ${touchVisits ? Prisma.sql`"dealerVisits" = ${dealerVisits}, "newPartyVisits" = ${newPartyVisits},` : Prisma.empty}
+        ${touchVisits ? Prisma.sql`${dealerVisits !== undefined ? Prisma.sql`"dealerVisits" = ${dealerVisits},` : Prisma.empty} "newPartyVisits" = ${newPartyVisits},` : Prisma.empty}
         ${touchOthers ? Prisma.sql`"others" = ${note},` : Prisma.empty}
-        "updatedAt" = NOW()`);
+        "updatedAt" = NOW()
+      WHERE (${Prisma.join([
+        ...(touchVisits && dealerVisits !== undefined ? [Prisma.sql`"DailyWorkEntry"."dealerVisits" IS DISTINCT FROM ${dealerVisits}`] : []),
+        ...(touchVisits ? [Prisma.sql`"DailyWorkEntry"."newPartyVisits" IS DISTINCT FROM ${newPartyVisits}`] : []),
+        ...(touchOthers ? [Prisma.sql`"DailyWorkEntry"."others" IS DISTINCT FROM ${note}`] : []),
+      ], " OR ")})`);
+    // Dealer Visits is derived from the dealer rows, never from the posted number: when the day has (or had) dealer rows the stored count follows them.
+    timer.phase("write");
+    if (touchVisits) { await syncDealerVisitsTx(tx, officerId, workDate, day.currentBatchId); timer.phase("sync"); }
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `SUMMARY:${workDate}`, summary: `Saved daily ${focus.toLowerCase()}` }, tx);
   });
   return { ok: true };
 }
 
-/** Save Visits actuals progressively on the exact submitted batch summary row. */
-export async function enterVisitsActual(ctx: AuthContext, raw: unknown): Promise<{ count: number }> {
+/** Save per-dealer Visit choices and New Party actuals progressively on their exact submitted summary batch. */
+export async function enterVisitsActual(ctx: AuthContext, raw: unknown): Promise<{ count: number; report?: Awaited<ReturnType<typeof reportCompletion>> }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
   const { workDate, entries } = dailyWorkSchemas(L).visitsActual.parse(raw);
   const officerId = ownerId(ctx);
   if (entries.length === 0) return { count: 0 };
-  return prisma.$transaction(async (tx) => {
+  return dailyWorkTransaction(L, "save", "enterVisitsActual", async (tx) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
     assertDayOpen(day, L["daily_work.validation.day_finalized"]);
     await assertReportWritable(tx, officerId, workDate, L);
-    let count = 0;
-    for (const entry of entries) {
-      count += Number(await tx.$executeRaw(Prisma.sql`
-        UPDATE "DailyWorkEntry"
-        SET "actualDealerVisits" = ${entry.actualDealerVisits}, "actualNewPartyVisits" = ${entry.actualNewPartyVisits}, "updatedAt" = NOW()
-        WHERE "id" = ${entry.entryId} AND "officerId" = ${officerId} AND "workDate" = ${workDate}::date
-          AND "section" = 'SUMMARY' AND "batchId" <> ${day.currentBatchId} AND "status" = 'PLAN_SUBMITTED'
-          AND ("dealerVisits" IS NOT NULL OR "newPartyVisits" IS NOT NULL)`));
-    }
-    if (count === 0) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
+    const records = await loadVisitReportRecords(tx, officerId, workDate, day.currentBatchId);
+    const summaries = new Map(records.filter((row) => row.section === "SUMMARY").map((row) => [row.id, row]));
+    const visits = dealerVisitReportRows(records);
+    const seen = new Set<string>();
+    const updates = entries.map((entry) => {
+      const summary = summaries.get(entry.entryId);
+      if (seen.has(entry.entryId)) throw new ApiError(422, L["daily_work.validation.invalid_option"]);
+      seen.add(entry.entryId);
+      if (!summary || summary.status !== "PLAN_SUBMITTED" || (summary.dealerVisits == null && summary.newPartyVisits == null) || parseNoPlanSet(summary.noPlanSections).has("VISITS")) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
+      const required = visits.filter((visit) => visit.entryId === entry.entryId);
+      const allowed = new Set(required.map((visit) => visit.dealerId));
+      const results = visitResultMap(summary.dealerVisitResults);
+      const chosen = new Set<string>();
+      for (const result of entry.dealerVisitResults ?? []) {
+        if (!allowed.has(result.dealerId) || chosen.has(result.dealerId)) throw new ApiError(422, L["daily_work.validation.invalid_visit_result"]);
+        chosen.add(result.dealerId);
+        if (result.result === null) delete results[result.dealerId]; else results[result.dealerId] = result.result;
+      }
+      let actualDealerVisits = entry.actualDealerVisits === undefined ? summary.actualDealerVisits : entry.actualDealerVisits;
+      let additionalActual: number | null = null;
+      if (required.length > 0) {
+        // The visible per-dealer results are authoritative. A stale client cannot bypass them by posting a total.
+        if (entry.actualDealerVisits !== undefined) throw new ApiError(422, L["daily_work.validation.choose_visit_results"]);
+        const additionalPlanned = Math.max(0, (summary.dealerVisits ?? 0) - required.length);
+        additionalActual = additionalPlanned === 0 ? 0 : entry.additionalDealerVisits !== undefined ? entry.additionalDealerVisits : additionalVisitActual(summary.dealerVisitResults);
+        actualDealerVisits = required.every((visit) => results[visit.dealerId]) && additionalActual != null ? required.filter((visit) => results[visit.dealerId] === "VISITED").length + additionalActual : null;
+      } else {
+        if (entry.additionalDealerVisits !== undefined) throw new ApiError(422, L["daily_work.validation.invalid_visit_result"]);
+        // A later batch may contain only dealers already counted in earlier batches. It contributes zero visits.
+        if (summary.followUpType === DERIVED_MARK && summary.dealerVisits === 0) {
+          if (entry.actualDealerVisits != null && entry.actualDealerVisits !== 0) throw new ApiError(422, L["daily_work.validation.invalid_visit_result"]);
+          actualDealerVisits = 0;
+        }
+      }
+      return { id: summary.id, dealer: actualDealerVisits, newParty: entry.actualNewPartyVisits === undefined ? summary.actualNewPartyVisits : entry.actualNewPartyVisits, results: required.length > 0 ? { results, additionalDealerVisits: additionalActual } : summary.dealerVisitResults ?? null };
+    });
+    // One bounded bulk write, regardless of the number of batches/dealers; audit and totals commit together under the day lock.
+    const count = Number(await tx.$executeRaw(Prisma.sql`
+      UPDATE "DailyWorkEntry" e
+      SET "actualDealerVisits" = v."dealer", "actualNewPartyVisits" = v."newParty", "dealerVisitResults" = v."results", "updatedAt" = NOW()
+      FROM jsonb_to_recordset(${JSON.stringify(updates)}::jsonb) AS v("id" text, "dealer" int, "newParty" int, "results" jsonb)
+      WHERE e."id" = v."id" AND e."officerId" = ${officerId} AND e."workDate" = ${workDate}::date
+        AND e."section" = 'SUMMARY' AND e."batchId" <> ${day.currentBatchId} AND e."status" = 'PLAN_SUBMITTED'`));
+    if (count !== entries.length) throw new ApiError(409, L["daily_work.validation.actuals_after_submit"]);
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "dailyWork", entityId: `VISITS:${workDate}`, summary: `Saved Visits actuals for ${count} planning batch(es)` }, tx);
-    return { count };
+    // The report completion on the SAVED state (same rules as the status read; one statement in this transaction): the screen updates its ticks and
+    // Submit Report from it instead of re-reading the whole status.
+    return { count, report: await reportCompletion(tx, officerId, workDate, day.currentBatchId) };
   });
 }
 
@@ -1577,7 +1884,7 @@ export interface DailyStatusPayload {
   canSubmitReport: boolean;
   isFinalized: boolean;
   selfRating: number | null;
-  reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
+  reportSections: { section: MandatorySection; required: boolean; complete: boolean; planStatus?: SectionStatus; reported?: boolean }[];
   // VISIBILITY-only flag for the "Today's Auto Tasks" block (default OFF). Never gates Auto Task behaviour.
   autoTasksEnabled: boolean;
   /** The previous calendar day's Daily Report as it gates THIS day's Daily Plan submission (see previousReportState). */
@@ -1612,24 +1919,29 @@ async function previousReportGate(db: DbClient, officerId: string, workDate: str
   return { date, state: previousReportState(row, date, now), deadline: dailyReportDeadline(date) };
 }
 
-interface ReportEntryState {
+interface ReportEntryState extends VisitReportRecord {
   section: string; batchId: string; todaysActual: string | null; resultStatus: string | null;
   dealerVisits: number | null; newPartyVisits: number | null;
-  actualDealerVisits: number | null; actualNewPartyVisits: number | null; noPlanSections: string | null; paymentMode: string | null;
+  actualDealerVisits: number | null; actualNewPartyVisits: number | null; noPlanSections: string | null; paymentMode: string | null; others: string | null;
 }
 
 async function reportCompletion(db: DbClient, officerId: string, workDate: string, currentBatchId: string) {
   const rows = await db.$queryRaw<ReportEntryState[]>(Prisma.sql`
     SELECT "section", "batchId", "todaysActual"::text AS "todaysActual", "resultStatus",
-      "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "noPlanSections", "paymentMode"
+      "id", "dealerId", "followUpType", "purpose", "dealerVisitResults",
+      "dealerVisits", "newPartyVisits", "actualDealerVisits", "actualNewPartyVisits", "noPlanSections", "paymentMode", "others"
     FROM "DailyWorkEntry"
     WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date
       AND "batchId" <> ${currentBatchId} AND "status" IN ('PLAN_SUBMITTED','FINALIZED','SUBMITTED')
       AND (${SCHEME_CONVERSION_ENABLED}::boolean OR "section" <> 'SCHEME_CONVERSION')
-      AND ("section" <> 'APPOINTMENT' OR "monthlyPlanId" IS NOT NULL OR COALESCE(TRIM("typedDealerName"), '') <> '' OR COALESCE(TRIM("marketName"), '') <> '')`);
+      AND ("section" <> 'APPOINTMENT' OR "monthlyPlanId" IS NOT NULL OR COALESCE(TRIM("typedDealerName"), '') <> '' OR COALESCE(TRIM("marketName"), '') <> '')
+    ORDER BY COALESCE("planSubmittedAt", "createdAt"), "createdAt", "id"`);
+  const visitResults = dealerVisitReportRows(rows);
   let paymentModeMissing = false;
   const required = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, false]));
   const complete = new Map<MandatorySection, boolean>(MANDATORY_SECTIONS.map((section) => [section, true]));
+  const noPlanSections = new Set<MandatorySection>();
+  let hasOthers = false;
   for (const row of rows) {
     if (row.section === "SALES" || row.section === "RECOVERY") {
       const section = row.section as MandatorySection;
@@ -1645,14 +1957,25 @@ async function reportCompletion(db: DbClient, officerId: string, workDate: strin
       if (row.resultStatus == null) complete.set("SCHEME_CONVERSION", false);
     } else if (row.section === "SUMMARY") {
       const noPlan = parseNoPlanSet(row.noPlanSections);
+      for (const section of noPlan) noPlanSections.add(section);
+      if (row.others?.trim()) hasOthers = true;
       const plannedVisits = (row.dealerVisits != null || row.newPartyVisits != null) && !noPlan.has("VISITS");
       if (plannedVisits) {
         required.set("VISITS", true);
-        if (row.actualDealerVisits == null || row.actualNewPartyVisits == null) complete.set("VISITS", false);
+        if (row.actualDealerVisits == null || row.actualNewPartyVisits == null || visitResults.some((visit) => visit.entryId === row.id && visit.result == null)) complete.set("VISITS", false);
       }
     }
   }
-  const sections = MANDATORY_SECTIONS.map((section) => ({ section, required: required.get(section) ?? false, complete: !(required.get(section) ?? false) || (complete.get(section) ?? false) }));
+  const sections = MANDATORY_SECTIONS.map((section) => {
+    const needsReport = required.get(section) ?? false;
+    const hasPlan = needsReport || (section === "OTHERS" && hasOthers);
+    return {
+      section, required: needsReport, complete: !needsReport || (complete.get(section) ?? false),
+      // These display-only facts describe submitted batches, never the next editable draft.
+      planStatus: hasPlan ? SectionStatus.FILLED : noPlanSections.has(section) ? SectionStatus.NO_PLAN : SectionStatus.REMAINING,
+      reported: needsReport && (complete.get(section) ?? false) && !(section === "RECOVERY" && paymentModeMissing),
+    };
+  });
   return { hasBatches: rows.length > 0, paymentModeMissing, sections, complete: rows.length > 0 && sections.every((section) => section.complete) };
 }
 
@@ -1742,6 +2065,43 @@ export const SUBMIT_DAY_TRANSACTION = { timeout: 30_000, maxWait: 10_000 } as co
 /** A Prisma transaction that closed (P2028), could not get a connection (P2024) or lost a write conflict / deadlock (P2034): nothing was committed, so the request is safely retryable. */
 export const isRetryableTransactionError = (e: unknown): boolean => typeof e === "object" && e !== null && ["P2028", "P2024", "P2034"].includes((e as { code?: string }).code ?? "");
 
+/* ---- bounded transaction limits for the Daily REPORT paths ----
+ * Prisma's interactive transactions default to 5 s, but every statement is a network round trip (the database itself needs milliseconds): at ~100 ms per round trip a final report of
+ * 16 tasks used ~48 sequential statements and ran out (P2028) — measured in report-finalize.integration.ts. The statement count is now bounded (see commitTaskOutcomes); these limits
+ * are the safety margin, not a substitute for that. Both are explicit and bounded (never a global increase), and `maxWait` (waiting for a pooled connection) is separate from
+ * `timeout` (how long the transaction may run once started).
+ *  • SAVE  — draft saves (actuals / outcome drafts / results): ~8 statements, one audit row; 15 s.
+ *  • FINAL — the final report submission (outcome commitment, reschedules, finalization, late-request completion, audit): the same budget as Submit Daily Work (30 s). The routes
+ *            declare maxDuration 60 s so a platform that enforces one cannot cut the request off before the transaction's own limit.
+ * A transaction that still expires is rolled back completely; it is reported as a clear, retryable 503 (never as success, never as a validation error). Nothing is retried automatically:
+ * the final submission is idempotent (a finalized day answers 409, a COMPLETED late request cannot be consumed twice), so the person simply presses the button again.
+ */
+export const DAILY_WORK_SAVE_TRANSACTION = { timeout: 15_000, maxWait: 10_000 };
+export const DAILY_WORK_FINAL_TRANSACTION = { timeout: 30_000, maxWait: 10_000 };
+
+/** Phase timings of one transaction, for diagnosis only: operation, phase names, durations and row counts — never submitted content. Logged when slow or failed. */
+interface TxTimer { phase(name: string): void; rows(name: string, n: number): void }
+const SLOW_TX_LOG_MS = 2_000;
+async function dailyWorkTransaction<T>(L: ResolvedLabels, kind: "save" | "final", op: string, fn: (tx: Prisma.TransactionClient, timer: TxTimer) => Promise<T>): Promise<T> {
+  const options = kind === "save" ? DAILY_WORK_SAVE_TRANSACTION : DAILY_WORK_FINAL_TRANSACTION;
+  const started = Date.now();
+  let last = started;
+  const phases: string[] = [], counts: string[] = [];
+  const timer: TxTimer = { phase(name) { const t = Date.now(); phases.push(`${name}=${t - last}ms`); last = t; }, rows(name, n) { counts.push(`${name}=${n}`); } };
+  const report = (outcome: string) => console.warn(`[daily-work] op=${op} outcome=${outcome} total=${Date.now() - started}ms limit=${options.timeout}ms phases[${phases.join(" ")}] rows[${counts.join(" ")}]`);
+  try {
+    const value = await prisma.$transaction((tx) => fn(tx, timer), options);
+    if (Date.now() - started >= SLOW_TX_LOG_MS) report("ok-slow");
+    return value;
+  } catch (error) {
+    if (isRetryableTransactionError(error)) {
+      report(`rolled-back(${(error as { code?: string }).code})`);
+      throw new ApiError(503, L[kind === "save" ? "daily_work.validation.save_timeout" : "daily_work.validation.report_submit_timeout"]);
+    }
+    throw error;
+  }
+}
+
 export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promise<{ ok: true; batchId: string }> {
   const L = await getResolvedLabels();
   await assertOwnerRole(ctx, L);
@@ -1768,6 +2128,7 @@ export async function submitDailyWorkDay(ctx: AuthContext, raw: unknown): Promis
       // Billing Exception tasks need no confirmation: a due task is in the plan once, and submitting it is the officer's confirmation.
       if (unconfirmed > 0) throw new ApiError(422, L["daily_work.validation.confirm_auto_tasks"]);
     }
+    await syncDealerVisitsTx(tx, officerId, workDate, day.currentBatchId); // the stored planned count is exactly what the dealer rows say at submission
     const { presence: data, noPlanSet, invalidAppointments } = await sectionFacts(officerId, workDate, day.currentBatchId, tx);
     if (invalidAppointments) throw new ApiError(422, L["daily_work.validation.appointment_details_required"]);
     const statuses = computeSectionStatuses(data, noPlanSet);
@@ -1824,12 +2185,14 @@ export async function submitDailyReport(ctx: AuthContext, raw: unknown): Promise
   const officerId = ownerId(ctx);
   let newlyMaterialized = 0;
   let outcomeSummary = { completed: 0, rescheduled: 0, abandoned: 0 };
-  await prisma.$transaction(async (tx) => {
+  await dailyWorkTransaction(L, "final", "submitDailyReport", async (tx, timer) => {
     const day = await lockDailyWorkDay(tx, officerId, workDate);
+    timer.phase("lock");
     assertDayOpen(day, L["daily_work.validation.report_already_submitted"]);
     // The deadline follows the report OWNER's persisted policy (Sales Officer, covered plan: midnight ending the work date; otherwise noon of the next day). An approved late-submission request
     // for THIS report keeps it open (no expiry) until this submission succeeds.
     await assertReportWritable(tx, officerId, workDate, L);
+    timer.phase("window");
     // Auto Tasks are materialized only for TODAY's report: submitting yesterday's still-open report must never add tasks to a day that
     // can no longer be planned (that would make it impossible to finalize). Today's behavior is unchanged.
     const materialized = autoTasksApplyToRole(ctx.role) && workDate === currentBusinessDate(dailyWorkClock.now())
@@ -1840,7 +2203,9 @@ export async function submitDailyReport(ctx: AuthContext, raw: unknown): Promise
       newlyMaterialized = materialized.materializedTasks;
       return;
     }
+    timer.phase("materialize");
     const report = await reportCompletion(tx, officerId, workDate, day.currentBatchId);
+    timer.phase("completion");
     if (!report.complete) {
       const sectionLabels: Record<MandatorySection, string> = {
         SALES: L["daily_work.section.sales"],
@@ -1859,10 +2224,12 @@ export async function submitDailyReport(ctx: AuthContext, raw: unknown): Promise
     // Commit the task outcomes in THIS transaction: Completed is recorded as reported, Not Completed — Reschedule moves the same task to its next date, Abandon ends it.
     // Any failure (an invalid draft, a changed task) rolls the whole report back — no partial reschedule / abandon is ever left behind.
     outcomeSummary = await commitTaskOutcomes(tx, ctx, officerId, workDate, currentBusinessDate(dailyWorkClock.now()), L as Record<string, string>);
+    timer.phase("outcomes"); timer.rows("outcomes", outcomeSummary.completed + outcomeSummary.rescheduled + outcomeSummary.abandoned);
+    // The day and its submitted entries are finalized by ONE statement (both changes or neither), then the late-request approval is consumed — all in this transaction.
     await tx.$executeRaw(Prisma.sql`
-      UPDATE "DailyWorkDay" SET "status" = 'FINALIZED', "selfRating" = ${selfRating}, "finalizedAt" = NOW(), "updatedAt" = NOW()
-      WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "status" = 'OPEN'`);
-    await tx.$executeRaw(Prisma.sql`
+      WITH day AS (
+        UPDATE "DailyWorkDay" SET "status" = 'FINALIZED', "selfRating" = ${selfRating}, "finalizedAt" = NOW(), "updatedAt" = NOW()
+        WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "status" = 'OPEN' RETURNING 1)
       UPDATE "DailyWorkEntry" SET "status" = 'FINALIZED', "updatedAt" = NOW()
       WHERE "officerId" = ${officerId} AND "workDate" = ${workDate}::date AND "status" = 'PLAN_SUBMITTED'`);
     await completeLateRequest(tx, officerId, workDate); // the approval is consumed by the successful final submission (same transaction)
@@ -2025,7 +2392,7 @@ export interface DailyWorkReviewDetailPayload {
   review: DailyWorkReviewDto | null;
   /** false → only the Daily Plan has been submitted: no actuals, self-rating or RM rating exist, and rating is not allowed. */
   reportSubmitted: boolean;
-  reportSections: { section: MandatorySection; required: boolean; complete: boolean }[];
+  reportSections: { section: MandatorySection; required: boolean; complete: boolean; planStatus?: SectionStatus; reported?: boolean }[];
   /** Display-only rescheduling facts (scheduled-date history of the shown rows, history-only tasks, and the date-change actions made that day). Never part of any total. */
   rescheduling: ReschedulingReview;
 }
@@ -2418,7 +2785,9 @@ async function resolvePerformanceFilters(ctx: AuthContext, raw: unknown) {
   const dates = enumerateDates(from, to);
   if (dates.length > MAX_PERFORMANCE_RANGE_DAYS) throw new ApiError(422, L["daily_work.performance.range_too_large"]);
 
-  let population = await performancePopulation(ctx);
+  // ONE authoritative population read per request: the narrowed list below and the full list (State / employee options) both come from it.
+  const fullPopulation = await performancePopulation(ctx);
+  let population = fullPopulation;
 
   // OR within selected States, then AND with employee choices. State never widens role scope.
   const selectedGroupIds = new Set([...(filters.groupIds ?? []), ...(filters.groupId ? [filters.groupId] : [])]);
@@ -2431,7 +2800,7 @@ async function resolvePerformanceFilters(ctx: AuthContext, raw: unknown) {
     if ([...selectedIds].some((id) => !allowed.has(id))) throw new ApiError(403, L["daily_work.performance.forbidden"]);
     population = population.filter((p) => selectedIds.has(p.id));
   }
-  return { L, filters, from, to, dates, population, selectedGroupIds };
+  return { L, filters, from, to, dates, population, selectedGroupIds, fullPopulation };
 }
 
 /**
@@ -2451,7 +2820,7 @@ export async function taskAnalysisScope(ctx: AuthContext, raw: { officerId?: str
 }
 
 export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): Promise<PerformancePayload> {
-  const { from, to, dates, population, selectedGroupIds } = await resolvePerformanceFilters(ctx, raw);
+  const { from, to, dates, population, selectedGroupIds, fullPopulation } = await resolvePerformanceFilters(ctx, raw);
 
   const ids = population.map((p) => p.id);
   const [planRows, dayRows, rmRows, entryRows] = ids.length === 0
@@ -2559,7 +2928,6 @@ export async function getDailyPerformance(ctx: AuthContext, raw: unknown = {}): 
 
   // State options always span the full authoritative population. Admin officer options follow the selected State;
   // with All States they span the company. RM options retain their existing team scope.
-  const fullPopulation = await performancePopulation(ctx);
   const officerOptions = isAdministrativeRole(ctx.role) && selectedGroupIds.size > 0
     ? fullPopulation.filter((p) => p.groupId != null && selectedGroupIds.has(p.groupId))
     : fullPopulation;
@@ -2597,7 +2965,7 @@ const DETAIL_MAX_PAGE_SIZE = 100;
  */
 export async function getPerformanceMetricDetail(ctx: AuthContext, raw: unknown = {}): Promise<PerformanceDetailPayload> {
   const input = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const { L, filters, from, to, population, selectedGroupIds } = await resolvePerformanceFilters(ctx, input);
+  const { L, filters, from, to, population, selectedGroupIds, fullPopulation } = await resolvePerformanceFilters(ctx, input);
   if (!isPerformanceMetric(input.metric)) throw new ApiError(422, L["daily_work.performance.invalid_metric"]);
   const metric = input.metric;
   const info = PERFORMANCE_METRIC_INFO[metric];
@@ -2653,7 +3021,7 @@ export async function getPerformanceMetricDetail(ctx: AuthContext, raw: unknown 
   });
 
   const stateName = isAdministrativeRole(ctx.role) && selectedGroupIds.size > 0
-    ? [...new Set((await performancePopulation(ctx)).filter((p) => p.groupId != null && selectedGroupIds.has(p.groupId)).map((p) => p.groupName).filter((name): name is string => name != null))].sort((a, b) => a.localeCompare(b)).join(", ") || null
+    ? [...new Set(fullPopulation.filter((p) => p.groupId != null && selectedGroupIds.has(p.groupId)).map((p) => p.groupName).filter((name): name is string => name != null))].sort((a, b) => a.localeCompare(b)).join(", ") || null
     : null;
   return {
     metric, unit: info.unit, kind: info.kind, from, to, stateName, officerName: filters.officerId || filters.officerIds?.length ? population.map((p) => p.name).join(", ") || null : null,

@@ -32,6 +32,8 @@ function makeFake() {
       const day = days.get(`${v[0] as string}:${v[1] as string}`);
       return day ? [{ ...day }] : [];
     }
+    // Dealer Visits derivation: no dealer rows exist in this suite, so there are no visit sources and nothing to derive.
+    if (text.startsWith('SELECT \'S\' AS "k"')) return [];
     // SELECT the day's SUMMARY row. Values: [officerId, workDate, rowKey('SUMMARY')].
     if (text.startsWith('SELECT "id", "batchId", "dealerVisits"')) {
       const officerId = v[0] as string, workDate = v[1] as string, currentBatchId = v[3] as string;

@@ -357,22 +357,22 @@ async function main() {
     eq((await svc.getDailyWork(so1, "RECOVERY", day(41), undefined, "PLAN")).availableDealers.some((d) => d.id === "A"), true, "the dealer stays in Add Dealer while it only has scheduled tasks");
 
     // The dealer's ONE directly entered manual task, next to its two scheduled tasks (and independently in Sales).
-    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
     eq(shape(await read()).map((r) => [r[0], r[1], r[4]]), [["A", "TASK", 900], ["A", "TASK", 1100], ["A", "MANUAL", 5000], ["B", "MANUAL", 150], ["C", "TASK", 450]], "tasks 900 + 1,100 and the manual 5,000 are three rows; saving never touches the scheduled tasks");
     const sum = (await read()).reduce((n, r) => n + (r.todaysPlan ?? 0), 0);
     eq([(await read()).filter((r) => r.dealerId === "A").length, new Set((await read()).map((r) => r.dealerId)).size, sum], [3, 3, 7600], "3 rows / 1 dealer for A; Today's Plan is the sum of the individual tasks");
-    assert.notEqual(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "SCHEME", schemeId: "forged" }] })), 0, "a forged scheme is refused");
-    assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }, { dealerId: "A", todaysPlan: 2, entryType: "REGULAR" }] })), 422, "two directly entered rows for one dealer in one request are refused");
-    await Promise.all(Array.from({ length: 4 }, () => svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] })));
+    assert.notEqual(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5000, entryType: "SCHEME", schemeId: "forged" }] })), 0, "a forged scheme is refused");
+    assert.equal(await code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 2, entryType: "REGULAR" }] })), 422, "two directly entered rows for one dealer in one request are refused");
+    await Promise.all(Array.from({ length: 4 }, () => svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] })));
     eq((await rowsOf("so1", day(41), "A")).length, 3, "concurrent saves of the same row never create a second manual row");
-    assert.equal(await code(svc.saveDailyWork(so2, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }] })), 403, "dealer ownership / assignment is still enforced");
+    assert.equal(await code(svc.saveDailyWork(so2, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 1, entryType: "REGULAR" }] })), 403, "dealer ownership / assignment is still enforced");
     // Sales and Recovery limits are independent.
-    await svc.saveDailyWork(so1, { section: "SALES", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 700, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(so1, { section: "SALES", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 700, entryType: "REGULAR" }] });
     eq((await svc.getDailyWork(so1, "SALES", day(41), undefined, "PLAN")).dealers.map((r) => [r.dealerId, r.rowKind, r.todaysPlan]), [["A", "MANUAL", 700]], "the same dealer has its own manual task in Sales");
     // Deleting the editable manual row makes the dealer selectable again and leaves the scheduled tasks alone.
-    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
     eq((await read()).filter((r) => r.dealerId === "A").map((r) => [r.rowKind, r.todaysPlan]), [["TASK", 900], ["TASK", 1100]], "removing the manual draft row removes only that row");
-    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
 
     // Each row acts on ITS task only: rescheduling the 900 task leaves the 1,100 task and the manual 5,000 untouched.
     await task.rescheduleBillingTask(rm, bt.id, day(44)); // the authorized RM moves it
@@ -383,7 +383,7 @@ async function main() {
     const sibling = await prisma.billingExceptionTask.findUniqueOrThrow({ where: { id: bt2.id } });
     eq([sibling.rescheduled, sibling.taskDate.toISOString().slice(0, 10), !!sibling.dailyWorkEntryId], [false, day(41), true], "the sibling task is unchanged");
     // A stale editor can neither bring the moved task back nor remove a scheduled task: the save only ever carries the manual row.
-    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
+    await svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 5000, entryType: "REGULAR" }, { followUpType: "TELEPHONIC", dealerId: "B", todaysPlan: 150, entryType: "REGULAR" }] });
     eq((await rowsOf("so1", day(41), "A")).map((r) => r[1]), [5000, 1100], "…and nothing was re-created or lost");
     assert.equal((await prisma.billingException.findUniqueOrThrow({ where: { id: ex.id } })).paymentDate?.toISOString().slice(0, 10), day(41), "the exception's own promised payment date is not rewritten");
     assert.ok((await prisma.auditLog.findMany({ where: { entity: "billingExceptionTask", entityId: bt.id } })).some((a) => a.summary?.includes(`${day(41)} → ${day(44)}`) && a.userId === "rm"), "who / previous date / new date are audited");
@@ -396,7 +396,7 @@ async function main() {
     await svc.submitDailyWorkDay(so1, { workDate: day(41) });
     const afterSubmit = await svc.getDailyWork(so1, "RECOVERY", day(41), undefined, "PLAN");
     eq([afterSubmit.manualDealerIds.sort(), afterSubmit.availableDealers.some((d) => d.id === "A")], [["A", "B"], false], "a submitted manual task keeps the dealer out of Add Dealer for that date and section");
-    const results = await Promise.all(Array.from({ length: 4 }, () => code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ dealerId: "A", todaysPlan: 9, entryType: "REGULAR" }] }))));
+    const results = await Promise.all(Array.from({ length: 4 }, () => code(svc.saveDailyWork(so1, { section: "RECOVERY", workDate: day(41), rows: [{ followUpType: "TELEPHONIC", dealerId: "A", todaysPlan: 9, entryType: "REGULAR" }] }))));
     eq(results, [409, 409, 409, 409], "a second directly entered task for the same dealer / date / section is rejected — also for concurrent requests, and across planning batches");
     eq(await prisma.dailyWorkEntry.count({ where: { officerId: "so1", workDate: new Date(day(41)), section: "RECOVERY", dealerId: "A", rowKey: "A" } }), 1, "exactly one directly entered row exists for the dealer");
     // Its scheduled date arrives: the same task enters that day's plan exactly once, in its own row.

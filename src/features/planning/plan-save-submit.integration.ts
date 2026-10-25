@@ -20,7 +20,7 @@ const withPool = (u: string, n: number) => { const x = new URL(u); x.searchParam
 const base = new PrismaClient({ datasources: { db: { url: withPool(raw, 4) } }, log: [{ emit: "event", level: "query" }] });
 const queries: string[] = [];
 base.$on("query", (e: { query: string }) => { queries.push(e.query.replace(/\s+/g, " ").trim()); });
-let rtt = 0;
+const rtt = 0;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Every statement waits a simulated round trip first, so interleavings that need a slow network actually happen.
 const prisma = base.$extends({ query: { async $allOperations({ args, query }) { if (rtt) await sleep(rtt); return query(args); } } }) as unknown as PrismaClient;

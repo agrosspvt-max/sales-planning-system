@@ -75,6 +75,7 @@ export const NAV_ITEMS: NavItem[] = [
   },
   { label: "Sales Upload", href: "/planning/sales-upload", icon: Upload, roles: ADMIN_ONLY, group: "Planning" },
   { label: "Dealer Alias", href: "/planning/dealer-alias", icon: Link2, roles: ADMIN_ONLY, group: "Planning" },
+  { label: "Tally Connection", href: "/planning/tally", icon: Link2, roles: [Role.SUPER_ADMIN], group: "Planning" },
   {
     label: "Approvals",
     href: "/planning/approvals",

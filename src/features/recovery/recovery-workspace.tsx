@@ -10,7 +10,7 @@ import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Ban, Save, Lock, Unlock, Info } from "lucide-react";
+import { Ban, Save, Lock, Unlock, Info, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatDate } from "@/lib/utils";
 import { lastPaymentDisplay } from "@/lib/last-payment-display";
@@ -94,6 +94,9 @@ interface RecoveryDetail {
   seasonName: string;
   monthName: string;
   cutoffDate: string;
+  agingAsOf?: string;
+  tallyObservedAt?: string | null;
+  tallySyncAvailable?: boolean;
   weeklyEditEnabled: boolean;
   monthEditable: boolean;
   weekEditable: boolean;
@@ -268,7 +271,9 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
   const { data, isLoading } = useQuery<RecoveryDetail>({
     queryKey: ["recovery-plan", id],
     queryFn: () => api.get(`/api/recovery/plans/${id}`),
+    refetchInterval: (query) => query.state.data?.tallySyncAvailable ? 30000 : false,
   });
+  const refresh = useMutation({mutationFn: () => api.post("/api/tally/refresh", {planId:id})});
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
 
   const remaining = data.dealers.filter((d) => !d.noPlan && !d.completed);
@@ -321,6 +326,12 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
           noPlanDealers={noPlanDealers.map((d) => ({ dealerId: d.dealerId, dealerName: d.dealerName, noPlanReason: d.noPlanReason, noPlanReasonDetail: d.noPlanReasonDetail }))}
         />
 
+        {data.tallySyncAvailable && <div className="flex flex-wrap items-center gap-3 text-sm">
+          <Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw className="mr-2 h-4 w-4"/>Refresh from Tally</Button>
+          <span className="text-muted-foreground">{data.tallyObservedAt ? `Tally data read ${new Date(data.tallyObservedAt).toLocaleString("en-IN", {timeZone:"Asia/Kolkata"})}` : "Waiting for the first verified Tally update"}</span>
+          {refresh.isSuccess && <span>Refresh requested. Waiting for the office connector.</span>}
+          {refresh.error && <span role="alert">{refresh.error.message}</span>}
+        </div>}
         <GuidancePanel data={data} />
 
         <DealerProgressBar counts={counts} />
@@ -369,7 +380,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
   };
   // Dynamic column dates: Current Outstanding is as of the aging cutoff; Outstanding Till is the month's
   // opening (first calendar day of the cutoff's month). Both derived from the plan cutoff — no calc change.
-  const cutoffDdMm = ddmm(detail.cutoffDate);
+  const cutoffDdMm = ddmm(detail.agingAsOf ?? detail.cutoffDate);
   const tillDdMm = monthFirstDdMm(detail.cutoffDate);
   // Admin Edit Mode: staged overlay, separate from the officer autosave path.
   const canAdminEdit = !!detail.canAdminEdit;
@@ -838,7 +849,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
     { labelKey: "recovery.section.results", span: 2, tone: "purple" },
   ];
   // Dynamic column dates (same derivation as Month View).
-  const cutoffDdMm = ddmm(detail.cutoffDate);
+  const cutoffDdMm = ddmm(detail.agingAsOf ?? detail.cutoffDate);
   const tillDdMm = monthFirstDdMm(detail.cutoffDate);
   const totalOutstandingTillDate = detail.dealers.reduce((s, d) => s + d.outstandingTillDate, 0);
 

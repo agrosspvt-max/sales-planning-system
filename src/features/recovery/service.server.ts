@@ -1,3 +1,4 @@
+import { indiaDay } from "@/features/tally/billwise";
 import "server-only";
 import { recoveryDealerCompleted } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
@@ -695,8 +696,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     where: { recoveryPlanId: plan.id },
     orderBy: [{ weekNo: "desc" }],
     take: 2,
-    select: { id: true, weekNo: true, cutoffDate: true, summary: true, createdAt: true },
-  })) as { id: string; weekNo: number; cutoffDate: Date; summary: string | null; createdAt: Date }[];
+    select: { id: true, weekNo: true, cutoffDate: true, summary: true, createdAt: true, source: true, sourceObservedAt: true },
+  })) as { id: string; weekNo: number; cutoffDate: Date; summary: string | null; createdAt: Date; source: string; sourceObservedAt: Date | null }[];
   const latestSnapshot = recentSnaps[0] ?? null;
   const prevSnapshot = recentSnaps[1] ?? null;
 
@@ -766,7 +767,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   const { dueValidation } = await getRecoveryConfig();
   const lastRefresh =
     latestSnapshot && latestSnapshot.weekNo > 0 && latestSnapshot.summary
-      ? { at: latestSnapshot.createdAt, businessWeek: Math.min(((latestSnapshot.weekNo as number) ?? 0) + 1, BUSINESS_WEEK_COUNT), ...(JSON.parse(latestSnapshot.summary) as AgingChangeSummary) }
+      ? { at: latestSnapshot.createdAt, businessWeek: latestSnapshot.source === "TALLY" ? businessWeekOfMonth(latestSnapshot.cutoffDate) : Math.min(((latestSnapshot.weekNo as number) ?? 0) + 1, BUSINESS_WEEK_COUNT), ...(JSON.parse(latestSnapshot.summary) as AgingChangeSummary) }
       : null;
 
   return {
@@ -784,6 +785,9 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     weekCount,
     currentWeek,
     weekLocks,
+    agingAsOf: latestSnapshot?.source === "TALLY" ? latestSnapshot.cutoffDate : plan.cutoffDate,
+    tallyObservedAt: latestSnapshot?.source === "TALLY" ? latestSnapshot.sourceObservedAt : null,
+    tallySyncAvailable: process.env.TALLY_SYNC_ENABLED === "true" && isLive && plan.seasonMonth.calendarMonth === Number(indiaDay().slice(5, 7)) && plan.seasonMonth.calendarYear === Number(indiaDay().slice(0, 4)),
     dueValidation,
     lastRefresh,
     dealers: plan.dealers.map((d) => {

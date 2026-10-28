@@ -1678,18 +1678,21 @@ model RecoveryWeekPlan {
 /// change-tracking summary vs the previous snapshot is stored as small COUNTS only (not the
 /// aging data — those live in the normalised dealer/bill tables below).
 model AgingSnapshot {
-  id             String                @id @default(cuid())
-  recoveryPlanId String
-  weekNo         Int
-  cutoffDate     DateTime
-  workbookName   String
-  uploadedById   String
-  summary        String?
-  createdAt      DateTime              @default(now())
-  recoveryPlan   RecoveryPlan          @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
-  uploadedBy     User                  @relation("RecoveryUploads", fields: [uploadedById], references: [id])
-  bills          AgingSnapshotBill[]
-  dealers        AgingSnapshotDealer[]
+  id               String                @id @default(cuid())
+  recoveryPlanId   String
+  weekNo           Int
+  cutoffDate       DateTime
+  workbookName     String
+  uploadedById     String
+  summary          String?
+  source           String                @default("AGING_UPLOAD")
+  sourceObservedAt DateTime?
+  tallyJobId       String?
+  createdAt        DateTime              @default(now())
+  recoveryPlan     RecoveryPlan          @relation(fields: [recoveryPlanId], references: [id], onDelete: Cascade)
+  uploadedBy       User                  @relation("RecoveryUploads", fields: [uploadedById], references: [id])
+  bills            AgingSnapshotBill[]
+  dealers          AgingSnapshotDealer[]
 
   @@unique([recoveryPlanId, weekNo])
   @@index([recoveryPlanId])
@@ -2736,4 +2739,68 @@ model CnProcessingEvent {
   cnRequest   CnRequest @relation(fields: [cnRequestId], references: [id], onDelete: Cascade)
 
   @@index([cnRequestId, createdAt])
+}
+
+/// Outbound office connector. Raw credentials are never stored.
+model TallyConnection {
+  id                 String               @id @default(uuid())
+  companyName        String               @unique
+  anchorName         String
+  anchorGuid         String
+  credentialHash     String
+  authorizedById     String
+  enabled            Boolean              @default(true)
+  lastSeenAt         DateTime?
+  requestWindowAt    DateTime?
+  requestCount       Int                  @default(0)
+  lastAttemptAt      DateTime?
+  lastPublishedAt    DateTime?
+  refreshRequestedAt DateTime?
+  lastError          String?
+  jobs               TallySyncJob[]
+  bindings           TallyLedgerBinding[]
+  createdAt          DateTime             @default(now())
+}
+
+model TallySyncJob {
+  id             String           @id @default(uuid())
+  connectionId   String
+  connection     TallyConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  status         String           @default("RUNNING")
+  asOf           String
+  scopeHash      String
+  scope          Json
+  leaseHash      String
+  leaseExpiresAt DateTime
+  manifest       Json?
+  resultHash     String?
+  summary        Json?
+  error          String?
+  createdAt      DateTime         @default(now())
+  completedAt    DateTime?
+  chunks         TallySyncChunk[]
+
+  @@index([connectionId, status])
+}
+
+model TallySyncChunk {
+  id       String       @id @default(cuid())
+  jobId    String
+  job      TallySyncJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  sequence Int
+  hash     String
+  data     String
+
+  @@unique([jobId, sequence])
+}
+
+model TallyLedgerBinding {
+  id           String          @id @default(cuid())
+  connectionId String
+  connection   TallyConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  aliasKey     String
+  guid         String
+
+  @@unique([connectionId, aliasKey])
+  @@unique([connectionId, guid])
 }

@@ -1,3 +1,10 @@
+export interface ReadProgress {
+  stage: "report" | "ledgers" | "upload" | "publish";
+  checked: number;
+  total: number;
+  updatedAt: string;
+}
+
 export interface SyncProgress {
   configured: boolean;
   enabled?: boolean;
@@ -5,6 +12,8 @@ export interface SyncProgress {
   lastPublishedAt?: string | null;
   refreshRequestedAt?: string | null;
   job?: {
+    id?: string;
+    progress?: ReadProgress | null;
     status: string;
     createdAt: string;
     completedAt: string | null;
@@ -57,13 +66,31 @@ export function refreshProgress(
         "No recent contact from the office connector. Open it on the Tally computer; your refresh is queued.",
       busy: true,
     };
-  if (active)
-    return {
-      phase: "reading",
-      message:
-        "Office connector is reading and checking Tally. This page will update when it finishes.",
-      busy: true,
-    };
+  if (active) {
+    const progress = job.progress;
+    if (!progress)
+      return {
+        phase: "reserved",
+        message: "Waiting for the office connector to confirm this read.",
+        busy: true,
+      };
+    if (now - Date.parse(progress.updatedAt) > 90000)
+      return {
+        phase: "stalled",
+        message:
+          "No recent progress from this read. Keep the office connector open; an administrator can restart the refresh.",
+        busy: true,
+      };
+    const message =
+      progress.stage === "report"
+        ? "Reading Tally bill details."
+        : progress.stage === "ledgers"
+          ? `Checking dealer balances: ${progress.checked} of ${progress.total} aliases.`
+          : progress.stage === "upload"
+            ? "Sending the checked balances."
+            : "Saving the checked balances. This page will update when it finishes.";
+    return { phase: "reading", message, busy: true };
+  }
   if (pending)
     return {
       phase: "queued",
@@ -77,4 +104,13 @@ export function refreshProgress(
       : "No recent contact from the office connector.",
     busy: false,
   };
+}
+
+export function canRestartRefresh(job: SyncProgress["job"], now = Date.now()) {
+  return (
+    !!job?.id &&
+    job.status === "RUNNING" &&
+    now - Date.parse(job.createdAt) > 60000 &&
+    (!job.progress || now - Date.parse(job.progress.updatedAt) > 90000)
+  );
 }

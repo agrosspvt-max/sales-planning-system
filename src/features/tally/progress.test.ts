@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { refreshProgress, type SyncProgress } from "./progress";
+import { refreshProgress, canRestartRefresh, type SyncProgress } from "./progress";
 const now = Date.parse("2026-10-29T06:30:00Z");
 const request = "2026-10-29T06:29:00Z";
 const state = (): SyncProgress => ({
@@ -28,7 +28,25 @@ active.job = {
   completedAt: null,
   leaseExpiresAt: "2026-10-29T06:49:10Z",
 };
+active.job.id = "11111111-1111-4111-8111-111111111111";
+assert.equal(refreshProgress(active, request, now).phase, "reserved");
+assert.equal(canRestartRefresh(active.job, now), false);
+assert.equal(canRestartRefresh(active.job, now + 15000), true);
+active.job.progress = {
+  stage: "ledgers",
+  checked: 40,
+  total: 543,
+  updatedAt: "2026-10-29T06:29:55Z",
+};
 assert.equal(refreshProgress(active, request, now).phase, "reading");
+assert.match(refreshProgress(active, request, now).message, /40 of 543/);
+assert.equal(canRestartRefresh(active.job, now + 15000), false);
+assert.equal(refreshProgress(active, request, now + 91000).phase, "stalled");
+assert.equal(canRestartRefresh(active.job, now + 91000), true);
+for (const stage of ["report", "upload", "publish"] as const) {
+  active.job.progress.stage = stage;
+  assert.equal(refreshProgress(active, request, now).phase, "reading");
+}
 active.job = { ...active.job!, status: "COMPLETE", completedAt: "2026-10-29T06:29:58Z" };
 assert.equal(refreshProgress(active, request, now).phase, "completed");
 assert.equal(refreshProgress(active, request, now).busy, false);

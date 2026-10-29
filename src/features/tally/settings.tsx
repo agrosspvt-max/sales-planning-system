@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
-import { refreshProgress } from "./progress";
+import { refreshProgress, canRestartRefresh, type ReadProgress } from "./progress";
 const displayTime = (value?: string | null) =>
   value
     ? new Date(value).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
@@ -19,17 +19,20 @@ export function TallySettings() {
   const [access, setAccess] = useState<{ agentId: string; token: string } | null>(null);
   const q = useQuery<{
     configured: boolean;
+    connectionAddress?: string | null;
     enabled?: boolean;
     lastSeenAt?: string | null;
     lastPublishedAt?: string | null;
     lastError?: string | null;
     refreshRequestedAt?: string | null;
     job?: {
+      id: string;
       status: string;
       createdAt: string;
       completedAt: string | null;
       leaseExpiresAt: string;
       summary?: {
+        progress?: ReadProgress;
         updatedPlans?: number;
         updatedDealers?: number;
         held?: { name: string; reason: string }[];
@@ -40,7 +43,13 @@ export function TallySettings() {
   }>({
     queryKey: ["tally-status"],
     queryFn: () => api.get("/api/tally/status"),
-    refetchInterval: 30000,
+    refetchInterval: 5000,
+  });
+  const restart = useMutation({
+    mutationFn: () => api.post("/api/tally/restart", { jobId: q.data?.job?.id }),
+    onSuccess: () => {
+      void q.refetch();
+    },
   });
   const revoke = useMutation({
     mutationFn: () => api.del("/api/tally/setup"),
@@ -64,6 +73,7 @@ export function TallySettings() {
             ? {
                 ...q.data.job,
                 heldCount: q.data.job.summary?.held?.length ?? 0,
+                progress: q.data.job.summary?.progress,
               }
             : null,
         }
@@ -86,11 +96,35 @@ export function TallySettings() {
           </Button>
           <p>Last contact: {displayTime(q.data.lastSeenAt)}</p>
           <p role="status">{progress.message}</p>
+          {canRestartRefresh(
+            q.data.job
+              ? { ...q.data.job, heldCount: 0, progress: q.data.job.summary?.progress }
+              : null,
+          ) && (
+            <Button variant="outline" disabled={restart.isPending} onClick={() => restart.mutate()}>
+              Restart refresh
+            </Button>
+          )}
+          {restart.error && <p role="alert">{restart.error.message}</p>}
+          {q.data.connectionAddress && (
+            <label className="my-3 block">
+              Office connector website address
+              <input
+                className="block w-full rounded border bg-background p-2"
+                readOnly
+                value={q.data.connectionAddress}
+                onFocus={(event) => event.target.select()}
+              />
+              <span className="text-xs text-muted-foreground">
+                Use this address in the office connector to receive future test updates.
+              </span>
+            </label>
+          )}
           <p>
             Last published:{" "}
             {q.data.lastPublishedAt ? displayTime(q.data.lastPublishedAt) : "No data published yet"}
           </p>
-          {q.data.job?.summary && (
+          {q.data.job?.status === "COMPLETE" && q.data.job.summary && (
             <div className="space-y-1">
               <p>
                 {q.data.job.summary.updatedPlans ?? 0} plans ·{" "}
@@ -115,12 +149,12 @@ export function TallySettings() {
             {q.data.job?.status === "COMPLETE"
               ? "Completed"
               : q.data.job?.status === "RUNNING"
-                ? "Reading and checking Tally"
+                ? progress.message
                 : q.data.job?.status === "FAILED"
                   ? "Last update did not complete"
                   : "Waiting"}
           </p>
-          {q.data.lastError && (
+          {q.data.lastError && q.data.job?.status !== "RUNNING" && (
             <p role="alert">
               {q.data.lastError === "SOME_DEALERS_HELD_FOR_REVIEW"
                 ? "Some dealers kept their previous balances and need review."

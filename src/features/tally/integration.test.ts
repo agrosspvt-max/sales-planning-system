@@ -212,10 +212,11 @@ async function main() {
   const refresh1 = await svc.requestRefresh(),
     refresh2 = await svc.requestRefresh();
   assert.equal(refresh1.requestedAt, refresh2.requestedAt, "queued clicks must coalesce");
-  const claimed = (await svc.agent(req(), { action: "claim" })) as {
+  const claimRequestId = "11111111-1111-4111-8111-111111111111";
+  const claimed = (await svc.agent(req(), { action: "claim", requestId: claimRequestId })) as {
     job: { id: string; leaseToken: string; aliases: { name: string }[] };
   };
-  const job = claimed.job;
+  let job = claimed.job;
   assert.ok(job);
   assert.deepEqual(
     job.aliases.map((x) => x.name),
@@ -224,6 +225,78 @@ async function main() {
   assert.equal(
     JSON.stringify(await svc.agent(req(), { action: "claim" })),
     JSON.stringify({ job: null }),
+  );
+  const originalLease = job.leaseToken;
+  const originalExpiry = (await prisma.tallySyncJob.findUniqueOrThrow({ where: { id: job.id } }))
+    .leaseExpiresAt;
+  assert.equal(
+    JSON.stringify(
+      await svc.agent(req(), {
+        action: "claim",
+        requestId: "22222222-2222-4222-8222-222222222222",
+      }),
+    ),
+    JSON.stringify({ job: null }),
+    "another request cannot steal the active read",
+  );
+  const resumed = (await svc.agent(req(), {
+    action: "claim",
+    requestId: claimRequestId,
+  })) as typeof claimed;
+  assert.equal(resumed.job.id, job.id, "lost claim reply recovers the same job");
+  assert.notEqual(resumed.job.leaseToken, originalLease);
+  job = resumed.job;
+  assert.equal(
+    +(await prisma.tallySyncJob.findUniqueOrThrow({ where: { id: job.id } })).leaseExpiresAt,
+    +originalExpiry,
+    "resume cannot extend lease",
+  );
+  await assert.rejects(
+    () =>
+      svc.agent(req(), {
+        action: "heartbeat",
+        jobId: job.id,
+        leaseToken: originalLease,
+        stage: "ledgers",
+        checked: 0,
+        total: 4,
+      }),
+    (e) => (e as ApiError).status === 409,
+  );
+  await assert.rejects(
+    () =>
+      svc.agent(req(), {
+        action: "heartbeat",
+        jobId: job.id,
+        leaseToken: job.leaseToken,
+        stage: "ledgers",
+        checked: 0,
+        total: 3,
+      }),
+    (e) => (e as ApiError).status === 422,
+  );
+  await svc.agent(req(), {
+    action: "heartbeat",
+    jobId: job.id,
+    leaseToken: job.leaseToken,
+    stage: "ledgers",
+    checked: 2,
+    total: 4,
+  });
+  assert.equal((await svc.syncProgress()).job?.progress?.checked, 2);
+  assert.equal(
+    await prisma.agingSnapshot.count(),
+    snapshotsBeforeContact,
+    "progress cannot publish amounts",
+  );
+  await assert.rejects(
+    () => svc.restartRefresh({ ...actor, role: db.Role.SALES_OFFICER }, job.id),
+    (e) => (e as ApiError).status === 403,
+  );
+  await assert.rejects(
+    () => svc.restartRefresh(actor, job.id),
+    (e) => (e as ApiError).status === 409,
+    "active progress cannot be restarted",
   );
   const body = JSON.stringify({
     version: "billwise.sync.v1",
@@ -260,6 +333,12 @@ async function main() {
     sha256: pure.digest(body),
   };
   await svc.agent(req(), { action: "begin", ...ids, manifest });
+  await assert.rejects(
+    () => svc.agent(req(), { action: "claim", requestId: claimRequestId }),
+    (e) => (e as ApiError).status === 409,
+    "staged upload must be replayed instead of rotating its lease",
+  );
+
   await svc.agent(req(), { action: "begin", ...ids, manifest });
   await svc.agent(req(), {
     action: "chunk",
@@ -449,7 +528,7 @@ config=c.load_config(os.path.join(os.environ['TALLY_CONNECTOR_TEST_ROOT'],'confi
 config.update(tallyUrl=os.environ['TALLY_MOCK_ORIGIN'],cloudUrl=os.environ['TALLY_MOCK_CLOUD'],agentId=os.environ['TALLY_TEST_AGENT'],stateDir=os.environ['TALLY_TEST_STATE'])
 context=ssl.create_default_context(cafile=os.environ['TALLY_TEST_CA'])
 cloud=c.Cloud(config,token_reader=lambda:os.environ['TALLY_TEST_TOKEN'],tls_context=context)
-worker=BillWorker(config,cloud=cloud,protect=lambda x:b'TEST'+x,unprotect=lambda x:x[4:])
+worker=BillWorker(config,cloud=cloud,protect=lambda x:b'TEST'+x,unprotect=lambda x:x[4:],keepalive=True,recover_claim=True)
 assert worker.tick()
 print('Python -> verified HTTPS -> atomic PostgreSQL publication passed')
 `;
@@ -495,6 +574,46 @@ print('Python -> verified HTTPS -> atomic PostgreSQL publication passed')
     ]);
     rmSync(certdir, { recursive: true, force: true });
   }
+  const snapshotsBeforeRestart = await prisma.agingSnapshot.count();
+  assert.equal(
+    JSON.stringify(await svc.agent(req(), { action: "claim", requestId: claimRequestId })),
+    JSON.stringify({ job: null }),
+    "completed request replay cannot create a new job",
+  );
+  await svc.requestRefresh();
+  const abandoned = ((await svc.agent(req(), { action: "claim" })) as typeof claimed).job;
+  await prisma.tallySyncJob.update({
+    where: { id: abandoned.id },
+    data: { createdAt: new Date(Date.now() - 120000) },
+  });
+  const cancelled = { jobId: abandoned.id, leaseToken: abandoned.leaseToken };
+  await svc.restartRefresh(actor, abandoned.id);
+  assert.equal(
+    (await prisma.tallySyncJob.findUniqueOrThrow({ where: { id: abandoned.id } })).error,
+    "RESTARTED_BY_ADMIN",
+  );
+  assert.equal(
+    await prisma.agingSnapshot.count(),
+    snapshotsBeforeRestart,
+    "restart must preserve all published snapshots",
+  );
+  await assert.rejects(
+    () => svc.agent(req(), { action: "begin", ...cancelled, manifest }),
+    (e) => (e as ApiError).status === 409,
+    "cancelled read cannot publish",
+  );
+  await assert.rejects(
+    () => svc.restartRefresh(actor, abandoned.id),
+    (e) => (e as ApiError).status === 409,
+  );
+  const replacement = ((await svc.agent(req(), { action: "claim" })) as typeof claimed).job;
+  assert.notEqual(replacement.id, abandoned.id);
+  await svc.agent(req(), {
+    action: "fail",
+    jobId: replacement.id,
+    leaseToken: replacement.leaseToken,
+    code: "SYNTHETIC_TEST_COMPLETE",
+  });
   await prisma.tallyConnection.update({
     where: { id: access.agentId },
     data: { requestWindowAt: new Date(), requestCount: 300 },

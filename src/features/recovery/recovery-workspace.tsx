@@ -3,7 +3,7 @@ import { AutosaveStatus } from "@/features/planning/autosave-status";
 import { applySavedMonth, applySavedWeek } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { formatDMY } from "@/lib/date-format";
-import { refreshProgress, type SyncProgress } from "@/features/tally/progress";
+import { refreshProgress, canRestartRefresh, type SyncProgress } from "@/features/tally/progress";
 import { TallyChangeHistory } from "@/features/tally/change-history";
 
 
@@ -282,6 +282,10 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
     mutationFn: () => api.post<{ queued: boolean; requestedAt: string }>("/api/tally/refresh", {planId:id}),
     onSuccess: (result) => { setRequestedAt(result.requestedAt); void refetch(); },
   });
+  const restart = useMutation({
+    mutationFn: () => api.post<{ requestedAt: string }>("/api/tally/restart", { jobId: data?.tallySync?.job?.id }),
+    onSuccess: (result) => { setRequestedAt(result.requestedAt); void refetch(); },
+  });
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
   const sync = refreshProgress(data.tallySync, requestedAt);
 
@@ -338,9 +342,11 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
         {data.tallySyncAvailable && <div className="flex flex-wrap items-center gap-3 text-sm">
           <Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw className="mr-2 h-4 w-4"/>Refresh from Tally</Button>
           <TallyChangeHistory planId={id} />
+          {role === Role.SUPER_ADMIN && canRestartRefresh(data.tallySync?.job) &&
+            <Button variant="outline" disabled={restart.isPending} onClick={() => restart.mutate()}>Restart refresh</Button>}
           <span className="text-muted-foreground">{data.tallyObservedAt ? `Tally data read ${new Date(data.tallyObservedAt).toLocaleString("en-IN", {timeZone:"Asia/Kolkata"})}` : "Waiting for the first verified Tally update"}</span>
           <span role="status" aria-live="polite">{sync.message}</span>
-          {refresh.error && <span role="alert">{refresh.error.message}</span>}
+          {(refresh.error || restart.error) && <span role="alert">{(refresh.error || restart.error)?.message}</span>}
         </div>}
         <GuidancePanel data={data} />
 

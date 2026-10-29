@@ -73,7 +73,11 @@ export function sameOrigin(req: Request) {
     throw new ApiError(403, "Same-origin request required");
 }
 const payloadScope = z
-  .object({ aliases: z.array(scopeAliasSchema).max(1000), planIds: z.array(z.string()).max(1000) })
+  .object({
+    aliases: z.array(scopeAliasSchema).max(1000),
+    planIds: z.array(z.string()).max(1000),
+    claimRequestId: z.string().uuid().optional(),
+  })
   .strict();
 type Tx = Prisma.TransactionClient;
 async function currentScope(db: Tx, connectionId: string, asOf: string) {
@@ -192,6 +196,7 @@ export async function status() {
     where: { connectionId: c.id },
     orderBy: { createdAt: "desc" },
     select: {
+      id: true,
       status: true,
       createdAt: true,
       completedAt: true,
@@ -200,7 +205,12 @@ export async function status() {
       summary: true,
     },
   });
-  return { configured: true, ...c, job };
+  const branch = process.env.VERCEL_BRANCH_URL;
+  const connectionAddress =
+    process.env.VERCEL_ENV === "preview" && branch && /^[a-z0-9.-]+\.vercel\.app$/i.test(branch)
+      ? "https://" + branch
+      : null;
+  return { configured: true, ...c, job, connectionAddress };
 }
 export async function syncProgress(): Promise<import("./progress").SyncProgress> {
   try {
@@ -219,6 +229,7 @@ export async function syncProgress(): Promise<import("./progress").SyncProgress>
         orderBy: { createdAt: "desc" },
         take: 1,
         select: {
+          id: true,
           status: true,
           createdAt: true,
           completedAt: true,
@@ -239,11 +250,13 @@ export async function syncProgress(): Promise<import("./progress").SyncProgress>
     refreshRequestedAt: c.refreshRequestedAt?.toISOString() ?? null,
     job: job
       ? {
+          id: job.id,
           status: job.status,
           createdAt: job.createdAt.toISOString(),
           completedAt: job.completedAt?.toISOString() ?? null,
           leaseExpiresAt: job.leaseExpiresAt.toISOString(),
           heldCount: Array.isArray(summary?.held) ? summary.held.length : 0,
+          progress: jobProgress(job.summary),
         }
       : null,
   };
@@ -266,6 +279,81 @@ export async function requestRefresh() {
     return { queued: true, requestedAt: requestedAt.toISOString() };
   });
 }
+export async function restartRefresh(ctx: AuthContext, jobId: string) {
+  assertEnabled();
+  assertSuper(ctx);
+  return prisma.$transaction(
+    async (tx) => {
+      const job = await tx.tallySyncJob.findUnique({ where: { id: jobId } });
+      if (!job) throw new ApiError(404, "Refresh was not found");
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${job.connectionId}))`;
+      const current = await tx.tallySyncJob.findUniqueOrThrow({ where: { id: jobId } });
+      const connection = await tx.tallyConnection.findUnique({ where: { id: job.connectionId } });
+      if (!connection?.enabled || current.status !== "RUNNING")
+        throw new ApiError(409, "That read has already ended. Refresh the page to see its result.");
+      const requestedAt = new Date();
+      const progress = jobProgress(current.summary);
+      if (
+        +requestedAt - +current.createdAt <= 60000 ||
+        (progress && +requestedAt - Date.parse(progress.updatedAt) <= 90000)
+      )
+        throw new ApiError(
+          409,
+          "The office connector is making progress. Wait for this read to finish.",
+        );
+      await tx.tallySyncJob.update({
+        where: { id: jobId },
+        data: { status: "FAILED", error: "RESTARTED_BY_ADMIN" },
+      });
+      await tx.tallyConnection.update({
+        where: { id: job.connectionId },
+        data: { refreshRequestedAt: requestedAt },
+      });
+      await writeAudit(
+        {
+          userId: ctx.userId,
+          action: "UPDATE",
+          entity: "TallySyncJob",
+          entityId: jobId,
+          summary: "Abandoned read cancelled; fresh read requested. Published balances preserved.",
+        },
+        tx,
+      );
+      return { queued: true, requestedAt: requestedAt.toISOString() };
+    },
+    { timeout: 15000, maxWait: 10000 },
+  );
+}
+const progressSchema = z.object({
+  stage: z.enum(["report", "ledgers", "upload", "publish"]),
+  checked: z.number().int().min(0).max(1000),
+  total: z.number().int().min(1).max(1000),
+  updatedAt: z.string().datetime(),
+});
+function jobProgress(summary: Prisma.JsonValue | null) {
+  const raw =
+    summary && typeof summary === "object" && !Array.isArray(summary) ? summary.progress : null;
+  const parsed = progressSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+const leasedJob = (
+  c: { companyName: string; anchorName: string; anchorGuid: string },
+  id: string,
+  leaseToken: string,
+  asOf: string,
+  aliases: z.infer<typeof scopeAliasSchema>[],
+) => ({
+  job: {
+    id,
+    leaseToken,
+    operation: "billwise.sync.v1",
+    companyName: c.companyName,
+    asOf,
+    anchorName: c.anchorName,
+    anchorGuid: c.anchorGuid,
+    aliases,
+  },
+});
 // Call only after the route has authorized access to this Recovery plan.
 export async function outstandingHistory(planId: string): Promise<OutstandingHistory> {
   assertEnabled();
@@ -311,8 +399,17 @@ export async function outstandingHistory(planId: string): Promise<OutstandingHis
 const identity = { jobId: z.string().uuid(), leaseToken: z.string().min(40).max(100) };
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const schema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("heartbeat") }).strict(),
-  z.object({ action: z.literal("claim") }).strict(),
+  z
+    .object({
+      action: z.literal("heartbeat"),
+      jobId: z.string().uuid().optional(),
+      leaseToken: z.string().min(40).max(100).optional(),
+      stage: z.enum(["report", "ledgers", "upload", "publish"]).optional(),
+      checked: z.number().int().min(0).max(1000).optional(),
+      total: z.number().int().min(1).max(1000).optional(),
+    })
+    .strict(),
+  z.object({ action: z.literal("claim"), requestId: z.string().uuid().optional() }).strict(),
   z
     .object({
       action: z.literal("begin"),
@@ -377,7 +474,50 @@ export async function agent(req: Request, raw: unknown) {
           throw new ApiError(403, "Connector authorization revoked");
         const now = new Date();
         await tx.tallyConnection.update({ where: { id: c.id }, data: { lastSeenAt: now } });
-        if (input.action === "heartbeat") return { ok: true };
+        if (input.action === "heartbeat") {
+          const hasProgress = [
+            input.jobId,
+            input.leaseToken,
+            input.stage,
+            input.checked,
+            input.total,
+          ].some((x) => x !== undefined);
+          if (!hasProgress) return { ok: true };
+          if (
+            !input.jobId ||
+            !input.leaseToken ||
+            !input.stage ||
+            input.checked === undefined ||
+            input.total === undefined ||
+            input.checked > input.total
+          )
+            throw new ApiError(400, "Incomplete read progress");
+          const job = await tx.tallySyncJob.findUnique({ where: { id: input.jobId } });
+          if (
+            !job ||
+            job.connectionId !== c.id ||
+            job.status !== "RUNNING" ||
+            job.leaseExpiresAt <= now ||
+            !timingSafeEqual(Buffer.from(job.leaseHash), Buffer.from(tokenHash(input.leaseToken)))
+          )
+            throw new ApiError(409, "Read attempt is no longer active");
+          if (payloadScope.parse(job.scope).aliases.length !== input.total)
+            throw new ApiError(422, "Progress scope does not match");
+          await tx.tallySyncJob.update({
+            where: { id: job.id },
+            data: {
+              summary: {
+                progress: {
+                  stage: input.stage,
+                  checked: input.checked,
+                  total: input.total,
+                  updatedAt: now.toISOString(),
+                },
+              },
+            },
+          });
+          return { ok: true };
+        }
         if (input.action === "claim") {
           await tx.tallySyncJob.updateMany({
             where: { connectionId: c.id, status: "RUNNING", leaseExpiresAt: { lte: now } },
@@ -395,6 +535,42 @@ export async function agent(req: Request, raw: unknown) {
           const running = await tx.tallySyncJob.findFirst({
             where: { connectionId: c.id, status: "RUNNING" },
           });
+          if (input.requestId) {
+            const prior = await tx.tallySyncJob.findFirst({
+              where: {
+                connectionId: c.id,
+                scope: { path: ["claimRequestId"], equals: input.requestId },
+              },
+              orderBy: { createdAt: "desc" },
+            });
+            if (prior) {
+              if (prior.status !== "RUNNING") return { job: null };
+              if (prior.manifest)
+                throw new ApiError(409, "Replay the saved upload before claiming again");
+              const scope = payloadScope.parse(prior.scope),
+                current = await currentScope(tx, c.id, prior.asOf);
+              if (
+                scopeHash(current.aliases, current.planIds) !== prior.scopeHash ||
+                prior.asOf !== indiaDay(now)
+              ) {
+                await tx.tallySyncJob.update({
+                  where: { id: prior.id },
+                  data: { status: "FAILED", error: "SCOPE_CHANGED_BEFORE_RESUME" },
+                });
+                await tx.tallyConnection.update({
+                  where: { id: c.id },
+                  data: { refreshRequestedAt: now },
+                });
+                return { job: null };
+              }
+              const lease = nonce();
+              await tx.tallySyncJob.update({
+                where: { id: prior.id },
+                data: { leaseHash: tokenHash(lease), summary: Prisma.JsonNull },
+              });
+              return leasedJob(c, prior.id, lease, prior.asOf, scope.aliases);
+            }
+          }
           if (running) return { job: null };
           const due =
             !c.lastAttemptAt ||
@@ -422,23 +598,12 @@ export async function agent(req: Request, raw: unknown) {
               connectionId: c.id,
               asOf,
               scopeHash: scopeHash(scope.aliases, scope.planIds),
-              scope,
+              scope: { ...scope, ...(input.requestId ? { claimRequestId: input.requestId } : {}) },
               leaseHash: tokenHash(lease),
               leaseExpiresAt: new Date(+now + 20 * 60000),
             },
           });
-          return {
-            job: {
-              id: job.id,
-              leaseToken: lease,
-              operation: "billwise.sync.v1",
-              companyName: c.companyName,
-              asOf,
-              anchorName: c.anchorName,
-              anchorGuid: c.anchorGuid,
-              aliases: scope.aliases,
-            },
-          };
+          return leasedJob(c, job.id, lease, asOf, scope.aliases);
         }
         const job = await tx.tallySyncJob.findUnique({ where: { id: input.jobId } });
         if (

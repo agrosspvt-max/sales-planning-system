@@ -4,6 +4,7 @@ import { applySavedMonth, applySavedWeek } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { formatDMY } from "@/lib/date-format";
 import { refreshProgress, type SyncProgress } from "@/features/tally/progress";
+import { TallyChangeHistory } from "@/features/tally/change-history";
 
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
@@ -336,6 +337,7 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
 
         {data.tallySyncAvailable && <div className="flex flex-wrap items-center gap-3 text-sm">
           <Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw className="mr-2 h-4 w-4"/>Refresh from Tally</Button>
+          <TallyChangeHistory planId={id} />
           <span className="text-muted-foreground">{data.tallyObservedAt ? `Tally data read ${new Date(data.tallyObservedAt).toLocaleString("en-IN", {timeZone:"Asia/Kolkata"})}` : "Waiting for the first verified Tally update"}</span>
           <span role="status" aria-live="polite">{sync.message}</span>
           {refresh.error && <span role="alert">{refresh.error.message}</span>}

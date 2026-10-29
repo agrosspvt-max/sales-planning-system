@@ -5,6 +5,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { writeAudit } from "@/lib/audit";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { outstandingChanges, savedOutstandingChanges, type OutstandingHistory } from "./changes";
 import {
   digest,
   indiaDay,
@@ -264,6 +265,48 @@ export async function requestRefresh() {
       });
     return { queued: true, requestedAt: requestedAt.toISOString() };
   });
+}
+// Call only after the route has authorized access to this Recovery plan.
+export async function outstandingHistory(planId: string): Promise<OutstandingHistory> {
+  assertEnabled();
+  const [latest, snapshots] = await Promise.all([
+    prisma.agingSnapshot.findFirst({
+      where: { recoveryPlanId: planId, source: "TALLY" },
+      orderBy: { weekNo: "desc" },
+      select: { summary: true, createdAt: true, sourceObservedAt: true },
+    }),
+    prisma.agingSnapshot.findMany({
+      where: {
+        recoveryPlanId: planId,
+        source: "TALLY",
+        summary: { contains: '"outstandingChanges":[{' },
+      },
+      orderBy: { weekNo: "desc" },
+      take: 50,
+      select: { id: true, summary: true, createdAt: true, sourceObservedAt: true },
+    }),
+  ]);
+  const latestChanges = latest ? savedOutstandingChanges(latest.summary) : null;
+  return {
+    limit: 50,
+    latestRefresh: latest
+      ? {
+          observedAt: latest.sourceObservedAt?.toISOString() ?? null,
+          publishedAt: latest.createdAt.toISOString(),
+          changedCount: latestChanges?.recorded ? latestChanges.changes.length : null,
+        }
+      : null,
+    records: snapshots
+      .flatMap((snapshot) =>
+        savedOutstandingChanges(snapshot.summary).changes.map((row) => ({
+          ...row,
+          id: snapshot.id + ":" + row.dealerId,
+          observedAt: snapshot.sourceObservedAt?.toISOString() ?? null,
+          publishedAt: snapshot.createdAt.toISOString(),
+        })),
+      )
+      .slice(0, 50),
+  };
 }
 const identity = { jobId: z.string().uuid(), leaseToken: z.string().min(40).max(100) };
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -549,6 +592,7 @@ export async function agent(req: Request, raw: unknown) {
             newDealers: 0,
             removedDealers: plan.dealers.length - rows.length,
             outstandingDelta: Number(decimal(delta)),
+            outstandingChanges: outstandingChanges(rows, previous),
           };
           const snapshot = await tx.agingSnapshot.create({
             data: {

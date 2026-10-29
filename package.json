@@ -56,7 +56,7 @@
     "test:cn-processing:db": "node --import tsx src/features/cn-requests/cn-review.integration.ts",
     "test:cn-processing": "node --import tsx src/features/cn-requests/cn-review.test.tsx",
     "test:approvals": "node --import tsx src/features/planning/approvals-inbox.test.tsx",
-    "test:tally": "node --import tsx src/features/tally/billwise.test.ts && node --import tsx src/features/tally/progress.test.ts",
+    "test:tally": "node --import tsx src/features/tally/billwise.test.ts && node --import tsx src/features/tally/progress.test.ts && node --import tsx src/features/tally/changes.test.ts",
     "test:tally:db": "node --import tsx src/features/tally/integration.test.ts"
   },
   "prisma": {

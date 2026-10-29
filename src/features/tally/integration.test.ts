@@ -13,6 +13,7 @@ import ts from "typescript";
 import * as db from "@prisma/client";
 import { z } from "zod";
 import * as pure from "./billwise";
+import * as changes from "./changes";
 const url = process.env.TALLY_DISPOSABLE_TEST_URL;
 if (
   !url ||
@@ -46,6 +47,7 @@ function load<T>(file: string): T {
     "@/lib/prisma": { prisma },
     "@/lib/http": { ApiError },
     "./billwise": pure,
+    "./changes": changes,
     "@/lib/audit": {
       writeAudit: async (data: unknown, tx: db.Prisma.TransactionClient) =>
         tx.auditLog.create({ data: data as db.Prisma.AuditLogCreateInput }),
@@ -275,6 +277,11 @@ async function main() {
     before,
     "partial upload changed a balance",
   );
+  assert.equal(
+    (await svc.outstandingHistory("current")).records.length,
+    0,
+    "partial upload cannot create change history",
+  );
   for (let sequence = 0; sequence < chunks.length; sequence++)
     await svc.agent(req(), {
       action: "chunk",
@@ -320,6 +327,18 @@ async function main() {
   };
   assert.equal(publishedSummary.zeroedUnavailable.length, 1);
   assert.equal(publishedSummary.creditAdvances.length, 1);
+  const firstHistory = await svc.outstandingHistory("current");
+  assert.equal(firstHistory.latestRefresh?.changedCount, 4);
+  assert.equal(firstHistory.records.length, 4);
+  assert.equal(firstHistory.records.find((x) => x.dealerId === "a")?.before, "100.00");
+  assert.equal(firstHistory.records.find((x) => x.dealerId === "a")?.after, "50.00");
+  assert.equal(firstHistory.records.find((x) => x.dealerId === "credit")?.after, "-5000.00");
+  assert.equal(firstHistory.records.find((x) => x.dealerId === "c")?.reason, "UNAVAILABLE_ZERO");
+  assert.equal(
+    (await svc.outstandingHistory("historical")).records.length,
+    0,
+    "another plan's history must not leak",
+  );
   await svc.agent(req(), { action: "begin", ...ids, manifest });
   await svc.agent(req(), {
     action: "chunk",
@@ -332,6 +351,11 @@ async function main() {
   assert.equal(JSON.stringify(replay), JSON.stringify({ ok: true, duplicate: true }));
   assert.equal(await prisma.agingSnapshot.count(), 1);
   assert.equal(await prisma.tallySyncChunk.count(), 0, "committed staging data not removed");
+  assert.deepEqual(
+    (await svc.outstandingHistory("current")).records,
+    firstHistory.records,
+    "replayed completion cannot duplicate change records",
+  );
   // Exercise the actual Python cloud transport against HTTPS + this database service.
   const certdir = mkdtempSync(join(tmpdir(), "tally-http-test-"));
   const openssl = spawnSync(
@@ -453,6 +477,17 @@ print('Python -> verified HTTPS -> atomic PostgreSQL publication passed')
     });
     assert.equal(await prisma.agingSnapshot.count(), 2);
     assert.equal(await prisma.tallySyncChunk.count(), 0);
+    const unchangedHistory = await svc.outstandingHistory("current");
+    assert.equal(
+      unchangedHistory.latestRefresh?.changedCount,
+      0,
+      "an unchanged refresh must report no outstanding changes",
+    );
+    assert.deepEqual(
+      unchangedHistory.records,
+      firstHistory.records,
+      "unchanged refresh cannot add change entries",
+    );
   } finally {
     await Promise.all([
       new Promise<void>((r) => http.close(() => r())),

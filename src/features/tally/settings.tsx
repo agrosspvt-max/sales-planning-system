@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { refreshProgress } from "./progress";
 const displayTime = (value?: string | null) =>
   value
     ? new Date(value).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
@@ -11,6 +12,7 @@ const reasons: Record<string, string> = {
   LEDGER_UNAVAILABLE: "Ledger could not be read",
   BILLS_LEDGER_MISMATCH: "Bills and ledger balance differ",
   MULTIPLE_LIVE_LEDGERS_FOR_DEALER: "More than one ledger maps to this dealer",
+  NEGATIVE_RECOVERY_BUCKET: "Bill credits need reconciliation before recovery buckets can update",
 };
 const reasonText = (code: string) => reasons[code] ?? "Needs review";
 export function TallySettings() {
@@ -21,12 +23,18 @@ export function TallySettings() {
     lastSeenAt?: string | null;
     lastPublishedAt?: string | null;
     lastError?: string | null;
+    refreshRequestedAt?: string | null;
     job?: {
       status: string;
+      createdAt: string;
+      completedAt: string | null;
+      leaseExpiresAt: string;
       summary?: {
         updatedPlans?: number;
         updatedDealers?: number;
         held?: { name: string; reason: string }[];
+        zeroedUnavailable?: { name: string; dealerId: string }[];
+        creditAdvances?: { name: string; dealerId: string }[];
       };
     } | null;
   }>({
@@ -48,6 +56,20 @@ export function TallySettings() {
       q.refetch();
     },
   });
+  const progress = refreshProgress(
+    q.data
+      ? {
+          ...q.data,
+          job: q.data.job
+            ? {
+                ...q.data.job,
+                heldCount: q.data.job.summary?.held?.length ?? 0,
+              }
+            : null,
+        }
+      : null,
+    q.data?.refreshRequestedAt,
+  );
   return (
     <div className="max-w-2xl space-y-4">
       <h1 className="text-xl font-semibold">Tally connection</h1>
@@ -63,10 +85,31 @@ export function TallySettings() {
             Disable connection
           </Button>
           <p>Last contact: {displayTime(q.data.lastSeenAt)}</p>
+          <p role="status">{progress.message}</p>
           <p>
             Last published:{" "}
             {q.data.lastPublishedAt ? displayTime(q.data.lastPublishedAt) : "No data published yet"}
           </p>
+          {q.data.job?.summary && (
+            <div className="space-y-1">
+              <p>
+                {q.data.job.summary.updatedPlans ?? 0} plans ·{" "}
+                {q.data.job.summary.updatedDealers ?? 0} dealer rows updated.
+              </p>
+              {!!q.data.job.summary.creditAdvances?.length && (
+                <p className="text-success">
+                  {q.data.job.summary.creditAdvances.length} credit / advance balances; recovery
+                  buckets set to zero.
+                </p>
+              )}
+              {!!q.data.job.summary.zeroedUnavailable?.length && (
+                <p>
+                  {q.data.job.summary.zeroedUnavailable.length} unavailable dealer entries set to
+                  zero under your Recovery rule.
+                </p>
+              )}
+            </div>
+          )}
           <p>
             Sync:{" "}
             {q.data.job?.status === "COMPLETE"
@@ -114,8 +157,8 @@ export function TallySettings() {
       {access && (
         <div className="space-y-2 rounded border p-4">
           <p>
-            This access key is shown once. Enter it only in the office connector&apos;s hidden credential
-            prompt.
+            This access key is shown once. Enter it only in the office connector&apos;s hidden
+            credential prompt.
           </p>
           <label className="block">
             Connector ID

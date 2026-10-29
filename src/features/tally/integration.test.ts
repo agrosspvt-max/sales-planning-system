@@ -115,7 +115,7 @@ async function main() {
       },
     ],
   });
-  for (const id of ["a", "b", "c", "d", "outside", "inactive"])
+  for (const id of ["a", "b", "c", "d", "credit", "outside", "inactive"])
     await prisma.dealer.create({
       data: { id, name: "Synthetic " + id, isActive: id !== "inactive" },
     });
@@ -139,7 +139,7 @@ async function main() {
       },
     ],
   });
-  for (const dealerId of ["a", "b", "c", "d", "inactive"])
+  for (const dealerId of ["a", "b", "c", "d", "credit", "inactive"])
     await prisma.recoveryPlanDealer.create({
       data: {
         recoveryPlanId: "current",
@@ -172,6 +172,7 @@ async function main() {
     ["a", "Dealer A"],
     ["b", "Dealer B"],
     ["c", "Dealer C"],
+    ["credit", "Credit Dealer"],
     ["outside", "Outside"],
     ["inactive", "Inactive"],
   ])
@@ -196,6 +197,19 @@ async function main() {
     () => svc.agent(req("x".repeat(43)), { action: "claim" }),
     (e) => (e as ApiError).status === 401,
   );
+  const snapshotsBeforeContact = await prisma.agingSnapshot.count();
+  assert.equal(
+    JSON.stringify(await svc.agent(req(), { action: "heartbeat" })),
+    JSON.stringify({ ok: true }),
+  );
+  assert.equal(
+    await prisma.agingSnapshot.count(),
+    snapshotsBeforeContact,
+    "contact cannot publish balances",
+  );
+  const refresh1 = await svc.requestRefresh(),
+    refresh2 = await svc.requestRefresh();
+  assert.equal(refresh1.requestedAt, refresh2.requestedAt, "queued clicks must coalesce");
   const claimed = (await svc.agent(req(), { action: "claim" })) as {
     job: { id: string; leaseToken: string; aliases: { name: string }[] };
   };
@@ -203,7 +217,7 @@ async function main() {
   assert.ok(job);
   assert.deepEqual(
     job.aliases.map((x) => x.name),
-    ["Dealer A", "Dealer B", "Dealer C"],
+    ["Credit Dealer", "Dealer A", "Dealer B", "Dealer C"],
   );
   assert.equal(
     JSON.stringify(await svc.agent(req(), { action: "claim" })),
@@ -223,6 +237,7 @@ async function main() {
     ledgers: [
       { name: "Dealer A", guid: anchor.slice(0, 36) + "-00000001", closingBalance: "-50.00" },
       { name: "Dealer B", guid: anchor.slice(0, 36) + "-00000002", closingBalance: "0.00" },
+      { name: "Credit Dealer", guid: anchor.slice(0, 36) + "-00000003", closingBalance: "5000.00" },
     ],
     unavailableNames: ["Dealer C"],
     bills: [
@@ -272,9 +287,16 @@ async function main() {
   const after = await prisma.recoveryPlanDealer.findMany({ orderBy: { dealerId: "asc" } });
   for (const old of before) {
     const v = after.find((x) => x.id === old.id)!;
-    const changed = old.recoveryPlanId === "current" && ["a", "b"].includes(old.dealerId);
+    const changed =
+      old.recoveryPlanId === "current" && ["a", "b", "c", "credit"].includes(old.dealerId);
     if (changed) {
-      assert.equal(v.outstanding.toFixed(2), old.dealerId === "a" ? "50.00" : "0.00");
+      assert.equal(
+        v.outstanding.toFixed(2),
+        old.dealerId === "a" ? "50.00" : old.dealerId === "credit" ? "-5000.00" : "0.00",
+      );
+      if (old.dealerId !== "a")
+        for (const name of ["overdue", "due", "running"] as const)
+          assert.equal(v[name].toFixed(2), "0.00");
       for (const k of ["outstanding", "overdue", "due", "running"] as const) {
         v[k] = old[k];
       }
@@ -290,7 +312,14 @@ async function main() {
   assert.deepEqual(await prisma.recoveryWeekLock.findMany(), beforeLocks);
   assert.equal(await prisma.agingSnapshot.count(), 1);
   assert.equal(await prisma.agingSnapshotBill.count(), 1);
-  assert.equal(await prisma.tallyLedgerBinding.count(), 2);
+  assert.equal(await prisma.tallyLedgerBinding.count(), 3);
+  const published = await prisma.tallySyncJob.findUniqueOrThrow({ where: { id: job.id } });
+  const publishedSummary = published.summary as {
+    zeroedUnavailable: unknown[];
+    creditAdvances: unknown[];
+  };
+  assert.equal(publishedSummary.zeroedUnavailable.length, 1);
+  assert.equal(publishedSummary.creditAdvances.length, 1);
   await svc.agent(req(), { action: "begin", ...ids, manifest });
   await svc.agent(req(), {
     action: "chunk",
@@ -341,8 +370,17 @@ async function main() {
           ? anchor.slice(0, 36) + "-00000001"
           : name === "Dealer B"
             ? anchor.slice(0, 36) + "-00000002"
-            : anchor;
-      const amount = name === "Dealer A" ? "-50.00" : name === "Dealer B" ? "0.00" : "-100.00";
+            : name === "Credit Dealer"
+              ? anchor.slice(0, 36) + "-00000003"
+              : anchor;
+      const amount =
+        name === "Dealer A"
+          ? "-50.00"
+          : name === "Dealer B"
+            ? "0.00"
+            : name === "Credit Dealer"
+              ? "5000.00"
+              : "-100.00";
       response =
         name === "Dealer C"
           ? "<ENVELOPE><HEADER><STATUS>0</STATUS></HEADER></ENVELOPE>"

@@ -190,25 +190,85 @@ export async function status() {
   const job = await prisma.tallySyncJob.findFirst({
     where: { connectionId: c.id },
     orderBy: { createdAt: "desc" },
-    select: { status: true, completedAt: true, error: true, summary: true },
+    select: {
+      status: true,
+      createdAt: true,
+      completedAt: true,
+      leaseExpiresAt: true,
+      error: true,
+      summary: true,
+    },
   });
   return { configured: true, ...c, job };
+}
+export async function syncProgress(): Promise<import("./progress").SyncProgress> {
+  try {
+    assertEnabled();
+  } catch {
+    return { configured: false };
+  }
+  const c = await prisma.tallyConnection.findFirst({
+    orderBy: { createdAt: "desc" },
+    select: {
+      enabled: true,
+      lastSeenAt: true,
+      lastPublishedAt: true,
+      refreshRequestedAt: true,
+      jobs: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: {
+          status: true,
+          createdAt: true,
+          completedAt: true,
+          leaseExpiresAt: true,
+          summary: true,
+        },
+      },
+    },
+  });
+  if (!c) return { configured: false };
+  const job = c.jobs[0];
+  const summary = job?.summary as { held?: unknown[] } | null;
+  return {
+    configured: true,
+    enabled: c.enabled,
+    lastSeenAt: c.lastSeenAt?.toISOString() ?? null,
+    lastPublishedAt: c.lastPublishedAt?.toISOString() ?? null,
+    refreshRequestedAt: c.refreshRequestedAt?.toISOString() ?? null,
+    job: job
+      ? {
+          status: job.status,
+          createdAt: job.createdAt.toISOString(),
+          completedAt: job.completedAt?.toISOString() ?? null,
+          leaseExpiresAt: job.leaseExpiresAt.toISOString(),
+          heldCount: Array.isArray(summary?.held) ? summary.held.length : 0,
+        }
+      : null,
+  };
 }
 export async function requestRefresh() {
   assertEnabled();
   const c = await prisma.tallyConnection.findFirst({ where: { enabled: true } });
   if (!c) throw new ApiError(409, "Configure the office connector first");
   // A refresh request queues work; the browser never reaches the Windows PC directly.
-  if (!c.refreshRequestedAt)
-    await prisma.tallyConnection.update({
-      where: { id: c.id },
-      data: { refreshRequestedAt: new Date() },
-    });
-  return { queued: true };
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${c.id}))`;
+    const current = await tx.tallyConnection.findUnique({ where: { id: c.id } });
+    if (!current?.enabled) throw new ApiError(409, "Office connector is not enabled");
+    const requestedAt = current.refreshRequestedAt ?? new Date();
+    if (!current.refreshRequestedAt)
+      await tx.tallyConnection.update({
+        where: { id: c.id },
+        data: { refreshRequestedAt: requestedAt },
+      });
+    return { queued: true, requestedAt: requestedAt.toISOString() };
+  });
 }
 const identity = { jobId: z.string().uuid(), leaseToken: z.string().min(40).max(100) };
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const schema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("heartbeat") }).strict(),
   z.object({ action: z.literal("claim") }).strict(),
   z
     .object({
@@ -274,6 +334,7 @@ export async function agent(req: Request, raw: unknown) {
           throw new ApiError(403, "Connector authorization revoked");
         const now = new Date();
         await tx.tallyConnection.update({ where: { id: c.id }, data: { lastSeenAt: now } });
+        if (input.action === "heartbeat") return { ok: true };
         if (input.action === "claim") {
           await tx.tallySyncJob.updateMany({
             where: { connectionId: c.id, status: "RUNNING", leaseExpiresAt: { lte: now } },
@@ -478,6 +539,7 @@ export async function agent(req: Request, raw: unknown) {
             source: "TALLY",
             dealersRefreshed: rows.length,
             heldDealers: verified.held.length,
+            zeroedUnavailableDealerIds: rows.filter((x) => !x.ledger).map((x) => x.alias.dealerId),
             outstandingIncreased: rows.filter(
               (x) => cents(x.amounts.outstanding) > (previous.get(x.alias.dealerId) ?? 0n),
             ).length,
@@ -530,16 +592,20 @@ export async function agent(req: Request, raw: unknown) {
           updatedPlans++;
           updatedDealers += rows.length;
         }
-        for (const x of verified.accepted)
+        for (const x of verified.accepted) {
+          if (!x.ledger) continue;
           await tx.tallyLedgerBinding.upsert({
             where: { connectionId_aliasKey: { connectionId: c.id, aliasKey: tight(x.alias.name) } },
             update: {},
             create: { connectionId: c.id, aliasKey: tight(x.alias.name), guid: x.ledger.guid },
           });
+        }
         const summary = {
           updatedPlans,
           updatedDealers,
-          matchedLedgers: verified.accepted.length,
+          matchedLedgers: verified.accepted.filter((x) => x.ledger).length,
+          zeroedUnavailable: verified.zeroedUnavailable,
+          creditAdvances: verified.creditAdvances,
           held: verified.held,
           asOf: job.asOf,
           observedAt: verified.report.observedAt,

@@ -116,17 +116,74 @@ test("missing report entry requires an explicit zero ledger", () => {
   x.ledgers[0].closingBalance = "0.00";
   assert.equal(validate(x).accepted[0].amounts.outstanding, "0.00");
 });
-test("unavailable ledger never becomes zero", () => {
+test("dealer-level unavailable ledger becomes zero under user's Recovery rule", () => {
   const x = sample();
   x.ledgers = [];
   x.unavailableNames = [scope[0].name];
-  assert.equal(validate(x).held[0].reason, "LEDGER_UNAVAILABLE");
+  const r = validate(x);
+  assert.equal(r.held.length, 0);
+  assert.deepEqual(r.accepted[0].amounts, {
+    outstanding: "0.00",
+    overdue: "0.00",
+    due: "0.00",
+    running: "0.00",
+  });
+  assert.equal(r.accepted[0].ledger, null);
+  assert.equal(r.zeroedUnavailable.length, 1);
 });
 test("credit keeps negative outstanding", () => {
   const x = sample();
   x.ledgers[0].closingBalance = "100.00";
   x.bills[0].pendingAmount = "-100.00";
   assert.equal(validate(x).accepted[0].amounts.outstanding, "-100.00");
+  assert.equal(validate(x).accepted[0].amounts.overdue, "0.00");
+  assert.equal(validate(x).creditAdvances.length, 1);
+});
+test("credit advances need no receivable bills and never create recovery buckets", () => {
+  const x = sample();
+  x.ledgers[0].closingBalance = "5000.00";
+  x.bills = [];
+  assert.deepEqual(validate(x).accepted[0].amounts, {
+    outstanding: "-5000.00",
+    overdue: "0.00",
+    due: "0.00",
+    running: "0.00",
+  });
+  x.bills = sample().bills;
+  assert.equal(validate(x).accepted[0].bills.length, 0);
+});
+test("verified zero closing clears old bill buckets even if gross bill rows remain", () => {
+  const x = sample();
+  x.ledgers[0].closingBalance = "0.00";
+  assert.deepEqual(validate(x).accepted[0].amounts, {
+    outstanding: "0.00",
+    overdue: "0.00",
+    due: "0.00",
+    running: "0.00",
+  });
+  assert.equal(validate(x).accepted[0].bills.length, 0);
+});
+test("an unavailable old alias cannot zero a readable alias for the same dealer", () => {
+  const x = sample();
+  x.unavailableNames = ["Old Alias"];
+  const r = validate(x, [
+    { name: "Old Alias", dealerId: scope[0].dealerId, expectedGuid: null },
+    ...scope,
+  ]);
+  assert.equal(r.zeroedUnavailable.length, 0);
+  assert.equal(r.accepted.length, 1);
+  assert.equal(r.accepted[0].amounts.outstanding, "100.00");
+});
+test("positive debtor closing with a negative recovery bucket stays under review", () => {
+  const x = sample();
+  x.bills.push({
+    ...x.bills[0],
+    reference: "credit",
+    pendingAmount: "-20.00",
+    dueDate: "2026-11-01",
+  });
+  x.ledgers[0].closingBalance = "-80.00";
+  assert.equal(validate(x).held[0].reason, "NEGATIVE_RECOVERY_BUCKET");
 });
 test("conflicting aliases excluded", () => {
   assert.equal(

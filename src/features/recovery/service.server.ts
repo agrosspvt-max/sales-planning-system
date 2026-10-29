@@ -1,4 +1,5 @@
 import { indiaDay } from "@/features/tally/billwise";
+import { syncProgress } from "@/features/tally/service.server";
 import "server-only";
 import { recoveryDealerCompleted } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
@@ -788,6 +789,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     agingAsOf: latestSnapshot?.source === "TALLY" ? latestSnapshot.cutoffDate : plan.cutoffDate,
     tallyObservedAt: latestSnapshot?.source === "TALLY" ? latestSnapshot.sourceObservedAt : null,
     tallySyncAvailable: process.env.TALLY_SYNC_ENABLED === "true" && isLive && plan.seasonMonth.calendarMonth === Number(indiaDay().slice(5, 7)) && plan.seasonMonth.calendarYear === Number(indiaDay().slice(0, 4)),
+    tallySync: process.env.TALLY_SYNC_ENABLED === "true" && isLive && plan.seasonMonth.calendarMonth === Number(indiaDay().slice(5, 7)) && plan.seasonMonth.calendarYear === Number(indiaDay().slice(0, 4)) ? await syncProgress() : null,
     dueValidation,
     lastRefresh,
     dealers: plan.dealers.map((d) => {

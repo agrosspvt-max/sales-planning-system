@@ -3,6 +3,7 @@ import { AutosaveStatus } from "@/features/planning/autosave-status";
 import { applySavedMonth, applySavedWeek } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { formatDMY } from "@/lib/date-format";
+import { refreshProgress, type SyncProgress } from "@/features/tally/progress";
 
 
 import { DealerTableBody as TableBody } from "@/features/dealers/dealer-table-ui";
@@ -97,6 +98,7 @@ interface RecoveryDetail {
   agingAsOf?: string;
   tallyObservedAt?: string | null;
   tallySyncAvailable?: boolean;
+  tallySync?: SyncProgress | null;
   weeklyEditEnabled: boolean;
   monthEditable: boolean;
   weekEditable: boolean;
@@ -215,10 +217,10 @@ function PctDelta({ value, base }: { value: number; base: number }) {
 }
 
 /** An aging value with an optional change delta underneath (vs the previous snapshot). */
-function AgingCell({ value, prev }: { value: number; prev: number | null | undefined }) {
+function AgingCell({ value, prev, credit = false }: { value: number; prev: number | null | undefined; credit?: boolean }) {
   return (
     <div className="text-right tabular-nums">
-      <div>{money(value)}</div>
+      <div className={credit && value < 0 ? "text-success" : undefined} title={credit && value < 0 ? "Credit / advance balance" : undefined}>{money(value)}</div>
       {prev != null && <Delta value={value - prev} />}
     </div>
   );
@@ -268,13 +270,19 @@ function GuidancePanel({ data }: { data: RecoveryDetail }) {
 
 export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role; userId: string }) {
   const [tab, setTab] = useState<Tab>("month");
-  const { data, isLoading } = useQuery<RecoveryDetail>({
+  const [requestedAt, setRequestedAt] = useState<string | null>(null);
+  const { data, isLoading, refetch } = useQuery<RecoveryDetail>({
     queryKey: ["recovery-plan", id],
     queryFn: () => api.get(`/api/recovery/plans/${id}`),
-    refetchInterval: (query) => query.state.data?.tallySyncAvailable ? 30000 : false,
+    refetchInterval: (query) => query.state.data?.tallySyncAvailable
+      ? refreshProgress(query.state.data.tallySync, requestedAt).busy ? 5000 : 30000 : false,
   });
-  const refresh = useMutation({mutationFn: () => api.post("/api/tally/refresh", {planId:id})});
+  const refresh = useMutation({
+    mutationFn: () => api.post<{ queued: boolean; requestedAt: string }>("/api/tally/refresh", {planId:id}),
+    onSuccess: (result) => { setRequestedAt(result.requestedAt); void refetch(); },
+  });
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
+  const sync = refreshProgress(data.tallySync, requestedAt);
 
   const remaining = data.dealers.filter((d) => !d.noPlan && !d.completed);
   const noPlanDealers = data.dealers.filter((d) => d.noPlan);
@@ -329,7 +337,7 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
         {data.tallySyncAvailable && <div className="flex flex-wrap items-center gap-3 text-sm">
           <Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw className="mr-2 h-4 w-4"/>Refresh from Tally</Button>
           <span className="text-muted-foreground">{data.tallyObservedAt ? `Tally data read ${new Date(data.tallyObservedAt).toLocaleString("en-IN", {timeZone:"Asia/Kolkata"})}` : "Waiting for the first verified Tally update"}</span>
-          {refresh.isSuccess && <span>Refresh requested. Waiting for the office connector.</span>}
+          <span role="status" aria-live="polite">{sync.message}</span>
           {refresh.error && <span role="alert">{refresh.error.message}</span>}
         </div>}
         <GuidancePanel data={data} />
@@ -554,7 +562,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
                   </TableCell>
                   {/* Section 1 — Dealer & Closing Balance. Current Outstanding KEEPS its amount change
                       delta; Outstanding Till Date is the month's opening balance (frozen after first import). */}
-                  <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
+                  <TableCell className="text-right"><AgingCell credit value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
                   {/* Last Payment — latest Day Book Receipt: date on top, that same Receipt's Credit Amount
                       below in the existing small green delta style. "—" when the dealer has no Receipt. */}
@@ -910,7 +918,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   <TableCell className="font-medium"><DealerName id={d.dealerId} name={d.dealerName} />{d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}</TableCell>
                   {/* Section 1 — Dealer & Closing Balance. Current Outstanding keeps its delta; Outstanding
                       Till Date (same calc as Month View) added beside it. */}
-                  <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
+                  <TableCell className="text-right"><AgingCell credit value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
                   <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} outstanding={d.outstanding} unavailableReason={d.lastPaymentUnavailableReason} />
                   {/* Section 2 — Weekly Planning. "This Week's Due" = only invoices due in the

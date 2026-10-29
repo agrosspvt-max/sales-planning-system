@@ -145,9 +145,11 @@ export function validateResult(
     rows.set(k, list);
   }
   const held: { name: string; reason: string }[] = [];
+  const zeroedUnavailable: { name: string; dealerId: string }[] = [];
+  const creditAdvances: { name: string; dealerId: string }[] = [];
   const accepted: {
     alias: ScopeAlias;
-    ledger: (typeof r.ledgers)[number];
+    ledger: (typeof r.ledgers)[number] | null;
     bills: typeof r.bills;
     amounts: { outstanding: string; overdue: string; due: string; running: string };
   }[] = [];
@@ -158,7 +160,22 @@ export function validateResult(
       l = ledgers.get(k),
       bills = rows.get(k) ?? [];
     if (!l) {
-      held.push({ name: a.name, reason: "LEDGER_UNAVAILABLE" });
+      // User's Recovery rule: dealer-level unavailable reads become zero.
+      // A real alternate alias takes precedence; never fabricate a GUID binding.
+      if (scope.some((x) => x.dealerId === a.dealerId && ledgers.has(tight(x.name)))) continue;
+      if (accepted.some((x) => x.alias.dealerId === a.dealerId)) continue;
+      accepted.push({
+        alias: a,
+        ledger: null,
+        bills: [],
+        amounts: {
+          outstanding: "0.00",
+          overdue: "0.00",
+          due: "0.00",
+          running: "0.00",
+        },
+      });
+      zeroedUnavailable.push({ name: a.name, dealerId: a.dealerId });
       continue;
     }
     // Several saved aliases may describe a renamed ledger. Never sum two ledgers automatically.
@@ -172,6 +189,24 @@ export function validateResult(
       held.push({ name: a.name, reason: "MULTIPLE_LIVE_LEDGERS_FOR_DEALER" });
       continue;
     }
+    const closing = -cents(l.closingBalance);
+    if (closing <= 0n) {
+      if (presentForDealer.length === 1 && presentForDealer[0].name !== a.name) continue;
+      if (accepted.some((x) => x.alias.dealerId === a.dealerId)) continue;
+      accepted.push({
+        alias: a,
+        ledger: l,
+        bills: [],
+        amounts: {
+          outstanding: decimal(closing),
+          overdue: "0.00",
+          due: "0.00",
+          running: "0.00",
+        },
+      });
+      if (closing < 0n) creditAdvances.push({ name: a.name, dealerId: a.dealerId });
+      continue;
+    }
     const n = { outstanding: 0n, overdue: 0n, due: 0n, running: 0n };
     for (const b of bills) {
       const v = cents(b.pendingAmount);
@@ -182,8 +217,12 @@ export function validateResult(
       held.push({ name: a.name, reason: "AGGREGATE_OUT_OF_RANGE" });
       continue;
     }
-    if (n.outstanding !== -cents(l.closingBalance)) {
+    if (n.outstanding !== closing) {
       held.push({ name: a.name, reason: "BILLS_LEDGER_MISMATCH" });
+      continue;
+    }
+    if (n.overdue < 0n || n.due < 0n || n.running < 0n) {
+      held.push({ name: a.name, reason: "NEGATIVE_RECOVERY_BUCKET" });
       continue;
     }
     // If another alias has actual pending data, don't overwrite it with this alias's zero.
@@ -201,5 +240,5 @@ export function validateResult(
       },
     });
   }
-  return { report: r, accepted, held };
+  return { report: r, accepted, held, zeroedUnavailable, creditAdvances };
 }

@@ -127,4 +127,3 @@ ALTER TABLE "TallySalesVoucher" ADD CONSTRAINT "TallySalesVoucher_snapshotId_fke
 
 -- AddForeignKey
 ALTER TABLE "TallySalesItem" ADD CONSTRAINT "TallySalesItem_voucherId_fkey" FOREIGN KEY ("voucherId") REFERENCES "TallySalesVoucher"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-

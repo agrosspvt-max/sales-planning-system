@@ -488,12 +488,12 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
               0,
             ),
             actualQty: l.monthlyEntries.reduce(
-              (s: number, e: { saleQty: number }) => s + e.saleQty,
+              (s: number, e: { saleQty: unknown }) => s + num(e.saleQty),
               0,
             ),
             // Actual SALES VALUE is only the uploaded Sales-file value. Never price actuals
             // from the Master Price List.
-            actualAmount: l.monthlyEntries.reduce((s: number, e: { saleQty: number; saleValue: unknown }) => {
+            actualAmount: l.monthlyEntries.reduce((s: number, e: { saleQty: unknown; saleValue: unknown }) => {
               void e.saleQty;
               return s + num(e.saleValue ?? 0);
             }, 0),
@@ -560,14 +560,14 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
           : l.inputValue !== null
             ? num(l.inputValue)
             : 0;
-      const byMonth = new Map<string, { planQty: number; saleQty: number; saleValue: unknown }>(
-        l.monthlyEntries.map((e: { seasonMonthId: string; planQty: number; saleQty: number; saleValue: unknown }) => [
+      const byMonth = new Map<string, { planQty: number; saleQty: unknown; saleValue: unknown }>(
+        l.monthlyEntries.map((e: { seasonMonthId: string; planQty: number; saleQty: unknown; saleValue: unknown }) => [
           e.seasonMonthId,
           e,
         ]),
       );
       const planQ = months.map((m: { id: string }) => byMonth.get(m.id)?.planQty ?? 0);
-      const saleQ = months.map((m: { id: string }) => byMonth.get(m.id)?.saleQty ?? 0);
+      const saleQ = months.map((m: { id: string }) => num(byMonth.get(m.id)?.saleQty ?? 0));
       const saleAmounts = months.map((m: { id: string }) => num(byMonth.get(m.id)?.saleValue ?? 0));
       const line: WorkbookLine = assembleWorkbookLine(lineMode, seasonalInput, planQ, saleQ, saleAmounts, rate, nbvPct);
       return { productId: l.productId, productName: l.product.name, line };

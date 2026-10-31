@@ -161,7 +161,7 @@ export function buildMonthlyDealers(
               months.map((m) => {
                 const e = entryByMonth.get(m.id);
                 const plan = valueMode ? num(e?.planValue ?? 0) : e?.planQty ?? 0;
-                const sale = valueMode ? num(e?.saleValue ?? 0) : e?.saleQty ?? 0;
+                const sale = valueMode ? num(e?.saleValue ?? 0) : num(e?.saleQty ?? 0);
                 // Actual SALES VALUE comes only from the uploaded Sales file.
                 const saleAmount = num(e?.saleValue ?? 0);
                 return [m.id, { plan, sale, saleAmount }];

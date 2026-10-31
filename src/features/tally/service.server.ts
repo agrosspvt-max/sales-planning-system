@@ -1,4 +1,5 @@
 import "server-only";
+import {salesSyncEnabled} from "./sales-rollout";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Prisma, Role } from "@prisma/client";
 import { z } from "zod";
@@ -162,6 +163,10 @@ export async function disable(ctx: AuthContext) {
       });
       await tx.tallySyncJob.updateMany({
         where: { connectionId: row.id, status: "RUNNING" },
+        data: { status: "FAILED", error: "CONNECTION_DISABLED" },
+      });
+      if (salesSyncEnabled()) await tx.tallySalesJob.updateMany({
+        where: { connectionId: row.id, status: { in: ["QUEUED", "RUNNING"] } },
         data: { status: "FAILED", error: "CONNECTION_DISABLED" },
       });
       await writeAudit(
@@ -441,9 +446,8 @@ const manifestSchema = z
   .object({ chunks: z.number().int(), bytes: z.number().int(), sha256: hash })
   .strict();
 
-export async function agent(req: Request, raw: unknown) {
+export async function authenticateConnector(req: Request) {
   assertEnabled();
-  const input = schema.parse(raw);
   const agentId = req.headers.get("x-agent-id") ?? "",
     bearer = req.headers.get("authorization") ?? "";
   if (!/^[a-f0-9-]{36}$/.test(agentId) || !/^Bearer [A-Za-z0-9_-]{40,100}$/.test(bearer))
@@ -455,9 +459,9 @@ export async function agent(req: Request, raw: unknown) {
   >`UPDATE "TallyConnection" SET "requestCount"=CASE WHEN "requestWindowAt">(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')-INTERVAL '60 seconds' THEN "requestCount"+1 ELSE 1 END,"requestWindowAt"=CASE WHEN "requestWindowAt">(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')-INTERVAL '60 seconds' THEN "requestWindowAt" ELSE (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') END WHERE "id"=${agentId} AND "enabled"=true AND "credentialHash"=${presented} RETURNING "requestCount"`;
   if (!gate.length) throw new ApiError(401, "Connector credential rejected");
   if (gate[0].requestCount > 300) throw new ApiError(429, "Connector request limit reached");
-  const transact = () =>
-    prisma.$transaction(
-      async (tx) => {
+  return { agentId, presented };
+}
+export async function lockConnector(tx: Prisma.TransactionClient, agentId: string, presented: string) {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${agentId}))`;
         const c = await tx.tallyConnection.findUnique({ where: { id: agentId } });
         if (
@@ -472,6 +476,17 @@ export async function agent(req: Request, raw: unknown) {
         });
         if (!owner || owner.role !== Role.SUPER_ADMIN || !owner.isActive || owner.deletedAt)
           throw new ApiError(403, "Connector authorization revoked");
+  return c;
+}
+
+export async function agent(req: Request, raw: unknown) {
+  assertEnabled();
+  const input = schema.parse(raw);
+  const { agentId, presented } = await authenticateConnector(req);
+  const transact = () =>
+    prisma.$transaction(
+      async (tx) => {
+        const c = await lockConnector(tx, agentId, presented);
         const now = new Date();
         await tx.tallyConnection.update({ where: { id: c.id }, data: { lastSeenAt: now } });
         if (input.action === "heartbeat") {

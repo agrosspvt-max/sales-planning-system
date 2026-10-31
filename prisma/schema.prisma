@@ -1334,7 +1334,7 @@ model MonthlyEntry {
   planLineId    String
   seasonMonthId String
   planQty       Int         @default(0)
-  saleQty       Int         @default(0)
+  saleQty       Decimal     @default(0) @db.Decimal(18, 6)
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
   inputMode     String?
@@ -2759,7 +2759,104 @@ model TallyConnection {
   lastError          String?
   jobs               TallySyncJob[]
   bindings           TallyLedgerBinding[]
+  salesJobs          TallySalesJob[]
+  salesSnapshots     TallySalesSnapshot[]
   createdAt          DateTime             @default(now())
+}
+
+/// Separate queue from Aging; automatic jobs cover only the current India calendar month.
+model TallySalesJob {
+  id             String          @id @default(uuid())
+  connectionId   String
+  connection     TallyConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  monthKey       String
+  fromDate       String
+  throughDate    String
+  manual         Boolean         @default(false)
+  status         String          @default("QUEUED")
+  claimRequestId String?
+  scope          Json?
+  scopeHash      String?
+  leaseHash      String?
+  leaseExpiresAt DateTime?
+  manifest       Json?
+  resultHash     String?
+  summary        Json?
+  error          String?
+  createdAt      DateTime        @default(now())
+  completedAt    DateTime?
+  chunks         TallySalesChunk[]
+
+  @@unique([connectionId, claimRequestId])
+  @@index([connectionId, status])
+  @@index([connectionId, monthKey, createdAt])
+}
+
+model TallySalesChunk {
+  id       String        @id @default(cuid())
+  jobId    String
+  job      TallySalesJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  sequence Int
+  hash     String
+  data     String
+
+  @@unique([jobId, sequence])
+}
+
+/// Latest authoritative source for one calendar month; other months are untouched by a refresh.
+model TallySalesSnapshot {
+  id           String          @id @default(uuid())
+  connectionId String
+  connection   TallyConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  monthKey     String
+  fromDate     String
+  throughDate  String
+  observedAt   DateTime
+  sourceHash   String
+  jobId        String
+  summary      Json
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  vouchers     TallySalesVoucher[]
+
+  @@unique([connectionId, monthKey])
+}
+
+model TallySalesVoucher {
+  id           String             @id @default(uuid())
+  snapshotId   String
+  snapshot     TallySalesSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  guid         String
+  masterId     String
+  alterId      String
+  billDate     String
+  billNumber   String
+  typeName     String
+  family       String
+  partyName    String
+  cancelled    Boolean
+  optional     Boolean
+  ledgerEntries Json
+  items        TallySalesItem[]
+
+  @@unique([snapshotId, guid])
+  @@index([partyName, billDate])
+}
+
+model TallySalesItem {
+  id            String            @id @default(uuid())
+  voucherId     String
+  voucher       TallySalesVoucher @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  lineNo        Int
+  stockItemName String
+  quantity      Decimal           @db.Decimal(18, 6)
+  amount        Decimal           @db.Decimal(18, 2)
+  unit          String
+  actualQty     String
+  billedQty     String
+  rate          String
+
+  @@unique([voucherId, lineNo])
 }
 
 model TallySyncJob {

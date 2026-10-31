@@ -252,7 +252,7 @@ export async function assessDealerOperationalData(
     for (const line of pd.lines) {
       for (const e of line.monthlyEntries) {
         if (e.planQty > 0) acc.monthlyPlans++;
-        if (e.saleQty > 0) acc.actualSales++;
+        if (Number(e.saleQty) > 0) acc.actualSales++;
       }
     }
     byDealer.set(pd.dealerId, acc);

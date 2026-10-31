@@ -341,7 +341,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         nbvPercentSnapshot: unknown;
         product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
         packs: { quantity: number }[];
-        monthlyEntries: { seasonMonthId: string; saleQty: number; saleValue: unknown }[];
+        monthlyEntries: { seasonMonthId: string; saleQty: unknown; saleValue: unknown }[];
       }[];
     }[];
 
@@ -364,7 +364,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         const input = lineMode === "PACK_SIZE" ? l.packs.reduce((s, pk) => s + pk.quantity, 0) : l.inputValue !== null ? num(l.inputValue) : 0;
         const fig = figuresForMode(lineMode, input, rate, nbvPct);
         let soldQty = 0, soldAmt = 0;
-        for (const e of l.monthlyEntries) { soldQty += e.saleQty; soldAmt += num(e.saleValue ?? 0); }
+        for (const e of l.monthlyEntries) { soldQty += num(e.saleQty); soldAmt += num(e.saleValue ?? 0); }
         // Season Baseline (qty + amount) — from the baseline representative plans.
         if (isBaseline) {
           row.seasonQty += fig.totalQty ?? 0;
@@ -376,7 +376,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
           if (dBucket) {
             let periodQty = 0, periodAmt = 0;
             for (const e of l.monthlyEntries) {
-              if (isTotal || selectedMonthSet.has(e.seasonMonthId)) { periodQty += e.saleQty; periodAmt += num(e.saleValue ?? 0); }
+              if (isTotal || selectedMonthSet.has(e.seasonMonthId)) { periodQty += num(e.saleQty); periodAmt += num(e.saleValue ?? 0); }
             }
             const dc = ensureDrawer(row.productId, dBucket, plan.officerId, pd.dealer.id, pd.dealer.name);
             dc.seasonPlan.qty += fig.totalQty ?? 0; dc.seasonPlan.amount += fig.amount ?? 0; dc.seasonPlan.nbv += fig.nbv ?? 0;
@@ -445,7 +445,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
           rateSnapshot: unknown;
           nbvPercentSnapshot: unknown;
           product: { name: string; technicalName: string | null; rate: unknown; nbvPercent: unknown };
-          monthlyEntries: { seasonMonthId: string; planQty: number; saleQty: number; planValue: unknown; saleValue: unknown }[];
+          monthlyEntries: { seasonMonthId: string; planQty: number; saleQty: unknown; planValue: unknown; saleValue: unknown }[];
         }[];
       }[];
 
@@ -476,7 +476,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
             // Period columns (Month/Range view) — only the SELECTED months in a selected bucket.
             if (mp && !isTotal && selectedMonthSet.has(e.seasonMonthId)) {
               const sold = num(e.saleValue ?? 0);
-              row.actual.qty += e.saleQty;
+              row.actual.qty += num(e.saleQty);
               row.actual.amount += sold;
               row.actual.nbv += calcNbv(sold, nbvPct);
               addContribution(row, {

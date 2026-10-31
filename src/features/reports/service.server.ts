@@ -142,7 +142,7 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
           const planValue = num(e.planValue ?? 0);
           const saleValue = num(e.saleValue ?? 0);
           if (isQuantityMode(eMode)) {
-            actualQty += e.saleQty;
+            actualQty += num(e.saleQty);
             actualAmount += saleValue;
             actualNbv += nbv(saleValue, nbvPct);
           } else if (eMode === "AMOUNT") {
@@ -155,7 +155,7 @@ export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<
           return {
             seasonMonthId: e.seasonMonthId,
             planQty: e.planQty,
-            saleQty: e.saleQty,
+            saleQty: num(e.saleQty),
             planValue,
             saleValue,
             inputMode: e.inputMode as PlanningMode | null,

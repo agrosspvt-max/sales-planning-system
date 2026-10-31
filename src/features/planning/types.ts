@@ -203,6 +203,6 @@ export interface MonthlyData {
   canAdminEdit?: boolean;
   /** Configured monthly planning mode for this workspace. */
   monthlyMode: PlanningMode;
-  months: { id: string; name: string; order: number; status: MonthStatus; editable: boolean }[];
+  months: { id: string; name: string; calendarYear?: number | null; calendarMonth?: number | null; order: number; status: MonthStatus; editable: boolean }[];
   dealers: MonthlyDealer[];
 }

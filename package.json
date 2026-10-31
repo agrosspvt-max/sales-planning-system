@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && next build",
+    "build": "prisma generate && node scripts/prepare-tally-sales-preview.cjs && next build",
     "postinstall": "prisma generate",
     "start": "next start",
     "lint": "next lint",
@@ -57,7 +57,8 @@
     "test:cn-processing": "node --import tsx src/features/cn-requests/cn-review.test.tsx",
     "test:approvals": "node --import tsx src/features/planning/approvals-inbox.test.tsx",
     "test:tally": "node --import tsx src/features/tally/billwise.test.ts && node --import tsx src/features/tally/progress.test.ts && node --import tsx src/features/tally/changes.test.ts",
-    "test:tally:db": "node --import tsx src/features/tally/integration.test.ts"
+    "test:tally:db": "node --import tsx src/features/tally/integration.test.ts",
+    "test:tally:sales": "node --import tsx src/features/tally/sales.integration.test.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

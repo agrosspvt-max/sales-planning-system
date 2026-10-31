@@ -62,7 +62,7 @@ export function MonthlyPlanner() {
   // Actual-sales columns (This Month Sold, Pending (MO), Actual Amount) show ONLY when the MonthlyPlan
   // itself is APPROVED — never based on season/admin/completion/sales presence.
   const isApproved = data.status === "APPROVED";
-  const fmtUnit = (v: number) => (qtyMode ? String(Math.round(v)) : formatCurrency(v));
+  const fmtUnit = (v: number) => (qtyMode ? v.toLocaleString("en-IN", { maximumFractionDigits: 6 }) : formatCurrency(v));
   const dealer = data.dealers.find((d) => d.dealerId === dealerId);
   const unitLabel = PLANNING_MODE_LABELS[monthlyMode];
   const selMonth = data.months.find((m) => m.id === monthId);

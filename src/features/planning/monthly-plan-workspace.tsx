@@ -1,5 +1,6 @@
 "use client";
 
+import { TallySalesRefresh } from "@/features/tally/sales-refresh";
 import { AutosaveStatus } from "@/features/planning/autosave-status";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -55,6 +56,7 @@ export function MonthlyPlanWorkspace({
   const { data, isLoading } = useQuery<MonthlyPlanDetail>({
     queryKey: ["monthly-plan", monthlyPlanId],
     queryFn: () => api.get(`/api/planning/monthly-plans/${monthlyPlanId}`),
+    refetchInterval: (query) => query.state.data?.status === "APPROVED" ? 60000 : false,
   });
 
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
@@ -91,6 +93,9 @@ export function MonthlyPlanWorkspace({
       <div className={cn("space-y-4", tab !== "history" && "sticky left-0 z-10 bg-background")}>
       {/* Mobile: slim context bar only (Back · Season · Month · Officer). Desktop/tablet: full header. */}
       <MobileContextBar backTo="/planning/sales" items={[data.seasonName, data.monthName, data.officerName]} />
+      {role === Role.SUPER_ADMIN && data.status === "APPROVED" && data.months[0]?.calendarYear && data.months[0]?.calendarMonth && (
+        <TallySalesRefresh monthKey={`${data.months[0].calendarYear}-${String(data.months[0].calendarMonth).padStart(2,"0")}`} />
+      )}
       <div className="hidden sm:block">
         <PageHeader
           backTo="/planning/sales"

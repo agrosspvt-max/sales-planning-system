@@ -313,11 +313,11 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
   const seasonEntries = (await prisma.monthlyEntry.findMany({
     where: { planLine: { planDealer: { seasonPlanId: mp.seasonPlanId } } },
     select: { planLineId: true, saleQty: true, saleValue: true },
-  })) as { planLineId: string; saleQty: number | null; saleValue: unknown }[];
+  })) as { planLineId: string; saleQty: unknown; saleValue: unknown }[];
   const seasonSaleByLine = new Map<string, { qty: number; value: number }>();
   for (const e of seasonEntries) {
     const cur = seasonSaleByLine.get(e.planLineId) ?? { qty: 0, value: 0 };
-    cur.qty += e.saleQty ?? 0;
+    cur.qty += num(e.saleQty ?? 0);
     cur.value += num(e.saleValue ?? 0);
     seasonSaleByLine.set(e.planLineId, cur);
   }

@@ -73,7 +73,7 @@ async function main() {
     const entries = (await prisma.monthlyEntry.findMany({
       where: { seasonMonthId: august.id, planLine: { planDealer: { seasonPlanId: selected.id } } },
       select: { id: true, planLineId: true, planQty: true, saleQty: true, planValue: true, saleValue: true, planLine: { select: { planDealerId: true, product: { select: { name: true } } } } },
-    })) as { id: string; planLineId: string; planQty: number; saleQty: number; planValue: unknown; saleValue: unknown; planLine: { planDealerId: string; product: { name: string } } }[];
+    })) as { id: string; planLineId: string; planQty: number; saleQty: unknown; planValue: unknown; saleValue: unknown; planLine: { planDealerId: string; product: { name: string } } }[];
 
     console.log(`     PlanDealers (${dealers.length}): ${dealers.map((d) => `${d.id}[${d.dealer.name}]`).join(", ") || "none"}`);
     console.log(`     [SOURCE OF TERRITORY VALUES] ${monthArg} MonthlyEntries (${entries.length}) under SeasonPlan ${selected.id}:`);

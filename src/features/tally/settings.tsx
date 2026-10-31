@@ -1,4 +1,5 @@
 "use client";
+import { TallySalesRefresh } from "./sales-refresh";
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -83,6 +84,7 @@ export function TallySettings() {
   return (
     <div className="max-w-2xl space-y-4">
       <h1 className="text-xl font-semibold">Tally connection</h1>
+      <TallySalesRefresh chooseMonth />
       <p>
         The office connector sends verified bill balances to current-month Recovery plans. Other
         plans and entered planning figures are preserved.

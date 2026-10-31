@@ -1,4 +1,5 @@
 import "server-only";
+import {salesSyncEnabled} from "@/features/tally/sales-rollout";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
 import { SEASON_MONTH_ORDER, monthLabel } from "@/lib/season-calendar";
@@ -542,6 +543,17 @@ export async function commitSalesUpload(
 ): Promise<SalesUploadResult> {
   assertAdmin(ctx);
   const input = commitInputSchema.parse(raw);
+  if (salesSyncEnabled()) {
+    const month = await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, select: { calendarYear: true, calendarMonth: true } });
+    if (month?.calendarYear && month.calendarMonth) {
+      const monthKey = `${month.calendarYear}-${String(month.calendarMonth).padStart(2, "0")}`;
+      const owner = monthKey >= "2026-04" && monthKey <= "2027-03"
+        ? await prisma.tallyConnection.findFirst({ where: { enabled: true }, select: { id: true } })
+        : null;
+      if (owner) throw new ApiError(409, "Tally sales is enabled for this financial year. Refresh sales from Tally instead of uploading overlapping actuals. Disable the connection first to use the upload fallback.");
+    }
+  }
+
   const parsed = parseSalesWorkbook(buffer);
   if (parsed.dealers.length === 0) throw new ApiError(422, "No dealer rows were found in the workbook");
   // Resolve once to discover both importable rows AND matched-but-unplanned sales (unplannedPairs).
@@ -563,7 +575,7 @@ export async function commitSalesUpload(
   const byLine = new Map<string, { saleQty: number; saleValue: number }>();
   for (const r of res.rows) {
     const cur = byLine.get(r.planLineId) ?? { saleQty: 0, saleValue: 0 };
-    cur.saleQty += Math.round(r.qty);
+    cur.saleQty += r.qty;
     cur.saleValue += r.amount;
     byLine.set(r.planLineId, cur);
   }

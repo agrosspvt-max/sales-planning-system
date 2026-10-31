@@ -109,8 +109,8 @@ export async function clearanceSoldForGroup(groupId: string | null | undefined, 
   const rows = (await db.monthlyEntry.findMany({
     where: { planLine: { productId: { in: productIds }, planDealer: { seasonPlan: { officer: { groupId }, lifecycleState: "ACTIVE" } } } },
     select: { saleQty: true, planLine: { select: { productId: true } } },
-  })) as { saleQty: number; planLine: { productId: string } }[];
-  for (const r of rows) sold.set(r.planLine.productId, (sold.get(r.planLine.productId) ?? 0) + r.saleQty);
+  })) as { saleQty: unknown; planLine: { productId: string } }[];
+  for (const r of rows) sold.set(r.planLine.productId, (sold.get(r.planLine.productId) ?? 0) + Number(r.saleQty));
   return sold;
 }
 async function loadGroupOr404(groupId: string) {
@@ -175,9 +175,9 @@ export async function listGroupCatalogue(ctx: AuthContext, groupId: string) {
     const soldRows = (await prisma.monthlyEntry.findMany({
       where: { planLine: { productId: { in: clearanceIds }, planDealer: { seasonPlan: { officer: { groupId }, lifecycleState: "ACTIVE" } } } },
       select: { saleQty: true, planLine: { select: { productId: true } } },
-    })) as { saleQty: number; planLine: { productId: string } }[];
+    })) as { saleQty: unknown; planLine: { productId: string } }[];
     const soldByProduct = new Map<string, number>();
-    for (const s of soldRows) soldByProduct.set(s.planLine.productId, (soldByProduct.get(s.planLine.productId) ?? 0) + s.saleQty);
+    for (const s of soldRows) soldByProduct.set(s.planLine.productId, (soldByProduct.get(s.planLine.productId) ?? 0) + Number(s.saleQty));
     for (const r of rows) {
       if (!r.isClearance) continue;
       r.clearanceSold = soldByProduct.get(r.productId) ?? 0;

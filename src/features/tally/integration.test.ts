@@ -42,6 +42,7 @@ function load<T>(file: string): T {
   const mod = { exports: {} };
   const aliases: Record<string, unknown> = {
     "server-only": {},
+    "./sales-rollout": { salesSyncEnabled: () => process.env.TALLY_SALES_SYNC_ENABLED === "true" },
     "@prisma/client": db,
     zod: { z },
     "@/lib/prisma": { prisma },

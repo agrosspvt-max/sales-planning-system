@@ -69,7 +69,7 @@ interface GroupProductPlan {
 
 type Tab = "territory" | "product" | "recovery";
 type View = "total" | "month" | "range";
-const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n));
+const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 }).format(n);
 
 /**
  * Territory (Group) Planning dashboard — READ-ONLY analytics. Aggregates across every Sales Officer in
@@ -188,6 +188,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   const monthsKey = selectedMonthIds.join(",");
   const { data, isLoading, isFetching } = useQuery<GroupProductPlan>({
     queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey, officerId, seasonMetrics],
+    refetchInterval: 60000,
     queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey || "approved"}&view=${view}&months=${monthsKey}${officerId ? `&officerId=${officerId}` : ""}&seasonMetrics=${seasonMetrics}`),
     enabled: !!seasonId,
     placeholderData: keepPreviousData,

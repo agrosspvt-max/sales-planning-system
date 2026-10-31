@@ -19,7 +19,7 @@ import {
 import { useMonthlyEdit } from "./monthly-edit-context";
 import { MonthFilter, defaultMonthFilter, resolveFilteredMonths, type MonthFilterState } from "./month-filter";
 
-const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n));
+const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 }).format(n);
 
 /** Monthly Product Plan — read-only, live from the monthly-edit context, filterable, with TOTALS. */
 export function MonthlyProductPlan() {

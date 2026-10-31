@@ -28,7 +28,16 @@ process.env.DATABASE_URL = url;
 process.env.TALLY_SYNC_ENABLED = "true";
 process.env.TALLY_SALES_SYNC_ENABLED = "true";
 process.env.TALLY_EXPECTED_DB_HOST = "localhost";
-const prisma = new db.PrismaClient({ datasources: { db: { url } } });
+const prisma = new db.PrismaClient({
+  datasources: { db: { url } },
+  log: [{ emit: "event", level: "query" }],
+});
+let planLineInsertQueries = 0,
+  monthlyWriteQueries = 0;
+prisma.$on("query", (event) => {
+  if (/INSERT INTO ["\w.]*"PlanLine"/.test(event.query)) planLineInsertQueries++;
+  if (/INSERT INTO "MonthlyEntry"/.test(event.query)) monthlyWriteQueries++;
+});
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -623,6 +632,57 @@ async function main() {
     "original bill/pack name retained for evidence",
   );
   assert.equal((await actual()).planQty, 77, "pack matching preserves planning figures");
+  // A first historical import can add hundreds of previously unplanned product lines.
+  // Measure actual SQL: these must be bulk inserts, not one round trip per product.
+  const bulkProducts = Array.from({ length: 300 }, (_, i) => ({
+    id: "bulk-" + i,
+    name:
+      "CATALOG " +
+      String.fromCharCode(65 + Math.floor(i / 26)) +
+      String.fromCharCode(65 + (i % 26)) +
+      " PRODUCT",
+    rate: 100,
+    nbvPercent: "0.5",
+  }));
+  await prisma.product.createMany({ data: bulkProducts });
+  const beforeBulk = planLineInsertQueries;
+  const bulkResult = (j: any) => {
+    const r = result(j);
+    const template = r.vouchers[0].items[0];
+    r.vouchers[0].items = bulkProducts.map((p, lineNo) => ({
+      ...template,
+      lineNo,
+      stockItemName: p.name,
+    }));
+    return r;
+  };
+  await refresh(bulkResult, oldKey);
+  assert.equal(
+    planLineInsertQueries - beforeBulk,
+    1,
+    "300 missing lines require batched SQL, not 300 upserts",
+  );
+  assert.equal(
+    await prisma.planLine.count({
+      where: { planDealerId: "pd-a", productId: { startsWith: "bulk-" } },
+    }),
+    300,
+  );
+  const oldWriteCount = monthlyWriteQueries;
+  await refresh(bulkResult, oldKey);
+  assert.equal(
+    monthlyWriteQueries,
+    oldWriteCount,
+    "identical month snapshot must not rewrite unchanged actual rows",
+  );
+  const bulkSnapshot = await prisma.tallySalesSnapshot.findUniqueOrThrow({
+    where: { connectionId_monthKey: { connectionId, monthKey: oldKey } },
+  });
+  assert.equal(
+    await prisma.tallySalesItem.count({ where: { voucher: { snapshotId: bulkSnapshot.id } } }),
+    300,
+    "bill-wise product evidence is kept even for an unchanged refresh",
+  );
   await svc.requestSalesRefresh(actor, month);
   const changed = await claim();
   const staged = await stage(changed, result(changed));

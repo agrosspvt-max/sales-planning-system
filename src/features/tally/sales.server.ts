@@ -196,12 +196,24 @@ async function publish(
     scopeHash: string | null;
   },
   result: SalesResult,
+  s: Scope,
 ) {
-  const s = await scope(db, job.monthKey);
   if (s.fingerprint !== job.scopeHash)
     throw new ApiError(409, "Sales mappings or plans changed; request a new refresh");
   if (!job.manual && (job.monthKey !== indiaDay().slice(0, 7) || job.throughDate !== indiaDay()))
     throw new ApiError(409, "Sales date changed; request a new refresh");
+  const began = Date.now();
+  const progress = (stage: string, rows: number) =>
+    console.info(
+      "tally_sales_publish",
+      JSON.stringify({
+        jobId: job.id,
+        month: job.monthKey,
+        stage,
+        rows,
+        elapsedMs: Date.now() - began,
+      }),
+    );
   const projection = projectSales(result, s),
     heldIds = new Set(projection.held.map((h) => h.dealerId));
   const writes: {
@@ -210,28 +222,51 @@ async function publish(
     qty: Prisma.Decimal;
     amount: Prisma.Decimal;
   }[] = [];
+  // Add all missing dealer/product lines in batches. One upsert per product held
+  // the publication transaction open for hundreds of network round trips.
+  const products = new Map(s.products.map((p) => [p.id, p]));
+  const additions: Prisma.PlanLineCreateManyInput[] = [];
+  for (const d of s.dealers) {
+    if (heldIds.has(d.dealerId)) continue;
+    const existing = new Set(d.lines.map((l) => l.productId));
+    for (const [productId] of projection.totals.get(d.dealerId) ?? []) {
+      if (existing.has(productId)) continue;
+      const p = products.get(productId)!;
+      additions.push({
+        id: randomUUID(),
+        planDealerId: d.planDealerId,
+        productId,
+        isAutoAdded: true,
+        rateSnapshot: p.rate,
+        nbvPercentSnapshot: p.nbvPercent,
+      });
+    }
+  }
+  if (additions.length) {
+    for (let offset = 0; offset < additions.length; offset += 500)
+      await db.planLine.createMany({
+        data: additions.slice(offset, offset + 500),
+        skipDuplicates: true,
+      });
+    const lines = await db.planLine.findMany({
+      where: { planDealerId: { in: [...new Set(additions.map((l) => l.planDealerId))] } },
+      select: { id: true, productId: true, planDealerId: true },
+    });
+    const byDealer = new Map<string, typeof lines>();
+    for (const line of lines) {
+      const bucket = byDealer.get(line.planDealerId) ?? [];
+      bucket.push(line);
+      byDealer.set(line.planDealerId, bucket);
+    }
+    for (const d of s.dealers)
+      if (byDealer.has(d.planDealerId)) d.lines = byDealer.get(d.planDealerId)!;
+  }
+  progress("plan_lines_ready", additions.length);
+  const merges = new Map(s.products.map((p) => [p.id, p.mergedIntoId]));
   for (const d of s.dealers) {
     if (heldIds.has(d.dealerId)) continue;
     const totals = projection.totals.get(d.dealerId) ?? new Map();
-    for (const [productId] of totals)
-      if (!d.lines.some((l) => l.productId === productId)) {
-        const p = s.products.find((p) => p.id === productId)!;
-        const l = await db.planLine.upsert({
-          where: { planDealerId_productId: { planDealerId: d.planDealerId, productId } },
-          create: {
-            planDealerId: d.planDealerId,
-            productId,
-            isAutoAdded: true,
-            rateSnapshot: p.rate,
-            nbvPercentSnapshot: p.nbvPercent,
-          },
-          update: {},
-          select: { id: true, productId: true },
-        });
-        d.lines.push(l);
-      }
     // Merge source rows into their existing survivor line, and zero any old merged source actuals.
-    const merges = new Map(s.products.map((p) => [p.id, p.mergedIntoId]));
     for (const l of d.lines) {
       const t =
         terminalSurvivor(l.productId, merges) === l.productId ? totals.get(l.productId) : undefined;
@@ -260,7 +295,7 @@ async function publish(
             l.id,
             {
               dealer: d.name,
-              product: s.products.find((p) => p.id === l.productId)?.name ?? "Product",
+              product: products.get(l.productId)?.name ?? "Product",
             },
           ] as const,
       ),
@@ -268,18 +303,18 @@ async function publish(
   );
   const previous = await db.monthlyEntry.findMany({
     where: {
-      OR: s.dealers.map((d) => ({
-        seasonMonthId: d.monthId,
-        planLine: { planDealerId: d.planDealerId },
-      })),
+      planLineId: { in: writes.map((w) => w.planLineId) },
+      seasonMonthId: { in: [...new Set(writes.map((w) => w.monthId))] },
     },
     select: { planLineId: true, seasonMonthId: true, saleQty: true, saleValue: true },
   });
   const old = new Map(previous.map((p) => [p.planLineId + ":" + p.seasonMonthId, p]));
+  const changedWrites: typeof writes = [];
   for (const w of writes) {
     const p = old.get(w.planLineId + ":" + w.monthId);
     if (!new D(p?.saleQty ?? 0).eq(w.qty) || !new D(p?.saleValue ?? 0).eq(w.amount)) {
       changedRows++;
+      changedWrites.push(w);
       if (changes.length < 100)
         changes.push({
           ...lineMeta.get(w.planLineId)!,
@@ -288,15 +323,17 @@ async function publish(
           beforeAmount: new D(p?.saleValue ?? 0).toFixed(2),
           amount: w.amount.toFixed(2),
         });
-    }
+    } else if (p?.saleValue === null) changedWrites.push(w);
   }
-  for (let offset = 0; offset < writes.length; offset += 250) {
-    const batch = writes.slice(offset, offset + 250);
+  progress("actuals_compared", changedWrites.length);
+  for (let offset = 0; offset < changedWrites.length; offset += 250) {
+    const batch = changedWrites.slice(offset, offset + 250);
     if (!batch.length) continue;
     await db.$executeRaw(
       Prisma.sql`INSERT INTO "MonthlyEntry" ("id","planLineId","seasonMonthId","planQty","saleQty","saleValue","createdAt","updatedAt") VALUES ${Prisma.join(batch.map((w) => Prisma.sql`(${randomUUID()},${w.planLineId},${w.monthId},0,${w.qty.toString()}::numeric,${w.amount.toString()}::numeric,NOW(),NOW())`))} ON CONFLICT ("planLineId","seasonMonthId") DO UPDATE SET "saleQty"=EXCLUDED."saleQty","saleValue"=EXCLUDED."saleValue","updatedAt"=NOW()`,
     );
   }
+  progress("actuals_saved", changedWrites.length);
   const summary = {
     voucherCount: result.vouchers.length,
     productLines: result.vouchers.reduce((n, v) => n + v.items.length, 0),
@@ -343,6 +380,7 @@ async function publish(
   );
   for (let i = 0; i < items.length; i += 500)
     await db.tallySalesItem.createMany({ data: items.slice(i, i + 500) });
+  progress("bill_details_saved", items.length);
   return summary;
 }
 const hash = z.string().regex(/^[a-f0-9]{64}$/),
@@ -387,17 +425,20 @@ export async function salesAgent(req: Request, raw: unknown) {
         today = indiaDay(now);
       await db.tallyConnection.update({ where: { id: c.id }, data: { lastSeenAt: now } });
       if (input.action === "heartbeat") return { ok: true };
-      const jobReply = async (j: {
-        id: string;
-        monthKey: string;
-        fromDate: string;
-        throughDate: string;
-        leaseExpiresAt: Date | null;
-        manifest: unknown;
-        scopeHash: string | null;
-      }) => {
+      const jobReply = async (
+        j: {
+          id: string;
+          monthKey: string;
+          fromDate: string;
+          throughDate: string;
+          leaseExpiresAt: Date | null;
+          manifest: unknown;
+          scopeHash: string | null;
+        },
+        cachedScope?: Scope,
+      ) => {
         if (j.manifest) throw new ApiError(409, "Replay the saved sales upload before claiming");
-        const current = await scope(db, j.monthKey);
+        const current = cachedScope ?? (await scope(db, j.monthKey));
         if (current.fingerprint !== j.scopeHash) {
           await db.tallySalesJob.update({
             where: { id: j.id },
@@ -490,7 +531,7 @@ export async function salesAgent(req: Request, raw: unknown) {
             leaseExpiresAt: new Date(+now + 20 * 60 * 1000),
           },
         });
-        return jobReply(job);
+        return jobReply(job, current);
       }
       const job = await db.tallySalesJob.findUnique({ where: { id: input.jobId } });
       if (
@@ -583,7 +624,7 @@ export async function salesAgent(req: Request, raw: unknown) {
         // Commit the failed state before returning a stale-attempt response. Values remain untouched.
         return { rejected: true };
       }
-      const summary = await publish(db, c, job, result);
+      const summary = await publish(db, c, job, result, current);
       await db.tallySalesJob.update({
         where: { id: job.id },
         data: { status: "SUCCEEDED", completedAt: now, resultHash: m.sha256, summary },

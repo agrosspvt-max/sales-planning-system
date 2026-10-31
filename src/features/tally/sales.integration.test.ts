@@ -74,6 +74,7 @@ modules["@/lib/import/workbook"] = {};
 modules["@/lib/match-key"] = load("src/lib/match-key.ts");
 modules["@/lib/product-merge"] = load("src/lib/product-merge.ts");
 modules["@/features/sales-upload/parser"] = load("src/features/sales-upload/parser.ts");
+modules["@/lib/product-resolver"] = load("src/lib/product-resolver.ts");
 modules["./service.server"] = load("src/features/tally/service.server.ts");
 const svc = load<typeof import("./sales.server")>("src/features/tally/sales.server.ts");
 const today = billwise.indiaDay(),
@@ -497,7 +498,7 @@ async function main() {
   );
   await refresh((j) => {
     const r = result(j);
-    r.vouchers[0].items[0].stockItemName = "Unknown Product";
+    r.vouchers[0].items[0].stockItemName = "UNREGISTERED ZETA";
     return r;
   });
   assert.equal(
@@ -528,6 +529,95 @@ async function main() {
     "0",
     "historical refresh cannot overwrite current month",
   );
+  await prisma.product.createMany({
+    data: [
+      { id: "catalog-tricho", name: "TRICHO", rate: 100, nbvPercent: "0.5" },
+      { id: "catalog-open", name: "OPEN", rate: 100, nbvPercent: "0.5" },
+      { id: "catalog-liner", name: "LINER (1ACER DOSE)", rate: 100, nbvPercent: "0.5" },
+    ],
+  });
+  await refresh((j) =>
+    result(j, [
+      {
+        lineNo: 0,
+        stockItemName: "MAXX TRICHO 12X1KG",
+        quantity: "12.000000",
+        amount: "3300.00",
+        unit: "Kg",
+        actualQty: "12 Kg",
+        billedQty: "12 Kg",
+        rate: "",
+      },
+      {
+        lineNo: 1,
+        stockItemName: "MAXX OPEN 20X500ML",
+        quantity: "10.000000",
+        amount: "22950.00",
+        unit: "L",
+        actualQty: "10 L",
+        billedQty: "10 L",
+        rate: "",
+      },
+      {
+        lineNo: 2,
+        stockItemName: "MAXX OPEN 100 X 25ML",
+        quantity: "2.500000",
+        amount: "8300.00",
+        unit: "L",
+        actualQty: "2.5 L",
+        billedQty: "2.5 L",
+        rate: "",
+      },
+      {
+        lineNo: 3,
+        stockItemName: "LINER 8X230ML",
+        quantity: "1.840000",
+        amount: "1000.00",
+        unit: "L",
+        actualQty: "1.84 L",
+        billedQty: "1.84 L",
+        rate: "",
+      },
+    ]),
+  );
+  const packRows = await prisma.monthlyEntry.findMany({
+    where: {
+      seasonMonthId: "sales-month",
+      planLine: {
+        planDealerId: "pd-a",
+        productId: { in: ["catalog-tricho", "catalog-open", "catalog-liner"] },
+      },
+    },
+    include: { planLine: true },
+  });
+  assert.equal(
+    packRows.length,
+    3,
+    "existing catalog products reused; no pack-specific products created",
+  );
+  assert.equal(
+    packRows.find((r) => r.planLine.productId === "catalog-open")?.saleQty.toString(),
+    "12.5",
+  );
+  assert.equal(
+    packRows.find((r) => r.planLine.productId === "catalog-open")?.saleValue?.toString(),
+    "31250",
+  );
+  assert.equal(
+    packRows.find((r) => r.planLine.productId === "catalog-tricho")?.saleQty.toString(),
+    "12",
+  );
+  assert.equal(
+    packRows.find((r) => r.planLine.productId === "catalog-liner")?.saleQty.toString(),
+    "1.84",
+  );
+  const packs = await prisma.tallySalesItem.findMany({ where: { voucher: { snapshot: { monthKey: month } } }, orderBy: { lineNo: "asc" } });
+  assert.equal(
+    packs[0].stockItemName,
+    "MAXX TRICHO 12X1KG",
+    "original bill/pack name retained for evidence",
+  );
+  assert.equal((await actual()).planQty, 77, "pack matching preserves planning figures");
   await svc.requestSalesRefresh(actor, month);
   const changed = await claim();
   const staged = await stage(changed, result(changed));

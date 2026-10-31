@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { decorate, matchByName, tightKey, type Keyed } from "@/lib/match-key";
+import { decorate, matchByName, similarity, tightKey, looseKey, type Keyed } from "@/lib/match-key";
 import { terminalSurvivor } from "@/lib/product-merge";
 
 /**
@@ -26,6 +26,8 @@ export interface ProductResolver {
   productNameById: Map<string, string>;
   /** Resolve an uploaded name to the operational SURVIVING product (a merged source name → its survivor). */
   resolveProduct: (rawName: string) => ProductMasterItem | null;
+  /** Same matching tiers/scores, but hold tied distinct surviving products for unattended sync. */
+  resolveProductUnique: (rawName: string) => ProductMasterItem | null;
   /** The operational product id for any (possibly merged) product id (terminal survivor). */
   effectiveProductId: (productId: string) => string;
   /** id → its terminal-survivor id, for every loaded product (merged source → survivor; else itself). */
@@ -40,6 +42,13 @@ export async function loadProductResolver(): Promise<ProductResolver> {
     select: { id: true, name: true, canonicalName: true, isActive: true, mergedIntoId: true },
   })) as { id: string; name: string; canonicalName: string | null; isActive: boolean; mergedIntoId: string | null }[];
 
+  return buildProductResolver(allRows);
+}
+
+export type ProductResolverRow = { id: string; name: string; canonicalName: string | null; isActive: boolean; mergedIntoId: string | null };
+
+/** Build from already pinned master rows, so a sync never reads a different catalog mid-job. */
+export function buildProductResolver(allRows: ProductResolverRow[]): ProductResolver {
   const mergedIntoById = new Map<string, string | null>(allRows.map((p) => [p.id, p.mergedIntoId]));
   const effectiveProductId = (id: string) => terminalSurvivor(id, mergedIntoById);
 
@@ -71,5 +80,35 @@ export async function loadProductResolver(): Promise<ProductResolver> {
     return matched ? survivorItem(matched) : null; // ALWAYS return the operational survivor
   };
 
-  return { products, productNameById, resolveProduct, effectiveProductId, mergedIntoById };
+  const unique = (matches: ProductMasterItem[]): ProductMasterItem | null => {
+    const survivors = new Map(matches.map(item => {
+      const survivor = survivorItem(item);
+      return [survivor.id, survivor] as const;
+    }));
+    if (survivors.size !== 1) return null;
+    const only = [...survivors.values()][0];
+    const meta = metaById.get(only.id);
+    return meta?.isActive && meta.mergedIntoId == null ? only : null;
+  };
+  const resolveProductUnique = (rawName: string): ProductMasterItem | null => {
+    const key = tightKey(rawName);
+    if (!key) return null;
+    // Canonical mappings win, exactly as in Sales Upload, without arbitrary duplicate masters.
+    const canonicalRows = decoratedAll.filter(p => p.canonicalName &&
+      (tightKey(p.name) === key || tightKey(p.canonicalName) === key));
+    const canonicalMatches = canonicalRows.flatMap(p => decoratedAll.filter(target =>
+      target.canonicalName && tightKey(target.name) === tightKey(target.canonicalName) &&
+      tightKey(target.canonicalName) === tightKey(p.canonicalName!)));
+    if (canonicalMatches.length) return unique(canonicalMatches);
+    const exact = decoratedAll.filter(p => p.tight === key);
+    if (exact.length) return unique(exact);
+    const loose = decoratedAll.filter(p => p.loose === looseKey(rawName));
+    if (loose.length) return unique(loose);
+    // Use the shared upload threshold and score, including its existing substring-name rule.
+    const scored = decoratedAll.map(p => ({p,score:similarity(rawName,p.name)})).filter(x => x.score >= 0.9);
+    if (!scored.length) return null;
+    const best = Math.max(...scored.map(x => x.score));
+    return unique(scored.filter(x => Math.abs(x.score - best) < 1e-12).map(x => x.p));
+  };
+  return { products, productNameById, resolveProduct, resolveProductUnique, effectiveProductId, mergedIntoById };
 }

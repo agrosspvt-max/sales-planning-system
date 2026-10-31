@@ -6,7 +6,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { cleanProductName } from "@/features/sales-upload/parser";
-import { tightKey } from "@/lib/match-key";
+import { buildProductResolver } from "@/lib/product-resolver";
 import { terminalSurvivor } from "@/lib/product-merge";
 import { indiaDay } from "./billwise";
 import { assertEnabled, assertSuper, authenticateConnector, lockConnector } from "./service.server";
@@ -111,30 +111,10 @@ async function scope(db: Tx, monthKey: string) {
 }
 type Scope = Awaited<ReturnType<typeof scope>>;
 function productMap(s: Scope) {
-  const merges = new Map(s.products.map((p) => [p.id, p.mergedIntoId]));
-  const canonical = new Map<string, Set<string>>();
-  for (const p of s.products)
-    if (p.canonicalName && tightKey(p.name) === tightKey(p.canonicalName)) {
-      const k = tightKey(p.canonicalName),
-        set = canonical.get(k) ?? new Set<string>();
-      set.add(terminalSurvivor(p.id, merges));
-      canonical.set(k, set);
-    }
-  const names = new Map<string, Set<string>>();
-  for (const p of s.products) {
-    const key = tightKey(p.name),
-      targets = p.canonicalName ? canonical.get(tightKey(p.canonicalName)) : undefined;
-    const set = names.get(key) ?? new Set<string>();
-    for (const id of targets ?? [terminalSurvivor(p.id, merges)]) {
-      if (s.products.some((x) => x.id === id && x.isActive && !x.mergedIntoId)) set.add(id);
-    }
-    names.set(key, set);
-  }
-  return (name: string) => {
-    const ids = names.get(tightKey(cleanProductName(name)));
-    return ids?.size === 1 ? [...ids][0] : null;
-  };
+  const resolver = buildProductResolver(s.products);
+  return (name: string) => resolver.resolveProductUnique(cleanProductName(name))?.id ?? null;
 }
+
 export function projectSales(result: SalesResult, s: Scope) {
   const ledgerNames = new Set(result.ledgers.map((l) => l.name)),
     needed = new Set(s.dealers.map((d) => d.dealerId));

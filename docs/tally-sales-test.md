@@ -38,3 +38,14 @@ State: health.json for aging; sales-health.json for sales; sync-all.log for the 
 - Real native curl XML → Python sales collector → certificate-verified local HTTPS → PostgreSQL publication passed with synthetic data. Windows DPAPI is replaced by a test codec only in this local roundtrip.
 - Connector regression suite and built-route authentication/cross-site checks passed. Three actual Windows protection/locking smoke checks cannot run on macOS.
 - First live sales publication on the office PC still requires installing/running the delivered update; a local synthetic roundtrip does not claim that office installation has happened.
+
+
+### Month-range refresh and connection recovery (1.4.1-test)
+
+Tally Connection now accepts an inclusive From month / To month range in the approved financial year, through the current India month. Each month is queued and published separately; repeated requests reuse pending jobs. The table shows each month's queue/read/completion/failure and last successful read. No eligible approved sales plans is shown explicitly. Current-month automatic refresh gets a turn when due between historical jobs. Aging retains its separate queue.
+
+A temporary status fetch failure keeps the selectors and last saved snapshot visible, with automatic bounded query retries. It no longer reports that sales is disabled for a generic network/server failure.
+
+Office update 1.4.1-test reads up to seven days per voucher-family request, splitting on a size limit or timeout. Every returned voucher is still checked against the exact interval. A failed single-day read fails the month; partial months cannot replace actuals. Cloud actions retry once when transient and replay-safe, with the same durable claim ID/chunk hashes/publication identity. Authentication, TLS certificate rejection and stale leases are not retried internally. The existing encrypted outboxes remain in place. Safe logs include action/error type only, without keys or payloads. Reading/upload/publication progress is printed in the office window.
+
+Validation: rendered controls during failed status queries, inclusive range and invalid dates, actual disposable PostgreSQL queue deduplication/month isolation/current-month priority, synthetic curl/TLS end-to-end publication, adaptive split and bounded cloud retry tests. Actual office network speed still needs verification on the Windows computer.

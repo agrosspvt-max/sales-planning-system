@@ -16,6 +16,7 @@ import { z } from "zod";
 import * as billwise from "./billwise";
 import * as changes from "./changes";
 import * as sales from "./sales";
+import { salesMonths } from "./sales-range";
 const url = process.env.TALLY_DISPOSABLE_TEST_URL;
 if (
   !url ||
@@ -70,6 +71,7 @@ function load<T>(file: string): T {
   });
   return mod.exports as T;
 }
+modules["./sales-range"] = load("src/features/tally/sales-range.ts");
 modules["@/lib/import/workbook"] = {};
 modules["@/lib/match-key"] = load("src/lib/match-key.ts");
 modules["@/lib/product-merge"] = load("src/lib/product-merge.ts");
@@ -611,7 +613,10 @@ async function main() {
     packRows.find((r) => r.planLine.productId === "catalog-liner")?.saleQty.toString(),
     "1.84",
   );
-  const packs = await prisma.tallySalesItem.findMany({ where: { voucher: { snapshot: { monthKey: month } } }, orderBy: { lineNo: "asc" } });
+  const packs = await prisma.tallySalesItem.findMany({
+    where: { voucher: { snapshot: { monthKey: month } } },
+    orderBy: { lineNo: "asc" },
+  });
   assert.equal(
     packs[0].stockItemName,
     "MAXX TRICHO 12X1KG",
@@ -635,7 +640,45 @@ async function main() {
     "SCOPE_CHANGED",
     "scope changes end the job immediately instead of leaving a stuck read",
   );
-  await svc.requestSalesRefresh(actor, month);
+  // Inclusive range is atomically queued, idempotent while pending, and never combines month snapshots.
+  const countBefore = await prisma.tallySalesJob.count();
+  await assert.rejects(
+    () => svc.requestSalesRefresh(actor, month, "2026-03"),
+    (e: any) => e.status === 422,
+  );
+  assert.equal(await prisma.tallySalesJob.count(), countBefore);
+  const range = await svc.requestSalesRefresh(actor, oldKey, month);
+  const again = await svc.requestSalesRefresh(actor, oldKey, month);
+  assert.equal(range.jobs.length, salesMonths(oldKey, month, today).length);
+  assert.deepEqual(JSON.parse(JSON.stringify(again.jobs)), JSON.parse(JSON.stringify(range.jobs)));
+  const rangeStatus = await svc.salesRangeStatus(actor, oldKey, month);
+  assert.equal(rangeStatus.months.length, range.jobs.length);
+  assert.equal(rangeStatus.months[0].job?.status, "QUEUED");
+  assert.equal(rangeStatus.months.at(-1)?.job?.status, "QUEUED");
+  // Historical queue must not starve the automatic current-month interval.
+  await prisma.tallySalesJob.updateMany({
+    where: { connectionId, manual: false, monthKey: month },
+    data: { createdAt: new Date(Date.now() - 16 * 60000) },
+  });
+  const priority = await claim();
+  assert.equal(priority.monthKey, month);
+  await call({
+    action: "fail",
+    jobId: priority.id,
+    leaseToken: priority.leaseToken,
+    code: "SALES_COLLECTION_REJECTED",
+  });
+  const historical = await claim();
+  assert.equal(historical.monthKey, oldKey);
+  await call({
+    action: "fail",
+    jobId: historical.id,
+    leaseToken: historical.leaseToken,
+    code: "SALES_COLLECTION_REJECTED",
+  });
+  await prisma.tallySalesJob.deleteMany({
+    where: { connectionId, status: "QUEUED", monthKey: { not: month } },
+  });
   const revokeJob = await claim();
   await (modules["./service.server"] as typeof import("./service.server")).disable(actor);
   await assert.rejects(

@@ -12,6 +12,8 @@ import { indiaDay } from "./billwise";
 import { assertEnabled, assertSuper, authenticateConnector, lockConnector } from "./service.server";
 import { hashSales, salesPeriod, validateSales, type SalesResult } from "./sales";
 
+import { salesMonths } from "./sales-range";
+
 type Tx = Prisma.TransactionClient;
 const D = Prisma.Decimal;
 const token = () => randomBytes(32).toString("base64url");
@@ -440,22 +442,28 @@ export async function salesAgent(req: Request, raw: unknown) {
           return { job: null };
         let job = await db.tallySalesJob.findFirst({
           where: { connectionId: c.id, status: "QUEUED" },
-          orderBy: { createdAt: "asc" },
+          orderBy: [{ createdAt: "asc" }, { monthKey: "asc" }, { id: "asc" }],
         });
-        if (!job) {
+        {
           const current = today.slice(0, 7),
             last = await db.tallySalesJob.findFirst({
               where: { connectionId: c.id, monthKey: current, manual: false },
               orderBy: { createdAt: "desc" },
             });
-          if (last && +now - +last.createdAt < 15 * 60 * 1000) return { job: null };
-          let period;
-          try {
-            period = salesPeriod(current, today);
-          } catch {
-            return { job: null };
+          const due =
+            current >= "2026-04" &&
+            current <= "2027-03" &&
+            (!last || +now - +last.createdAt >= 15 * 60 * 1000);
+          if (!job && !due) return { job: null };
+          if (!job || (job.monthKey !== current && due)) {
+            let period;
+            try {
+              period = salesPeriod(current, today);
+            } catch {
+              return { job: null };
+            }
+            job = await db.tallySalesJob.create({ data: { connectionId: c.id, ...period } });
           }
-          job = await db.tallySalesJob.create({ data: { connectionId: c.id, ...period } });
         }
         // A current-month request queued yesterday must read through today, rather than publish a stale end date.
         const period = salesPeriod(job.monthKey, today),
@@ -466,7 +474,7 @@ export async function salesAgent(req: Request, raw: unknown) {
             data: {
               status: "SUCCEEDED",
               completedAt: now,
-              summary: { updatedRows: 0, changedRows: 0, held: [] },
+              summary: { updatedRows: 0, changedRows: 0, held: [], noEligiblePlans: true },
             },
           });
           return { job: null };
@@ -603,24 +611,94 @@ function checkedPeriod(monthKey: string) {
     );
   }
 }
-export async function requestSalesRefresh(ctx: AuthContext, monthKey: string) {
+export async function requestSalesRefresh(ctx: AuthContext, monthKey: string, toMonth = monthKey) {
   assertSalesEnabled();
   assertSuper(ctx);
-  const period = checkedPeriod(monthKey);
-  return prisma.$transaction(async (db) => {
-    const c = await db.tallyConnection.findFirst({ where: { enabled: true } });
-    if (!c) throw new ApiError(409, "Configure the office connector first");
-    await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${c.id}))`;
-    const existing = await db.tallySalesJob.findFirst({
-      where: { connectionId: c.id, monthKey, status: { in: ["QUEUED", "RUNNING"] } },
-    });
-    if (existing) return { jobId: existing.id };
-    const row = await db.tallySalesJob.create({
-      data: { connectionId: c.id, ...period, manual: true },
-    });
-    return { jobId: row.id };
-  });
+  let months: string[];
+  try {
+    months = salesMonths(monthKey, toMonth, indiaDay());
+  } catch (error) {
+    throw new ApiError(422, (error as Error).message);
+  }
+  return prisma.$transaction(
+    async (db) => {
+      const c = await db.tallyConnection.findFirst({ where: { enabled: true } });
+      if (!c) throw new ApiError(409, "Configure the office connector first");
+      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${c.id}))`;
+      const jobs = [];
+      for (const key of months) {
+        const existing = await db.tallySalesJob.findFirst({
+          where: { connectionId: c.id, monthKey: key, status: { in: ["QUEUED", "RUNNING"] } },
+        });
+        const row =
+          existing ??
+          (await db.tallySalesJob.create({
+            data: { connectionId: c.id, ...checkedPeriod(key), manual: true },
+          }));
+        jobs.push({ monthKey: key, jobId: row.id, status: row.status });
+      }
+      return { jobId: jobs[0].jobId, jobs };
+    },
+    { timeout: 20000 },
+  );
 }
+export async function salesRangeStatus(ctx: AuthContext, fromMonth: string, toMonth: string) {
+  assertSalesEnabled();
+  assertSuper(ctx);
+  let months: string[];
+  try {
+    months = salesMonths(fromMonth, toMonth, indiaDay());
+  } catch (error) {
+    throw new ApiError(422, (error as Error).message);
+  }
+  const c = await prisma.tallyConnection.findFirst({
+    where: { enabled: true },
+    select: { id: true, lastSeenAt: true },
+  });
+  if (!c) return { configured: false, months: [] };
+  const [jobs, snapshots] = await Promise.all([
+    prisma.tallySalesJob.findMany({
+      where: { connectionId: c.id, monthKey: { in: months } },
+      orderBy: { createdAt: "desc" },
+      distinct: ["monthKey"],
+      select: {
+        id: true,
+        monthKey: true,
+        status: true,
+        error: true,
+        leaseExpiresAt: true,
+        summary: true,
+      },
+    }),
+    prisma.tallySalesSnapshot.findMany({
+      where: { connectionId: c.id, monthKey: { in: months } },
+      select: { monthKey: true, observedAt: true },
+    }),
+  ]);
+  return {
+    configured: true,
+    lastSeenAt: c.lastSeenAt,
+    months: months.map((monthKey) => ({
+      monthKey,
+      job: (() => {
+        const job = jobs.find((j) => j.monthKey === monthKey);
+        if (!job) return null;
+        const { summary, ...info } = job;
+        return {
+          ...info,
+          noEligiblePlans: !!(
+            summary &&
+            typeof summary === "object" &&
+            !Array.isArray(summary) &&
+            summary.noEligiblePlans
+          ),
+        };
+      })(),
+      observedAt: snapshots.find((s) => s.monthKey === monthKey)?.observedAt ?? null,
+    })),
+  };
+}
+
 export async function salesStatus(ctx: AuthContext, monthKey: string) {
   assertSalesEnabled();
   assertSuper(ctx);
@@ -639,6 +717,7 @@ export async function salesStatus(ctx: AuthContext, monthKey: string) {
         status: true,
         createdAt: true,
         completedAt: true,
+        leaseExpiresAt: true,
         error: true,
         summary: true,
       },

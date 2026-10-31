@@ -59,6 +59,7 @@
     "test:tally": "node --import tsx src/features/tally/billwise.test.ts && node --import tsx src/features/tally/progress.test.ts && node --import tsx src/features/tally/changes.test.ts",
     "test:tally:db": "node --import tsx src/features/tally/integration.test.ts",
     "test:tally:sales": "node --import tsx src/features/tally/sales.integration.test.ts",
+    "test:tally:sales-ui": "node --import tsx src/features/tally/sales-refresh.test.tsx",
     "test:tally:sales-products": "node --import tsx src/lib/product-resolver.test.ts"
   },
   "prisma": {

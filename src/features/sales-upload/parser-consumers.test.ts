@@ -36,8 +36,8 @@ async function main() {
     seasonMonth: { findUnique: async () => ({ id: "m1", name: "October", calendarMonth: 10, calendarYear: 2026, season: { id: "s1", name: "Rabi", year: 2026 } }) },
     planDealer: {
       findMany: async () => [
-        { id: "pd-g", dealerId: "d-ganesh", dealer: { name: "Ganesh Agro berla CG" }, seasonPlan: { officer: { id: "o1", name: "Officer" } }, lines: [{ id: "pl-bc", productId: "p-bc" }, { id: "pl-mo", productId: "p-mo" }] },
-        { id: "pd-o", dealerId: "d-other", dealer: { name: "Other Dealer" }, seasonPlan: { officer: { id: "o1", name: "Officer" } }, lines: [{ id: "pl-o", productId: "p-mo" }] },
+        { id: "pd-g", dealerId: "d-ganesh", dealer: { name: "Ganesh Agro berla CG", assignments: [] }, seasonPlan: { officer: { id: "o1", name: "Officer" } }, lines: [{ id: "pl-bc", productId: "p-bc" }, { id: "pl-mo", productId: "p-mo" }] },
+        { id: "pd-o", dealerId: "d-other", dealer: { name: "Other Dealer", assignments: [] }, seasonPlan: { officer: { id: "o1", name: "Officer" } }, lines: [{ id: "pl-o", productId: "p-mo" }] },
       ],
     },
     monthlyEntry: { findMany: async () => [], createMany: async ({ data }: { data: Row[] }) => { created.push(...data); return { count: data.length }; }, update: async () => ({}) },

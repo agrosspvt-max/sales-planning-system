@@ -10,3 +10,6 @@ npm-debug.log*
 .vercel
 next-env.d.ts
 /prisma/*.db
+
+# Private before-images and reviewed one-off repair manifests
+/.local-repairs/

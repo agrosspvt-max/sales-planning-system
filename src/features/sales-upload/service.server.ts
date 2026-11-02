@@ -11,6 +11,7 @@ import { similarity } from "@/lib/match-key";
 import { withDbRetry } from "@/lib/db-retry";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { loadProductResolver } from "@/lib/product-resolver";
+import { isCurrentlyOwnedBy, resolveCurrentOwner, type OpenAssignment } from "@/lib/dealer-ownership";
 import { writeAudit } from "@/lib/audit";
 import { parseSalesWorkbook, type ParsedSalesWorkbook } from "./parser";
 
@@ -24,7 +25,7 @@ const inputSchema = z.object({
   toDate: z.string().optional(),
   // "SELECT SALES OFFICER" mode: restrict matching to THIS existing officer's approved seasonal plan so
   // the chosen officer takes precedence over the file-detected officer. Omitted = AUTO / USE DETECTED
-  // (unchanged behaviour — match across every officer's plan by dealer identity).
+  // (match across eligible plans by dealer identity). A selection never overrides current ownership.
   officerId: z.string().optional(),
 });
 export type SalesUploadInput = z.infer<typeof inputSchema>;
@@ -147,7 +148,9 @@ const NO_PLAN_OFFICER = "— No approved seasonal plan —";
  * matching logic is defined once. Dealer: Alias → exact → loose → fuzzy. Product: exact → loose
  * → fuzzy (both via the shared matchByName). A row is importable only when the matched dealer +
  * product correspond to a PlanLine in an APPROVED, active seasonal plan for the target month's
- * season — that PlanDealer IS the dealer → Sales Officer link, so no officer is ever chosen.
+ * season. Current DealerAssignment chooses the owner; historical PlanDealer membership must never
+ * route a reassigned dealer's new actuals back to the previous officer. Unassigned legacy dealers
+ * retain their existing plan-based routing.
  */
 async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: string, opts: { withReport?: boolean; officerId?: string } = {}): Promise<Resolution> {
   const withReport = opts.withReport ?? false;
@@ -185,7 +188,13 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
     select: {
       id: true,
       dealerId: true,
-      dealer: { select: { name: true } },
+      dealer: { select: {
+        name: true,
+        assignments: {
+          where: { effectiveTo: null },
+          select: { officerId: true, effectiveFrom: true, createdAt: true },
+        },
+      } },
       seasonPlan: { select: { officer: { select: { id: true, name: true } } } },
       lines: { select: { id: true, productId: true } },
     },
@@ -199,10 +208,12 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
   for (const pd of plans as {
     id: string;
     dealerId: string;
-    dealer: { name: string };
+    dealer: { name: string; assignments: OpenAssignment[] };
     seasonPlan: { officer: { id: string; name: string } | null } | null;
     lines: { id: string; productId: string }[];
   }[]) {
+    const ownerId = resolveCurrentOwner(pd.dealer.assignments);
+    if (!pd.seasonPlan?.officer || !isCurrentlyOwnedBy(ownerId, pd.seasonPlan.officer.id)) continue;
     dealersWithPlan.add(pd.dealerId);
     planDealerIdByDealer.set(pd.dealerId, pd.id);
     dealerNameById.set(pd.dealerId, pd.dealer.name);

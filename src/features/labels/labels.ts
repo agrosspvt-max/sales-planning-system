@@ -10,6 +10,18 @@ import { APPROVAL_LABELS } from "@/features/planning/approval-labels";
  * at runtime. Keys are stable identifiers and must never change once shipped.
  */
 export const DEFAULT_LABELS = {
+  "seasons.months.visibility_help": "Only open seasons and open months appear in planning and upload choices for any account. Closed or locked periods stay here so you can reopen them. Closing preserves all saved data; reopening makes it visible again.",
+  "seasons.remove.action": "Remove",
+  "seasons.remove.title": "Remove and transfer month",
+  "seasons.remove.help": "Move this month’s sales, recovery and party planning to the receiving season, then remove it here. Other months and seasonal totals stay unchanged. Missing destination seasonal plans are created as drafts. Non-overlapping entries are merged; conflicting records stop the entire transfer.",
+  "seasons.remove.destination": "Receiving season",
+  "seasons.remove.no_target": "No other open season contains this exact month and year. Add the month to the receiving season first.",
+  "seasons.remove.confirm": "Remove & transfer",
+  "seasons.remove.cancel": "Cancel",
+  "seasons.remove.saving": "Transferring…",
+  "seasons.remove.sales": "Sales entries",
+  "seasons.remove.recovery": "Recovery plans",
+  "seasons.remove.party": "Party entries",
   ...CN_REVIEW_LABELS,
   ...APPROVAL_LABELS,
   "historical_daybook.tab": "Historical Daybook",
@@ -2523,6 +2535,7 @@ const SCHEME_PLANNING_META: Partial<Record<LabelKey, LabelMeta>> = {} as Partial
 
 /** Classify any key into { module, group } — explicit Scheme Planning metadata first, else by prefix. */
 export function labelMeta(key: LabelKey): LabelMeta {
+  if (key.startsWith("seasons.")) return { module: "Seasons", group: "Form Fields" };
   if (key.startsWith("approvals.")) return { module: "Approvals", group: /^approvals\.(category|cn)\./.test(key) ? "Navigation / Flip Buttons" : "Sections" };
   if (key.startsWith("historical_daybook.")) return { module: "Historical Daybook", group: key.endsWith(".date") || key.endsWith(".voucher") || key.endsWith(".decision") ? "Table Columns" : "View Buttons" };
   // Performance → Requests / Performance / late reports (kept under one understandable module instead of the Daily Work lump).

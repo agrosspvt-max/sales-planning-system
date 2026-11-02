@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -69,7 +70,7 @@ export async function adminEditSeasonal(ctx: AuthContext, planId: string, lines:
   const reason = cleanReason(reasonRaw);
 
   const plan = (await prisma.seasonPlan.findUnique({
-    where: { id: planId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: planId }),
     select: { id: true, status: true, isActiveVersion: true, lifecycleState: true, version: true, seasonId: true },
   })) as { id: string; status: string; isActiveVersion: boolean; lifecycleState: string; version: number; seasonId: string } | null;
   if (!plan) throw new ApiError(404, "Seasonal plan not found");
@@ -151,7 +152,7 @@ export async function adminEditMonthly(ctx: AuthContext, monthlyPlanId: string, 
   const reason = cleanReason(reasonRaw);
 
   const mp = (await prisma.monthlyPlan.findUnique({
-    where: { id: monthlyPlanId },
+    where: inOpenPlanningPeriod("monthlyPlan", { id: monthlyPlanId }),
     select: { id: true, status: true, lifecycleState: true, seasonPlanId: true, seasonMonthId: true, seasonPlan: { select: { status: true, isActiveVersion: true, lifecycleState: true, version: true, seasonId: true } } },
   })) as { id: string; status: string; lifecycleState: string; seasonPlanId: string; seasonMonthId: string; seasonPlan: { status: string; isActiveVersion: boolean; lifecycleState: string; version: number; seasonId: string } } | null;
   if (!mp) throw new ApiError(404, "Monthly plan not found");
@@ -165,7 +166,7 @@ export async function adminEditMonthly(ctx: AuthContext, monthlyPlanId: string, 
     select: { id: true, productId: true, product: { select: { name: true } }, planDealer: { select: { dealerId: true, dealer: { select: { name: true } } } } },
   })) as { id: string; productId: string; product: { name: string }; planDealer: { dealerId: string; dealer: { name: string } } }[];
   const lineMeta = new Map(planLines.map((l) => [l.id, l] as const));
-  const month = (await prisma.seasonMonth.findUnique({ where: { id: mp.seasonMonthId }, select: { name: true } })) as { name: string } | null;
+  const month = (await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: mp.seasonMonthId }), select: { name: true } })) as { name: string } | null;
 
   const audits: ReturnType<typeof auditData>[] = [];
   const writes: ((tx: Prisma.TransactionClient) => Promise<unknown>)[] = [];
@@ -204,7 +205,7 @@ export interface AdminRecoveryWeekEntry { dealerId: string; weekRecoveryPlan?: n
 async function loadRecoveryEligible(ctx: AuthContext, id: string) {
   assertSuperAdmin(ctx);
   const plan = (await prisma.recoveryPlan.findUnique({
-    where: { id },
+    where: inOpenPlanningPeriod("recoveryPlan", { id }),
     select: { id: true, status: true, lifecycleState: true, seasonId: true, seasonMonthId: true },
   })) as { id: string; status: string; lifecycleState: string; seasonId: string; seasonMonthId: string } | null;
   if (!plan) throw new ApiError(404, "Recovery plan not found");

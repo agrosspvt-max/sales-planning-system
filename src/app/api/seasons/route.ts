@@ -2,13 +2,19 @@ import { type NextRequest } from "next/server";
 import { handle, ok, requirePermission } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { createSeason, listSeasons } from "@/features/seasons/service.server";
+import { hasAdminPermission, isAdministrativeRole } from "@/features/accounts/permissions";
+import { ApiError } from "@/lib/http";
 
 export async function GET(req: NextRequest) {
   return handle(async () => {
-    await requirePermission("seasons", "read");
+    const auth = await requirePermission("seasons", "read");
     const search = (req.nextUrl.searchParams.get("search") ?? "").trim();
-    // active=true → only OPEN seasons (planning/recovery/import selectors). Omitted → all (management/reports).
-    const activeOnly = req.nextUrl.searchParams.get("active") === "true";
+    // Only the management view can include closed periods, so they can be reopened.
+    const management = req.nextUrl.searchParams.get("management") === "true";
+    if (management && !(isAdministrativeRole(auth.role) && hasAdminPermission(auth, "seasons", "read"))) {
+      throw new ApiError(403, "Only Seasons management can view closed seasons");
+    }
+    const activeOnly = !management;
     return ok(await listSeasons(search, activeOnly));
   });
 }

@@ -1,7 +1,8 @@
 "use client";
 
 import { retryTransientOnce } from "@/lib/polling";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { listenForPlanningPeriodChanges } from "@/lib/planning-period-cache";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { LabelProvider } from "@/features/labels/label-ui";
@@ -18,6 +19,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
         },
       }),
   );
+
+  useEffect(() => listenForPlanningPeriodChanges(client), [client]);
 
   return (
     <ThemeProvider>

@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -167,8 +168,8 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   const [group, season, packSizes] = (await Promise.all([
     prisma.userGroup.findUnique({ where: { id: groupId }, select: { name: true } }),
     prisma.season.findUnique({
-      where: { id: seasonId },
-      select: { name: true, year: true, seasonalMode: true, monthlyMode: true, months: { orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } },
+      where: inOpenPlanningPeriod("season", { id: seasonId }),
+      select: { name: true, year: true, seasonalMode: true, monthlyMode: true, months: { where: { status: "OPEN" }, orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } },
     }),
     prisma.packSize.findMany({ where: { isActive: true, isPlanning: true }, orderBy: { displayOrder: "asc" }, select: { id: true, name: true } }),
   ])) as [
@@ -204,7 +205,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
 
   // Every ACTIVE-lifecycle seasonal plan (all versions/statuses) for these officers this season.
   const seasonPlans = (await prisma.seasonPlan.findMany({
-    where: { seasonId, officerId: { in: officers.map((o) => o.id) }, planningType: "SEASONAL", lifecycleState: "ACTIVE" },
+    where: inOpenPlanningPeriod("seasonPlan", { seasonId, officerId: { in: officers.map((o) => o.id) }, planningType: "SEASONAL", lifecycleState: "ACTIVE" }),
     select: { id: true, officerId: true, version: true, status: true, isActiveVersion: true },
     orderBy: { version: "desc" },
   })) as SeasonPlanRow[];
@@ -406,7 +407,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   const allPlanIds = seasonPlans.map((p) => p.id);
   if (allPlanIds.length > 0) {
     const monthlyPlans = (await prisma.monthlyPlan.findMany({
-      where: { seasonPlanId: { in: allPlanIds } },
+      where: inOpenPlanningPeriod("monthlyPlan", { seasonPlanId: { in: allPlanIds } }),
       select: { seasonPlanId: true, seasonMonthId: true, status: true },
     })) as { seasonPlanId: string; seasonMonthId: string; status: string }[];
     // Two month gates: `mpBucket` = months in a SELECTED bucket (period columns); `mpBaseline` = months in

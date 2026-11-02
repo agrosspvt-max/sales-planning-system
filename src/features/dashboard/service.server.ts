@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { Role, SeasonStatus, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -5,7 +6,7 @@ import type { AuthContext } from "@/lib/http";
 import { getCurrentDealerIds, getOfficerScope } from "@/lib/scope";
 import { computeFacts, groupSummary } from "@/features/reports/service.server";
 import { getApprovalsInbox } from "@/features/planning/service.server";
-import { getSeasonMonthStates } from "@/features/planning/planning-state.server";
+import { getOpenSeasonMonthStates } from "@/features/planning/planning-state.server";
 import { achievement } from "@/lib/calc";
 import type { RankRow } from "@/features/reports/types";
 
@@ -29,23 +30,22 @@ export interface DashboardData {
  * (`computeFacts`, which only counts APPROVED + active plans). So it must first pick the
  * season that actually holds such a plan — otherwise it can land on a newer, empty OPEN
  * season and report ₹0 while an approved, active (e.g. imported) plan exists elsewhere.
- * Falls back to the previous heuristic (most recent OPEN, else most recent overall) only
- * when no approved active plan exists yet.
+ * Falls back to the most recent OPEN season when no approved active plan exists yet.
+ * Closed seasons are never a fallback; with none open the dashboard has no current season.
  */
 export async function getCurrentSeason() {
   const withActivePlan = await prisma.seasonPlan.findFirst({
-    where: { status: PlanStatus.APPROVED, isActiveVersion: true },
+    where: inOpenPlanningPeriod("seasonPlan", { status: PlanStatus.APPROVED, isActiveVersion: true }),
     orderBy: [{ approvedAt: "desc" }, { createdAt: "desc" }],
     select: { season: true },
   });
   if (withActivePlan?.season) return withActivePlan.season;
 
   const open = await prisma.season.findFirst({
-    where: { status: SeasonStatus.OPEN },
+    where: inOpenPlanningPeriod("season", { status: SeasonStatus.OPEN }),
     orderBy: [{ year: "desc" }, { createdAt: "desc" }],
   });
-  if (open) return open;
-  return prisma.season.findFirst({ orderBy: [{ year: "desc" }, { createdAt: "desc" }] });
+  return open;
 }
 
 const money = (n: number) =>
@@ -62,7 +62,7 @@ export async function getDashboard(ctx: AuthContext): Promise<DashboardData> {
   const seasonName = `${season.name} ${season.year}`;
 
   // Operational: the currently OPEN planning month(s) for this season (Open-Month, §42).
-  const monthStates = await getSeasonMonthStates(season.id);
+  const monthStates = await getOpenSeasonMonthStates(season.id);
   const openMonths = monthStates.filter((m) => m.status === "OPEN");
   const planningMonthCard: DashboardCard = {
     label: "Current Planning Month",
@@ -72,7 +72,7 @@ export async function getDashboard(ctx: AuthContext): Promise<DashboardData> {
   if (ctx.role === Role.SALES_OFFICER) {
     const dealerIds = await getCurrentDealerIds(ctx.userId);
     const plan = await prisma.seasonPlan.findFirst({
-      where: { seasonId: season.id, officerId: ctx.userId },
+      where: inOpenPlanningPeriod("seasonPlan", { seasonId: season.id, officerId: ctx.userId }),
       orderBy: { version: "desc" },
     });
     return {

@@ -22,7 +22,7 @@ export async function lockSeasonPlan(db: Db, id: string): Promise<LockedSeasonPl
   const rows = await db.$queryRaw<LockedSeasonPlan[]>(Prisma.sql`
     SELECT p."id", p."status"::text AS "status", p."lifecycleState", p."officerId", p."seasonId", s."status"::text AS "seasonStatus"
     FROM "SeasonPlan" p JOIN "Season" s ON s."id" = p."seasonId"
-    WHERE p."id" = ${id}
+    WHERE p."id" = ${id} AND s."status" = 'OPEN'
     FOR UPDATE OF p`);
   return rows[0] ?? null;
 }
@@ -32,7 +32,8 @@ export async function lockMonthlyPlan(db: Db, id: string): Promise<LockedMonthly
     SELECT m."id", m."status"::text AS "status", m."lifecycleState", m."officerId", m."seasonPlanId", m."seasonMonthId", p."lifecycleState" AS "parentLifecycleState",
            s."monthlyMode"
     FROM "MonthlyPlan" m JOIN "SeasonPlan" p ON p."id" = m."seasonPlanId" JOIN "Season" s ON s."id" = p."seasonId"
-    WHERE m."id" = ${id}
+    JOIN "SeasonMonth" sm ON sm."id" = m."seasonMonthId"
+    WHERE m."id" = ${id} AND s."status" = 'OPEN' AND sm."status" = 'OPEN'
     FOR UPDATE OF m`);
   return rows[0] ?? null;
 }
@@ -41,7 +42,9 @@ export async function lockRecoveryPlan(db: Db, id: string): Promise<LockedRecove
   const rows = await db.$queryRaw<LockedRecoveryPlan[]>(Prisma.sql`
     SELECT r."id", r."status"::text AS "status", r."lifecycleState", r."officerId", r."weeklyEditEnabled", p."lifecycleState" AS "parentLifecycleState"
     FROM "RecoveryPlan" r LEFT JOIN "SeasonPlan" p ON p."id" = r."seasonPlanId"
-    WHERE r."id" = ${id}
+    JOIN "Season" s ON s."id" = r."seasonId"
+    JOIN "SeasonMonth" sm ON sm."id" = r."seasonMonthId"
+    WHERE r."id" = ${id} AND s."status" = 'OPEN' AND sm."status" = 'OPEN'
     FOR UPDATE OF r`);
   return rows[0] ?? null;
 }

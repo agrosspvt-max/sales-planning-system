@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -49,7 +50,7 @@ export async function globalSearch(ctx: AuthContext, q: string): Promise<SearchH
   }
 
   // Seasons
-  const seasons = await prisma.season.findMany({ where: { name: contains }, take: TAKE, orderBy: { year: "desc" } });
+  const seasons = await prisma.season.findMany({ where: inOpenPlanningPeriod("season", { name: contains }), take: TAKE, orderBy: { year: "desc" } });
   for (const s of seasons) {
     hits.push({ type: "Season", id: s.id, label: `${s.name} ${s.year}`, href: "/seasons" });
   }

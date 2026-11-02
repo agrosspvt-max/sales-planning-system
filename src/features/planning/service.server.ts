@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import { actorDisplayName } from "@/features/accounts/identity";
 import { assertAdminPermission, hasAdminPermission } from "@/features/accounts/permissions";
 import "server-only";
@@ -41,7 +42,7 @@ const PLAN_WRITE_TRANSACTION = { maxWait: 10_000, timeout: 15_000 };
 async function planLabel(plan: { officerId: string; seasonId: string }): Promise<string> {
   const [officer, season] = await Promise.all([
     prisma.user.findUnique({ where: { id: plan.officerId }, select: { name: true } }),
-    prisma.season.findUnique({ where: { id: plan.seasonId }, select: { name: true, year: true } }),
+    prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: plan.seasonId }), select: { name: true, year: true } }),
   ]);
   return `${officer?.name ?? "Officer"} — ${season?.name ?? ""} ${season?.year ?? ""}`.trim();
 }
@@ -51,13 +52,13 @@ function num(d: unknown): number {
 }
 
 async function loadPlanOr404(planId: string) {
-  const plan = await prisma.seasonPlan.findUnique({ where: { id: planId } });
+  const plan = await prisma.seasonPlan.findUnique({ where: inOpenPlanningPeriod("seasonPlan", { id: planId }) });
   if (!plan) throw new ApiError(404, "Plan not found");
   return plan;
 }
 
 async function assertSeasonOpen(seasonId: string) {
-  const season = await prisma.season.findUnique({ where: { id: seasonId } });
+  const season = await prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: seasonId }) });
   if (!season) throw new ApiError(404, "Season not found");
   if (season.status !== SeasonStatus.OPEN) {
     throw new ApiError(422, "The season is closed; plans cannot be created or edited"); // V5
@@ -177,7 +178,7 @@ export async function createSalesPlan(ctx: AuthContext, input: CreateSalesPlanIn
   }
 
   const existing = await prisma.seasonPlan.findMany({
-    where: { seasonId: input.seasonId, officerId, planningType },
+    where: inOpenPlanningPeriod("seasonPlan", { seasonId: input.seasonId, officerId, planningType }),
     orderBy: { version: "desc" },
   });
   // Only ACTIVE plans block creation / are reopened. Archived (deactivated) or frozen (closed)
@@ -346,7 +347,7 @@ export async function createSeasonalPlans(
 export async function getPlanDetail(ctx: AuthContext, planId: string) {
   const [plan, planningPacks] = await Promise.all([
     prisma.seasonPlan.findUnique({
-      where: { id: planId },
+      where: inOpenPlanningPeriod("seasonPlan", { id: planId }),
       include: {
         season: { select: { name: true, year: true, status: true, seasonalMode: true } },
         officer: { select: { name: true, groupId: true } },
@@ -511,7 +512,7 @@ export async function getPlanDetail(ctx: AuthContext, planId: string) {
  */
 export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: string) {
   const plan = await prisma.seasonPlan.findUnique({
-    where: { id: planId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: planId }),
     include: {
       season: { select: { name: true, year: true, seasonalMode: true } },
       officer: { select: { name: true } },
@@ -533,7 +534,7 @@ export async function getWorkbook(ctx: AuthContext, planId: string, dealerId?: s
   await assertOfficerInScope(ctx, plan.officerId);
 
   const months = await prisma.seasonMonth.findMany({
-    where: { seasonId: plan.seasonId },
+    where: inOpenPlanningPeriod("seasonMonth", { seasonId: plan.seasonId }),
     orderBy: SEASON_MONTH_ORDER,
     select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true },
   });
@@ -939,7 +940,7 @@ export async function authorizeRevision(ctx: AuthContext, planId: string): Promi
     throw new ApiError(403, "Only the Super Admin can authorize a revision");
   }
   const plan = await prisma.seasonPlan.findUnique({
-    where: { id: planId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: planId }),
     include: { dealers: { include: { lines: { include: { packs: true } } } } },
   });
   if (!plan) throw new ApiError(404, "Plan not found");
@@ -1014,7 +1015,7 @@ export async function getPlanHistory(ctx: AuthContext, planId: string) {
       orderBy: { createdAt: "asc" },
     }),
     prisma.seasonPlan.findMany({
-      where: { seasonId: plan.seasonId, officerId: plan.officerId },
+      where: inOpenPlanningPeriod("seasonPlan", { seasonId: plan.seasonId, officerId: plan.officerId }),
       orderBy: { version: "asc" },
       select: { id: true, version: true, status: true, isActiveVersion: true, approvedAt: true },
     }),
@@ -1039,12 +1040,12 @@ export async function listPlans(ctx: AuthContext, seasonId?: string, mine = fals
   // "My Plans" narrows to the caller's own plans (used by RMs, who otherwise see the whole group).
   const officerWhere = mine ? ctx.userId : scope.all ? undefined : { in: scope.ids };
   const plans = await prisma.seasonPlan.findMany({
-    where: {
+    where: inOpenPlanningPeriod("seasonPlan", {
       seasonId: seasonId || undefined,
       officerId: officerWhere,
       // Deactivated plans are hidden from the Sales Officer; Admin/RM still see them.
       ...officerVisibilityWhere(ctx),
-    },
+    }),
     include: {
       season: { select: { name: true, year: true, seasonalMode: true } },
       officer: { select: { name: true, territory: true, group: { select: { name: true } } } },
@@ -1110,7 +1111,7 @@ export async function deleteSalesPlan(ctx: AuthContext, planId: string) {
 /** Duplicate a plan's structure into a new DRAFT version (no snapshots, no monthly entries). */
 export async function duplicateSalesPlan(ctx: AuthContext, planId: string): Promise<string> {
   const plan = await prisma.seasonPlan.findUnique({
-    where: { id: planId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: planId }),
     include: { dealers: { include: { lines: { include: { packs: true } } } } },
   });
   if (!plan) throw new ApiError(404, "Plan not found");
@@ -1169,7 +1170,7 @@ export async function getApprovalsInbox(ctx: AuthContext) {
 
   const pending = await prisma.seasonPlan.findMany({
     where:
-      isAdministrativeRole(ctx.role)
+      inOpenPlanningPeriod("seasonPlan", isAdministrativeRole(ctx.role)
         ? {
             // Closed/deactivated plans are frozen and never appear in the approval queue.
             lifecycleState: "ACTIVE",
@@ -1181,7 +1182,7 @@ export async function getApprovalsInbox(ctx: AuthContext) {
               { status: PlanStatus.APPROVED, isActiveVersion: true, revisionRequested: true },
             ],
           }
-        : { status: PlanStatus.PENDING_RM, officerId: { in: scope.ids }, lifecycleState: "ACTIVE" },
+        : { status: PlanStatus.PENDING_RM, officerId: { in: scope.ids }, lifecycleState: "ACTIVE" }),
     include: {
       season: { select: { name: true, year: true } },
       officer: { select: { name: true } },

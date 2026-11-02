@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { assertAdminPermission } from "@/features/accounts/permissions";
@@ -139,7 +140,7 @@ export async function setSeasonalPlanLifecycle(
 ): Promise<{ lifecycleState: LifecycleState }> {
   assertAdmin(ctx);
   const plan = await prisma.seasonPlan.findUnique({
-    where: { id: planId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: planId }),
     select: { id: true, lifecycleState: true, planningType: true },
   });
   if (!plan) throw new ApiError(404, "Plan not found");
@@ -165,7 +166,7 @@ export async function setSeasonalPlanLifecycle(
 export async function deleteSeasonalPlan(ctx: AuthContext, planId: string): Promise<{ deleted: true }> {
   assertAdmin(ctx);
   const plan = await prisma.seasonPlan.findUnique({
-    where: { id: planId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: planId }),
     select: { id: true, status: true, planningType: true },
   });
   if (!plan) throw new ApiError(404, "Plan not found");
@@ -174,7 +175,7 @@ export async function deleteSeasonalPlan(ctx: AuthContext, planId: string): Prom
   }
   // Recovery must always keep a valid parent (FK is Restrict). Block deletion while any recovery plan
   // references this seasonal plan — the admin must handle (delete/deactivate) those first.
-  const linkedRecovery = await prisma.recoveryPlan.count({ where: { seasonPlanId: planId } });
+  const linkedRecovery = await prisma.recoveryPlan.count({ where: inOpenPlanningPeriod("recoveryPlan", { seasonPlanId: planId }) });
   if (linkedRecovery > 0) {
     throw new ApiError(
       409,
@@ -201,7 +202,7 @@ export async function setMonthlyPlanLifecycle(
   action: LifecycleAction,
 ): Promise<{ lifecycleState: LifecycleState }> {
   assertAdmin(ctx);
-  const mp = await prisma.monthlyPlan.findUnique({ where: { id: monthlyPlanId }, select: { id: true, lifecycleState: true } });
+  const mp = await prisma.monthlyPlan.findUnique({ where: inOpenPlanningPeriod("monthlyPlan", { id: monthlyPlanId }), select: { id: true, lifecycleState: true } });
   if (!mp) throw new ApiError(404, "Monthly plan not found");
   const patch = lifecyclePatch(action);
   // Direct admin action → this state is admin-managed, not inherited from a parent cascade.
@@ -218,7 +219,7 @@ export async function setMonthlyPlanLifecycle(
 
 export async function deleteMonthlyPlan(ctx: AuthContext, monthlyPlanId: string): Promise<{ deleted: true }> {
   assertAdmin(ctx);
-  const mp = await prisma.monthlyPlan.findUnique({ where: { id: monthlyPlanId }, select: { id: true, status: true } });
+  const mp = await prisma.monthlyPlan.findUnique({ where: inOpenPlanningPeriod("monthlyPlan", { id: monthlyPlanId }), select: { id: true, status: true } });
   if (!mp) throw new ApiError(404, "Monthly plan not found");
   if (!DELETABLE_STATUSES.includes(mp.status as PlanStatus)) {
     throw new ApiError(409, "Only Draft, Returned or Rejected monthly plans can be deleted. Deactivate an approved plan instead.");
@@ -242,7 +243,7 @@ export async function setRecoveryPlanLifecycle(
   action: LifecycleAction,
 ): Promise<{ lifecycleState: LifecycleState }> {
   assertAdmin(ctx);
-  const rp = await prisma.recoveryPlan.findUnique({ where: { id: recoveryPlanId }, select: { id: true, lifecycleState: true } });
+  const rp = await prisma.recoveryPlan.findUnique({ where: inOpenPlanningPeriod("recoveryPlan", { id: recoveryPlanId }), select: { id: true, lifecycleState: true } });
   if (!rp) throw new ApiError(404, "Recovery plan not found");
   const patch = lifecyclePatch(action);
   // Direct admin action → admin-managed, not inherited from a parent cascade.
@@ -259,7 +260,7 @@ export async function setRecoveryPlanLifecycle(
 
 export async function deleteRecoveryPlan(ctx: AuthContext, recoveryPlanId: string): Promise<{ deleted: true }> {
   assertAdmin(ctx);
-  const rp = await prisma.recoveryPlan.findUnique({ where: { id: recoveryPlanId }, select: { id: true, status: true } });
+  const rp = await prisma.recoveryPlan.findUnique({ where: inOpenPlanningPeriod("recoveryPlan", { id: recoveryPlanId }), select: { id: true, status: true } });
   if (!rp) throw new ApiError(404, "Recovery plan not found");
   if (!DELETABLE_STATUSES.includes(rp.status as PlanStatus)) {
     throw new ApiError(409, "Only Draft, Returned or Rejected recovery plans can be deleted. Deactivate an approved plan instead.");
@@ -298,10 +299,10 @@ async function loadChildContext(kind: ChildKind, childId: string): Promise<Child
   const parentSelect = { id: true, version: true, lifecycleState: true, officerId: true, seasonId: true, planningType: true };
   const row =
     kind === "MONTHLY"
-      ? ((await prisma.monthlyPlan.findUnique({ where: { id: childId }, select: { lifecycleState: true, lifecycleFromParent: true, seasonPlan: { select: parentSelect } } })) as {
+      ? ((await prisma.monthlyPlan.findUnique({ where: inOpenPlanningPeriod("monthlyPlan", { id: childId }), select: { lifecycleState: true, lifecycleFromParent: true, seasonPlan: { select: parentSelect } } })) as {
           lifecycleState: string; lifecycleFromParent: boolean; seasonPlan: ParentInfo | null;
         } | null)
-      : ((await prisma.recoveryPlan.findUnique({ where: { id: childId }, select: { lifecycleState: true, lifecycleFromParent: true, seasonPlan: { select: parentSelect } } })) as {
+      : ((await prisma.recoveryPlan.findUnique({ where: inOpenPlanningPeriod("recoveryPlan", { id: childId }), select: { lifecycleState: true, lifecycleFromParent: true, seasonPlan: { select: parentSelect } } })) as {
           lifecycleState: string; lifecycleFromParent: boolean; seasonPlan: ParentInfo | null;
         } | null);
   if (!row) throw new ApiError(404, `${kind === "MONTHLY" ? "Monthly" : "Recovery"} plan not found`);
@@ -311,7 +312,7 @@ async function loadChildContext(kind: ChildKind, childId: string): Promise<Child
 /** A DIFFERENT seasonal version that is currently the active one for the same officer+season+type. */
 async function findNewerActiveVersion(parent: ParentInfo): Promise<{ id: string; version: number } | null> {
   const active = await prisma.seasonPlan.findFirst({
-    where: { seasonId: parent.seasonId, officerId: parent.officerId, planningType: parent.planningType, isActiveVersion: true, lifecycleState: "ACTIVE", id: { not: parent.id } },
+    where: inOpenPlanningPeriod("seasonPlan", { seasonId: parent.seasonId, officerId: parent.officerId, planningType: parent.planningType, isActiveVersion: true, lifecycleState: "ACTIVE", id: { not: parent.id } }),
     select: { id: true, version: true },
     orderBy: { version: "desc" },
   });
@@ -391,7 +392,7 @@ export async function replaceSeasonalPlan(
   planId: string,
 ): Promise<{ archived: number; officerId: string; seasonId: string }> {
   assertAdmin(ctx);
-  const plan = await prisma.seasonPlan.findUnique({ where: { id: planId }, select: { officerId: true, seasonId: true } });
+  const plan = await prisma.seasonPlan.findUnique({ where: inOpenPlanningPeriod("seasonPlan", { id: planId }), select: { officerId: true, seasonId: true } });
   if (!plan) throw new ApiError(404, "Plan not found");
   const { archived } = await archiveActiveSeasonalForReplace(ctx, plan.officerId, plan.seasonId);
   return { archived, officerId: plan.officerId, seasonId: plan.seasonId };
@@ -404,7 +405,7 @@ export async function archiveActiveSeasonalForReplace(
 ): Promise<{ archived: number }> {
   assertAdmin(ctx);
   const active = await prisma.seasonPlan.findMany({
-    where: { officerId, seasonId, planningType: "SEASONAL", lifecycleState: "ACTIVE" },
+    where: inOpenPlanningPeriod("seasonPlan", { officerId, seasonId, planningType: "SEASONAL", lifecycleState: "ACTIVE" }),
     select: { id: true },
   });
   if (active.length === 0) return { archived: 0 };

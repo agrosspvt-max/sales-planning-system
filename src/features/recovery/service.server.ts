@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { recoveryDealerCompleted } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
@@ -206,7 +207,7 @@ async function effectiveWeekLocked(planId: string, weekNo: number, db: Tx = pris
   })) as { locked: boolean } | null;
   if (override) return override.locked;
   const meta = (await db.recoveryPlan.findUnique({
-    where: { id: planId },
+    where: inOpenPlanningPeriod("recoveryPlan", { id: planId }),
     select: { cutoffDate: true, seasonMonth: { select: { order: true, calendarMonth: true, calendarYear: true } }, season: { select: { startMonth: true, startYear: true } } },
   })) as { cutoffDate: Date; seasonMonth: MonthIdentity & { order: number }; season: { startMonth: number | null; startYear: number | null } } | null;
   if (!meta) return false;
@@ -479,7 +480,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   assertAdmin(ctx);
   const input = createSchema.parse(raw);
   const cutoff = new Date(input.cutoffDate);
-  const month = await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, select: { id: true, seasonId: true } });
+  const month = await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: input.seasonMonthId }), select: { id: true, seasonId: true } });
   if (!month) throw new ApiError(422, "The selected Month does not exist");
   const parsed = parseAgingReport(buffer);
   const res = await resolveAging(parsed, cutoff);
@@ -496,7 +497,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
 
   // Guard: a recovery plan for this month must not already exist for any affected officer.
   const existing = await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: month.id, officerId: { in: plannedOfficerIds } },
+    where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: month.id, officerId: { in: plannedOfficerIds } }),
     select: { officerId: true },
   });
   if (existing.length > 0) {
@@ -511,7 +512,7 @@ export async function createRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   // plan for this season (active version preferred). Officers WITHOUT a seasonal plan are skipped
   // so no orphan (null-parent) recovery plan is ever created.
   const seasonalPlans = await prisma.seasonPlan.findMany({
-    where: { seasonId: month.seasonId, planningType: "SEASONAL", officerId: { in: plannedOfficerIds } },
+    where: inOpenPlanningPeriod("seasonPlan", { seasonId: month.seasonId, planningType: "SEASONAL", officerId: { in: plannedOfficerIds } }),
     select: { id: true, officerId: true, isActiveVersion: true, version: true },
     orderBy: [{ isActiveVersion: "desc" }, { version: "desc" }],
   });
@@ -611,7 +612,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
   // "My Plans" narrows to the caller's own recovery plans (used by RMs).
   const officerWhere = mine ? ctx.userId : scope.all ? undefined : { in: scope.ids };
   const rows = await prisma.recoveryPlan.findMany({
-    where: {
+    where: inOpenPlanningPeriod("recoveryPlan", {
       officerId: officerWhere,
       status: statuses ? { in: statuses } : undefined,
       // Deactivated recovery plans — and any under a deactivated SEASONAL plan — are hidden from the
@@ -620,7 +621,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
       ...(ctx.role === Role.SALES_OFFICER
         ? { OR: [{ seasonPlanId: null }, { lifecycleFromParent: false }, { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } }] }
         : {}),
-    },
+    }),
     include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true } }, officer: { select: { name: true, territory: true, group: { select: { name: true } } } } },
     orderBy: [{ updatedAt: "desc" }],
   });
@@ -648,7 +649,7 @@ export async function listRecoveryPlans(ctx: AuthContext, statuses?: PlanStatus[
 
 export async function getRecoveryPlan(ctx: AuthContext, id: string) {
   const plan = await prisma.recoveryPlan.findUnique({
-    where: { id },
+    where: inOpenPlanningPeriod("recoveryPlan", { id }),
     include: {
       season: { select: { name: true, year: true, startMonth: true, startYear: true } },
       seasonMonth: { select: { name: true, order: true, calendarMonth: true, calendarYear: true } },
@@ -869,7 +870,7 @@ async function canManageRecovery(ctx: AuthContext, officerId: string, status: Pl
 
 async function loadEditablePlan(ctx: AuthContext, id: string) {
   const plan = await prisma.recoveryPlan.findUnique({
-    where: { id },
+    where: inOpenPlanningPeriod("recoveryPlan", { id }),
     select: { id: true, officerId: true, status: true, weeklyEditEnabled: true, lifecycleState: true, seasonPlan: { select: { lifecycleState: true } } },
   });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
@@ -1060,7 +1061,7 @@ export async function uploadWeeklyAging(ctx: AuthContext, buffer: Buffer, filena
   const input = weeklySchema.parse(raw);
   const cutoff = new Date(input.cutoffDate);
   const plan = await prisma.recoveryPlan.findUnique({
-    where: { id: input.recoveryPlanId },
+    where: inOpenPlanningPeriod("recoveryPlan", { id: input.recoveryPlanId }),
     select: { id: true, officerId: true, lifecycleState: true, seasonPlan: { select: { lifecycleState: true } } },
   });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
@@ -1247,7 +1248,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
   const normalized = typeof raw === "string" ? JSON.parse(raw) : raw;
   const input = updateSchema.parse(normalized);
   const cutoff = new Date(input.cutoffDate);
-  const month = await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, select: { id: true } });
+  const month = await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: input.seasonMonthId }), select: { id: true } });
   if (!month) throw new ApiError(422, "The selected Month does not exist");
   const parsed = parseAgingReport(buffer);
   if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
@@ -1255,7 +1256,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
 
   const updateScopeIds = input.officerIds?.length ? input.officerIds : input.officerScope ? [input.officerScope] : null;
   const plans = (await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: month.id, lifecycleState: "ACTIVE", officerId: updateScopeIds ? { in: updateScopeIds } : undefined },
+    where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: month.id, lifecycleState: "ACTIVE", officerId: updateScopeIds ? { in: updateScopeIds } : undefined }),
     select: { id: true, officerId: true, officer: { select: { name: true } }, seasonPlan: { select: { lifecycleState: true } } },
   })) as { id: string; officerId: string; officer: { name: string }; seasonPlan: { lifecycleState: string } | null }[];
   if (plans.length === 0) throw new ApiError(422, "No active recovery plans exist for the selected month.");
@@ -1339,7 +1340,7 @@ export async function updateRecoveryFromAging(ctx: AuthContext, buffer: Buffer, 
 
 /** The aging-refresh timeline for one recovery plan (every snapshot, oldest → newest). */
 export async function getRecoveryTimeline(ctx: AuthContext, id: string) {
-  const plan = await prisma.recoveryPlan.findUnique({ where: { id }, select: { officerId: true } });
+  const plan = await prisma.recoveryPlan.findUnique({ where: inOpenPlanningPeriod("recoveryPlan", { id }), select: { officerId: true } });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
   await assertOfficerInScope(ctx, plan.officerId);
   const snaps = (await prisma.agingSnapshot.findMany({
@@ -1365,7 +1366,7 @@ export async function getRecoveryTimeline(ctx: AuthContext, id: string) {
 
 export async function compareSnapshots(ctx: AuthContext, id: string, fromId: string, toId: string) {
   assertAdmin(ctx); // admin analysis tool only
-  const plan = await prisma.recoveryPlan.findUnique({ where: { id }, select: { officerId: true } });
+  const plan = await prisma.recoveryPlan.findUnique({ where: inOpenPlanningPeriod("recoveryPlan", { id }), select: { officerId: true } });
   if (!plan) throw new ApiError(404, "Recovery plan not found");
 
   // AgingSnapshotDealer has scalar `dealerId` + relations `snapshot`/`bills` — there is NO `dealer`
@@ -1476,21 +1477,21 @@ export interface RecoveryImportResult {
 /** Load the officer + month for a Seasonal-Replace scope, validating the month belongs to the plan. */
 async function loadSeasonalRecoveryContext(input: { seasonPlanId: string; seasonMonthId: string }) {
   const plan = (await prisma.seasonPlan.findUnique({
-    where: { id: input.seasonPlanId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: input.seasonPlanId }),
     select: { officerId: true, seasonId: true, officer: { select: { name: true } }, season: { select: { name: true, year: true } } },
   })) as { officerId: string; seasonId: string; officer: { name: string }; season: { name: string; year: number } } | null;
   if (!plan) throw new ApiError(404, "Seasonal plan not found");
-  const month = (await prisma.seasonMonth.findUnique({ where: { id: input.seasonMonthId }, select: { id: true, name: true, seasonId: true } })) as { id: string; name: string; seasonId: string } | null;
+  const month = (await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: input.seasonMonthId }), select: { id: true, name: true, seasonId: true } })) as { id: string; name: string; seasonId: string } | null;
   if (!month || month.seasonId !== plan.seasonId) throw new ApiError(422, "That month does not belong to this plan's season");
   return { plan, month };
 }
 
 /** The officer's active seasonal plan id for the month's season (recovery must belong to one). */
 async function activeSeasonalPlanIdForOfficer(officerId: string, seasonMonthId: string): Promise<string> {
-  const month = await prisma.seasonMonth.findUnique({ where: { id: seasonMonthId }, select: { seasonId: true } });
+  const month = await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: seasonMonthId }), select: { seasonId: true } });
   if (!month) throw new ApiError(422, "The selected Month does not exist");
   const sp = (await prisma.seasonPlan.findFirst({
-    where: { seasonId: month.seasonId, planningType: "SEASONAL", officerId },
+    where: inOpenPlanningPeriod("seasonPlan", { seasonId: month.seasonId, planningType: "SEASONAL", officerId }),
     select: { id: true },
     orderBy: [{ isActiveVersion: "desc" }, { version: "desc" }],
   })) as { id: string } | null;
@@ -1627,7 +1628,7 @@ export async function analyzeRecoveryImport(ctx: AuthContext, buffer: Buffer, fi
   const cutoff = input.cutoffDate ? new Date(input.cutoffDate) : new Date();
 
   const month = (await prisma.seasonMonth.findUnique({
-    where: { id: input.seasonMonthId },
+    where: inOpenPlanningPeriod("seasonMonth", { id: input.seasonMonthId }),
     select: { id: true, name: true, seasonId: true, season: { select: { name: true, year: true } } },
   })) as { id: string; name: string; seasonId: string; season: { name: string; year: number } } | null;
   if (!month) throw new ApiError(422, "The selected Month does not exist");
@@ -1652,7 +1653,7 @@ export async function analyzeRecoveryImport(ctx: AuthContext, buffer: Buffer, fi
   const officerNameById = new Map(users.map((u) => [u.id, u.name]));
 
   const existingRows = (await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: input.seasonMonthId, officerId: { in: scopeOfficerIds } },
+    where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: input.seasonMonthId, officerId: { in: scopeOfficerIds } }),
     select: { id: true, officerId: true, status: true, lifecycleState: true },
   })) as { id: string; officerId: string; status: PlanStatus; lifecycleState: string }[];
   const existingByOfficer = new Map(existingRows.map((e) => [e.officerId, { id: e.id, status: e.status, lifecycleState: e.lifecycleState }]));
@@ -1695,7 +1696,7 @@ async function applyStaticOutstanding(
   seasonMonthId: string,
   officerIds: string[] | null,
 ): Promise<{ updatedOfficers: number; recoveryPlanIds: string[]; skipped: RecoverySkip[] }> {
-  const month = await prisma.seasonMonth.findUnique({ where: { id: seasonMonthId }, select: { id: true } });
+  const month = await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: seasonMonthId }), select: { id: true } });
   if (!month) throw new ApiError(422, "The selected Month does not exist");
   const parsed = parseAgingReport(buffer);
   if (parsed.dealers.length === 0) throw new ApiError(422, "No dealers found — is this a Bills Receivable Aging Report?");
@@ -1703,7 +1704,7 @@ async function applyStaticOutstanding(
   const res = await resolveAging(parsed, new Date());
 
   const plans = (await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: month.id, lifecycleState: "ACTIVE", officerId: officerIds ? { in: officerIds } : undefined },
+    where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: month.id, lifecycleState: "ACTIVE", officerId: officerIds ? { in: officerIds } : undefined }),
     select: { id: true, officerId: true, officer: { select: { name: true } } },
   })) as { id: string; officerId: string; officer: { name: string } }[];
   if (plans.length === 0) throw new ApiError(422, "No active recovery plans exist for the selected month.");
@@ -1810,7 +1811,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     // in-scope plan is independent and RESILIENT (D1): one officer's failure is recorded, not thrown,
     // so the others still complete and a retry can be scoped to only the failed officers.
     const targetPlans = (await prisma.recoveryPlan.findMany({
-      where: { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) },
+      where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) }),
       select: { id: true, officerId: true, officer: { select: { name: true } }, seasonPlan: { select: { lifecycleState: true } } },
     })) as { id: string; officerId: string; officer: { name: string }; seasonPlan: { lifecycleState: string } | null }[];
     const cutoff = new Date(input.cutoffDate ?? new Date()); // normal mode guarantees a cutoff (schema refine)
@@ -1836,7 +1837,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
     // UPDATE: refresh aging only (officer planning preserved) via the shared batch service, which is
     // itself resilient and returns per-officer failures.
     const targetPlans = (await prisma.recoveryPlan.findMany({
-      where: { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) },
+      where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: input.seasonMonthId, lifecycleState: "ACTIVE", ...(officerIds ? { officerId: { in: officerIds } } : {}) }),
       select: { id: true, officerId: true, officer: { select: { name: true } } },
     })) as { id: string; officerId: string; officer: { name: string } }[];
     // Pass a PLAIN OBJECT — updateRecoveryFromAging validates with a z.object schema, so a JSON string
@@ -1858,7 +1859,7 @@ export async function commitRecoveryImport(ctx: AuthContext, buffer: Buffer, fil
 
   // 3) Reconcile onboarded dealers into the single officer's plan; 4) relink seasonal-scope recovery.
   if (singleOfficerId) {
-    const rp = (await prisma.recoveryPlan.findFirst({ where: { seasonMonthId: input.seasonMonthId, officerId: singleOfficerId }, select: { id: true } })) as { id: string } | null;
+    const rp = (await prisma.recoveryPlan.findFirst({ where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: input.seasonMonthId, officerId: singleOfficerId }), select: { id: true } })) as { id: string } | null;
     if (rp) {
       if (input.mode !== "CREATE" && onboardedIds.size > 0) await reconcileRecoveryDealers(rp.id, onboardedIds);
       if (seasonPlanIdForRelink) await prisma.recoveryPlan.update({ where: { id: rp.id }, data: { seasonPlanId: seasonPlanIdForRelink } });
@@ -1919,7 +1920,7 @@ interface DaybookResolution {
 /** Resolve a parsed Day Book against the month's Recovery Plans (NO writes). Shared by analyze+commit. */
 async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMonthId: string): Promise<DaybookResolution> {
   const month = (await prisma.seasonMonth.findUnique({
-    where: { id: seasonMonthId },
+    where: inOpenPlanningPeriod("seasonMonth", { id: seasonMonthId }),
     select: { name: true, season: { select: { name: true, year: true } } },
   })) as { name: string; season: { name: string; year: number } } | null;
   if (!month) throw new ApiError(422, "The selected Recovery Month does not exist");
@@ -1927,7 +1928,7 @@ async function resolveDaybook(parsed: ReturnType<typeof parseDaybook>, seasonMon
   const [resolver, plans, paymentResolver] = await Promise.all([
     loadDealerResolver(),
     prisma.recoveryPlan.findMany({
-      where: { seasonMonthId },
+      where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId }),
       select: { id: true, officerId: true, officer: { select: { name: true } }, dealers: { select: { id: true, dealerId: true, dealer: { select: { name: true } } } } },
     }),
     loadDealerResolver(prisma, { includeInactive: true }), // the SAME matching rules over every non-deleted dealer — consulted only for rows Recovery's resolver cannot match
@@ -2075,6 +2076,15 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
   let jobId = "";
   await prisma.$transaction(
     async (tx: Tx) => {
+      // The retained-receipt job uses a plain month ID, not a foreign key. Serialize
+      // its creation with month removal/transfer, including an upload analyzed earlier.
+      // A no-op row write is a version barrier for the transfer's SERIALIZABLE snapshot;
+      // no month setting or business value changes. One statement per Day Book upload.
+      const monthGuard = await tx.$queryRaw<{ id: string }[]>`
+        UPDATE "SeasonMonth" SET "status" = "status" WHERE "id" = ${input.seasonMonthId} AND "status" = 'OPEN'
+      AND EXISTS (SELECT 1 FROM "Season" s WHERE s."id" = "SeasonMonth"."seasonId" AND s."status" = 'OPEN')
+      RETURNING "id"`;
+      if (!monthGuard.length) throw new ApiError(409, "This month is closed, removed or transferred. Select an open month and analyze the upload again.");
       // Reset the two Daybook-owned columns for the WHOLE month first (clears any prior upload).
       if (res.monthRpdIds.length > 0) {
         await tx.recoveryPlanDealer.updateMany({ where: { id: { in: res.monthRpdIds } }, data: { srCr: 0, liveRecovery: 0 } });

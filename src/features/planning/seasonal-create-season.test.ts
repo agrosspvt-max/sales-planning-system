@@ -10,7 +10,7 @@ import type { AuthContext } from "@/lib/http";
 import { TestApiError, testLoader } from "@/features/dealer-tags/test-loader";
 import { createSeasonalPlanSchema } from "@/lib/validations/planning";
 
-const mo = (name: string, order: number, m: number, y: number) => ({ id: `${name}${y}`, name, order, calendarMonth: m, calendarYear: y });
+const mo = (name: string, order: number, m: number, y: number) => ({ id: `${name}${y}`, name, order, calendarMonth: m, calendarYear: y, status: "OPEN" });
 interface Season { id: string; name: string; year: number; status: "OPEN" | "CLOSED"; startMonth: number | null; startYear: number | null; endMonth: number | null; endYear: number | null; months: ReturnType<typeof mo>[] }
 const seasons: Season[] = [
   { id: "kharif-open", name: "Kharif", year: 2026, status: "OPEN", startMonth: 4, startYear: 2026, endMonth: 11, endYear: 2026,

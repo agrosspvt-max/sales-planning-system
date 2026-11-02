@@ -76,7 +76,7 @@ export async function listSeasons(search: string, activeOnly = false) {
     status: s.status,
     seasonalMode: s.seasonalMode as PlanningMode,
     monthlyMode: s.monthlyMode as PlanningMode,
-    months: s.months.map((m) => m.name),
+    months: s.months.filter((m) => !activeOnly || m.status === "OPEN").map((m) => m.name),
     // Preserve additions even before planning exists: Edit must never regenerate an extended Season.
     locked: s._count.plans > 0 || extendedIds.has(s.id),
   }));

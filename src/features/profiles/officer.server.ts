@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { Role, PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -12,7 +13,7 @@ import {
   type GroupedFact,
 } from "@/features/reports/service.server";
 import { getCurrentSeason } from "@/features/dashboard/service.server";
-import { getSeasonMonthStates } from "@/features/planning/planning-state.server";
+import { getOpenSeasonMonthStates } from "@/features/planning/planning-state.server";
 import { achievement, remaining, type PlanningMode } from "@/lib/calc";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { withProfileContext } from "@/features/navigation/profile-context";
@@ -69,7 +70,7 @@ export async function getOfficerProfile(
   if (!officer) throw new ApiError(404, "User not found");
 
   const season: SeasonRow | null = seasonId
-    ? ((await prisma.season.findUnique({ where: { id: seasonId } })) as SeasonRow | null)
+    ? ((await prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: seasonId }) })) as SeasonRow | null)
     : await getCurrentSeason();
   if (!season) throw new ApiError(404, "No season available");
 
@@ -88,13 +89,13 @@ export async function getOfficerProfile(
       include: { manager: { select: { name: true } } },
     }),
     prisma.seasonPlan.findMany({
-      where: { seasonId: season.id, officerId },
+      where: inOpenPlanningPeriod("seasonPlan", { seasonId: season.id, officerId }),
       select: { id: true, status: true, version: true, versionName: true, source: true, isActiveVersion: true, lifecycleState: true, createdAt: true },
       orderBy: { version: "desc" },
     }),
   ]);
   const [months, imports, products] = await Promise.all([
-    getSeasonMonthStates(season.id),
+    getOpenSeasonMonthStates(season.id),
     prisma.seasonPlanImportRecord.findMany({
       where: { seasonId: season.id, officerId },
       orderBy: { createdAt: "desc" },

@@ -43,6 +43,7 @@ function makeDb() {
   const matches = (row: Row, where: Row | undefined): boolean => {
     if (!where) return true;
     return Object.entries(where).every(([key, cond]) => {
+      if (key === "season") return matches(t.seasons.find((s) => s.id === row.seasonId)!, cond as Row);
       if (key === "AND") return (cond as Row[]).every((c) => matches(row, c));
       if (key === "OR") return (cond as Row[]).some((c) => matches(row, c));
       if (key === "market") return matches(t.markets.find((m) => m.id === row.marketId)!, cond as Row);
@@ -239,10 +240,10 @@ async function main() {
     const other = plain(await sheetFor(service, SO2, "s-kharif"));
     assert.equal((await service.listSeasonalSheets(SO1)).length, 1, "another officer's plan is separate"); assert.equal(other.counts.create, 0);
     assert.ok([403, 404].includes(await status(() => service.submitSeasonalSheet(SO2, sheet.id))));
-    // closed season: read-only, still loads
+    // closed season: hidden, data retained
     t.seasons.find((x) => x.id === "s-kharif")!.status = "CLOSED";
-    assert.equal(await status(() => service.submitSeasonalSheet(SO1, sheet.id)), 409);
-    assert.equal(plain(await service.getSeasonalSheet(SO1, sheet.id, "", "older")).plans.length, 4, "Older Plans show every entry");
+    assert.equal(await status(() => service.submitSeasonalSheet(SO1, sheet.id)), 404);
+    assert.equal(await status(() => service.getSeasonalSheet(SO1, sheet.id, "", "older")), 404, "closed seasons are hidden in Older Plans too");
   }
 
   /* ---- list across seasons + open by id ---- */
@@ -321,11 +322,12 @@ async function main() {
     assert.equal(t.dealerWrites, 0, "no Dealer is created or edited");
     // A season that closes makes ITS plan read-only (other seasons are unaffected).
     t.seasons.find((s) => s.id === "s-rabi")!.status = "CLOSED";
-    assert.equal(await status(() => addRow(service, SO1, rabi.id)), 409, "no new rows in a closed season");
-    assert.equal(await status(() => service.updateSeasonalPlan(SO1, b.id, { marketId: "m-new" })), 409);
-    assert.equal(await status(() => service.submitSeasonalPlan(SO1, b.id)), 409);
+    assert.equal(await status(() => addRow(service, SO1, rabi.id)), 404, "no new rows in a closed season");
+    assert.equal(await status(() => service.updateSeasonalPlan(SO1, b.id, { marketId: "m-new" })), 404);
+    assert.equal(await status(() => service.submitSeasonalPlan(SO1, b.id)), 404);
     assert.equal(await status(() => service.updateSeasonalPlan(SO1, a.id, { marketId: "m-exist" })), 0, "Kharif is untouched");
-    assert.equal(plain(await service.getSeasonalSheet(SO1, rabi.id)).plans.length, 1, "a closed season's plan stays readable");
+    assert.equal(await status(() => service.getSeasonalSheet(SO1, rabi.id)), 404, "a closed season's plan is hidden, not deleted");
+    assert.equal(t.plans.filter((p) => p.sheetId === rabi.id).length, 1);
     await service.deleteSeasonalPlan(SO1, spoof.id);
     assert.equal(t.plans.some((r) => r.id === spoof.id), false);
   }

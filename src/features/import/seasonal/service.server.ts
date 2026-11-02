@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -333,7 +334,7 @@ export async function commitSeasonalImport(
   const payload = commitSchema.parse(raw);
 
   // --- Validation (no writes) ---
-  const season = await prisma.season.findUnique({ where: { id: payload.seasonId } });
+  const season = await prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: payload.seasonId }) });
   if (!season) throw new ApiError(422, "Season does not exist");
   if (season.status !== SeasonStatus.OPEN)
     throw new ApiError(422, "The season is closed; open it before importing");
@@ -444,7 +445,7 @@ export async function commitSeasonalImport(
   let monthIdsWithData: string[] = [];
   if (payload.mode === "COMPLETE") {
     const months = await prisma.seasonMonth.findMany({
-      where: { seasonId: payload.seasonId },
+      where: inOpenPlanningPeriod("seasonMonth", { seasonId: payload.seasonId }),
       select: { id: true, calendarMonth: true, calendarYear: true },
     });
     if (months.length === 0) throw new ApiError(422, "Season has no calendar months for Complete Workbook import.");

@@ -265,10 +265,13 @@ function GuidancePanel({ data }: { data: RecoveryDetail }) {
 
 export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role; userId: string }) {
   const [tab, setTab] = useState<Tab>("month");
-  const { data, isLoading } = useQuery<RecoveryDetail>({
+  const { data, isLoading, error: loadError } = useQuery<RecoveryDetail>({
     queryKey: ["recovery-plan", id],
     queryFn: () => api.get(`/api/recovery/plans/${id}`),
   });
+  if ((loadError as { status?: number } | null)?.status === 404) {
+    return <p role="alert" className="p-4 text-sm text-muted-foreground">{(loadError as Error).message}</p>;
+  }
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
 
   const remaining = data.dealers.filter((d) => !d.noPlan && !d.completed);

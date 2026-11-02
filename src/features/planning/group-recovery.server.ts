@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -82,7 +83,7 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
 
   const [group, season] = (await Promise.all([
     prisma.userGroup.findUnique({ where: { id: groupId }, select: { name: true } }),
-    prisma.season.findUnique({ where: { id: seasonId }, select: { name: true, year: true, months: { orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } } }),
+    prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: seasonId }), select: { name: true, year: true, months: { where: { status: "OPEN" }, orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } } }),
   ])) as [{ name: string } | null, { name: string; year: number; months: { id: string; name: string; order: number; calendarMonth?: number | null; calendarYear?: number | null }[] } | null];
   if (!group) throw new ApiError(404, "Group not found");
   if (!season) throw new ApiError(404, "Season not found");
@@ -109,7 +110,7 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
 
   // ONE batched query: every officer's recovery plan for this month (all statuses), with dealers + weeks.
   const plans = (await prisma.recoveryPlan.findMany({
-    where: { seasonMonthId: monthId, officerId: { in: officers.map((o) => o.id) }, lifecycleState: "ACTIVE" },
+    where: inOpenPlanningPeriod("recoveryPlan", { seasonMonthId: monthId, officerId: { in: officers.map((o) => o.id) }, lifecycleState: "ACTIVE" }),
     select: {
       id: true,
       officerId: true,

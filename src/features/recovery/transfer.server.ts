@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -56,7 +57,7 @@ type RecoveryRow = { id: string; officerId: string; seasonId: string; seasonPlan
 /** All Seasonal Plans for an officer+season, newest version first. Reused by options + validation. */
 async function seasonalPlansFor(officerId: string, seasonId: string): Promise<SeasonPlanOption[]> {
   return (await prisma.seasonPlan.findMany({
-    where: { officerId, seasonId, planningType: "SEASONAL" },
+    where: inOpenPlanningPeriod("seasonPlan", { officerId, seasonId, planningType: "SEASONAL" }),
     select: { id: true, version: true, status: true, planningType: true, isActiveVersion: true, createdAt: true },
     orderBy: [{ version: "desc" }],
   })) as SeasonPlanOption[];
@@ -66,7 +67,7 @@ async function seasonalPlansFor(officerId: string, seasonId: string): Promise<Se
 export async function getTransferOptions(ctx: AuthContext, recoveryPlanId: string): Promise<TransferOptions> {
   assertSuperAdmin(ctx);
   const rp = (await prisma.recoveryPlan.findUnique({
-    where: { id: recoveryPlanId },
+    where: inOpenPlanningPeriod("recoveryPlan", { id: recoveryPlanId }),
     select: { id: true, officerId: true, seasonId: true, seasonPlanId: true },
   })) as RecoveryRow | null;
   if (!rp) throw new ApiError(404, "Recovery Plan not found");
@@ -95,7 +96,7 @@ interface PreparedTransfer {
  */
 async function validateTransfer(recoveryPlanId: string, targetSeasonPlanId: string): Promise<PreparedTransfer> {
   const rp = (await prisma.recoveryPlan.findUnique({
-    where: { id: recoveryPlanId },
+    where: inOpenPlanningPeriod("recoveryPlan", { id: recoveryPlanId }),
     select: { id: true, officerId: true, seasonId: true, seasonPlanId: true },
   })) as RecoveryRow | null;
   if (!rp) throw new ApiError(404, "Recovery Plan not found");
@@ -103,7 +104,7 @@ async function validateTransfer(recoveryPlanId: string, targetSeasonPlanId: stri
   if (targetSeasonPlanId === rp.seasonPlanId) throw new ApiError(422, "The Recovery Plan is already attached to this Seasonal Plan");
 
   const target = (await prisma.seasonPlan.findUnique({
-    where: { id: targetSeasonPlanId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: targetSeasonPlanId }),
     select: { id: true, officerId: true, seasonId: true, planningType: true, version: true },
   })) as { id: string; officerId: string; seasonId: string; planningType: string; version: number } | null;
   if (!target) throw new ApiError(404, "Target Seasonal Plan not found");
@@ -113,7 +114,7 @@ async function validateTransfer(recoveryPlanId: string, targetSeasonPlanId: stri
 
   // Current version for a readable audit summary (may be null for legacy/unattached rows).
   const from = rp.seasonPlanId
-    ? ((await prisma.seasonPlan.findUnique({ where: { id: rp.seasonPlanId }, select: { version: true } })) as { version: number } | null)
+    ? ((await prisma.seasonPlan.findUnique({ where: inOpenPlanningPeriod("seasonPlan", { id: rp.seasonPlanId }), select: { version: true } })) as { version: number } | null)
     : null;
 
   return {

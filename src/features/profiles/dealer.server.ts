@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import "server-only";
 import { PlanStatus } from "@prisma/client";
@@ -12,7 +13,7 @@ import {
   type Fact,
 } from "@/features/reports/service.server";
 import { getCurrentSeason } from "@/features/dashboard/service.server";
-import { getSeasonMonthStates } from "@/features/planning/planning-state.server";
+import { getOpenSeasonMonthStates } from "@/features/planning/planning-state.server";
 import { achievement, remaining, type PlanningMode } from "@/lib/calc";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { withProfileContext } from "@/features/navigation/profile-context";
@@ -55,16 +56,16 @@ export async function getDealerProfile(
     : null;
 
   const season: SeasonRow | null = seasonId
-    ? ((await prisma.season.findUnique({ where: { id: seasonId } })) as SeasonRow | null)
+    ? ((await prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: seasonId }) })) as SeasonRow | null)
     : await getCurrentSeason();
   if (!season) throw new ApiError(404, "No season available");
 
   const [allFacts, months, activePlan] = await Promise.all([
     computeFacts(ctx, season.id),
-    getSeasonMonthStates(season.id),
+    getOpenSeasonMonthStates(season.id),
     officerId
       ? prisma.seasonPlan.findFirst({
-          where: { seasonId: season.id, officerId, isActiveVersion: true },
+          where: inOpenPlanningPeriod("seasonPlan", { seasonId: season.id, officerId, isActiveVersion: true }),
           select: { id: true },
         })
       : Promise.resolve(null),

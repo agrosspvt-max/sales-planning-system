@@ -6,13 +6,14 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { isMonthEditable, MONTH_TRANSITIONS, type MonthStatus } from "./planning-state";
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 
 /**
  * Centralized planning-state authority (Open-Month, Section 42). Every planning operation that
  * depends on month state — Monthly Planning, Actual Sales, and the management open/close action —
  * goes through here, so the business rules exist in ONE place. Imports (migration) write
- * directly and intentionally bypass this gate; Reports and Approvals do not consult it (open
- * state governs editability only, never what is reported or how the seasonal plan is approved).
+ * directly only for explicit maintenance. Operational planning, reports and approvals hide closed
+ * periods for every role. Management retains the inclusive list so periods can be reopened.
  */
 
 export interface MonthState {
@@ -26,9 +27,9 @@ export interface MonthState {
 }
 
 /** All months of a season with their lifecycle status (ordered). */
-export async function getSeasonMonthStates(seasonId: string): Promise<MonthState[]> {
+export async function getSeasonMonthStates(seasonId: string, openOnly = false): Promise<MonthState[]> {
   const rows = (await prisma.seasonMonth.findMany({
-    where: { seasonId },
+    where: openOnly ? inOpenPlanningPeriod("seasonMonth", { seasonId }) : { seasonId },
     orderBy: SEASON_MONTH_ORDER,
     select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true, status: true },
   })) as { id: string; name: string; order: number; status: string; calendarMonth: number | null; calendarYear: number | null }[];
@@ -36,6 +37,11 @@ export async function getSeasonMonthStates(seasonId: string): Promise<MonthState
     const status = (m.status as MonthStatus) ?? "OPEN";
     return { id: m.id, name: m.name, calendarMonth: m.calendarMonth, calendarYear: m.calendarYear, order: m.order, status, editable: isMonthEditable(status) };
   });
+}
+
+/** Operational selectors/profile month columns. Management uses the inclusive function above. */
+export function getOpenSeasonMonthStates(seasonId: string): Promise<MonthState[]> {
+  return getSeasonMonthStates(seasonId, true);
 }
 
 /** Map of seasonMonthId → editable, for O(1) enforcement inside a save loop. */

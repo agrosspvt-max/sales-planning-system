@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import { actorDisplayName } from "@/features/accounts/identity";
 import { assertAdminPermission } from "@/features/accounts/permissions";
 import "server-only";
@@ -35,7 +36,7 @@ interface RecoveryRow {
 
 async function loadOr404(id: string): Promise<RecoveryRow> {
   const p = await prisma.recoveryPlan.findUnique({
-    where: { id },
+    where: inOpenPlanningPeriod("recoveryPlan", { id }),
     include: {
       seasonMonth: { select: { name: true } },
       season: { select: { name: true, year: true } },

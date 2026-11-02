@@ -109,7 +109,8 @@ export function SeasonalPlanDetailPage({ role, sheetId, stage = "create" }: { ro
     edit: "party_planning.common.edit", del: "party_planning.common.delete", addMarket: "party_planning.action.add_market", submitAll: "party_planning.seasonal.action.submit_all",
     emptySubmitted: "party_planning.seasonal.empty_entries_submitted", emptyApproved: "party_planning.seasonal.empty_entries_approved", emptyOlder: "party_planning.seasonal.empty_entries_older" });
 
-  const { data: detail, isLoading, error: loadError } = useQuery<SheetDetail>({ queryKey: ["seasonal-sheet", sheetId, stage], queryFn: () => api.get<SheetDetail>(`/api/seasonal-sheets/${sheetId}?stage=${stage}`) });
+  const { data: cachedDetail, isLoading, error: loadError } = useQuery<SheetDetail>({ queryKey: ["seasonal-sheet", sheetId, stage], queryFn: () => api.get<SheetDetail>(`/api/seasonal-sheets/${sheetId}?stage=${stage}`) });
+  const detail = (loadError as { status?: number } | null)?.status === 404 ? undefined : cachedDetail;
   const allPlans = detail?.plans;
   const plans = allPlans;
   const refresh = () => { qc.invalidateQueries({ queryKey: ["seasonal-sheet", sheetId] }); qc.invalidateQueries({ queryKey: ["seasonal-sheets"] }); };

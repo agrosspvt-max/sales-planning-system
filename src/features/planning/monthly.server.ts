@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -29,7 +30,7 @@ function targetForMonthlyMode(
 }
 
 async function loadActiveApprovedPlan(planId: string) {
-  const plan = await prisma.seasonPlan.findUnique({ where: { id: planId } });
+  const plan = await prisma.seasonPlan.findUnique({ where: inOpenPlanningPeriod("seasonPlan", { id: planId }) });
   if (!plan) throw new ApiError(404, "Plan not found");
   if (!(plan.status === PlanStatus.APPROVED && plan.isActiveVersion)) {
     // V8 — monthly planning is blocked until the seasonal plan is approved.
@@ -44,7 +45,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
 
   const [season, planDealers, months] = await Promise.all([
     prisma.season.findUnique({
-      where: { id: plan.seasonId },
+      where: inOpenPlanningPeriod("season", { id: plan.seasonId }),
       select: { name: true, year: true, monthlyMode: true },
     }),
     prisma.planDealer.findMany({
@@ -60,7 +61,7 @@ export async function getMonthly(ctx: AuthContext, planId: string) {
         },
       },
     }),
-    prisma.seasonMonth.findMany({ where: { seasonId: plan.seasonId }, orderBy: SEASON_MONTH_ORDER }),
+    prisma.seasonMonth.findMany({ where: inOpenPlanningPeriod("seasonMonth", { seasonId: plan.seasonId }), orderBy: SEASON_MONTH_ORDER }),
   ]);
 
   const isOwner = isPlanOwner(ctx, plan.officerId);
@@ -212,7 +213,7 @@ export async function saveMonthly(ctx: AuthContext, planId: string, raw: unknown
 
   const validMonths = new Set(
     (
-      await prisma.seasonMonth.findMany({ where: { seasonId: plan.seasonId }, select: { id: true } })
+      await prisma.seasonMonth.findMany({ where: inOpenPlanningPeriod("seasonMonth", { seasonId: plan.seasonId }), select: { id: true } })
     ).map((m) => m.id),
   );
   const validLines = new Set(

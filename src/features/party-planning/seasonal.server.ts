@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { z } from "zod";
 import { Prisma, Role } from "@prisma/client";
@@ -89,7 +90,7 @@ export async function getSeasonalOptions(ctx: AuthContext): Promise<{ seasons: (
   assertReader(ctx);
   const [seasons, mine] = await Promise.all([
     listOpenSeasonInfos(),
-    planner(ctx) || isAdministrativeRole(ctx.role) ? prisma.seasonalPlanSheet.findMany({ where: { ownerId: ctx.userId }, select: { seasonId: true } }) : Promise.resolve([]),
+    planner(ctx) || isAdministrativeRole(ctx.role) ? prisma.seasonalPlanSheet.findMany({ where: inOpenPlanningPeriod("seasonalPlanSheet", { ownerId: ctx.userId }), select: { seasonId: true } }) : Promise.resolve([]),
   ]);
   const have = new Set(mine.map((m) => m.seasonId));
   return { seasons: seasons.map((s) => ({ ...s, hasPlan: have.has(s.id) })) };
@@ -100,7 +101,7 @@ export async function listSeasonalSheets(ctx: AuthContext, filters: { seasonId?:
   assertReader(ctx);
   const v = await viewerOf(ctx);
   const where: Prisma.SeasonalPlanSheetWhereInput = { ...(filters.seasonId ? { seasonId: filters.seasonId } : {}), ...(v.scope.all ? {} : { ownerId: { in: v.scope.ids } }) };
-  const rows = await prisma.seasonalPlanSheet.findMany({ where, include: sheetInclude, take: 1000 });
+  const rows = await prisma.seasonalPlanSheet.findMany({ where: inOpenPlanningPeriod("seasonalPlanSheet", where), include: sheetInclude, take: 1000 });
   return rows.filter((r) => sheetVisible(ctx, v, r)).map((r) => toSheetDto(ctx, v, r))
     .filter((d) => !filters.needsReview || d.needsMyReview > 0)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -117,7 +118,7 @@ export async function createSeasonalSheet(ctx: AuthContext, raw: unknown): Promi
   // Create-or-RESUME: the caller's one sheet for this season (owner + season is unique) is returned if it exists — whatever it holds (drafts, submitted or approved
   // entries are all kept) — so choosing a season never fails and never duplicates. Concurrent / repeated requests converge on the same row through the unique constraint.
   const key = { ownerId_seasonId: { ownerId: ctx.userId, seasonId: season.id } };
-  const existing = await prisma.seasonalPlanSheet.findUnique({ where: key, include: sheetInclude });
+  const existing = await prisma.seasonalPlanSheet.findUnique({ where: inOpenPlanningPeriod("seasonalPlanSheet", key), include: sheetInclude });
   if (existing) return toSheetDto(ctx, await viewerOf(ctx), existing);
   try {
     const created = await prisma.$transaction(async (tx) => {
@@ -128,7 +129,7 @@ export async function createSeasonalSheet(ctx: AuthContext, raw: unknown): Promi
     return toSheetDto(ctx, await viewerOf(ctx), created);
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") { // lost the race: another request created it first
-      const winner = await prisma.seasonalPlanSheet.findUnique({ where: key, include: sheetInclude });
+      const winner = await prisma.seasonalPlanSheet.findUnique({ where: inOpenPlanningPeriod("seasonalPlanSheet", key), include: sheetInclude });
       if (winner) return toSheetDto(ctx, await viewerOf(ctx), winner);
     }
     throw e;
@@ -144,13 +145,13 @@ export interface SeasonalSheetDetail { sheet: SeasonalSheetDto; season: SeasonIn
 export async function getSeasonalSheet(ctx: AuthContext, id: string, search = "", stage?: string): Promise<SeasonalSheetDetail> {
   assertReader(ctx);
   const v = await viewerOf(ctx);
-  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id }, include: sheetInclude });
+  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: inOpenPlanningPeriod("seasonalPlanSheet", { id }), include: sheetInclude });
   if (!sheet || !sheetVisible(ctx, v, sheet)) throw new ApiError(404, "Seasonal Plan not found"); // not yours / not in scope looks the same as missing
   const season = await getSeasonInfo(sheet.seasonId);
   if (!season) throw new ApiError(404, "Seasonal Plan not found");
   const needle = search.trim();
   const rows = await prisma.seasonalPlan.findMany({
-    where: { AND: [{ sheetId: id }, ...(sheet.ownerId === ctx.userId || v.role === "ADMIN" ? [] : [{ approvalStatus: { not: "DRAFT" } }]), ...(STAGE_ROWS[stage ?? ""] ? [{ approvalStatus: { in: STAGE_ROWS[stage ?? ""]! } }] : []), ...(needle ? [{ market: { name: { contains: needle, mode: "insensitive" as const } } }] : [])] },
+    where: inOpenPlanningPeriod("seasonalPlan", { AND: [{ sheetId: id }, ...(sheet.ownerId === ctx.userId || v.role === "ADMIN" ? [] : [{ approvalStatus: { not: "DRAFT" } }]), ...(STAGE_ROWS[stage ?? ""] ? [{ approvalStatus: { in: STAGE_ROWS[stage ?? ""]! } }] : []), ...(needle ? [{ market: { name: { contains: needle, mode: "insensitive" as const } } }] : [])] }),
     include, orderBy: { createdAt: "desc" }, take: 1000,
   });
   return { sheet: toSheetDto(ctx, v, sheet), season, plans: await toDtos(ctx, rows, v) };
@@ -239,17 +240,17 @@ async function withMarketRetry<T>(run: () => Promise<T>): Promise<T> {
  */
 export async function listSeasonalMarketOptions(ctx: AuthContext, sheetId: string): Promise<SeasonalMarketOptions> {
   assertPlanner(ctx);
-  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id: sheetId }, select: { id: true, ownerId: true } });
+  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: inOpenPlanningPeriod("seasonalPlanSheet", { id: sheetId }), select: { id: true, ownerId: true } });
   if (!sheet || sheet.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
   return listEligibleMarkets(sheet.ownerId);
 }
 /** A market appears once in a Seasonal Plan (owner + season): a second row for it would be an indistinguishable duplicate. */
 async function assertMarketFree(db: Pick<Tx, "seasonalPlan">, sheetId: string, marketId: string, exceptId?: string): Promise<void> {
-  const clash = await db.seasonalPlan.findFirst({ where: { sheetId, marketId, ...(exceptId ? { id: { not: exceptId } } : {}) }, select: { id: true } });
+  const clash = await db.seasonalPlan.findFirst({ where: inOpenPlanningPeriod("seasonalPlan", { sheetId, marketId, ...(exceptId ? { id: { not: exceptId } } : {}) }), select: { id: true } });
   if (clash) throw new ApiError(409, "This market is already in your Seasonal Plan");
 }
 async function ownPlan(ctx: AuthContext, id: string): Promise<PlanRow> {
-  const plan = await prisma.seasonalPlan.findUnique({ where: { id }, include });
+  const plan = await prisma.seasonalPlan.findUnique({ where: inOpenPlanningPeriod("seasonalPlan", { id }), include });
   // Another officer's plan is indistinguishable from a missing one: ids cannot be probed.
   if (!plan || plan.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
   return plan;
@@ -260,7 +261,7 @@ export async function createSeasonalPlan(ctx: AuthContext, raw: unknown): Promis
   const parsed = createInput.safeParse(raw ?? {});
   if (!parsed.success) throw new ApiError(422, parsed.error.issues[0]?.message ?? "Invalid Seasonal Plan");
   // The season comes from the Seasonal Plan being edited — and must still be open. Another officer's plan looks missing.
-  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id: parsed.data.sheetId }, select: { id: true, ownerId: true, seasonId: true, season: { select: { name: true, year: true, status: true } } } });
+  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: inOpenPlanningPeriod("seasonalPlanSheet", { id: parsed.data.sheetId }), select: { id: true, ownerId: true, seasonId: true, season: { select: { name: true, year: true, status: true } } } });
   if (!sheet || sheet.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
   if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
   const choice = { marketId: parsed.data.marketId, territoryMappingId: parsed.data.territoryMappingId, expectedMarket: parsed.data.expectedMarket };
@@ -327,7 +328,7 @@ export async function submitSeasonalPlan(ctx: AuthContext, id: string): Promise<
     });
     if (claimed.count === 0) throw new ApiError(409, "This Seasonal Plan has already been submitted");
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan submitted for ${target === "PENDING_RM" ? "RM" : "Admin"} review · ${plan.market.name}` }, tx);
-    return (await tx.seasonalPlan.findUnique({ where: { id }, include }))!;
+    return (await tx.seasonalPlan.findUnique({ where: inOpenPlanningPeriod("seasonalPlan", { id }), include }))!;
   });
   return (await toDtos(ctx, [updated]))[0]!;
 }
@@ -339,12 +340,12 @@ export async function submitSeasonalPlan(ctx: AuthContext, id: string): Promise<
  */
 export async function submitSeasonalSheet(ctx: AuthContext, sheetId: string): Promise<{ submitted: number }> {
   assertPlanner(ctx);
-  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: { id: sheetId }, select: { id: true, ownerId: true, seasonId: true, season: { select: { name: true, year: true, status: true } } } });
+  const sheet = await prisma.seasonalPlanSheet.findUnique({ where: inOpenPlanningPeriod("seasonalPlanSheet", { id: sheetId }), select: { id: true, ownerId: true, seasonId: true, season: { select: { name: true, year: true, status: true } } } });
   if (!sheet || sheet.ownerId !== ctx.userId) throw new ApiError(404, "Seasonal Plan not found");
   if (sheet.season.status !== "OPEN") throw new ApiError(409, SEASON_CLOSED);
   const rmId = ctx.role === Role.SALES_OFFICER ? await getCurrentManagerId(ctx.userId) : null;
   const submitted = await prisma.$transaction(async (tx) => {
-    const rows = await tx.seasonalPlan.findMany({ where: { sheetId, ownerId: ctx.userId, approvalStatus: { in: ["DRAFT", "REJECTED"] } }, select: { id: true, approvalStatus: true } });
+    const rows = await tx.seasonalPlan.findMany({ where: inOpenPlanningPeriod("seasonalPlan", { sheetId, ownerId: ctx.userId, approvalStatus: { in: ["DRAFT", "REJECTED"] } }), select: { id: true, approvalStatus: true } });
     if (rows.length === 0) throw new ApiError(409, "There is nothing new to submit");
     let n = 0;
     for (const row of rows) {
@@ -376,7 +377,7 @@ export async function actOnSeasonalPlan(ctx: AuthContext, id: string, raw: unkno
   if (isAdmin) assertAdminPermission(ctx, "partyPlanning", action === "approve" ? "approve" : "reject");
 
   const updated = await prisma.$transaction(async (tx) => {
-    const plan = await tx.seasonalPlan.findUnique({ where: { id }, include });
+    const plan = await tx.seasonalPlan.findUnique({ where: inOpenPlanningPeriod("seasonalPlan", { id }), include });
     if (!plan) throw new ApiError(404, "Seasonal Plan not found");
     if (isRm) {
       const scope = await getOfficerScope(ctx, tx);
@@ -393,7 +394,7 @@ export async function actOnSeasonalPlan(ctx: AuthContext, id: string, raw: unkno
     if (claimed.count === 0) throw new ApiError(409, "This plan was just reviewed by someone else");
     const verb = action === "approve" ? (step.finalApproval ? "approved (final)" : "approved by RM") : "rejected";
     await writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, action: "UPDATE", entity: "seasonalPlan", entityId: id, summary: `Seasonal Plan ${verb} · ${plan.market.name}${action === "reject" ? ` — ${reason}` : ""}` }, tx);
-    return (await tx.seasonalPlan.findUnique({ where: { id }, include }))!;
+    return (await tx.seasonalPlan.findUnique({ where: inOpenPlanningPeriod("seasonalPlan", { id }), include }))!;
   });
   return (await toDtos(ctx, [updated]))[0]!;
 }

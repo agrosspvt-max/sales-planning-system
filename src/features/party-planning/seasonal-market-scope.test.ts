@@ -63,6 +63,7 @@ function makeDb() {
   const matches = (row: Row, where: Row | undefined): boolean => {
     if (!where) return true;
     return Object.entries(where).every(([key, cond]) => {
+      if (key === "season") return matches(t.seasons.find((s) => s.id === row.seasonId)!, cond as Row);
       if (key === "AND") return (cond as Row[]).every((c) => matches(row, c));
       if (key === "OR") return (cond as Row[]).some((c) => matches(row, c));
       if (key === "ownerId_seasonId") return row.ownerId === cond.ownerId && row.seasonId === cond.seasonId;

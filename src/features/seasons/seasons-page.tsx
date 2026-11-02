@@ -1,5 +1,7 @@
 "use client";
 
+import { announcePlanningPeriodChange } from "@/lib/planning-period-cache";
+
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Search, Lock, CalendarClock } from "lucide-react";
@@ -79,7 +81,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
 
   const { data, isLoading } = useQuery<Season[]>({
     queryKey: ["seasons", search],
-    queryFn: () => api.get<Season[]>(`/api/seasons?search=${encodeURIComponent(search)}`),
+    queryFn: () => api.get<Season[]>(`/api/seasons?management=true&search=${encodeURIComponent(search)}`),
   });
 
   // The global Planning Configuration provides only the DEFAULT for new seasons.
@@ -109,7 +111,7 @@ export function SeasonsPage({ canManage }: { canManage: boolean }) {
   const statusMut = useMutation({
     mutationFn: (vars: { id: string; status: "OPEN" | "CLOSED" }) =>
       api.post(`/api/seasons/${vars.id}/status`, { status: vars.status }),
-    onSuccess: invalidate,
+    onSuccess: () => announcePlanningPeriodChange(qc),
   });
 
   // Live month preview + validation, shared with the server generator.

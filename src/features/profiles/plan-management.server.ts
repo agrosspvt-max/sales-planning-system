@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { PlanStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -44,12 +45,12 @@ export async function getOfficerPlans(ctx: AuthContext, officerId: string): Prom
   const [officer, seasonPlans, monthlyPlans, recoveryPlans] = await Promise.all([
     prisma.user.findUnique({ where: { id: officerId }, select: { name: true } }),
     prisma.seasonPlan.findMany({
-      where: { officerId },
+      where: inOpenPlanningPeriod("seasonPlan", { officerId }),
       include: { season: { select: { id: true, name: true, year: true } } },
       orderBy: [{ updatedAt: "desc" }],
     }),
     prisma.monthlyPlan.findMany({
-      where: { officerId },
+      where: inOpenPlanningPeriod("monthlyPlan", { officerId }),
       include: {
         seasonPlan: { select: { season: { select: { name: true, year: true } } } },
         seasonMonth: { select: { name: true, order: true } },
@@ -57,7 +58,7 @@ export async function getOfficerPlans(ctx: AuthContext, officerId: string): Prom
       orderBy: [{ updatedAt: "desc" }],
     }),
     prisma.recoveryPlan.findMany({
-      where: { officerId },
+      where: inOpenPlanningPeriod("recoveryPlan", { officerId }),
       include: { season: { select: { name: true, year: true } }, seasonMonth: { select: { name: true, order: true } } },
       orderBy: [{ updatedAt: "desc" }],
     }),

@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import { actorDisplayName } from "@/features/accounts/identity";
 import { assertAdminPermission } from "@/features/accounts/permissions";
 import "server-only";
@@ -57,7 +58,7 @@ interface MonthlyPlanRow {
 
 async function loadMonthlyPlanOr404(id: string): Promise<MonthlyPlanRow> {
   const mp = await prisma.monthlyPlan.findUnique({
-    where: { id },
+    where: inOpenPlanningPeriod("monthlyPlan", { id }),
     include: {
       seasonPlan: { select: { seasonId: true, officerId: true, lifecycleState: true } },
       seasonMonth: { select: { name: true, order: true, calendarMonth: true, calendarYear: true } },
@@ -84,7 +85,7 @@ function assertMonthlyLive(mp: MonthlyPlanRow) {
 async function monthlyLabel(mp: MonthlyPlanRow): Promise<string> {
   const [officer, season] = await Promise.all([
     prisma.user.findUnique({ where: { id: mp.officerId }, select: { name: true } }),
-    prisma.season.findUnique({ where: { id: mp.seasonPlan.seasonId }, select: { name: true, year: true } }),
+    prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: mp.seasonPlan.seasonId }), select: { name: true, year: true } }),
   ]);
   return `${officer?.name ?? "Officer"} — ${season?.name ?? ""} ${season?.year ?? ""} · ${mp.seasonMonth.name}`.trim();
 }
@@ -109,7 +110,7 @@ export async function createMonthlyPlan(
   seasonPlanId: string,
   seasonMonthId: string,
 ): Promise<{ id: string; reopened: boolean }> {
-  const seasonPlan = await prisma.seasonPlan.findUnique({ where: { id: seasonPlanId } });
+  const seasonPlan = await prisma.seasonPlan.findUnique({ where: inOpenPlanningPeriod("seasonPlan", { id: seasonPlanId }) });
   if (!seasonPlan) throw new ApiError(404, "Seasonal plan not found");
   if (!(seasonPlan.status === PlanStatus.APPROVED && seasonPlan.isActiveVersion)) {
     throw new ApiError(409, "Monthly plans can only be created from an approved seasonal plan");
@@ -120,13 +121,13 @@ export async function createMonthlyPlan(
     throw new ApiError(403, "Only the owning Sales Officer or a Super Admin can create a monthly plan");
   }
   // The month must belong to this plan's season.
-  const month = await prisma.seasonMonth.findUnique({ where: { id: seasonMonthId }, select: { seasonId: true } });
+  const month = await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: seasonMonthId }), select: { seasonId: true } });
   if (!month || month.seasonId !== seasonPlan.seasonId) {
     throw new ApiError(422, "That month does not belong to this plan's season");
   }
 
   const existing = await prisma.monthlyPlan.findUnique({
-    where: { seasonPlanId_seasonMonthId: { seasonPlanId, seasonMonthId } },
+    where: inOpenPlanningPeriod("monthlyPlan", { seasonPlanId_seasonMonthId: { seasonPlanId, seasonMonthId } }),
   });
   if (existing) {
     if (EDITABLE.includes(existing.status as PlanStatus)) return { id: existing.id, reopened: true };
@@ -147,7 +148,7 @@ export async function listMonthlyPlans(
 ) {
   const scope = await getOfficerScope(ctx);
   const rows = await prisma.monthlyPlan.findMany({
-    where: {
+    where: inOpenPlanningPeriod("monthlyPlan", {
       seasonPlanId: opts.seasonPlanId || undefined,
       officerId: scope.all ? undefined : { in: scope.ids },
       status: opts.statuses ? { in: opts.statuses } : undefined,
@@ -157,7 +158,7 @@ export async function listMonthlyPlans(
       ...(ctx.role === Role.SALES_OFFICER
         ? { OR: [{ lifecycleFromParent: false }, { seasonPlan: { lifecycleState: { not: "DEACTIVATED" } } }] }
         : {}),
-    },
+    }),
     include: {
       seasonPlan: { select: { seasonId: true, season: { select: { name: true, year: true } } } },
       seasonMonth: { select: { name: true, order: true, calendarMonth: true, calendarYear: true } },
@@ -173,7 +174,7 @@ export async function listMonthlyPlans(
     console.log(`[approvals-debug:monthly] sessionUserId=${ctx.userId} username=${ctx.username} scopeIds=${JSON.stringify(scope.ids)} resultCount=${rows.length}`);
     if (rows.length === 0 && ctx.username) {
       const byName = (await prisma.monthlyPlan.findMany({
-        where: { officer: { username: ctx.username } },
+        where: inOpenPlanningPeriod("monthlyPlan", { officer: { username: ctx.username } }),
         select: { officerId: true, status: true, officer: { select: { id: true, name: true } } },
         take: 25,
       })) as { officerId: string; status: string; officer: { id: string; name: string } }[];
@@ -211,15 +212,15 @@ export async function listMonthlyPlans(
  */
 export async function getSeasonalPlanMonths(ctx: AuthContext, seasonPlanId: string) {
   const seasonPlan = await prisma.seasonPlan.findUnique({
-    where: { id: seasonPlanId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: seasonPlanId }),
     select: { seasonId: true, officerId: true, status: true, isActiveVersion: true, season: { select: { name: true, year: true } } },
   });
   if (!seasonPlan) throw new ApiError(404, "Seasonal plan not found");
   await assertOfficerInScope(ctx, seasonPlan.officerId);
 
   const [months, monthlyPlans] = await Promise.all([
-    prisma.seasonMonth.findMany({ where: { seasonId: seasonPlan.seasonId }, orderBy: SEASON_MONTH_ORDER }),
-    prisma.monthlyPlan.findMany({ where: { seasonPlanId }, select: { id: true, seasonMonthId: true, status: true } }),
+    prisma.seasonMonth.findMany({ where: inOpenPlanningPeriod("seasonMonth", { seasonId: seasonPlan.seasonId }), orderBy: SEASON_MONTH_ORDER }),
+    prisma.monthlyPlan.findMany({ where: inOpenPlanningPeriod("monthlyPlan", { seasonPlanId }), select: { id: true, seasonMonthId: true, status: true } }),
   ]);
   const byMonth = new Map<string, { id: string; status: PlanStatus }>(
     (monthlyPlans as { id: string; seasonMonthId: string; status: PlanStatus }[]).map((mp) => [mp.seasonMonthId, mp]),
@@ -258,7 +259,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
 
   const seasonId = mp.seasonPlan.seasonId;
   const [season, planDealers, month, noPlanRows] = await Promise.all([
-    prisma.season.findUnique({ where: { id: seasonId }, select: { name: true, year: true, monthlyMode: true } }),
+    prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: seasonId }), select: { name: true, year: true, monthlyMode: true } }),
     prisma.planDealer.findMany({
       // Only isActive dealers appear (excludes Inactive/deleted). Defaulters are blocked from every
       // planning screen. Pending monthly-created dealers stay visible to their creator (isActive=true).
@@ -274,7 +275,7 @@ export async function getMonthlyPlan(ctx: AuthContext, monthlyPlanId: string) {
         },
       },
     }),
-    prisma.seasonMonth.findUnique({ where: { id: mp.seasonMonthId }, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } }),
+    prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: mp.seasonMonthId }), select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } }),
     prisma.monthlyPlanDealer.findMany({ where: { monthlyPlanId: mp.id, noPlan: true }, select: { dealerId: true, noPlanReason: true } }),
   ]);
 
@@ -394,7 +395,7 @@ export async function setMonthlyDealerNoPlan(
  */
 export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPlanId: string) {
   const seasonPlan = await prisma.seasonPlan.findUnique({
-    where: { id: seasonPlanId },
+    where: inOpenPlanningPeriod("seasonPlan", { id: seasonPlanId }),
     select: { seasonId: true, officerId: true, season: { select: { monthlyMode: true } } },
   });
   if (!seasonPlan) throw new ApiError(404, "Seasonal plan not found");
@@ -402,14 +403,14 @@ export async function getApprovedMonthlyForSeasonPlan(ctx: AuthContext, seasonPl
 
   const monthlyMode = (seasonPlan.season.monthlyMode ?? "PACK_SIZE") as PlanningMode;
   const approved = await prisma.monthlyPlan.findMany({
-    where: { seasonPlanId, status: PlanStatus.APPROVED },
+    where: inOpenPlanningPeriod("monthlyPlan", { seasonPlanId, status: PlanStatus.APPROVED }),
     select: { seasonMonthId: true },
   });
   const approvedIds = approved.map((a) => a.seasonMonthId);
   if (approvedIds.length === 0) return { monthlyMode, months: [], dealers: [] };
 
   const [months, planDealers] = await Promise.all([
-    prisma.seasonMonth.findMany({ where: { id: { in: approvedIds } }, orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } }),
+    prisma.seasonMonth.findMany({ where: inOpenPlanningPeriod("seasonMonth", { id: { in: approvedIds } }), orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } }),
     prisma.planDealer.findMany({
       where: { seasonPlanId },
       include: {
@@ -648,13 +649,13 @@ function dealerData(d: DealerFields) {
  */
 export async function resolveAddableSeasonalPlanId(tx: Tx, officerId: string): Promise<string | null> {
   const approved = await tx.seasonPlan.findFirst({
-    where: { officerId, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
+    where: inOpenPlanningPeriod("seasonPlan", { officerId, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" }),
     select: { id: true },
   });
   if (approved) return approved.id;
   // Fallback: an in-progress (not-yet-approved) plan for a season that is still OPEN.
   const open = await tx.seasonPlan.findFirst({
-    where: { officerId, planningType: "SEASONAL", lifecycleState: "ACTIVE", season: { status: "OPEN" } },
+    where: inOpenPlanningPeriod("seasonPlan", { officerId, planningType: "SEASONAL", lifecycleState: "ACTIVE", season: { status: "OPEN" } }),
     orderBy: [{ isActiveVersion: "desc" }, { version: "desc" }],
     select: { id: true },
   });

@@ -106,7 +106,8 @@ export function MonthlyPlanDetailPage({ role, sheetId, stage = "create" }: { rol
     statusHistory: "party_planning.monthly.aria.status_history", daysFinal: "party_planning.monthly.tooltip.days_final", daysLive: "party_planning.monthly.tooltip.days_live", addMarket: "party_planning.action.add_market", submit: "party_planning.action.submit",
     approve: "party_planning.action.approve", reject: "party_planning.action.reject", emptySubmitted: "party_planning.monthly.empty_entries_submitted", emptyApproved: "party_planning.monthly.empty_entries_approved", emptyOlder: "party_planning.monthly.empty_entries_older" });
   const st = useStatusText();
-  const { data: detail, isLoading, error: loadError } = useQuery<MonthlySheetDetail>({ queryKey: ["party-monthly-sheet", sheetId, stage], queryFn: () => api.get<MonthlySheetDetail>(`/api/party-monthly-sheets/${sheetId}?stage=${stage}`) });
+  const { data: cachedDetail, isLoading, error: loadError } = useQuery<MonthlySheetDetail>({ queryKey: ["party-monthly-sheet", sheetId, stage], queryFn: () => api.get<MonthlySheetDetail>(`/api/party-monthly-sheets/${sheetId}?stage=${stage}`) });
+  const detail = (loadError as { status?: number } | null)?.status === 404 ? undefined : cachedDetail;
   const refresh = () => { qc.invalidateQueries({ queryKey: ["party-monthly-sheet", sheetId] }); qc.invalidateQueries({ queryKey: ["party-monthly-sheets"] }); qc.invalidateQueries({ queryKey: ["party-monthly-sheet-options"] }); };
   const submit = useMutation({
     mutationFn: () => api.post(`/api/party-monthly-sheets/${sheetId}/submit`, {}),

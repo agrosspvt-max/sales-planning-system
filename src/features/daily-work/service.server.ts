@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import { getTaskActivity } from "@/features/tasks/task-analysis.server";
 import { additionalVisitActual, dealerVisitReportRows, visitResultMap, type DealerVisitReportRow, type VisitReportRecord } from "./dealer-visit-report";
 import { compareListRows } from "@/lib/task-analysis";
@@ -422,7 +423,7 @@ async function assertDealersEligible(ctx: AuthContext, officerId: string, rows: 
 async function recoveryFiguresByDealer(officerId: string): Promise<{ map: Map<string, { plan: number; actual: number }>; monthName: string | null }> {
   const out = new Map<string, { plan: number; actual: number }>();
   const plan = await prisma.recoveryPlan.findFirst({
-    where: { officerId, lifecycleState: "ACTIVE" },
+    where: inOpenPlanningPeriod("recoveryPlan", { officerId, lifecycleState: "ACTIVE" }),
     orderBy: [{ updatedAt: "desc" }],
     select: { id: true, seasonMonth: { select: { name: true } }, dealers: { select: { dealerId: true, monthRecoveryPlan: true, monthRunningRecovery: true, liveRecovery: true, srCr: true, due: true, overdue: true } } },
   });
@@ -1058,7 +1059,7 @@ async function eligibleMonthlyMarkets(officerId: string, workDate: string, db: P
   if (!isPartyPlanningEnabled()) return []; // Party Planning switched off (PARTY_PLANNING_ENABLED): there is no approved monthly plan to plan from
   const [year, month] = workDate.split("-").map(Number) as [number, number];
   const plans = await db.partyMonthlyPlan.findMany({
-    where: { ownerId: officerId, approvalStatus: "APPROVED", season: { status: "OPEN" }, seasonMonth: { calendarYear: year, calendarMonth: month } },
+    where: inOpenPlanningPeriod("partyMonthlyPlan", { ownerId: officerId, approvalStatus: "APPROVED", seasonMonth: { calendarYear: year, calendarMonth: month } }),
     select: { id: true, marketId: true, marketNameAtPlanning: true, opStatus: true },
     orderBy: [{ marketNameAtPlanning: "asc" }, { id: "asc" }],
   });
@@ -1077,7 +1078,7 @@ export async function getDailyAppointment(ctx: AuthContext, rawDate?: string, ta
   const partyPlanningEnabled = await getAppointmentPartyPlanningEnabled();
   const eligibleMarkets = partyPlanningEnabled ? await eligibleMonthlyMarkets(apptOfficerId, workDate) : [];
   const linkedIds = [...new Set(entries.map((r) => r.monthlyPlanId).filter((id): id is string => !!id))];
-  const linked = partyPlanningEnabled && linkedIds.length ? await prisma.partyMonthlyPlan.findMany({ where: { id: { in: linkedIds } }, select: { id: true, opStatus: true } }) : [];
+  const linked = partyPlanningEnabled && linkedIds.length ? await prisma.partyMonthlyPlan.findMany({ where: inOpenPlanningPeriod("partyMonthlyPlan", { id: { in: linkedIds } }), select: { id: true, opStatus: true } }) : [];
   const monthlyStatus = new Map(linked.map((p) => [p.id, p.opStatus]));
   const totals = appointmentMonthlyTotals(eligibleMarkets.map((m) => ({ marketId: m.marketId, opStatus: m.monthlyStatus })));
   const rows: AppointmentRowDto[] = entries.map((r) => ({
@@ -1262,7 +1263,7 @@ export async function recordAppointedResult(ctx: AuthContext, raw: unknown): Pro
     if (!row) throw new ApiError(409, L["daily_work.validation.appointment_after_submit"]);
     if (!row.monthlyPlanId) throw new ApiError(422, L["daily_work.validation.appointment_use_popup"]);
     if (row.resultStatus === "APPOINTED") return { entryId, status: "APPOINTED" as const, eventId: row.resultEventId, transitioned: false }; // retry: nothing replayed
-    const plan = await tx.partyMonthlyPlan.findUnique({ where: { id: row.monthlyPlanId }, select: { id: true, ownerId: true, opStatus: true, approvalStatus: true } });
+    const plan = await tx.partyMonthlyPlan.findUnique({ where: inOpenPlanningPeriod("partyMonthlyPlan", { id: row.monthlyPlanId }), select: { id: true, ownerId: true, opStatus: true, approvalStatus: true } });
     if (!plan || plan.ownerId !== officerId || plan.approvalStatus !== "APPROVED") throw new ApiError(409, L["daily_work.validation.appointment_market_not_eligible"]);
     let eventId: string | null;
     let transitioned = false;

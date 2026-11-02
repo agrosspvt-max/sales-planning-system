@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 
@@ -152,7 +153,7 @@ async function resolveWorkbook(parsed: ParsedSalesWorkbook, seasonMonthId: strin
   const withReport = opts.withReport ?? false;
   const officerId = opts.officerId; // when set, only this officer's approved seasonal plan is matched
   const month = await prisma.seasonMonth.findUnique({
-    where: { id: seasonMonthId },
+    where: inOpenPlanningPeriod("seasonMonth", { id: seasonMonthId }),
     include: { season: { select: { id: true, name: true, year: true } } },
   });
   if (!month) throw new ApiError(422, "The selected Target Month does not exist");
@@ -473,7 +474,7 @@ async function autoAddUnplannedProducts(
   selections: { officerId: string; productId: string }[],
 ): Promise<number> {
   if (selections.length === 0) return 0;
-  const month = await prisma.seasonMonth.findUnique({ where: { id: seasonMonthId }, select: { seasonId: true } });
+  const month = await prisma.seasonMonth.findUnique({ where: inOpenPlanningPeriod("seasonMonth", { id: seasonMonthId }), select: { seasonId: true } });
   if (!month) return 0;
 
   const byOfficer = new Map<string, Set<string>>();
@@ -494,7 +495,7 @@ async function autoAddUnplannedProducts(
   for (const [officerId, productIds] of byOfficer) {
     // The officer's approved, active seasonal plan for this season (the same plan Sales Upload imports into).
     const plan = (await prisma.seasonPlan.findFirst({
-      where: { seasonId: month.seasonId, officerId, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" },
+      where: inOpenPlanningPeriod("seasonPlan", { seasonId: month.seasonId, officerId, planningType: "SEASONAL", status: PlanStatus.APPROVED, isActiveVersion: true, lifecycleState: "ACTIVE" }),
       select: { id: true },
     })) as { id: string } | null;
     if (!plan) continue;
@@ -696,9 +697,9 @@ export async function listSalesOfficers(ctx: AuthContext): Promise<{ id: string;
 export async function listTargetMonths(ctx: AuthContext) {
   assertAdmin(ctx);
   const seasons = await prisma.season.findMany({
-    where: { status: SeasonStatus.OPEN }, // CLOSED seasons disappear from Sales Upload / Aging import selectors
+    where: inOpenPlanningPeriod("season", { status: SeasonStatus.OPEN }), // CLOSED seasons disappear from Sales Upload / Aging import selectors
     orderBy: [{ year: "desc" }, { name: "asc" }],
-    select: { name: true, year: true, months: { orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } },
+    select: { name: true, year: true, months: { where: { status: "OPEN" }, orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, order: true, calendarMonth: true, calendarYear: true } } },
   });
   const out: { id: string; label: string }[] = [];
   for (const s of seasons as { name: string; year: number; months: { id: string; name: string; order: number; calendarMonth: number | null; calendarYear: number | null }[] }[]) {

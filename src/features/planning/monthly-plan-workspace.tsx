@@ -52,11 +52,14 @@ export function MonthlyPlanWorkspace({
   userId: string;
 }) {
   const [tab, setTab] = useState<Tab>("dealer");
-  const { data, isLoading } = useQuery<MonthlyPlanDetail>({
+  const { data, isLoading, error: loadError } = useQuery<MonthlyPlanDetail>({
     queryKey: ["monthly-plan", monthlyPlanId],
     queryFn: () => api.get(`/api/planning/monthly-plans/${monthlyPlanId}`),
   });
 
+  if ((loadError as { status?: number } | null)?.status === 404) {
+    return <p role="alert" className="p-4 text-sm text-muted-foreground">{(loadError as Error).message}</p>;
+  }
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
 
   const tabs: { key: Tab; label: string }[] = [

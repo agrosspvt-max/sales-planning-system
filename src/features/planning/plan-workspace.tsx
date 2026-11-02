@@ -56,11 +56,14 @@ export function PlanWorkspace({
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>(mapParamTab(searchParams.get("tab")));
   const [monthlyOpen, setMonthlyOpen] = useState(false);
-  const { data: detail, isLoading } = useQuery<PlanDetail>({
+  const { data: detail, isLoading, error: loadError } = useQuery<PlanDetail>({
     queryKey: ["plan", planId],
     queryFn: () => api.get(`/api/planning/season-plans/${planId}`),
   });
 
+  if ((loadError as { status?: number } | null)?.status === 404) {
+    return <p role="alert" className="p-4 text-sm text-muted-foreground">{(loadError as Error).message}</p>;
+  }
   if (isLoading || !detail) return <Skeleton className="h-64 w-full" />;
 
   const isYearly = detail.planningType === "YEARLY";

@@ -24,7 +24,7 @@ const KHARIF_MONTHS = [["June", 1, 6], ["July", 2, 7], ["August", 3, 8], ["Septe
   .map(([name, order, calendarMonth]) => ({ id: `sm-${String(name).toLowerCase()}`, seasonId: "s-kharif", name, order, calendarMonth, calendarYear: 2026 }));
 const RABI_MONTHS = [{ id: "sm-r-jan", seasonId: "s-rabi", name: "January", order: 1, calendarMonth: 1, calendarYear: 2027 }, { id: "sm-r-nov", seasonId: "s-rabi", name: "November", order: 2, calendarMonth: 11, calendarYear: 2026 }, { id: "sm-r-dec", seasonId: "s-rabi", name: "December", order: 3, calendarMonth: 12, calendarYear: 2026 }];
 const OLD_MONTHS = [{ id: "sm-old-jun", seasonId: "s-old", name: "June", order: 1, calendarMonth: 6, calendarYear: 2025 }];
-const ALL_MONTHS = [...KHARIF_MONTHS, ...RABI_MONTHS, ...OLD_MONTHS];
+const ALL_MONTHS = [...KHARIF_MONTHS, ...RABI_MONTHS, ...OLD_MONTHS].map((m) => ({ ...m, status: "OPEN" }));
 
 function makeDb() {
   const sp = (id: string, ownerId: string, seasonId: string, marketId: string, approvalStatus: string, partyName: string) => ({ id, ownerId, seasonId, marketId, approvalStatus, partyName, approvedMarketSource: approvalStatus === "APPROVED" ? (marketId === "m-new" ? "REQUESTED" : "EXISTING") : null, approvedMarketPotential: approvalStatus === "APPROVED" ? (marketId === "m-new" ? "A" : "B") : null, appointmentStatus: approvalStatus === "APPROVED" ? "PENDING" : null, appointedAt: null, createdAt: new Date() });
@@ -50,6 +50,8 @@ function makeDb() {
   let seq = 0, clock = 1_000;
   const tick = () => new Date(Date.now() + ++clock); // strictly increasing created times
   const matches = (row: Row, where: Row | undefined): boolean => !where || Object.entries(where).every(([key, cond]) => {
+    if (key === "season") return matches(t.seasons.find((s) => s.id === row.seasonId)!, cond as Row);
+    if (key === "seasonMonth") return matches(ALL_MONTHS.find((m) => m.id === row.seasonMonthId)!, cond as Row);
     if (key === "AND") return (cond as Row[]).every((c) => matches(row, c));
     if (key === "OR") return (cond as Row[]).some((c) => matches(row, c));
     if (key === "ownerId_seasonMonthId") return row.ownerId === cond.ownerId && row.seasonMonthId === cond.seasonMonthId;
@@ -71,7 +73,7 @@ function makeDb() {
   };
   const sortBy = (rows: Row[], orderBy: Row | Row[]) => { const keys = (Array.isArray(orderBy) ? orderBy : [orderBy]).map((o) => Object.keys(o)[0]!); return [...rows].sort((a, b) => { for (const k of keys) { const d = a[k] - b[k]; if (d) return d; } return 0; }); };
   const prisma = {
-    season: { findUnique: async ({ where }: Row) => { const s = t.seasons.find((x) => x.id === where.id); return s ? { ...s } : null; } },
+    season: { findUnique: async ({ where }: Row) => { const s = t.seasons.find((x) => matches(x, where)); return s ? { ...s } : null; } },
     seasonMonth: { findMany: async ({ where, orderBy }: Row) => sortBy(ALL_MONTHS.filter((m) => m.seasonId === where.seasonId), orderBy ?? { order: "asc" }) },
     user: { findUnique: async ({ where }: Row) => USERS.find((u) => u.id === where.id) ?? null, findMany: async ({ where }: Row) => USERS.filter((u) => where.id.in.includes(u.id)) },
     seasonalPlan: {
@@ -90,10 +92,10 @@ function makeDb() {
       // (nested `options: { create: [...] }` writes are supported — the service creates the entry and both options in one statement)
       create: async ({ data: { options, ...data } }: Row) => { const row = { id: `mp${++seq}`, opStatus: "NONE", opStatusChangedAt: null, appointedDealerId: null, approvalStatus: "DRAFT", submittedAt: null, rmDecidedById: null, rmDecidedAt: null, adminDecidedById: null, adminDecidedAt: null, rejectionStage: null, rejectionReason: null, ...data, createdAt: tick(), updatedAt: tick() }; t.plans.push(row); for (const o of (options?.create ?? []) as Row[]) t.options.push({ id: `op${++seq}`, sentInfo: null, sentById: null, sentAt: null, receivedInfo: null, receivedById: null, receivedAt: null, actualPartyName: null, actualAppointedOn: null, rejectionReason: null, statusChangedAt: new Date(), updatedAt: tick(), monthlyPlanId: row.id, ...o }); return { ...row }; },
       updateMany: async ({ where, data }: Row) => { t.onClaim?.(); t.onClaim = null; const rows = t.plans.filter((p) => matches(p, where)); rows.forEach((r) => Object.assign(r, data, { updatedAt: tick() })); return { count: rows.length }; },
-      findUnique: async ({ where }: Row) => { const p = t.plans.find((x) => x.id === where.id); return p ? planView(p) : null; },
+      findUnique: async ({ where }: Row) => { const p = t.plans.find((x) => matches(x, where)); return p ? planView(p) : null; },
       findFirst: async ({ where }: Row) => { const p = t.plans.find((x) => matches(x, where)); return p ? { ...p } : null; },
       findMany: async ({ where }: Row) => t.plans.filter((p) => matches(p, where)).map(planView),
-      update: async ({ where, data }: Row) => { const p = t.plans.find((x) => x.id === where.id)!; Object.assign(p, data, { updatedAt: tick() }); return { ...p }; },
+      update: async ({ where, data }: Row) => { const p = t.plans.find((x) => matches(x, where))!; Object.assign(p, data, { updatedAt: tick() }); return { ...p }; },
     },
     partyMonthlyOption: {
       create: async ({ data }: Row) => { const row = { id: `op${++seq}`, sentInfo: null, sentById: null, sentAt: null, receivedInfo: null, receivedById: null, receivedAt: null, actualPartyName: null, actualAppointedOn: null, rejectionReason: null, statusChangedAt: new Date(), updatedAt: tick(), ...data }; t.options.push(row); return { ...row }; },
@@ -213,7 +215,7 @@ async function main() {
     assert.equal(plain(await service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-june" })).id, (await service.listMonthlySheets(SO1)).find((x) => x.monthLabel === "June 2026")!.id, "create-or-resume: choosing a month that has a plan reopens THAT plan (one per owner and month)");
     assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-r-nov" })), 422, "a month of ANOTHER season is refused");
     assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-kharif", seasonMonthId: "sm-december" })), 422, "a month outside the season is refused");
-    assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-old", seasonMonthId: "sm-old-jun" })), 409, "a CLOSED season cannot be chosen");
+    assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-old", seasonMonthId: "sm-old-jun" })), 422, "a CLOSED season cannot be chosen");
     assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "nope", seasonMonthId: "sm-june" })), 422);
     assert.equal(await status(() => service.createMonthlySheet(SO1, { seasonId: "s-kharif" })), 422);
     assert.equal(await status(() => service.createMonthlySheet(SO3, { seasonId: "s-kharif", seasonMonthId: "sm-june" })), 422, "no approved Seasonal Plan market in that season → nothing to plan (the dialog explains it)");
@@ -279,8 +281,9 @@ async function main() {
     // list status follows the options
     assert.equal(plain((await service.listMonthlySheets(SO1)).find((s) => s.id === june.id)!).status, "In Progress");
     t.seasons.find((s) => s.id === "s-kharif")!.status = "CLOSED";
-    assert.equal(await status(() => service.createMonthlyPlan(SO1, { sheetId: april.id, seasonalPlanId: "sp-so1-new", planDate: "2026-04-11", option1Party: "late" })), 409, "no new rows in a closed season");
-    assert.equal(plain(await service.getMonthlySheet(SO1, june.id)).plans.length, 2, "…but its plans stay readable");
+    assert.equal(await status(() => service.createMonthlyPlan(SO1, { sheetId: april.id, seasonalPlanId: "sp-so1-new", planDate: "2026-04-11", option1Party: "late" })), 404, "no new rows in a closed season");
+    assert.equal(await status(() => service.getMonthlySheet(SO1, june.id)), 404, "closed plans disappear but their entries are retained");
+    assert.equal(t.plans.filter((p) => p.sheetId === june.id).length, 2);
   }
 
   /* ---- row status workflow: ONE status per market row ---- */
@@ -554,11 +557,10 @@ async function main() {
     // Older Plans: closed season, nothing altered
     const snapshot = JSON.stringify([t.sheets, t.plans.map((p) => [p.id, p.approvalStatus, p.opStatus])]);
     t.seasons.find((x) => x.id === "s-kharif")!.status = "CLOSED";
-    assert.deepEqual([ids(await service.listMonthlySheets(SO1, { stage: "create" })), ids(await service.listMonthlySheets(SO1, { stage: "approved" })), ids(await service.listMonthlySheets(SO1, { stage: "older" }))], [[], [], [so.id]]);
+    assert.deepEqual([ids(await service.listMonthlySheets(SO1, { stage: "create" })), ids(await service.listMonthlySheets(SO1, { stage: "approved" })), ids(await service.listMonthlySheets(SO1, { stage: "older" }))], [[], [], []]);
     assert.equal(JSON.stringify([t.sheets, t.plans.map((p) => [p.id, p.approvalStatus, p.opStatus])]), snapshot, "classification alters no record");
-    const older = plain(await service.getMonthlySheet(SO1, so.id, "older"));
-    assert.deepEqual([older.plans.length, older.sheet.canEdit, older.sheet.canSubmit, older.sheet.canReview], [2, false, false, false], "historical plans load and are read-only");
-    assert.equal(await status(() => service.submitMonthlySheet(SO1, so.id)), 409);
+    assert.equal(await status(() => service.getMonthlySheet(SO1, so.id, "older")), 404, "closed master periods are hidden, including Older Plans");
+    assert.equal(await status(() => service.submitMonthlySheet(SO1, so.id)), 404);
   }
 
   /* ---- Admin-created plans are in the global lists ---- */
@@ -621,7 +623,7 @@ async function main() {
     assert.equal(await status(() => service.updateMonthlyPlan(SO2, plan.id, { planDate: "2026-06-10" })), 404, "another SO cannot change the date");
     assert.equal(await status(() => service.updateMonthlyPlan(ADMIN, plan.id, { planDate: "2026-06-10" })), 403, "Admin does not hand-edit the date either");
     t.seasons.find((x) => x.id === "s-kharif")!.status = "CLOSED";
-    assert.equal(await status(() => move(service, ADMIN, plan, { to: "REJECTED" })), 409, "closed season: read-only");
+    assert.equal(await status(() => move(service, ADMIN, plan, { to: "REJECTED" })), 404, "closed season: hidden");
     assert.ok(readFileSync("prisma/migrations/20261008020000_monthly_conversion_date_history/migration.sql", "utf8").includes("PartyMonthlyDateChange_no_delete"));
   }
 
@@ -662,17 +664,17 @@ async function main() {
     assert.deepEqual(plain(await service.getMonthlySheet(RM1, sheetId)).plans[0]!.allowedStatuses, [], "an RM viewing a team plan has no status actions");
   }
 
-  /* ---- a closed season keeps history but is read-only ---- */
+  /* ---- a closed season keeps history but is hidden ---- */
   {
     const { service, t } = loadService();
     const plan = await planFor(service);
     await move(service, SO1, plan, { to: "DOC_SENT", sent: DOCS });
     t.seasons.find((s) => s.id === "s-kharif")!.status = "CLOSED";
-    assert.equal(await status(() => move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: { documents: true, checks: true, other: "GST certificate" } })), 409, "a plan of a closed season is read-only");
-    assert.equal(await status(() => service.updateMonthlyPlan(SO1, plan.id, { planDate: "2026-06-18" })), 409);
+    assert.equal(await status(() => move(service, ADMIN, plan, { to: "DOC_RECEIVED", received: { documents: true, checks: true, other: "GST certificate" } })), 404, "a plan of a closed season is hidden");
+    assert.equal(await status(() => service.updateMonthlyPlan(SO1, plan.id, { planDate: "2026-06-18" })), 404);
     assert.equal(t.plans.length, 1);
     assert.equal(t.statusEvents.filter((e) => e.monthlyPlanId === plan.id).length, 1, "history is never deleted");
-    assert.deepEqual(plain(await service.getMonthlySheet(SO1, plan.sheetId)).plans[0]!.allowedStatuses, [], "no actions are offered");
+    assert.equal(await status(() => service.getMonthlySheet(SO1, plan.sheetId)), 404, "the closed plan cannot be opened");
   }
 
   /* ---- detail page wiring: Market | Party Options | Status | Conversion Date | Days ---- */

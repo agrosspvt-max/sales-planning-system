@@ -77,7 +77,7 @@ export function ReportsPage({ initialType = "product", lockType = false, title }
 
   const { data: seasons } = useQuery<SeasonOption[]>({
     queryKey: ["seasons"],
-    queryFn: () => api.get<SeasonOption[]>("/api/seasons"),
+    queryFn: () => api.get<SeasonOption[]>("/api/seasons?active=true"),
   });
   const effectiveSeason = seasonId || seasons?.[0]?.id || "";
 

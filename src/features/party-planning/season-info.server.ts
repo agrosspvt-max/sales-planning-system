@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { prisma } from "@/lib/prisma";
 import { listSeasons } from "@/features/seasons/service.server";
@@ -13,15 +14,16 @@ export interface MonthOption { id: string; name: string; label: string; key: str
 export interface SeasonInfo { id: string; name: string; year: number; status: string; period: string | null; months: MonthOption[] }
 
 export async function getSeasonInfo(seasonId: string): Promise<SeasonInfo | null> {
-  const season = await prisma.season.findUnique({ where: { id: seasonId }, select: { id: true, name: true, year: true, status: true, startMonth: true, startYear: true, endMonth: true, endYear: true } });
+  const season = await prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: seasonId }), select: { id: true, name: true, year: true, status: true, startMonth: true, startYear: true, endMonth: true, endYear: true } });
   if (!season) return null;
-  const rows = await prisma.seasonMonth.findMany({ where: { seasonId }, orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, calendarMonth: true, calendarYear: true } });
+  // The period remains the season's full calendar period; only selectable months are filtered.
+  const rows = await prisma.seasonMonth.findMany({ where: { seasonId }, orderBy: SEASON_MONTH_ORDER, select: { id: true, name: true, status: true, calendarMonth: true, calendarYear: true } });
   const ids = rows.map((m) => identity(m));
   const effective = rows.length > 0 && ids.every((m) => m) ? calendarPeriod(ids.map((m) => m!)) : null;
   const period = formatPeriod(effective?.startMonth ?? season.startMonth, effective?.startYear ?? season.startYear, effective?.endMonth ?? season.endMonth, effective?.endYear ?? season.endYear) || null;
   return {
     id: season.id, name: season.name, year: season.year, status: season.status, period,
-    months: rows.filter((m) => identity(m)).map((m) => ({ id: m.id, name: m.name, label: monthLabel(m), key: monthKey(m)! })),
+    months: rows.filter((m) => m.status === "OPEN" && identity(m)).map((m) => ({ id: m.id, name: m.name, label: monthLabel(m), key: monthKey(m)! })),
   };
 }
 
@@ -33,6 +35,6 @@ export async function listOpenSeasonInfos(): Promise<SeasonInfo[]> {
 }
 
 export async function isSeasonOpen(seasonId: string): Promise<boolean> {
-  const season = await prisma.season.findUnique({ where: { id: seasonId }, select: { status: true } });
+  const season = await prisma.season.findUnique({ where: inOpenPlanningPeriod("season", { id: seasonId }), select: { status: true } });
   return season?.status === "OPEN";
 }

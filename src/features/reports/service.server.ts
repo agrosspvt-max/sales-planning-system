@@ -1,3 +1,4 @@
+import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
 import "server-only";
 import { SEASON_MONTH_ORDER } from "@/lib/season-calendar";
 import { PlanStatus } from "@prisma/client";
@@ -55,14 +56,14 @@ export type { Fact };
 export async function computeFacts(ctx: AuthContext, seasonId: string): Promise<Fact[]> {
   const scope = await getOfficerScope(ctx);
   const plans = await prisma.seasonPlan.findMany({
-    where: {
+    where: inOpenPlanningPeriod("seasonPlan", {
       seasonId,
       status: PlanStatus.APPROVED,
       isActiveVersion: true,
       // Reports include ACTIVE and CLOSED (frozen) plans; DEACTIVATED (archived) plans are excluded.
       lifecycleState: { not: "DEACTIVATED" },
       officerId: scope.all ? undefined : { in: scope.ids },
-    },
+    }),
     include: {
       officer: { select: { id: true, name: true } },
       dealers: {
@@ -436,7 +437,7 @@ export async function getReport(
 ): Promise<ReportPayload> {
   if (!seasonId) throw new ApiError(422, "A season is required");
   const season = await prisma.season.findUnique({
-    where: { id: seasonId },
+    where: inOpenPlanningPeriod("season", { id: seasonId }),
     select: { name: true, year: true, monthlyMode: true },
   });
   const seasonName = season ? `${season.name} ${season.year}` : "";
@@ -448,7 +449,7 @@ export async function getReport(
   if (type === "monthly") {
     // Use the mode saved on THIS season, never the current global default.
     const monthlyMode = (season?.monthlyMode ?? "PACK_SIZE") as PlanningMode;
-    const months = await prisma.seasonMonth.findMany({ where: { seasonId }, orderBy: SEASON_MONTH_ORDER });
+    const months = await prisma.seasonMonth.findMany({ where: inOpenPlanningPeriod("seasonMonth", { seasonId }), orderBy: SEASON_MONTH_ORDER });
     let rows: ReportRow[] = monthlyRowsFromFacts(facts, months, monthlyMode);
     const sort = opts.sort ?? { key: "label", dir: "asc" };
     if (opts.sort) rows = sortRows(rows, sort);

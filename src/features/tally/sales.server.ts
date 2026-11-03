@@ -1,5 +1,5 @@
 import "server-only";
-import { salesSyncEnabled } from "./sales-rollout";
+import { salesSyncEnabled, missingSalesLedgerAsZeroEnabled } from "./sales-rollout";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -98,10 +98,12 @@ async function scope(db: Tx, monthKey: string) {
     .sort((a, b) => a.name.localeCompare(b.name));
   if (names.length > 2000 || dealers.length > 2000)
     throw new ApiError(422, "Sales scope is too large");
+  const missingLedgerAsZero = missingSalesLedgerAsZeroEnabled();
   const fingerprint = hashSales(
     JSON.stringify({
       dealers,
       names,
+      missingLedgerAsZero,
       products: products.map((p) => ({
         ...p,
         rate: String(p.rate),
@@ -109,7 +111,7 @@ async function scope(db: Tx, monthKey: string) {
       })),
     }),
   );
-  return { dealers, names, products, fingerprint };
+  return { dealers, names, products, fingerprint, missingLedgerAsZero };
 }
 type Scope = Awaited<ReturnType<typeof scope>>;
 function productMap(s: Scope) {
@@ -136,10 +138,17 @@ export function projectSales(result: SalesResult, s: Scope) {
     if (h.details.length < 50 && !h.details.includes(detail)) h.details.push(detail);
     held.set(id, h);
   }
+  const missing = new Map<string, string[]>(),
+    matched = new Set<string>();
   for (const n of s.names)
     for (const id of n.dealerIds) {
-      if (n.dealerIds.length !== 1) hold(id, "ALIAS_AMBIGUOUS", n.name);
+      if (s.missingLedgerAsZero && !ledgerNames.has(n.name)) {
+        const details = missing.get(id) ?? [];
+        details.push(n.name);
+        missing.set(id, details);
+      } else if (n.dealerIds.length !== 1) hold(id, "ALIAS_AMBIGUOUS", n.name);
       else if (!ledgerNames.has(n.name)) hold(id, "LEDGER_NOT_VERIFIED", n.name);
+      else matched.add(id);
     }
   const resolve = productMap(s),
     totals = new Map<
@@ -152,7 +161,7 @@ export function projectSales(result: SalesResult, s: Scope) {
     if (v.cancelled || v.optional) continue;
     if (!v.items.length && v.family === "Credit Note") unallocated++;
     const ids = byName.get(v.partyName);
-    if (!ids || ids.length !== 1) {
+    if (!ids || ids.length !== 1 || (s.missingLedgerAsZero && !ledgerNames.has(v.partyName))) {
       unmappedVouchers++;
       continue;
     }
@@ -181,7 +190,15 @@ export function projectSales(result: SalesResult, s: Scope) {
         hold(id, "PRODUCT_TOTAL_TOO_LARGE", line.stockItemName);
     }
   }
-  return { held: [...held.values()], totals, unallocated, unmappedVouchers };
+  const zeroed = [...missing]
+    .filter(([id]) => needed.has(id) && !matched.has(id) && !held.has(id))
+    .map(([dealerId, details]) => ({
+      dealerId,
+      name: s.dealers.find((d) => d.dealerId === dealerId)!.name,
+      reason: "LEDGER_NOT_FOUND_ZEROED",
+      details,
+    }));
+  return { held: [...held.values()], zeroed, totals, unallocated, unmappedVouchers };
 }
 async function publish(
   db: Tx,
@@ -341,6 +358,7 @@ async function publish(
     changedRows,
     changes,
     held: projection.held,
+    zeroed: projection.zeroed,
     unallocatedCredits: projection.unallocated,
     unmappedVouchers: projection.unmappedVouchers,
     controlMarkerCount: result.controlMarkerCount,
@@ -446,7 +464,15 @@ export async function salesAgent(req: Request, raw: unknown) {
           });
           return { job: null };
         }
-        if (Buffer.byteLength(JSON.stringify(current.names.map((n) => n.name)), "utf8") > 100000)
+        const aliases = [
+          ...new Set([
+            ...current.names.map((n) => n.name),
+            ...(current.missingLedgerAsZero ? [c.anchorName] : []),
+          ]),
+        ];
+        // Include the pinned anchor in the same ledger collection: an empty/incorrect
+        // export must never be accepted as proof that every requested dealer is absent.
+        if (aliases.length > 2000 || Buffer.byteLength(JSON.stringify(aliases), "utf8") > 100000)
           throw new ApiError(422, "Sales dealer scope requires a smaller reviewed batch");
         const leaseToken = token();
         await db.tallySalesJob.update({
@@ -464,7 +490,7 @@ export async function salesAgent(req: Request, raw: unknown) {
             monthKey: j.monthKey,
             fromDate: j.fromDate,
             throughDate: j.throughDate,
-            aliases: current.names.map((n) => n.name),
+            aliases,
           },
         };
       };
@@ -611,6 +637,13 @@ export async function salesAgent(req: Request, raw: unknown) {
             { ...job, companyName: c.companyName, anchorGuid: c.anchorGuid },
             now,
           );
+          if (
+            current.missingLedgerAsZero &&
+            !result.ledgers.some(
+              (l) => l.name === c.anchorName && l.guid.toLowerCase() === c.anchorGuid.toLowerCase(),
+            )
+          )
+            rejection = "SALES_LEDGER_COVERAGE_NOT_VERIFIED";
         } catch {
           rejection = "SALES_DATA_REJECTED";
         }

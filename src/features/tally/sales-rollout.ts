@@ -1,9 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import approved from "../../../config/tally-sales-preview.json";
-export function salesSyncEnabled(env: NodeJS.ProcessEnv = process.env) {
-  if (env.TALLY_SALES_SYNC_ENABLED === "false") return false;
-  if (env.TALLY_SALES_SYNC_ENABLED === "true") return true;
+function approvedTestPreview(env: NodeJS.ProcessEnv) {
   if (
     env.VERCEL_ENV !== "preview" ||
     env.VERCEL_GIT_COMMIT_REF !== approved.branch ||
@@ -22,4 +20,14 @@ export function salesSyncEnabled(env: NodeJS.ProcessEnv = process.env) {
   } catch {
     return false;
   }
+}
+
+export function salesSyncEnabled(env: NodeJS.ProcessEnv = process.env) {
+  if (env.TALLY_SALES_SYNC_ENABLED === "false") return false;
+  if (env.TALLY_SALES_SYNC_ENABLED === "true") return true;
+  return approvedTestPreview(env);
+}
+/** User-authorized rule is restricted to this pinned test branch and database. */
+export function missingSalesLedgerAsZeroEnabled(env: NodeJS.ProcessEnv = process.env) {
+  return env.TALLY_SALES_SYNC_ENABLED !== "false" && approvedTestPreview(env);
 }

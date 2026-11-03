@@ -20,6 +20,10 @@ for (const [from, to] of [
 let fail = false,
   cached = false;
 const load = testLoader({
+  react: {
+    ...React,
+    useState: (initial: any) => React.useState(typeof initial === "boolean" ? true : initial),
+  },
   "@/lib/api-client": { api: {}, ApiRequestError: class extends Error {} },
   "@/components/ui/button": {
     Button: (p: React.ButtonHTMLAttributes<HTMLButtonElement>) => <button {...p} />,
@@ -36,7 +40,16 @@ const load = testLoader({
                 snapshot: {
                   observedAt: "2026-10-31T10:00:00Z",
                   throughDate: "2026-10-31",
-                  summary: { changedRows: 4 },
+                  summary: {
+                    changedRows: 4,
+                    zeroed: [
+                      {
+                        name: "Kisan Beej Bhandar",
+                        reason: "LEDGER_NOT_FOUND_ZEROED",
+                        details: ["Kisan Beej Bhandar"],
+                      },
+                    ],
+                  },
                 },
               }
             : undefined,
@@ -60,4 +73,7 @@ assert.match(html, /Sales to month/);
 assert.match(html, /temporarily unavailable/);
 assert.match(html, /4 product rows changed/);
 assert.doesNotMatch(html, /not enabled for this test website/);
+assert.match(html, /Kisan Beej Bhandar/);
+assert.match(html, /Sales quantity and amount set to 0/);
+assert.doesNotMatch(html, /Previous actuals kept/);
 console.log("Sales range validation and rendered controls/saved data during status errors: PASS");

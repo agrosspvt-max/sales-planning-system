@@ -46,10 +46,14 @@ class ApiError extends Error {
     super(message);
   }
 }
+let missingLedgerZeroPolicy = true;
 const require = createRequire(import.meta.url),
   modules: Record<string, unknown> = {
     "server-only": {},
-    "./sales-rollout": { salesSyncEnabled: () => process.env.TALLY_SALES_SYNC_ENABLED === "true" },
+    "./sales-rollout": {
+      salesSyncEnabled: () => process.env.TALLY_SALES_SYNC_ENABLED === "true",
+      missingSalesLedgerAsZeroEnabled: () => missingLedgerZeroPolicy,
+    },
     "@prisma/client": db,
     zod: { z },
     "@/lib/prisma": { prisma },
@@ -138,6 +142,7 @@ function result(
     controlMarkerCount: 0,
     anchorGuid: anchor,
     ledgers: [
+      { name: "NEW MAURYA BEEJ BHANDAR-SIKRIGANJ UP", guid: anchor },
       { name: "Dealer A", guid: prefix + "-00000002" },
       { name: "Dealer B", guid: prefix + "-00000003" },
     ],
@@ -239,7 +244,7 @@ async function roundtrip() {
       );
     else if (xml.includes("<TYPE>Ledger</TYPE>"))
       reply = envelope(
-        `<LEDGER NAME="Dealer A"><GUID>${prefix}-00000002</GUID></LEDGER><LEDGER NAME="Dealer B"><GUID>${prefix}-00000003</GUID></LEDGER>`,
+        `<LEDGER NAME="NEW MAURYA BEEJ BHANDAR-SIKRIGANJ UP"><GUID>${anchor}</GUID></LEDGER><LEDGER NAME="Dealer A"><GUID>${prefix}-00000002</GUID></LEDGER><LEDGER NAME="Dealer B"><GUID>${prefix}-00000003</GUID></LEDGER>`,
       );
     else {
       const monthNames = [
@@ -400,17 +405,18 @@ async function main() {
   await prisma.product.create({
     data: { id: "sales-product", name: "Product", rate: 100, nbvPercent: "0.5" },
   });
-  for (const id of ["a", "b", "held"]) {
+  for (const id of ["a", "b", "held", "noalias"]) {
     await prisma.dealer.create({
       data: { id, name: "Dealer " + id.toUpperCase(), isActive: true, status: "ACTIVE" },
     });
-    await prisma.dealerAlias.create({
-      data: {
-        tallyName: "Dealer " + id.toUpperCase(),
-        tallyKey: "dealer" + id,
-        systemDealerId: id,
-      },
-    });
+    if (id !== "noalias")
+      await prisma.dealerAlias.create({
+        data: {
+          tallyName: "Dealer " + id.toUpperCase(),
+          tallyKey: "dealer" + id,
+          systemDealerId: id,
+        },
+      });
     await prisma.planDealer.create({
       data: { id: "pd-" + id, dealerId: id, seasonPlanId: "sales-plan" },
     });
@@ -437,6 +443,15 @@ async function main() {
       saleValue: 8888,
     },
   });
+  await prisma.monthlyEntry.create({
+    data: {
+      planLineId: "line-noalias",
+      seasonMonthId: "sales-old",
+      planQty: 44,
+      saleQty: 101,
+      saleValue: -505,
+    },
+  });
   const access = await (modules["./service.server"] as typeof import("./service.server")).setup(
     actor,
   );
@@ -453,6 +468,10 @@ async function main() {
   const requestId = randomUUID(),
     first = (await call({ action: "claim", requestId })).job,
     resumed = (await call({ action: "claim", requestId })).job;
+  assert.ok(
+    first.aliases.includes("NEW MAURYA BEEJ BHANDAR-SIKRIGANJ UP"),
+    "verified ledger anchor is requested even outside dealer scope",
+  );
   assert.equal(first.id, resumed.id);
   assert.notEqual(first.leaseToken, resumed.leaseToken);
   assert.equal(await claim(), null);
@@ -473,8 +492,8 @@ async function main() {
   );
   assert.equal(
     (await actual("line-held")).saleQty.toString(),
-    "20",
-    "unverified ledger preserves old actuals",
+    "0",
+    "absent configured Tally ledger clears requested month actuals under test rule",
   );
   assert.equal(
     (await actual("line-a", "sales-old")).saleQty.toString(),
@@ -485,6 +504,88 @@ async function main() {
   assert.equal(await prisma.tallySalesItem.count(), 1);
   assert.equal((await call({ action: "complete", ...ids })).duplicate, true);
   assert.equal(await prisma.tallySalesVoucher.count(), 1);
+  assert.equal(
+    (await actual("line-noalias")).saleQty.toString(),
+    "0",
+    "no alias and no exact Tally name clears old quantity",
+  );
+  assert.equal(
+    (await actual("line-noalias")).saleValue?.toString(),
+    "0",
+    "no alias and no exact Tally name clears old amount",
+  );
+  assert.equal((await actual("line-noalias")).planQty, 77, "zero rule preserves planning figures");
+  assert.equal(
+    (await actual("line-noalias", "sales-old")).saleQty.toString(),
+    "101",
+    "zero rule cannot change another month",
+  );
+  const initialSnapshot = await prisma.tallySalesSnapshot.findUniqueOrThrow({
+    where: { connectionId_monthKey: { connectionId, monthKey: month } },
+  });
+  const initialSummary = initialSnapshot.summary as any;
+  assert.ok(initialSummary.zeroed.some((d: any) => d.name === "Dealer NOALIAS"));
+  assert.ok(!initialSummary.held.some((d: any) => d.name === "Dealer NOALIAS"));
+  // Missing or malformed ledger coverage must not be interpreted as zero sales.
+  await prisma.monthlyEntry.update({
+    where: {
+      planLineId_seasonMonthId: { planLineId: "line-noalias", seasonMonthId: "sales-month" },
+    },
+    data: { saleQty: 5, saleValue: 500 },
+  });
+  await svc.requestSalesRefresh(actor, month);
+  const invalidCoverage = await claim();
+  const incomplete = result(invalidCoverage);
+  incomplete.ledgers = [];
+  const incompleteIds = await stage(invalidCoverage, incomplete);
+  await assert.rejects(
+    () => call({ action: "complete", ...incompleteIds }),
+    (e: any) => e.status === 409,
+  );
+  assert.equal(
+    (await actual("line-noalias")).saleValue?.toString(),
+    "500",
+    "failed ledger export keeps prior values",
+  );
+  assert.equal(
+    (await prisma.tallySalesJob.findUniqueOrThrow({ where: { id: invalidCoverage.id } })).error,
+    "SALES_LEDGER_COVERAGE_NOT_VERIFIED",
+  );
+  // No-alias dealer with an exact Tally ledger name still receives actual sales.
+  await refresh((j) => {
+    const r = result(j);
+    r.ledgers.push({ name: "Dealer NOALIAS", guid: prefix + "-00000005" });
+    r.vouchers[0].partyName = "Dealer NOALIAS";
+    r.vouchers[0].items[0].quantity = "2.500000";
+    r.vouchers[0].items[0].amount = "125.00";
+    return r;
+  });
+  assert.equal((await actual("line-noalias")).saleQty.toString(), "2.5");
+  assert.equal((await actual("line-noalias")).saleValue?.toString(), "125");
+  // A missing old alias contributes zero; it cannot erase a readable current alias.
+  await prisma.dealerAlias.create({
+    data: { tallyName: "Missing old alias", tallyKey: "missingoldalias", systemDealerId: "a" },
+  });
+  await refresh((j) => result(j));
+  assert.equal((await actual()).saleValue?.toString(), "1040");
+  await prisma.dealerAlias.deleteMany({ where: { tallyKey: "missingoldalias" } });
+  // The legacy preserve policy still applies outside the pinned test Preview.
+  missingLedgerZeroPolicy = false;
+  await prisma.monthlyEntry.update({
+    where: {
+      planLineId_seasonMonthId: { planLineId: "line-noalias", seasonMonthId: "sales-month" },
+    },
+    data: { saleQty: 7, saleValue: 700 },
+  });
+  await refresh((j) => result(j));
+  assert.equal((await actual("line-noalias")).saleValue?.toString(), "700");
+  missingLedgerZeroPolicy = true;
+  await refresh((j) => result(j));
+  assert.equal((await actual("line-noalias")).saleValue?.toString(), "0");
+  // Explicit historical request clears that historical month only, including old credit values.
+  await refresh((j) => result(j), oldKey);
+  assert.equal((await actual("line-noalias", "sales-old")).saleValue?.toString(), "0");
+  assert.equal((await actual("line-noalias", "sales-old")).planQty, 44);
   await roundtrip();
   assert.equal(await claim(), null, "automatic refresh not due before 15 minutes");
   await refresh((j) => {
@@ -756,7 +857,7 @@ async function main() {
   });
   assert.throws(() => sales.salesPeriod("2026-11", "2026-10-31"));
   console.log(
-    "Sales integration: credential/role boundaries, claim recovery, decimals, returns, zero-qty value, verified zero, holds, replacement, replay, 15-minute interval, historical manual refresh, scope-change rollback, revoke: PASS",
+    "Sales integration: credential/role boundaries, claim recovery, decimals, returns, zero-qty value, verified zero, holds, replacement, replay, 15-minute interval, historical manual refresh, scope-change rollback, missing-ledger zero with anchor coverage, no-alias exact match, requested-month isolation, production preservation, revoke: PASS",
   );
 }
 main()

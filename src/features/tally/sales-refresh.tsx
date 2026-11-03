@@ -23,6 +23,7 @@ type Summary = {
     amount: string;
   }[];
   held?: { name: string; reason: string; details: string[] }[];
+  zeroed?: { name: string; reason: string; details: string[] }[];
 };
 type Status = {
   configured: boolean;
@@ -131,6 +132,13 @@ function SalesMonthRefresh({
         </p>
       )}
       {refresh.error && <p role="alert">{refresh.error.message}</p>}
+      {!!summary?.zeroed?.length && (
+        <p className="text-sm">
+          {summary.zeroed.length} {summary.zeroed.length === 1 ? "dealer had" : "dealers had"} no
+          matching Tally ledger. Sales quantity and amount were set to 0 for {month}. See ⓘ for
+          names.
+        </p>
+      )}
       {q.data?.snapshot && (
         <p className="text-sm text-muted-foreground">
           Sales read{" "}
@@ -193,6 +201,17 @@ function SalesMonthRefresh({
           {summary.changedRows === 0 && (
             <p>No actual sales quantities or amounts changed in this refresh.</p>
           )}
+          {summary.zeroed?.map((z) => (
+            <div key={z.name}>
+              <strong>{z.name}</strong>: No matching Tally ledger. Sales quantity and amount set to
+              0 for {month}.
+              <ul>
+                {z.details.map((name) => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
           {summary.held?.map((h) => (
             <div key={h.name}>
               <strong>{h.name}</strong>: {reasons[h.reason] ?? h.reason}. Previous actuals kept.

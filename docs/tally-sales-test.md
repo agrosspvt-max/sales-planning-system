@@ -60,3 +60,16 @@ The completion path previously performed one `PlanLine.upsert` per new dealer/pr
 Safe server timing logs identify plan-line creation, actual comparison, actual saving and bill-detail saving by job/month and row counts. They exclude source names, financial amounts and credentials.
 
 The disposable database test imports 300 previously unplanned products in one historical bill, verifies one PlanLine insert statement, confirms an identical refresh makes no monthly-actual insert/update statements, and checks all 300 bill product lines are stored. The existing credential, atomic-publication, scope-change, historical isolation, decimal, return, replay and aging checks remain in the same run. This establishes the reduced database work; actual hosted timings require the next office retry.
+
+
+### Missing dealer ledger becomes zero — approved test Preview only (3 November)
+
+After a successfully validated ledger collection, any requested Tally name absent from that collection contributes zero for the requested month. Without a Dealer Alias, the system dealer name remains the exact lookup name. A dealer with no matching ledger has its existing monthly saleQty/saleValue replaced by zero. A readable alias continues contributing actual sales even when another older alias is absent. Ambiguous present names, unresolved product mappings and incompatible units still appear under review.
+
+The zero rule is enabled only on the pinned `codex/tally-billwise-test` Vercel Preview and pinned test Neon database. An explicit sales-enable flag on another environment does not enable the zero rule. Other environments retain the previous preservation behavior. The policy is included in the job scope fingerprint, so an in-flight result reserved under the prior policy must be refreshed.
+
+The claim adds the existing approved company-anchor ledger to the requested ledger names, even when it is outside the planning scope. Connector 1.4.1 already returns requested names from the full Ledger collection, so no protocol/schema/Windows update is required. Completion checks the anchor's exact name and GUID inside that collection before accepting missing names as zero. Empty/incorrect collections fail with `SALES_LEDGER_COVERAGE_NOT_VERIFIED`; a failed read cannot clear actuals.
+
+Summary `zeroed` lists affected dealers and missing names separately from `held`. The refresh UI explains the zero action and selected month. Source bill records remain stored; zeroing only changes actual sales fields in the requested month, preserving plan fields, other months and aging.
+
+Validated using disposable PostgreSQL: no-alias missing name clears quantity/amount, configured missing alias clears, exact no-alias match imports decimals, missing older alias does not erase a readable alias, empty ledger collection preserves values, explicit historical refresh affects only its month, production-mode policy preserves previous behavior, and bill/aging regression checks. Rendered UI tests verify the zero explanation and the Preview/database guard tests reject production, other branches and other databases.

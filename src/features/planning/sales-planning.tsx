@@ -7,7 +7,10 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
-import { Plus, FileInput } from "lucide-react";
+import { Plus, FileInput, Download } from "lucide-react";
+import { useAdminPermission } from "@/features/accounts/permission-ui";
+import { useLabel } from "@/features/labels/label-ui";
+import { SeasonalExportDialog } from "./seasonal-export-dialog";
 import { api } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { MONTH_NAMES, formatPeriod } from "@/lib/season-months";
@@ -173,6 +176,11 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
   }, [allPlans, tab]);
 
   const canCreateSeasonal = isCreate && tab === "SEASONAL" && (isAdmin || isOfficer || isManager);
+  // Export Seasonal Plan: administrators with the Sales Planning export grant (Super Admin always). The server re-checks.
+  const exportGranted = useAdminPermission("salesPlanning", "export");
+  const canExport = isAdmin && exportGranted;
+  const exportLabel = useLabel("sales_planning.export.button");
+  const [exportOpen, setExportOpen] = useState(false);
   const { data: openSeasons, isLoading: seasonsLoading, refetch: refetchSeasons } = useQuery<OpenSeason[]>({
     queryKey: ["open-seasons"],
     queryFn: () => api.get<OpenSeason[]>("/api/planning/season-plans/open-seasons"),
@@ -218,13 +226,24 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
         title="Sales Planning"
         subtitle={isCreate ? "Create or continue editable plans (Draft, Returned, Rejected)." : "Submitted, approved and historical plans."}
         actions={
-          isAdmin && isCreate ? (
-            <Button variant="outline" asChild>
-              <Link href="/planning/sales/import"><FileInput className="h-4 w-4" /> Import Seasonal Plan</Link>
-            </Button>
+          isAdmin && (isCreate || canExport) ? (
+            <div className="flex flex-wrap gap-2">
+              {isCreate && (
+                <Button variant="outline" asChild>
+                  <Link href="/planning/sales/import"><FileInput className="h-4 w-4" /> Import Seasonal Plan</Link>
+                </Button>
+              )}
+              {/* Export has its own permission (Sales Planning → Export); it never depends on the Import grant. */}
+              {canExport && (
+                <Button variant="outline" onClick={() => setExportOpen(true)}>
+                  <Download className="h-4 w-4" /> {exportLabel}
+                </Button>
+              )}
+            </div>
           ) : undefined
         }
       />
+      {canExport && <SeasonalExportDialog open={exportOpen} onOpenChange={setExportOpen} />}
 
       {/* Level 1 — Create New Plan | View Plans */}
       <PillNavLinks isCreate={isCreate} createHref="/planning/sales" viewHref="/planning/sales/plans" />

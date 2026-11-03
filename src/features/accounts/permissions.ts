@@ -11,7 +11,7 @@ export const ADMIN_MODULES = [
   { id: "dashboard", label: "Dashboard", group: "Insights", href: "/dashboard", actions: READ },
   { id: "onboarding", label: "Company Onboarding", group: "Setup", href: "/onboarding", actions: IMPORT },
   { id: "onboardingHistory", label: "Onboarding History", group: "Setup", href: "/onboarding/history", actions: READ },
-  { id: "salesPlanning", label: "Sales Planning", group: "Planning", href: "/planning/sales", actions: [...PLAN, "create", "delete"] },
+  { id: "salesPlanning", label: "Sales Planning", group: "Planning", href: "/planning/sales", actions: [...PLAN, "create", "delete", "export"] }, // "export" = Export Seasonal Plan (independent of Import)
   { id: "recoveryPlanning", label: "Recovery Planning", group: "Planning", href: "/planning/recovery", actions: [...PLAN, "delete", "upload", "transfer"] },
   { id: "schemePlanning", label: "Scheme Planning", group: "Planning", href: "/planning/scheme", actions: [...PLAN, "verify", "upload"] },
   { id: "partyPlanning", label: "Dealer Appointment", group: "Planning", href: "/planning/party", actions: ["read", "approve", "reject", "manage"] }, // "manage" = Territory Mapping writes (mapping, import, Market requests)

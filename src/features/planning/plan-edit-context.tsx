@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { DealerMarkerScope } from "@/features/dealers/dealer-name-ui";
 import { api } from "@/lib/api-client";
 import { figuresForMode, isQuantityMode, type FlexFigures, type PlanningMode } from "@/lib/calc";
+import { seasonalSeedValue } from "@/lib/seasonal-line";
 import { useAutosaveMap } from "./use-autosave-map";
 import type { AdminChange } from "./admin-edit-ui";
 import type { PlanDetail, PlanLineDetail, PackSizeColumn } from "./types";
@@ -25,18 +26,8 @@ type ValueMap = Record<string, Cell>; // key: dealerId|productId
 
 const key = (dealerId: string, productId: string) => `${dealerId}|${productId}`;
 
-function storedFigures(l: PlanLineDetail): FlexFigures {
-  const mode: PlanningMode = l.inputMode ?? "PACK_SIZE";
-  const value = mode === "PACK_SIZE" ? Object.values(l.packs).reduce((a, b) => a + b, 0) : l.inputValue ?? 0;
-  return figuresForMode(mode, value, l.rate, l.nbvPercent);
-}
-function seedValue(l: PlanLineDetail, mode: PlanningMode): number {
-  const fig = storedFigures(l);
-  if (mode === "TOTAL_QUANTITY") return fig.totalQty ?? 0;
-  if (mode === "AMOUNT") return fig.amount ?? 0;
-  if (mode === "NBV") return fig.nbv ?? 0;
-  return 0;
-}
+// The line → season-mode seeding rule is shared with the Seasonal Plan Excel export (src/lib/seasonal-line.ts).
+const seedValue = (l: PlanLineDetail, mode: PlanningMode): number => seasonalSeedValue(l, mode);
 
 /** The lines save response: `lines` are the values exactly as stored (see saveLines). */
 export interface SaveLinesResponse {

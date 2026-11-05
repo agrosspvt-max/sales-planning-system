@@ -2,16 +2,26 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {approvedPreview}=require('./tally-sales-preview.cjs');
+async function applyMigration(tx, directory){
+ const sql=fs.readFileSync(path.join(__dirname,'../prisma/migrations',directory,'migration.sql'),'utf8');
+ for(const statement of sql.split(';').map(x=>x.trim()).filter(Boolean))await tx.$executeRawUnsafe(statement);
+}
 async function apply(db){
- const sql=fs.readFileSync(path.join(__dirname,'../prisma/migrations/20261102000000_tally_sales_sync/migration.sql'),'utf8');
  await db.$transaction(async tx=>{
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('tally-sales-schema-20261102'))`;
+  const billwiseTables=await tx.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('TallyConnection','TallySyncJob','TallySyncChunk','TallyLedgerBinding')`;
+  const billwiseColumns=await tx.$queryRaw`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='AgingSnapshot' AND column_name IN ('source','sourceObservedAt','tallyJobId')`;
+  if(!billwiseTables.length && !billwiseColumns.length){
+   await applyMigration(tx,'20261101000000_tally_billwise_sync');
+  }else if(billwiseTables.length!==4 || billwiseColumns.length!==3){
+   throw Error('Partial billwise schema requires review; no automatic repair attempted');
+  }
   const tables=await tx.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('TallySalesJob','TallySalesChunk','TallySalesSnapshot','TallySalesVoucher','TallySalesItem')`;
   const columns=await tx.$queryRaw`SELECT data_type,numeric_precision,numeric_scale FROM information_schema.columns WHERE table_schema='public' AND table_name='MonthlyEntry' AND column_name='saleQty'`;
   if(tables.length===5 && columns[0]?.data_type==='numeric' && columns[0]?.numeric_precision===18 && columns[0]?.numeric_scale===6)return;
   if(tables.length)throw Error('Partial sales schema requires review; no automatic repair attempted');
   if(columns[0]?.data_type!=='integer')throw Error('Unexpected original quantity type; schema upgrade stopped');
-  for(const statement of sql.split(';').map(x=>x.trim()).filter(Boolean))await tx.$executeRawUnsafe(statement);
+  await applyMigration(tx,'20261102000000_tally_sales_sync');
  },{timeout:55000,maxWait:10000});
 }
 async function main(){

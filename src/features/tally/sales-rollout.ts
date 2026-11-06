@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import approved from "../../../config/tally-sales-preview.json";
-function approvedTestPreview(env: NodeJS.ProcessEnv) {
+export function approvedTestPreview(env: NodeJS.ProcessEnv = process.env) {
   if (
     env.VERCEL_ENV !== "preview" ||
     env.VERCEL_GIT_COMMIT_REF !== approved.branch ||

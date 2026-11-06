@@ -1,5 +1,6 @@
 "use client";
 import { TallySalesRefresh } from "./sales-refresh";
+import { TallyDaybookReview } from "./daybook-review";
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -16,7 +17,7 @@ const reasons: Record<string, string> = {
   NEGATIVE_RECOVERY_BUCKET: "Bill credits need reconciliation before recovery buckets can update",
 };
 const reasonText = (code: string) => reasons[code] ?? "Needs review";
-export function TallySettings() {
+export function TallySettings({ daybookReview = false }: { daybookReview?: boolean }) {
   const [access, setAccess] = useState<{ agentId: string; token: string } | null>(null);
   const q = useQuery<{
     configured: boolean;
@@ -85,6 +86,7 @@ export function TallySettings() {
     <div className="max-w-2xl space-y-4">
       <h1 className="text-xl font-semibold">Tally connection</h1>
       <TallySalesRefresh chooseMonth />
+      {daybookReview && <TallyDaybookReview />}
       <p>
         The office connector sends verified bill balances to current-month Recovery plans. Other
         plans and entered planning figures are preserved.

@@ -40,10 +40,10 @@ export function assertSuper(ctx: AuthContext) {
 const nonce = () => randomBytes(32).toString("base64url");
 const MAX_BODY = 128 * 1024,
   MAX_PAYLOAD = 8 * 1024 * 1024;
-export async function readBody(req: Request) {
+export async function readBody(req: Request, maxBytes = MAX_BODY) {
   if (req.headers.get("content-type")?.split(";")[0].trim() !== "application/json")
     throw new ApiError(415, "JSON required");
-  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY)
+  if (Number(req.headers.get("content-length") ?? 0) > maxBytes)
     throw new ApiError(413, "Request too large");
   const reader = req.body?.getReader();
   if (!reader) throw new ApiError(400, "Empty request");
@@ -54,7 +54,7 @@ export async function readBody(req: Request) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY) {
+      if (size > maxBytes) {
         await reader.cancel();
         throw new ApiError(413, "Request too large");
       }

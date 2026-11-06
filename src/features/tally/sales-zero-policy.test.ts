@@ -7,10 +7,11 @@ const load = testLoader({
     databaseHostSha256: createHash("sha256").update("test-db.example").digest("hex"),
   },
 });
-const { missingSalesLedgerAsZeroEnabled, salesSyncEnabled } = load<
+const { approvedTestPreview, missingSalesLedgerAsZeroEnabled, salesSyncEnabled } = load<
   typeof import("./sales-rollout")
 >("src/features/tally/sales-rollout.ts");
 const preview = {
+  NODE_ENV: "test" as const,
   VERCEL_ENV: "preview",
   VERCEL_GIT_COMMIT_REF: "codex/tally-billwise-test",
   TALLY_SYNC_ENABLED: "true",
@@ -18,6 +19,12 @@ const preview = {
   DIRECT_URL: "postgresql://user:example@test-db.example/db",
   TALLY_EXPECTED_DB_HOST: "test-db.example",
 };
+assert.equal(approvedTestPreview(preview), true);
+assert.equal(approvedTestPreview({ ...preview, VERCEL_ENV: "production" }), false);
+assert.equal(
+  approvedTestPreview({ ...preview, DIRECT_URL: "postgresql://user:example@other-db.example/db" }),
+  false,
+);
 assert.equal(missingSalesLedgerAsZeroEnabled(preview), true);
 assert.equal(
   missingSalesLedgerAsZeroEnabled({

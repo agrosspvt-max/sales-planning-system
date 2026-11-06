@@ -1,5 +1,6 @@
 import { indiaDay } from "@/features/tally/billwise";
 import { syncProgress } from "@/features/tally/service.server";
+import { assertManualDaybookMonthAvailable } from "@/features/tally/daybook.server";
 import "server-only";
 import { recoveryDealerCompleted } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
@@ -2081,6 +2082,7 @@ export async function commitDaybook(ctx: AuthContext, buffer: Buffer, filename: 
   let jobId = "";
   await prisma.$transaction(
     async (tx: Tx) => {
+      await assertManualDaybookMonthAvailable(tx, input.seasonMonthId);
       // Reset the two Daybook-owned columns for the WHOLE month first (clears any prior upload).
       if (res.monthRpdIds.length > 0) {
         await tx.recoveryPlanDealer.updateMany({ where: { id: { in: res.monthRpdIds } }, data: { srCr: 0, liveRecovery: 0 } });

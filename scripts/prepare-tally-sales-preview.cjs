@@ -18,10 +18,18 @@ async function apply(db){
   }
   const tables=await tx.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('TallySalesJob','TallySalesChunk','TallySalesSnapshot','TallySalesVoucher','TallySalesItem')`;
   const columns=await tx.$queryRaw`SELECT data_type,numeric_precision,numeric_scale FROM information_schema.columns WHERE table_schema='public' AND table_name='MonthlyEntry' AND column_name='saleQty'`;
-  if(tables.length===5 && columns[0]?.data_type==='numeric' && columns[0]?.numeric_precision===18 && columns[0]?.numeric_scale===6)return;
-  if(tables.length)throw Error('Partial sales schema requires review; no automatic repair attempted');
-  if(columns[0]?.data_type!=='integer')throw Error('Unexpected original quantity type; schema upgrade stopped');
-  await applyMigration(tx,'20261102000000_tally_sales_sync');
+  const salesReady=tables.length===5 && columns[0]?.data_type==='numeric' && columns[0]?.numeric_precision===18 && columns[0]?.numeric_scale===6;
+  if(!salesReady){
+   if(tables.length)throw Error('Partial sales schema requires review; no automatic repair attempted');
+   if(columns[0]?.data_type!=='integer')throw Error('Unexpected original quantity type; schema upgrade stopped');
+   await applyMigration(tx,'20261102000000_tally_sales_sync');
+  }
+  const daybookTables=await tx.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('TallyDaybookJob','TallyDaybookDealerMonth')`;
+  if(!daybookTables.length){
+   await applyMigration(tx,'20261106000000_tally_daybook_sync');
+  }else if(daybookTables.length!==2){
+   throw Error('Partial Daybook schema requires review; no automatic repair attempted');
+  }
  },{timeout:55000,maxWait:10000});
 }
 async function main(){

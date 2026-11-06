@@ -2,9 +2,11 @@ import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { latestReceiptAsOfByDealer } from "./last-payment.server";
+import { loadLastPaymentPoints } from "./last-payment.server";
+import { combineDaybookPaymentPoints, loadDaybookPaymentCoverage } from "./tally-daybook-payments.server";
 import { ledgerPoints, selectLatest } from "./dealer-last-payment";
 
-type ReadDb = Pick<Prisma.TransactionClient, "dealerPaymentReceipt" | "dealerLastPayment" | "$queryRaw" | "lastPaymentReceipt">;
+type ReadDb = Pick<Prisma.TransactionClient, "dealerPaymentReceipt" | "dealerLastPayment" | "$queryRaw" | "lastPaymentReceipt" | "tallyDaybookDealerMonth">;
 
 /**
  * The Last Payment Report's value for each dealer as of `today` ("YYYY-MM-DD"): READ ONLY (a report read never writes).
@@ -17,7 +19,9 @@ type ReadDb = Pick<Prisma.TransactionClient, "dealerPaymentReceipt" | "dealerLas
 export async function loadEffectiveLastPayments(dealerIds: string[], today: string, db: ReadDb = prisma): Promise<Map<string, { date: string; amount: number }>> {
   const out = new Map<string, { date: string; amount: number }>();
   if (dealerIds.length === 0) return out;
-  const stored = await db.dealerLastPayment.findMany({ where: { dealerId: { in: dealerIds } }, select: { dealerId: true, paymentDate: true, amount: true } });
+  const coverage = await loadDaybookPaymentCoverage(db, dealerIds, today);
+  const legacyIds = dealerIds.filter((id) => !coverage.has(id));
+  const stored = await db.dealerLastPayment.findMany({ where: { dealerId: { in: legacyIds } }, select: { dealerId: true, paymentDate: true, amount: true } });
   const have = new Map(stored.map((s) => [s.dealerId, { date: s.paymentDate.toISOString().slice(0, 10), amount: Number(s.amount) }]));
   const stale = new Set<string>();
   if (stored.length) {
@@ -32,7 +36,7 @@ export async function loadEffectiveLastPayments(dealerIds: string[], today: stri
     for (const id of stale) { const best = selectLatest(ledgerPoints(byDealer.get(id) ?? []), today); if (best) have.set(id, { date: best.date, amount: best.amount }); }
   }
   for (const [id, v] of have) out.set(id, v);
-  const missing = dealerIds.filter((id) => !have.has(id));
+  const missing = legacyIds.filter((id) => !have.has(id));
   if (missing.length) {
     // No latest-payment summary yet. The permanent ledger comes FIRST (it can hold a receipt that was future-dated when it was accepted and is eligible now, and it
     // outlives any import); the previous sources (active imports + legacy snapshots) only fill in what the ledger cannot say — the newer of the two wins.
@@ -47,6 +51,44 @@ export async function loadEffectiveLastPayments(dealerIds: string[], today: stri
       const older = old?.date ? { date: old.date, amount: old.amount ?? 0 } : null;
       const pick = l && older ? (older.date > l.date ? older : l) : l ?? older;
       if (pick) out.set(id, pick);
+    }
+  }
+  if (coverage.size) {
+    const ids = [...coverage.keys()];
+    const cutoff = new Date(`${today}T00:00:00Z`);
+    const [history, receipts, persisted] = await Promise.all([
+      loadLastPaymentPoints(ids, cutoff, db),
+      db.dealerPaymentReceipt.findMany({
+        where: { dealerId: { in: ids }, receiptDate: { lte: cutoff } },
+        select: { dealerId: true, receiptDate: true, amount: true, sourceKind: true },
+      }),
+      db.dealerLastPayment.findMany({
+        where: { dealerId: { in: ids }, paymentDate: { lte: cutoff } },
+        select: { dealerId: true, paymentDate: true, amount: true },
+      }),
+    ]);
+    const byDealer = new Map<string, typeof receipts>();
+    for (const row of receipts) {
+      const list = byDealer.get(row.dealerId) ?? [];
+      list.push(row);
+      byDealer.set(row.dealerId, list);
+    }
+    const summaries = new Map(persisted.map((r) => [r.dealerId, r]));
+    for (const [id, months] of coverage) {
+      const accepted = ledgerPoints(byDealer.get(id) ?? []);
+      const acceptedDates = new Set(accepted.filter((p) => p.kind !== "snapshot").map((p) => p.date));
+      const legacy = [
+        ...accepted,
+        ...(history.get(id) ?? []).filter((p) => !acceptedDates.has(p.date)),
+      ];
+      const saved = summaries.get(id);
+      if (saved) legacy.push({
+        date: saved.paymentDate.toISOString().slice(0, 10),
+        amount: Number(saved.amount),
+        kind: "snapshot",
+      });
+      const best = selectLatest(combineDaybookPaymentPoints(months, legacy), today);
+      if (best) out.set(id, { date: best.date, amount: best.amount });
     }
   }
   return out;

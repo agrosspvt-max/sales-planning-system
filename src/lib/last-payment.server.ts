@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { latestReceiptAsOf, type ReceiptPoint } from "./last-payment";
 
+import { combineDaybookPaymentPoints, loadDaybookPaymentCoverage } from "./tally-daybook-payments.server";
+
 type ReadClient = Pick<Prisma.TransactionClient, "$queryRaw" | "lastPaymentReceipt">;
 /** Batched, informational sources only: stored per-plan pairs (tagged "snapshot") + every individual receipt of the
  * active imports. The selector sums the individual receipts on the winning date; the snapshot is the fallback only. */
@@ -41,12 +43,19 @@ export async function loadLastPaymentPoints(
 export async function latestReceiptAsOfByDealer(
   dealerIds: string[],
   throughDate: Date,
-  db: ReadClient = prisma,
+  db: ReadClient & Pick<Prisma.TransactionClient, "tallyDaybookDealerMonth"> = prisma,
 ) {
-  const points = await loadLastPaymentPoints(dealerIds, throughDate, db);
+  const through = throughDate.toISOString().slice(0, 10);
+  const [points, coverage] = await Promise.all([
+    loadLastPaymentPoints(dealerIds, throughDate, db),
+    loadDaybookPaymentCoverage(db, dealerIds, through),
+  ]);
+  for (const [id, months] of coverage) {
+    points.set(id, combineDaybookPaymentPoints(months, points.get(id) ?? []));
+  }
   const out = new Map<string, { date: string | null; amount: number | null }>();
   for (const [id, receipts] of points) {
-    const best = latestReceiptAsOf(receipts, throughDate.toISOString().slice(0, 10));
+    const best = latestReceiptAsOf(receipts, through);
     if (best) out.set(id, best);
   }
   return out;

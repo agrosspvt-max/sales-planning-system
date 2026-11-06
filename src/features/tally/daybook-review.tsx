@@ -140,6 +140,12 @@ export function TallyDaybookReview() {
               </ul>
             </details>
           )}
+          {!!result.excludedAccounts.length && (
+            <p>
+              Accounting ledgers excluded from dealer figures:{" "}
+              {result.excludedAccounts.map((r) => r.ledgerName).join(", ")}
+            </p>
+          )}
           {!!result.review.length && (
             <details>
               <summary className="cursor-pointer">

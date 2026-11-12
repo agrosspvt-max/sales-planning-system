@@ -271,6 +271,7 @@ async function main() {
   for (const v of initial)
     assert.equal(ids(v.months), "dec,nov", "locked January is never offered");
   await states.setMonthStatus(admin, "nov", "CLOSED");
+  await assert.rejects(() => monthly.createMonthlyPlan(admin, "sp-u0", "nov"), { status: 422 });
   for (const a of actors) {
     const v = await view(a);
     assert.ok(
@@ -357,8 +358,18 @@ async function main() {
   await seasons.setSeasonStatus("s", "OPEN");
   assert.equal(await savedWork(), before);
   assert.equal(JSON.stringify(await Promise.all(actors.map(view))), JSON.stringify(initial));
+
+  await assert.rejects(() => monthly.createMonthlyPlan(admin, "sp-u0", "jan"), { status: 422 });
+  await assert.rejects(() => monthly.createMonthlyPlan(admin, "sp-u0", "nov"), { status: 409 });
+  await prisma.monthlyPlan.delete({ where: { id: "mp-u0-nov" } });
+  const created = await monthly.createMonthlyPlan(admin, "sp-u0", "nov");
+  assert.equal(created.reopened, false);
+  const draft = await monthly.createMonthlyPlan(admin, "sp-u0", "nov");
+  assert.equal(draft.id, created.id);
+  assert.equal(draft.reopened, true);
+  assert.equal(await prisma.monthlyPlan.count({ where: { seasonPlanId: "sp-u0", seasonMonthId: "nov" } }), 1);
   console.log(
-    "Open-period DB regression passed: all four roles, lists, selectors, stale URLs/saves, master management, locks, close/reopen and saved data preservation.",
+    "Open-period DB regression passed: all four roles, lists, selectors, stale URLs/saves, master management, locks, close/reopen, saved data preservation and monthly plan creation.",
   );
 }
 main()

@@ -1,4 +1,4 @@
-import { inOpenPlanningPeriod } from "@/lib/open-planning-period";
+import { inOpenPlanningPeriod, OPEN_PLANNING_PERIOD } from "@/lib/open-planning-period";
 import { actorDisplayName } from "@/features/accounts/identity";
 import { assertAdminPermission } from "@/features/accounts/permissions";
 import "server-only";
@@ -127,7 +127,11 @@ export async function createMonthlyPlan(
   }
 
   const existing = await prisma.monthlyPlan.findUnique({
-    where: inOpenPlanningPeriod("monthlyPlan", { seasonPlanId_seasonMonthId: { seasonPlanId, seasonMonthId } }),
+    where: {
+      // Prisma accepts the compound unique selector only at the top level.
+      seasonPlanId_seasonMonthId: { seasonPlanId, seasonMonthId },
+      AND: [OPEN_PLANNING_PERIOD.monthlyPlan],
+    },
   });
   if (existing) {
     if (EDITABLE.includes(existing.status as PlanStatus)) return { id: existing.id, reopened: true };

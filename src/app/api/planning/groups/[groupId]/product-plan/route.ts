@@ -30,6 +30,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ groupId: st
 
     return ok(await getGroupProductPlan(auth, groupId, seasonId, {
       buckets, includeUnplanned: q.get("unplanned") === "true", view, monthIds, officerId, seasonMetrics,
+      fromMonthId: q.get("fromMonth") ?? undefined,
+      toMonthId: q.get("toMonth") ?? undefined,
+      groupBy: q.get("groupBy") === "dealer" ? "dealer" : undefined,
     }));
   });
 }

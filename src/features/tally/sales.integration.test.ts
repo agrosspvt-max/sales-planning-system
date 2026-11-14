@@ -17,6 +17,8 @@ import * as billwise from "./billwise";
 import * as changes from "./changes";
 import * as sales from "./sales";
 import { salesMonths } from "./sales-range";
+import { figuresForMode, nbv, isQuantityMode } from "@/lib/calc";
+import { summarizeTerritoryDealers } from "@/features/planning/group-dealer-summary";
 const url = process.env.TALLY_DISPOSABLE_TEST_URL;
 if (
   !url ||
@@ -954,15 +956,9 @@ async function main() {
   modules["@/features/accounts/permissions"] = {
     isAdministrativeRole: (role: string) => role === "SUPER_ADMIN",
   };
-  modules["@/lib/season-calendar"] = {
-    SEASON_MONTH_ORDER: [{ order: "asc" }],
-    calendarRows: (rows: unknown[]) => rows,
-  };
-  modules["@/lib/calc"] = {
-    figuresForMode: () => ({ totalQty: 0, amount: 0, nbv: 0 }),
-    nbv: (n: number, pct: number) => n * pct,
-    isQuantityMode: () => true,
-  };
+  modules["./season-months"] = load("src/lib/season-months.ts");
+  modules["@/lib/season-calendar"] = load("src/lib/season-calendar.ts");
+  modules["@/lib/calc"] = { figuresForMode, nbv, isQuantityMode };
   modules["@/features/users/catalogue.server"] = { clearanceMapForGroup: async () => new Map() };
   modules["@/features/products/merge.server"] = {
     loadEffectiveProduct: async () => ({ effId: (id: string) => id, meta: () => null }),
@@ -1008,6 +1004,50 @@ async function main() {
     combined.products.flatMap((p) => p.drawer).reduce((sum, d) => sum + d.periodSales.amount, 0),
     1740 + novemberAmount,
   );
+  const dealerReport = async (filter: Parameters<typeof territory.getGroupProductPlan>[3]) => {
+    const result = await territory.getGroupProductPlan(actor, group.id, "sales-season", {
+      ...filter,
+      groupBy: "dealer",
+    });
+    return summarizeTerritoryDealers(result.dealerProducts ?? [], "", []);
+  };
+  const dealerApril = await dealerReport({
+    buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: [], fromMonthId: "sales-old",
+  });
+  const dealerA = dealerApril.find((r) => r.dealerId === "a");
+  assert.equal(dealerA?.planAmount, 5500);
+  assert.equal(dealerA?.planNbv, 2750);
+  assert.equal(dealerA?.actualAmount, 1040);
+  assert.equal(dealerA?.actualNbv, 520);
+  assert.equal(dealerApril.reduce((sum, d) => sum + d.actualAmount, 0), 1740);
+  const unplannedOnly = await dealerReport({
+    buckets: [], includeUnplanned: true, view: "month", monthIds: [], fromMonthId: "",
+    officerId: "territory-missing-seasonal",
+  });
+  assert.equal(unplannedOnly.length, 1);
+  assert.equal(unplannedOnly[0].actualAmount, -75);
+  assert.equal(unplannedOnly[0].actualNbv, -37.5);
+  assert.equal(unplannedOnly[0].planAmount, 0);
+  const dealerSeason = await dealerReport({
+    buckets: ["approved"], includeUnplanned: true, view: "total", monthIds: [],
+  });
+  const dealerRange = await dealerReport({
+    buckets: ["approved"], includeUnplanned: true, view: "range", monthIds: [],
+    fromMonthId: "sales-month", toMonthId: "sales-old",
+  });
+  assert.equal(dealerSeason.find((r) => r.dealerId === "a")?.planAmount, 5500);
+  assert.equal(JSON.stringify(dealerSeason), JSON.stringify(dealerRange));
+  assert.equal(dealerSeason.reduce((sum, d) => sum + d.actualAmount, 0), 1740 + novemberAmount);
+  const filtered = summarizeTerritoryDealers(
+    [
+      { ...unplannedOnly[0], nbvPercent: 0.5 },
+      { ...unplannedOnly[0], nbvPercent: 0.25, actualAmount: 25, actualNbv: 6.25 },
+    ],
+    "half",
+    [{ id: "half", name: "Half", nbvPercent: 0.5, notation: null, color: null }],
+  );
+  assert.equal(filtered[0].actualAmount, -75, "filter products before combining dealer amounts");
+  console.log("Territory dealer plans, consistent actuals, month selection, and category filtering: PASS");
   console.log("Territory approval filters, missing-plan capture, returns and deduplication: PASS");
 
   await svc.requestSalesRefresh(actor, month);

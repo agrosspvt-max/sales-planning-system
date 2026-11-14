@@ -19,6 +19,8 @@ import { useCategories } from "@/lib/use-categories";
 import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
 import { GroupRecovery } from "./group-recovery-page";
 import { isNegativeTerritoryPlanMetric } from "./group-plan-metrics";
+import { DealerFinancialSummaryTable } from "./dealer-financial-summary-table";
+import { summarizeTerritoryDealers, type DealerProductFinancialRow } from "./group-dealer-summary";
 
 /* ------------------------------- Shared types ----------------------------- */
 
@@ -69,6 +71,7 @@ interface GroupProductPlan {
   months: { id: string; name: string; order: number }[];
   packSizes: { id: string; name: string }[];
   products: GroupProductRow[];
+  dealerProducts?: DealerProductFinancialRow[];
 }
 
 type Tab = "territory" | "product" | "recovery";
@@ -137,30 +140,30 @@ export function GroupPlanPage({ groupId, groupName, showUnplanned = false }: { g
         ))}
       </div>
 
-      {tab === "territory" ? (
-        <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">
-          Territory Plan — coming soon. This will mirror the Dealer Plan for the whole territory.
-        </div>
-      ) : tab === "product" ? (
-        <GroupProductPlan groupId={groupId} seasonId={effectiveSeason} officerId={officerId} showUnplanned={showUnplanned} />
-      ) : (
+      {tab === "recovery" ? (
         <GroupRecovery groupId={groupId} seasonId={effectiveSeason} officerId={officerId} />
+      ) : (
+        <GroupSalesPlan groupId={groupId} seasonId={effectiveSeason} officerId={officerId}
+          showUnplanned={showUnplanned} dealerView={tab === "territory"} />
       )}
     </div>
   );
 }
 
-/* ------------------------------ Product Plan ------------------------------ */
+/* ----------------------------- Territory sales ---------------------------- */
 
-function GroupProductPlan({ groupId, seasonId, officerId = "", showUnplanned = false }: {
-  groupId: string; seasonId: string; officerId?: string; showUnplanned?: boolean;
+function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = false, dealerView }: {
+  groupId: string; seasonId: string; officerId?: string; showUnplanned?: boolean; dealerView: boolean;
 }) {
   const [includeUnplanned, setIncludeUnplanned] = useState(false);
   const [view, setView] = useState<View>("total");
   const [monthA, setMonthA] = useState("");
   const [monthB, setMonthB] = useState("");
   const [buckets, setBuckets] = useState<StatusBucket[]>(["approved"]);
-  const [drawerProduct, setDrawerProduct] = useState<GroupProductRow | null>(null);
+  const [drawerProductId, setDrawerProductId] = useState<string | null>(null);
+  useEffect(() => {
+    if (dealerView) setDrawerProductId(null);
+  }, [dealerView]);
   const categories = useCategories();
   const [categoryFilter, setCategoryFilter] = useState("");
   // Season Baseline mode (default Approved). Show Amounts is a persisted per-user UI preference.
@@ -176,34 +179,29 @@ function GroupProductPlan({ groupId, seasonId, officerId = "", showUnplanned = f
       return next;
     });
 
-  // Month options come from the payload (stable per season). keepPreviousData keeps them during refetch.
-  const monthsRef = useRef<{ id: string; name: string; order: number }[]>([]);
-  const selectedMonthIds = useMemo(() => {
-    const months = monthsRef.current;
-    if (view === "month") return monthA ? [monthA] : months[0] ? [months[0].id] : [];
-    if (view === "range") {
-      const a = months.find((m) => m.id === (monthA || months[0]?.id));
-      const b = months.find((m) => m.id === (monthB || months[months.length - 1]?.id));
-      if (!a || !b) return [];
-      const [lo, hi] = a.order <= b.order ? [a.order, b.order] : [b.order, a.order];
-      return months.filter((m) => m.order >= lo && m.order <= hi).map((m) => m.id);
-    }
-    return [];
-  }, [view, monthA, monthB]);
-
   const bucketsKey = [...buckets].sort().join(",");
-  const monthsKey = selectedMonthIds.join(",");
-  const { data, isLoading, isFetching } = useQuery<GroupProductPlan>({
-    queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey, officerId, seasonMetrics, includeUnplanned],
+  const params = new URLSearchParams({
+    seasonId, buckets: bucketsKey, unplanned: String(includeUnplanned), view,
+    fromMonth: view === "total" ? "" : monthA,
+    toMonth: view === "range" ? monthB : "",
+    officerId, seasonMetrics,
+  });
+  if (dealerView) params.set("groupBy", "dealer");
+  const { data, isError, isFetching, isPlaceholderData, refetch } = useQuery<GroupProductPlan>({
+    queryKey: ["group-product-plan", groupId, params.toString()],
     refetchInterval: 60000,
-    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey}&unplanned=${includeUnplanned}&view=${view}&months=${monthsKey}${officerId ? `&officerId=${officerId}` : ""}&seasonMetrics=${seasonMetrics}`),
+    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?${params}`),
     enabled: !!seasonId,
     placeholderData: keepPreviousData,
   });
-  if (data?.months && data.months.length) monthsRef.current = data.months;
-
-  const months = data?.months ?? monthsRef.current;
+  const months = data?.months ?? [];
   const monthOpts = months.map((m) => ({ value: m.id, label: m.name }));
+  const startMonth = months.find((month) => month.id === monthA)?.id ?? months[0]?.id;
+  const endMonth = months.find((month) => month.id === monthB)?.id ?? months.at(-1)?.id;
+  const visibleProducts = data?.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)) ?? [];
+  const drawerProduct = visibleProducts.find((r) => r.productId === drawerProductId);
+  const dealers = useMemo(() => summarizeTerritoryDealers(data?.dealerProducts ?? [], categoryFilter, categories),
+    [data?.dealerProducts, categoryFilter, categories]);
 
   const toggleBucket = (b: StatusBucket) =>
     setBuckets((prev) => {
@@ -211,11 +209,16 @@ function GroupProductPlan({ groupId, seasonId, officerId = "", showUnplanned = f
       return next.length || includeUnplanned ? next : prev; // keep at least one selected
     });
 
-  if (!seasonId) return <p className="rounded-md border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground">Choose a season to view the group Product Plan.</p>;
-  if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
+  if (!seasonId) return <p className="rounded-md border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground">Choose a season to view the {dealerView ? "Territory Plan" : "Product Plan"}.</p>;
+  if (isError && !data) return (
+    <p role="alert" className="rounded-md border p-4 text-sm">
+      Unable to load the {dealerView ? "Territory Plan" : "Product Plan"}.{" "}
+      <button type="button" className="text-primary underline" onClick={() => void refetch()}>Try again</button>
+    </p>
+  );
+  if (!data) return <Skeleton className="h-64 w-full" />;
 
-  // Column totals across every product (Season Baseline qty+amount, and period).
-  const T = data.products.reduce(
+  const T = visibleProducts.reduce(
     (a, r) => ({
       seasonQty: a.seasonQty + r.seasonQty,
       plannedAllMonths: a.plannedAllMonths + r.plannedAllMonths,
@@ -264,39 +267,46 @@ function GroupProductPlan({ groupId, seasonId, officerId = "", showUnplanned = f
           ))}
         </div>
         {view === "month" && months.length > 0 && (
-          <NativeSelect className="w-44" options={monthOpts} value={monthA || months[0].id} onChange={(e) => setMonthA(e.target.value)} />
+          <NativeSelect className="w-44" options={monthOpts} aria-label="From month" value={startMonth} onChange={(e) => setMonthA(e.target.value)} />
         )}
         {view === "range" && months.length > 0 && (
           <div className="flex items-center gap-2">
-            <NativeSelect className="w-40" options={monthOpts} value={monthA || months[0].id} onChange={(e) => setMonthA(e.target.value)} />
+            <NativeSelect className="w-40" options={monthOpts} aria-label="From month" value={startMonth} onChange={(e) => setMonthA(e.target.value)} />
             <span className="text-sm text-muted-foreground">to</span>
-            <NativeSelect className="w-40" options={monthOpts} value={monthB || months[months.length - 1].id} onChange={(e) => setMonthB(e.target.value)} />
+            <NativeSelect className="w-40" options={monthOpts} aria-label="To month" value={endMonth} onChange={(e) => setMonthB(e.target.value)} />
           </div>
         )}
         <span className="text-xs text-muted-foreground">
-          {view === "total" ? "Filtering Seasonal Plans" : "Filtering Monthly Plans"} by: {[...buckets.map((b) => BUCKET_LABEL[b]), ...(includeUnplanned ? ["Unplanned sales"] : [])].join(", ")}
+          {view === "total" && !dealerView ? "Filtering Seasonal Plans" : "Filtering Monthly Plans"} by: {[...buckets.map((b) => BUCKET_LABEL[b]), ...(includeUnplanned ? ["Unplanned sales"] : [])].join(", ")}
         </span>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        {/* Season Baseline mode — Approved (management default) vs Follow the selected status filters. */}
-        <div className="inline-flex items-center gap-2 text-sm">
-          <span className="font-medium text-muted-foreground">Season Metrics</span>
-          <NativeSelect
-            className="w-52"
-            value={seasonMetrics}
-            onChange={(e) => setSeasonMetrics(e.target.value as "approved" | "filters")}
-            options={[{ value: "approved", label: "Approved Baseline" }, { value: "filters", label: "Follow Selected Filters" }]}
-          />
-        </div>
-        <label className="flex cursor-pointer items-center gap-1.5 text-sm">
-          <input type="checkbox" className="h-4 w-4" checked={showAmounts} onChange={toggleAmounts} />
-          Show Amounts
-        </label>
+        {!dealerView && (
+          <>
+            <div className="inline-flex items-center gap-2 text-sm">
+              <span className="font-medium text-muted-foreground">Season Metrics</span>
+              <NativeSelect
+                className="w-52"
+                value={seasonMetrics}
+                onChange={(e) => setSeasonMetrics(e.target.value as "approved" | "filters")}
+                options={[{ value: "approved", label: "Approved Baseline" }, { value: "filters", label: "Follow Selected Filters" }]}
+              />
+            </div>
+            <label className="flex cursor-pointer items-center gap-1.5 text-sm">
+              <input type="checkbox" className="h-4 w-4" checked={showAmounts} onChange={toggleAmounts} />
+              Show Amounts
+            </label>
+          </>
+        )}
         <CategoryFilter categories={categories} value={categoryFilter} onChange={setCategoryFilter} />
       </div>
 
-      {data.products.length === 0 ? (
+      {isPlaceholderData ? (
+        <Skeleton className="h-64 w-full" />
+      ) : dealerView ? (
+        <DealerFinancialSummaryTable rows={dealers} emptyMessage="No sales or plan data for this selection." />
+      ) : visibleProducts.length === 0 ? (
         <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">No sales or plan data for this selection.</div>
       ) : (
         <div className="overflow-auto rounded-lg border bg-background">
@@ -330,10 +340,10 @@ function GroupProductPlan({ groupId, seasonId, officerId = "", showUnplanned = f
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)).map((r) => (
+              {visibleProducts.map((r) => (
                 <TableRow key={r.productId}>
                   <TableCell className="font-medium">
-                    <button className="inline-flex flex-wrap items-center gap-1 text-left hover:underline" onClick={() => setDrawerProduct(r)}>
+                    <button className="inline-flex flex-wrap items-center gap-1 text-left hover:underline" onClick={() => setDrawerProductId(r.productId)}>
                       <span className={r.isClearance ? "text-warning" : "text-primary"}>{r.productName}</span>{r.isClearance && <ClearanceTag qty={r.clearanceQty} />}
                       <CategoryBadge category={categoryForNbv(r.nbvPercent, categories)} /> <ChevronRight className="h-3.5 w-3.5 text-primary" />
                     </button>
@@ -382,13 +392,13 @@ function GroupProductPlan({ groupId, seasonId, officerId = "", showUnplanned = f
         </div>
       )}
 
-      {drawerProduct && (
+      {!dealerView && !isPlaceholderData && drawerProduct && (
         <ProductDrawer
           key={drawerProduct.productId}
           product={drawerProduct}
           seasonName={data.seasonName}
           filterLabel={`${view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range"} · ${[...buckets.map((b) => BUCKET_LABEL[b]), ...(includeUnplanned ? ["Unplanned sales"] : [])].join(", ")}`}
-          onClose={() => setDrawerProduct(null)}
+          onClose={() => setDrawerProductId(null)}
         />
       )}
     </div>

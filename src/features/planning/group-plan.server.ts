@@ -14,6 +14,7 @@ import { isCurrentlyOwnedBy } from "@/lib/dealer-ownership";
 import { approvedTestPreview } from "@/features/tally/sales-rollout";
 import { compareSalesPlans, includesTerritorySale } from "./territory-sales";
 import { deriveTerritoryPlanMetrics } from "./group-plan-metrics";
+import type { DealerProductFinancialRow } from "./group-dealer-summary";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -58,6 +59,9 @@ export interface GroupPlanFilter {
   includeUnplanned?: boolean;
   view: "total" | "month" | "range";
   monthIds: string[];
+  fromMonthId?: string;
+  toMonthId?: string;
+  groupBy?: "dealer";
   officerId?: string; // optional: restrict the whole aggregation to ONE Sales Officer in the group
   // Season Baseline mode. "approved" (default) → the 5 Season columns always use APPROVED seasonal +
   // APPROVED monthly plans regardless of the selected buckets. "filters" → they follow the selected buckets.
@@ -147,6 +151,7 @@ export interface GroupProductPlan {
   months: { id: string; name: string; order: number; calendarMonth?: number | null; calendarYear?: number | null }[];
   packSizes: { id: string; name: string }[];
   products: GroupProductRow[];
+  dealerProducts?: DealerProductFinancialRow[];
 }
 
 const emptyBucketTotals = (): Record<StatusBucket, BucketTotal> => ({
@@ -188,7 +193,21 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   const monthlyMode = (season.monthlyMode ?? "PACK_SIZE") as PlanningMode;
   const seasonalMode = (season.seasonalMode ?? "PACK_SIZE") as PlanningMode;
   const monthNameById = new Map(season.months.map((m) => [m.id, m.name] as const));
-  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthlyMode, seasonalMode, months: calendarRows(season.months), packSizes, filter: { ...filter, buckets, includeUnplanned } };
+  const months = calendarRows(season.months);
+  const firstMonth = months[0];
+  const lastMonth = months.at(-1);
+  const fromMonth = months.find((month) => month.id === filter.fromMonthId) ?? firstMonth;
+  const toMonth = months.find((month) => month.id === filter.toMonthId) ?? lastMonth;
+  let monthIds = filter.monthIds;
+  if (filter.fromMonthId !== undefined && fromMonth && toMonth) {
+    if (filter.view === "month") monthIds = [fromMonth.id];
+    if (filter.view === "range") {
+      const start = Math.min(fromMonth.order, toMonth.order);
+      const end = Math.max(fromMonth.order, toMonth.order);
+      monthIds = months.filter((month) => month.order >= start && month.order <= end).map((month) => month.id);
+    }
+  }
+  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthlyMode, seasonalMode, months, packSizes, filter: { ...filter, buckets, includeUnplanned, monthIds } };
 
   // Contributors to a state's Territory Plan = every Sales Officer in the group PLUS the group's own
   // Regional Manager (the RM also plans their own dealers). The groupId constraint stays, so an officerId
@@ -204,7 +223,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     total: officers.length,
     includedCount: 0,
     byBucket: { approved: [], submitted: [], draft: [] },
-    excluded: officers.map((o) => ({ name: o.name, reason: "No plan in the selected states" })),
+    excluded: officers.map((o) => ({ name: o.name, reason: "No plan or sales for this selection" })),
   });
   if (officers.length === 0) return { ...base, officers: emptyOfficers(), products: [] };
 
@@ -310,7 +329,20 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   };
 
   const valueMonthly = !isQuantityMode(monthlyMode);
-  const selectedMonthSet = new Set(filter.monthIds.filter((id) => monthNameById.has(id)));
+  const selectedMonthSet = new Set(monthIds.filter((id) => monthNameById.has(id)));
+  const dealerView = filter.groupBy === "dealer";
+  const dealerProducts = new Map<string, DealerProductFinancialRow>();
+  const officersByBucket: Record<StatusBucket, Set<string>> = { approved: new Set(), submitted: new Set(), draft: new Set() };
+  function dealerFinancials(dealer: { id: string; name: string }, product: GroupProductRow) {
+    const key = `${dealer.id}:${product.productId}`;
+    let row = dealerProducts.get(key);
+    if (!row) {
+      row = { dealerId: dealer.id, name: dealer.name, nbvPercent: product.nbvPercent,
+        planAmount: 0, planNbv: 0, actualAmount: 0, actualNbv: 0 };
+      dealerProducts.set(key, row);
+    }
+    return row;
+  }
   const isTotal = filter.view === "total";
 
   // ===== SEASONAL pass (ALWAYS runs). Loads BOTH the Season-Baseline representative plans and the
@@ -397,9 +429,16 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         // Period columns (Seasonal-Total view) — from the selected-bucket representative plans.
         if (isTotal && periodBucket) {
           if (!companyActuals) {
+            const actualNbv = calcNbv(soldAmt, nbvPct);
             row.actual.qty += soldQty;
             row.actual.amount += soldAmt;
-            row.actual.nbv += calcNbv(soldAmt, nbvPct);
+            row.actual.nbv += actualNbv;
+            if (dealerView && (soldQty || soldAmt)) {
+              const dealer = dealerFinancials(pd.dealer, row);
+              dealer.actualAmount += soldAmt;
+              dealer.actualNbv += actualNbv;
+              officersByBucket[periodBucket].add(plan.officerId);
+            }
           }
           addContribution(row, {
             bucket: periodBucket, officerId: plan.officerId, officerName: officerName.get(plan.officerId) ?? plan.officerId,
@@ -473,13 +512,26 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
             row.plannedAllMonths += fig.totalQty ?? 0;
             row.plannedAllMonthsAmount += fig.amount ?? 0;
           }
-          // Period columns (Month/Range view) — only the SELECTED months in a selected bucket.
-          if (mp && !isTotal && selectedMonthSet.has(e.seasonMonthId)) {
+          // Dealer Summary uses monthly plan amounts for the whole season or selected months.
+          // Product Plan uses seasonal targets for Seasonal Total.
+          if (!mp || (!isTotal && !selectedMonthSet.has(e.seasonMonthId))) continue;
+          const soldAmount = num(e.saleValue ?? 0);
+          const soldNbv = calcNbv(soldAmount, nbvPct);
+          if (dealerView) {
+            const dealer = dealerFinancials(pd.dealer, row);
+            dealer.planAmount += fig.amount ?? 0;
+            dealer.planNbv += fig.nbv ?? 0;
+            officersByBucket[mp.bucket].add(plan.officerId);
+            if (!companyActuals && !isTotal) {
+              dealer.actualAmount += soldAmount;
+              dealer.actualNbv += soldNbv;
+            }
+          }
+          if (!isTotal) {
             if (!companyActuals) {
-              const sold = num(e.saleValue ?? 0);
               row.actual.qty += num(e.saleQty);
-              row.actual.amount += sold;
-              row.actual.nbv += calcNbv(sold, nbvPct);
+              row.actual.amount += soldAmount;
+              row.actual.nbv += soldNbv;
             }
             addContribution(row, {
               bucket: mp.bucket, officerId: plan.officerId, officerName: officerName.get(plan.officerId) ?? plan.officerId,
@@ -572,6 +624,13 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         drawer.periodSales.qty += qty;
         drawer.periodSales.amount += amount;
         drawer.periodSales.nbv += nbv;
+        if (dealerView) {
+          const financials = dealerFinancials(dealer, row);
+          financials.actualAmount += amount;
+          financials.actualNbv += nbv;
+          if (drawerBucket && drawerBucket !== "unplanned")
+            officersByBucket[drawerBucket].add(officerId);
+        }
         if (includeUnplanned && bucket !== "approved") unplannedOfficers.add(officerId);
       }
     }
@@ -610,8 +669,9 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   }
 
   // Officer breakdown — derived from the SAME contributions (no separate logic).
-  const officersByBucket: Record<StatusBucket, Set<string>> = { approved: new Set(), submitted: new Set(), draft: new Set() };
-  for (const c of contributions) officersByBucket[c.bucket].add(c.officerId);
+  if (!dealerView) {
+    for (const c of contributions) officersByBucket[c.bucket].add(c.officerId);
+  }
   const includedOfficerIds = new Set<string>([...officersByBucket.approved, ...officersByBucket.submitted, ...officersByBucket.draft, ...unplannedOfficers]);
   const refs = (ids: Set<string>): OfficerRef[] => [...ids].map((id) => ({ id, name: officerName.get(id) ?? id })).sort((a, b) => a.name.localeCompare(b.name));
   // Per-product officer counts per bucket.
@@ -627,8 +687,15 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     includedCount: includedOfficerIds.size,
     byBucket: { approved: refs(officersByBucket.approved), submitted: refs(officersByBucket.submitted), draft: refs(officersByBucket.draft) },
     ...(includeUnplanned ? { withUnplannedSales: refs(unplannedOfficers) } : {}),
-    excluded: officers.filter((o) => !includedOfficerIds.has(o.id)).map((o) => ({ name: o.name, reason: "No plan in the selected states" })),
+    excluded: officers.filter((o) => !includedOfficerIds.has(o.id)).map((o) => ({ name: o.name, reason: "No plan or sales for this selection" })),
   };
+
+  if (dealerView) {
+    const rows = [...dealerProducts.values()];
+    const names = await loadDealerAliasNameMap([...new Set(rows.map((dealer) => dealer.dealerId))]);
+    for (const row of rows) row.name = names.get(row.dealerId) ?? row.name;
+    return { ...base, officers: officerBreakdown, products: [], dealerProducts: rows };
+  }
 
   // Annotate clearance (group-specific, by groupId + productId) — display-only.
   const clearance = await clearanceMapForGroup(groupId);

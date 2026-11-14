@@ -19,6 +19,7 @@ import { useCategories } from "@/lib/use-categories";
 import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
 import { GroupRecovery } from "./group-recovery-page";
 import { isNegativeTerritoryPlanMetric } from "./group-plan-metrics";
+import { DealerSalesDrawer } from "./dealer-sales-drawer";
 import { DealerFinancialSummaryTable } from "./dealer-financial-summary-table";
 import { summarizeTerritoryDealers, type DealerProductFinancialRow } from "./group-dealer-summary";
 
@@ -161,8 +162,11 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
   const [monthB, setMonthB] = useState("");
   const [buckets, setBuckets] = useState<StatusBucket[]>(["approved"]);
   const [drawerProductId, setDrawerProductId] = useState<string | null>(null);
+  const [drawerDealerId, setDrawerDealerId] = useState<string | null>(null);
+  const dealerTrigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (dealerView) setDrawerProductId(null);
+    else setDrawerDealerId(null);
   }, [dealerView]);
   const categories = useCategories();
   const [categoryFilter, setCategoryFilter] = useState("");
@@ -202,6 +206,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
   const drawerProduct = visibleProducts.find((r) => r.productId === drawerProductId);
   const dealers = useMemo(() => summarizeTerritoryDealers(data?.dealerProducts ?? [], categoryFilter, categories),
     [data?.dealerProducts, categoryFilter, categories]);
+  const drawerDealer = dealers.find((dealer) => dealer.dealerId === drawerDealerId);
 
   const toggleBucket = (b: StatusBucket) =>
     setBuckets((prev) => {
@@ -240,6 +245,13 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
     { seasonQty: 0, plannedAllMonths: 0, remaining: 0, seasonSales: 0, pendingSales: 0, seasonAmount: 0, plannedAllMonthsAmount: 0, remainingAmount: 0, seasonSalesAmount: 0, pendingAmount: 0, periodPlan: 0, periodSold: 0, plannedAmount: 0, plannedNbv: 0, actualAmount: 0, actualNbv: 0 },
   );
   const periodLabel = view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range";
+  const selectedMonths = months.filter((month) => data.filter.monthIds.includes(month.id));
+  let dealerPeriodLabel = periodLabel;
+  if (view !== "total" && selectedMonths.length) {
+    dealerPeriodLabel = selectedMonths.length === 1
+      ? selectedMonths[0].name
+      : `${selectedMonths[0].name} – ${selectedMonths[selectedMonths.length - 1].name}`;
+  }
   const seasonSpan = showAmounts ? 10 : 5; // Season Baseline column count (qty [+ amount] × 5 metrics)
 
   return (
@@ -305,7 +317,14 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
       {isPlaceholderData ? (
         <Skeleton className="h-64 w-full" />
       ) : dealerView ? (
-        <DealerFinancialSummaryTable rows={dealers} emptyMessage="No sales or plan data for this selection." />
+        <DealerFinancialSummaryTable
+          rows={dealers}
+          emptyMessage="No sales or plan data for this selection."
+          onDealerSelect={(dealerId, trigger) => {
+            dealerTrigger.current = trigger;
+            setDrawerDealerId(dealerId);
+          }}
+        />
       ) : visibleProducts.length === 0 ? (
         <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">No sales or plan data for this selection.</div>
       ) : (
@@ -392,6 +411,14 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
         </div>
       )}
 
+      {dealerView && !isPlaceholderData && drawerDealer && (
+        <DealerSalesDrawer
+          dealer={drawerDealer}
+          periodLabel={`${dealerPeriodLabel} · ${data.seasonName}`}
+          onClose={() => setDrawerDealerId(null)}
+          trigger={dealerTrigger.current}
+        />
+      )}
       {!dealerView && !isPlaceholderData && drawerProduct && (
         <ProductDrawer
           key={drawerProduct.productId}

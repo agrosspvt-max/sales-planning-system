@@ -2,15 +2,22 @@ import { matchesCategoryFilter, type Category } from "@/lib/product-category";
 import type { DealerFinancialRow } from "./dealer-financial-summary-table";
 
 export interface DealerProductFinancialRow extends DealerFinancialRow {
+  productId: string;
+  productName: string;
   nbvPercent: number;
+  actualQty: number;
 }
+
+export type TerritoryDealerSummary = DealerFinancialRow & {
+  products: DealerProductFinancialRow[];
+};
 
 export function summarizeTerritoryDealers(
   products: DealerProductFinancialRow[],
   categoryFilter: string,
   categories: Category[],
-): DealerFinancialRow[] {
-  const dealers = new Map<string, DealerFinancialRow>();
+): TerritoryDealerSummary[] {
+  const dealers = new Map<string, TerritoryDealerSummary>();
   for (const product of products) {
     if (!matchesCategoryFilter(product.nbvPercent, categoryFilter, categories)) continue;
     const row = dealers.get(product.dealerId);
@@ -22,6 +29,7 @@ export function summarizeTerritoryDealers(
         planNbv: product.planNbv,
         actualAmount: product.actualAmount,
         actualNbv: product.actualNbv,
+        products: [product],
       });
       continue;
     }
@@ -29,6 +37,7 @@ export function summarizeTerritoryDealers(
     row.planNbv += product.planNbv;
     row.actualAmount += product.actualAmount;
     row.actualNbv += product.actualNbv;
+    row.products.push(product);
   }
   return [...dealers.values()].sort((a, b) =>
     b.planAmount - a.planAmount || b.actualAmount - a.actualAmount || a.name.localeCompare(b.name),

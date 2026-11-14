@@ -337,8 +337,11 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     const key = `${dealer.id}:${product.productId}`;
     let row = dealerProducts.get(key);
     if (!row) {
-      row = { dealerId: dealer.id, name: dealer.name, nbvPercent: product.nbvPercent,
-        planAmount: 0, planNbv: 0, actualAmount: 0, actualNbv: 0 };
+      row = {
+        dealerId: dealer.id, name: dealer.name,
+        productId: product.productId, productName: product.productName, nbvPercent: product.nbvPercent,
+        planAmount: 0, planNbv: 0, actualQty: 0, actualAmount: 0, actualNbv: 0,
+      };
       dealerProducts.set(key, row);
     }
     return row;
@@ -435,6 +438,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
             row.actual.nbv += actualNbv;
             if (dealerView && (soldQty || soldAmt)) {
               const dealer = dealerFinancials(pd.dealer, row);
+              dealer.actualQty += soldQty;
               dealer.actualAmount += soldAmt;
               dealer.actualNbv += actualNbv;
               officersByBucket[periodBucket].add(plan.officerId);
@@ -515,6 +519,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
           // Dealer Summary uses monthly plan amounts for the whole season or selected months.
           // Product Plan uses seasonal targets for Seasonal Total.
           if (!mp || (!isTotal && !selectedMonthSet.has(e.seasonMonthId))) continue;
+          const soldQty = num(e.saleQty);
           const soldAmount = num(e.saleValue ?? 0);
           const soldNbv = calcNbv(soldAmount, nbvPct);
           if (dealerView) {
@@ -523,13 +528,14 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
             dealer.planNbv += fig.nbv ?? 0;
             officersByBucket[mp.bucket].add(plan.officerId);
             if (!companyActuals && !isTotal) {
+              dealer.actualQty += soldQty;
               dealer.actualAmount += soldAmount;
               dealer.actualNbv += soldNbv;
             }
           }
           if (!isTotal) {
             if (!companyActuals) {
-              row.actual.qty += num(e.saleQty);
+              row.actual.qty += soldQty;
               row.actual.amount += soldAmount;
               row.actual.nbv += soldNbv;
             }
@@ -626,6 +632,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         drawer.periodSales.nbv += nbv;
         if (dealerView) {
           const financials = dealerFinancials(dealer, row);
+          financials.actualQty += qty;
           financials.actualAmount += amount;
           financials.actualNbv += nbv;
           if (drawerBucket && drawerBucket !== "unplanned")

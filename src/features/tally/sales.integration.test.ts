@@ -1019,6 +1019,11 @@ async function main() {
   assert.equal(dealerA?.planNbv, 2750);
   assert.equal(dealerA?.actualAmount, 1040);
   assert.equal(dealerA?.actualNbv, 520);
+  assert.equal(dealerA?.products.find((p) => p.productId === "sales-product")?.productName, "Product");
+  assert.equal(dealerA?.products.find((p) => p.productId === "sales-product")?.actualQty, 14.4);
+  for (const dealer of dealerApril) {
+    assert.equal(dealer.products.reduce((sum, product) => sum + product.actualAmount, 0), dealer.actualAmount);
+  }
   assert.equal(dealerApril.reduce((sum, d) => sum + d.actualAmount, 0), 1740);
   const unplannedOnly = await dealerReport({
     buckets: [], includeUnplanned: true, view: "month", monthIds: [], fromMonthId: "",
@@ -1028,6 +1033,7 @@ async function main() {
   assert.equal(unplannedOnly[0].actualAmount, -75);
   assert.equal(unplannedOnly[0].actualNbv, -37.5);
   assert.equal(unplannedOnly[0].planAmount, 0);
+  assert.equal(unplannedOnly[0].products[0].actualQty, -0.75);
   const dealerSeason = await dealerReport({
     buckets: ["approved"], includeUnplanned: true, view: "total", monthIds: [],
   });
@@ -1040,13 +1046,14 @@ async function main() {
   assert.equal(dealerSeason.reduce((sum, d) => sum + d.actualAmount, 0), 1740 + novemberAmount);
   const filtered = summarizeTerritoryDealers(
     [
-      { ...unplannedOnly[0], nbvPercent: 0.5 },
-      { ...unplannedOnly[0], nbvPercent: 0.25, actualAmount: 25, actualNbv: 6.25 },
+      { ...unplannedOnly[0].products[0], nbvPercent: 0.5 },
+      { ...unplannedOnly[0].products[0], productId: "other", nbvPercent: 0.25, actualAmount: 25, actualNbv: 6.25 },
     ],
     "half",
     [{ id: "half", name: "Half", nbvPercent: 0.5, notation: null, color: null }],
   );
   assert.equal(filtered[0].actualAmount, -75, "filter products before combining dealer amounts");
+  assert.equal(filtered[0].products.length, 1, "drawer sees the same category-filtered products");
   console.log("Territory dealer plans, consistent actuals, month selection, and category filtering: PASS");
   console.log("Territory approval filters, missing-plan capture, returns and deduplication: PASS");
 

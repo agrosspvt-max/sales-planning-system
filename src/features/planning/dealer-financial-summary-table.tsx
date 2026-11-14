@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
 import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -19,10 +20,12 @@ export function DealerFinancialSummaryTable({
   rows,
   externalScroll = false,
   emptyMessage = "No dealers.",
+  onDealerSelect,
 }: {
   rows: DealerFinancialRow[];
   externalScroll?: boolean;
   emptyMessage?: string;
+  onDealerSelect?: (dealerId: string, trigger: HTMLButtonElement) => void;
 }) {
   const totals = rows.reduce(
     (total, row) => ({
@@ -54,7 +57,21 @@ export function DealerFinancialSummaryTable({
           ) : (
             rows.map((r) => (
               <TableRow key={r.dealerId} data-dealer-id={r.dealerId}>
-                <TableCell className="font-medium"><DealerName id={r.dealerId} name={r.name} /></TableCell>
+                <TableCell className="font-medium">
+                  {onDealerSelect ? (
+                    <button
+                      type="button"
+                      aria-haspopup="dialog"
+                      className="inline-flex items-center gap-1 rounded-sm text-left text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                      onClick={(event) => onDealerSelect(r.dealerId, event.currentTarget)}
+                    >
+                      <span><DealerName id={r.dealerId} name={r.name} /></span>
+                      <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                    </button>
+                  ) : (
+                    <DealerName id={r.dealerId} name={r.name} />
+                  )}
+                </TableCell>
                 <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatCurrency(r.planNbv)}</TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualAmount)}</TableCell>

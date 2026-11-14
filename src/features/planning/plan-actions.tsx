@@ -48,7 +48,7 @@ export function PlanActions({ detail, role, userId }: Props) {
   const [returnOpen, setReturnOpen] = useState(false);
   const [returnReason, setReturnReason] = useState("");
 
-  const isOwner = role === Role.SALES_OFFICER && detail.officerId === userId;
+  const isOwner = (role === Role.SALES_OFFICER || role === Role.REGIONAL_MANAGER) && detail.officerId === userId;
   const base = `/api/planning/season-plans/${detail.id}`;
 
   // Dealer completion gate — every dealer must be Completed (≥1 saved qty) or No Plan.

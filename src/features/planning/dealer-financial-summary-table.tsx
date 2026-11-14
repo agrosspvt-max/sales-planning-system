@@ -4,7 +4,7 @@ import { ChevronRight } from "lucide-react";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
 import { Table, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { achievement } from "@/lib/calc";
+import { dealerFinancialTotals, dealerPlanColumns } from "./group-plan-export";
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
 
 export interface DealerFinancialRow {
@@ -27,15 +27,7 @@ export function DealerFinancialSummaryTable({
   emptyMessage?: string;
   onDealerSelect?: (dealerId: string, trigger: HTMLButtonElement) => void;
 }) {
-  const totals = rows.reduce(
-    (total, row) => ({
-      planAmount: total.planAmount + row.planAmount,
-      planNbv: total.planNbv + row.planNbv,
-      actualAmount: total.actualAmount + row.actualAmount,
-      actualNbv: total.actualNbv + row.actualNbv,
-    }),
-    { planAmount: 0, planNbv: 0, actualAmount: 0, actualNbv: 0 },
-  );
+  const totals = dealerFinancialTotals(rows);
 
   return (
     <div className={cn("rounded-lg border bg-background", externalScroll && "w-max min-w-full")}>
@@ -43,12 +35,9 @@ export function DealerFinancialSummaryTable({
         <TableHeader>
           <TableRow>
             <TableHead>Dealer</TableHead>
-            <TableHead className="text-right">Monthly Plan</TableHead>
-            <TableHead className="text-right">Planned NBV</TableHead>
-            <TableHead className="text-right text-muted-foreground">Actual Sales</TableHead>
-            <TableHead className="text-right text-muted-foreground">Actual NBV</TableHead>
-            <TableHead className="text-right">Sales Achv %</TableHead>
-            <TableHead className="text-right">NBV Achv %</TableHead>
+            {dealerPlanColumns.map((column) => (
+              <TableHead key={column.key} className="text-right">{column.label}</TableHead>
+            ))}
           </TableRow>
         </TableHeader>
         <DealerTableBody>
@@ -72,12 +61,12 @@ export function DealerFinancialSummaryTable({
                     <DealerName id={r.dealerId} name={r.name} />
                   )}
                 </TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(r.planNbv)}</TableCell>
-                <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualAmount)}</TableCell>
-                <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualNbv)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatPercent(achievement(r.actualAmount, r.planAmount))}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatPercent(achievement(r.actualNbv, r.planNbv))}</TableCell>
+                {dealerPlanColumns.map((column) => (
+                  <TableCell key={column.key} className={cn("text-right tabular-nums",
+                    (column.key === "actualAmount" || column.key === "actualNbv") && "text-muted-foreground")}>
+                    {column.format === "percent" ? formatPercent(column.value(r)) : formatCurrency(column.value(r))}
+                  </TableCell>
+                ))}
               </TableRow>
             ))
           )}
@@ -85,12 +74,11 @@ export function DealerFinancialSummaryTable({
         <tfoot>
           <TableRow className="bg-muted/40 font-semibold">
             <TableCell>Total</TableCell>
-            <TableCell className="text-right tabular-nums">{formatCurrency(totals.planAmount)}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatCurrency(totals.planNbv)}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatCurrency(totals.actualAmount)}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatCurrency(totals.actualNbv)}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatPercent(achievement(totals.actualAmount, totals.planAmount))}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatPercent(achievement(totals.actualNbv, totals.planNbv))}</TableCell>
+            {dealerPlanColumns.map((column) => (
+              <TableCell key={column.key} className="text-right tabular-nums">
+                {column.format === "percent" ? formatPercent(column.value(totals)) : formatCurrency(column.value(totals))}
+              </TableCell>
+            ))}
           </TableRow>
         </tfoot>
       </Table>

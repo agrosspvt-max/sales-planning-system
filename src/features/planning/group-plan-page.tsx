@@ -1,13 +1,14 @@
 "use client";
-import { DealerName } from "@/features/dealers/dealer-name-ui";
-import { DealerOrder } from "@/features/dealers/dealer-table-ui";
+import { DealerName, useDealerNameResolver } from "@/features/dealers/dealer-name-ui";
+import { DealerOrder, useTaggedDealersFirst } from "@/features/dealers/dealer-table-ui";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
-import { CheckCircle2, ChevronRight, MinusCircle, Users2, X } from "lucide-react";
+import { CheckCircle2, ChevronRight, Download, MinusCircle, Users2, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatCurrency } from "@/lib/utils";
 import { type PlanningMode } from "@/lib/calc";
+import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/layout/page-header";
 import { NativeSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,9 +17,10 @@ import { ClearanceTag } from "@/components/ui/clearance-tag";
 import { CategoryBadge } from "@/components/ui/category-badge";
 import { CategoryFilter } from "@/components/ui/category-filter";
 import { useCategories } from "@/lib/use-categories";
-import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
+import { categoryForNbv, matchesCategoryFilter, UNCATEGORIZED } from "@/lib/product-category";
 import { GroupRecovery } from "./group-recovery-page";
 import { isNegativeTerritoryPlanMetric } from "./group-plan-metrics";
+import { downloadGroupPlan, getProductPlanColumns, productColumnTotals } from "./group-plan-export";
 import { DealerSalesDrawer } from "./dealer-sales-drawer";
 import { DealerFinancialSummaryTable } from "./dealer-financial-summary-table";
 import { summarizeTerritoryDealers, type DealerProductFinancialRow } from "./group-dealer-summary";
@@ -67,7 +69,7 @@ export interface GroupOfficerBreakdown {
 }
 interface GroupProductPlan {
   groupName: string; seasonName: string; monthlyMode: PlanningMode; seasonalMode: PlanningMode;
-  filter: { buckets: StatusBucket[]; view: "total" | "month" | "range"; monthIds: string[] };
+  filter: { buckets: StatusBucket[]; includeUnplanned?: boolean; view: "total" | "month" | "range"; monthIds: string[] };
   officers: GroupOfficerBreakdown;
   months: { id: string; name: string; order: number }[];
   packSizes: { id: string; name: string }[];
@@ -145,6 +147,7 @@ export function GroupPlanPage({ groupId, groupName, showUnplanned = false }: { g
         <GroupRecovery groupId={groupId} seasonId={effectiveSeason} officerId={officerId} />
       ) : (
         <GroupSalesPlan groupId={groupId} seasonId={effectiveSeason} officerId={officerId}
+          officerLabel={officers?.find((officer) => officer.id === officerId)?.name ?? "All Team Members"}
           showUnplanned={showUnplanned} dealerView={tab === "territory"} />
       )}
     </div>
@@ -153,9 +156,13 @@ export function GroupPlanPage({ groupId, groupName, showUnplanned = false }: { g
 
 /* ----------------------------- Territory sales ---------------------------- */
 
-function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = false, dealerView }: {
-  groupId: string; seasonId: string; officerId?: string; showUnplanned?: boolean; dealerView: boolean;
+function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showUnplanned = false, dealerView }: {
+  groupId: string; seasonId: string; officerId?: string; officerLabel: string; showUnplanned?: boolean; dealerView: boolean;
 }) {
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const dealerName = useDealerNameResolver();
+  const orderDealers = useTaggedDealersFirst();
   const [includeUnplanned, setIncludeUnplanned] = useState(false);
   const [view, setView] = useState<View>("total");
   const [monthA, setMonthA] = useState("");
@@ -223,36 +230,49 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
   );
   if (!data) return <Skeleton className="h-64 w-full" />;
 
-  const T = visibleProducts.reduce(
-    (a, r) => ({
-      seasonQty: a.seasonQty + r.seasonQty,
-      plannedAllMonths: a.plannedAllMonths + r.plannedAllMonths,
-      remaining: a.remaining + r.remaining,
-      seasonSales: a.seasonSales + r.seasonSales,
-      pendingSales: a.pendingSales + r.pendingSales,
-      seasonAmount: a.seasonAmount + r.seasonAmount,
-      plannedAllMonthsAmount: a.plannedAllMonthsAmount + r.plannedAllMonthsAmount,
-      remainingAmount: a.remainingAmount + r.remainingAmount,
-      seasonSalesAmount: a.seasonSalesAmount + r.seasonSalesAmount,
-      pendingAmount: a.pendingAmount + r.pendingAmount,
-      periodPlan: a.periodPlan + r.total.qty,
-      periodSold: a.periodSold + r.actual.qty,
-      plannedAmount: a.plannedAmount + r.total.amount,
-      plannedNbv: a.plannedNbv + r.total.nbv,
-      actualAmount: a.actualAmount + r.actual.amount,
-      actualNbv: a.actualNbv + r.actual.nbv,
-    }),
-    { seasonQty: 0, plannedAllMonths: 0, remaining: 0, seasonSales: 0, pendingSales: 0, seasonAmount: 0, plannedAllMonthsAmount: 0, remainingAmount: 0, seasonSalesAmount: 0, pendingAmount: 0, periodPlan: 0, periodSold: 0, plannedAmount: 0, plannedNbv: 0, actualAmount: 0, actualNbv: 0 },
-  );
+  const productColumns = getProductPlanColumns(showAmounts);
+  const totals = productColumnTotals(visibleProducts, productColumns);
   const periodLabel = view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range";
   const selectedMonths = months.filter((month) => data.filter.monthIds.includes(month.id));
-  let dealerPeriodLabel = periodLabel;
+  let selectedPeriodLabel = periodLabel;
   if (view !== "total" && selectedMonths.length) {
-    dealerPeriodLabel = selectedMonths.length === 1
+    selectedPeriodLabel = selectedMonths.length === 1
       ? selectedMonths[0].name
       : `${selectedMonths[0].name} – ${selectedMonths[selectedMonths.length - 1].name}`;
   }
-  const seasonSpan = showAmounts ? 10 : 5; // Season Baseline column count (qty [+ amount] × 5 metrics)
+  const seasonSpan = showAmounts ? 10 : 5;
+  const plansLabel = [...data.filter.buckets.map((b) => BUCKET_LABEL[b]), ...(data.filter.includeUnplanned ? ["Unplanned"] : [])].join(", ");
+  const baselineLabel = seasonMetrics === "approved" ? "Approved" : "Follow Selected Filters";
+
+  async function exportPlan() {
+    if (!data || isPlaceholderData || exporting) return;
+    const category = categoryFilter === UNCATEGORIZED ? "Uncategorized" :
+      categories.find((item) => item.id === categoryFilter)?.name ?? "All Categories";
+    const context = {
+      group: data.groupName,
+      season: data.seasonName,
+      period: selectedPeriodLabel,
+      officer: officerLabel,
+      plans: plansLabel,
+      category,
+    };
+
+    setExportError("");
+    setExporting(true);
+    try {
+      if (dealerView) {
+        const rows = orderDealers(dealers, (row) => row.dealerId)
+          .map((row) => ({ ...row, name: dealerName(row.dealerId, row.name) }));
+        await downloadGroupPlan({ ...context, view: "dealer", rows });
+      } else {
+        await downloadGroupPlan({ ...context, view: "product", rows: visibleProducts, showAmounts, baseline: baselineLabel });
+      }
+    } catch {
+      setExportError("Couldn’t export the plan. Try again.");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <div className="space-y-3">
@@ -312,6 +332,17 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
           </>
         )}
         <CategoryFilter categories={categories} value={categoryFilter} onChange={setCategoryFilter} />
+        <Button
+          type="button"
+          variant="outline"
+          className="ml-auto"
+          onClick={() => void exportPlan()}
+          disabled={exporting || isPlaceholderData || (dealerView ? dealers.length === 0 : visibleProducts.length === 0)}
+        >
+          <Download className="h-4 w-4" aria-hidden="true" />
+          {exporting ? "Exporting…" : "Export Excel"}
+        </Button>
+        {exportError && <p role="alert" className="w-full text-sm text-destructive">{exportError}</p>}
       </div>
 
       {isPlaceholderData ? (
@@ -340,22 +371,11 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
               </TableRow>
               <TableRow>
                 <TableHead className="min-w-[170px]">Product</TableHead>
-                <TableHead className="border-l text-right" title="Total seasonal quantity planned (Approved seasonal plan by default)">Season Qty</TableHead>
-                {showAmounts && <TableHead className="text-right" title="Amount for Season Qty">Season Amt</TableHead>}
-                <TableHead className="text-right" title="Quantity distributed into monthly plans across ALL months">Planned (All Mo.)</TableHead>
-                {showAmounts && <TableHead className="text-right" title="Amount for Planned (All Months)">Planned Amt</TableHead>}
-                <TableHead className="text-right" title="Planned (All Months) − Season Qty">Remaining</TableHead>
-                {showAmounts && <TableHead className="text-right" title="Planned Amount − Season Amount">Remaining Amt</TableHead>}
-                <TableHead className="text-right" title="Actual sales quantity for the complete season">Season Sales</TableHead>
-                {showAmounts && <TableHead className="text-right" title="Amount for Season Sales">Sales Amt</TableHead>}
-                <TableHead className="text-right" title="Pending = Season Sales − Season Qty">Pending</TableHead>
-                {showAmounts && <TableHead className="text-right" title="Sales Amount − Season Amount">Pending Amt</TableHead>}
-                <TableHead className="border-l text-right" title="Plan for the selected period (season / month / range)">Period Plan</TableHead>
-                <TableHead className="text-right" title="Sold in the selected period">Period Sold</TableHead>
-                <TableHead className="border-l text-right" title="Planned Amount for This Period Plan">Plan Amt</TableHead>
-                <TableHead className="text-right" title="Planned NBV for This Period Plan">Plan NBV</TableHead>
-                <TableHead className="text-right text-muted-foreground" title="Actual Amount for This Period Sold">Act. Amt</TableHead>
-                <TableHead className="text-right text-muted-foreground" title="Actual NBV for This Period Sold">Act. NBV</TableHead>
+                {productColumns.map((column) => (
+                  <TableHead key={column.key} className={cn("text-right", column.sectionStart && "border-l")} title={column.title}>
+                    {column.label}
+                  </TableHead>
+                ))}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -367,44 +387,31 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
                       <CategoryBadge category={categoryForNbv(r.nbvPercent, categories)} /> <ChevronRight className="h-3.5 w-3.5 text-primary" />
                     </button>
                   </TableCell>
-                  <TableCell className="border-l text-right tabular-nums">{qtyFmt(r.seasonQty)}</TableCell>
-                  {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.seasonAmount)}</TableCell>}
-                  <TableCell className="text-right tabular-nums">{qtyFmt(r.plannedAllMonths)}</TableCell>
-                  {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.plannedAllMonthsAmount)}</TableCell>}
-                  <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.remaining) && "text-destructive")}>{qtyFmt(r.remaining)}</TableCell>
-                  {showAmounts && <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.remainingAmount) && "text-destructive")}>{formatCurrency(r.remainingAmount)}</TableCell>}
-                  <TableCell className="text-right tabular-nums">{qtyFmt(r.seasonSales)}</TableCell>
-                  {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(r.seasonSalesAmount)}</TableCell>}
-                  <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.pendingSales) && "text-destructive")}>{qtyFmt(r.pendingSales)}</TableCell>
-                  {showAmounts && <TableCell className={cn("text-right tabular-nums", isNegativeTerritoryPlanMetric(r.pendingAmount) && "text-destructive")}>{formatCurrency(r.pendingAmount)}</TableCell>}
-                  <TableCell className="border-l text-right tabular-nums">{qtyFmt(r.total.qty)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{qtyFmt(r.actual.qty)}</TableCell>
-                  <TableCell className="border-l text-right tabular-nums">{formatCurrency(r.total.amount)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatCurrency(r.total.nbv)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actual.amount)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actual.nbv)}</TableCell>
+                  {productColumns.map((column) => {
+                    const value = column.value(r);
+                    return (
+                      <TableCell key={column.key} className={cn("text-right tabular-nums",
+                        column.sectionStart && "border-l", column.muted && "text-muted-foreground",
+                        column.comparison && isNegativeTerritoryPlanMetric(value) && "text-destructive")}>
+                        {column.format === "currency" ? formatCurrency(value) : qtyFmt(value)}
+                      </TableCell>
+                    );
+                  })}
                 </TableRow>
               ))}
             </TableBody>
             <tfoot>
               <TableRow className="bg-muted/40 font-semibold">
                 <TableCell>Total</TableCell>
-                <TableCell className="border-l text-right tabular-nums">{qtyFmt(T.seasonQty)}</TableCell>
-                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.seasonAmount)}</TableCell>}
-                <TableCell className="text-right tabular-nums">{qtyFmt(T.plannedAllMonths)}</TableCell>
-                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.plannedAllMonthsAmount)}</TableCell>}
-                <TableCell className="text-right tabular-nums">{qtyFmt(T.remaining)}</TableCell>
-                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.remainingAmount)}</TableCell>}
-                <TableCell className="text-right tabular-nums">{qtyFmt(T.seasonSales)}</TableCell>
-                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.seasonSalesAmount)}</TableCell>}
-                <TableCell className="text-right tabular-nums">{qtyFmt(T.pendingSales)}</TableCell>
-                {showAmounts && <TableCell className="text-right tabular-nums">{formatCurrency(T.pendingAmount)}</TableCell>}
-                <TableCell className="border-l text-right tabular-nums">{qtyFmt(T.periodPlan)}</TableCell>
-                <TableCell className="text-right tabular-nums">{qtyFmt(T.periodSold)}</TableCell>
-                <TableCell className="border-l text-right tabular-nums">{formatCurrency(T.plannedAmount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(T.plannedNbv)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(T.actualAmount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatCurrency(T.actualNbv)}</TableCell>
+                {productColumns.map((column, index) => {
+                  const value = totals[index];
+                  return (
+                    <TableCell key={column.key} className={cn("text-right tabular-nums", column.sectionStart && "border-l",
+                      column.comparison && isNegativeTerritoryPlanMetric(value) && "text-destructive")}>
+                      {column.format === "currency" ? formatCurrency(value) : qtyFmt(value)}
+                    </TableCell>
+                  );
+                })}
               </TableRow>
             </tfoot>
           </Table>
@@ -414,7 +421,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", showUnplanned = fal
       {dealerView && !isPlaceholderData && drawerDealer && (
         <DealerSalesDrawer
           dealer={drawerDealer}
-          periodLabel={`${dealerPeriodLabel} · ${data.seasonName}`}
+          periodLabel={`${selectedPeriodLabel} · ${data.seasonName}`}
           onClose={() => setDrawerDealerId(null)}
           trigger={dealerTrigger.current}
         />

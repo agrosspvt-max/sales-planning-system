@@ -1,5 +1,9 @@
 import "server-only";
-import { salesSyncEnabled, missingSalesLedgerAsZeroEnabled } from "./sales-rollout";
+import {
+  approvedTestPreview,
+  salesSyncEnabled,
+  missingSalesLedgerAsZeroEnabled,
+} from "./sales-rollout";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -81,7 +85,15 @@ async function scope(db: Tx, monthKey: string) {
       })),
     )
     .sort((a, b) => a.planDealerId.localeCompare(b.planDealerId));
-  const needed = new Set(dealers.map((d) => d.dealerId));
+  const includeCompanyActuals = approvedTestPreview();
+  const salesDealers = includeCompanyActuals
+    ? await db.dealer.findMany({
+        where: { deletedAt: null },
+        select: { id: true, name: true },
+        orderBy: { id: "asc" },
+      })
+    : [...new Map(dealers.map((d) => [d.dealerId, { id: d.dealerId, name: d.name }])).values()];
+  const needed = new Set(salesDealers.map((d) => d.id));
   // All aliases participate in collision detection, including dealers outside this month's plans.
   const candidates = new Map<string, Set<string>>();
   const add = (name: string, id: string) => {
@@ -90,8 +102,13 @@ async function scope(db: Tx, monthKey: string) {
     candidates.set(name, set);
   };
   for (const a of aliases) add(a.tallyName.trim(), a.systemDealerId);
-  for (const d of dealers)
-    if (!aliases.some((a) => a.systemDealerId === d.dealerId)) add(d.name.trim(), d.dealerId);
+  const aliasOwners = new Set(aliases.map((a) => a.systemDealerId));
+  const configuredAliasNames = new Set(candidates.keys());
+  for (const d of salesDealers) {
+    const name = d.name.trim();
+    if (includeCompanyActuals ? !configuredAliasNames.has(name) : !aliasOwners.has(d.id))
+      add(name, d.id);
+  }
   const names = [...candidates]
     .filter(([, ids]) => [...ids].some((id) => needed.has(id)))
     .map(([name, ids]) => ({ name, dealerIds: [...ids].sort() }))
@@ -102,7 +119,9 @@ async function scope(db: Tx, monthKey: string) {
   const fingerprint = hashSales(
     JSON.stringify({
       dealers,
+      salesDealers,
       names,
+      includeCompanyActuals,
       missingLedgerAsZero,
       products: products.map((p) => ({
         ...p,
@@ -111,7 +130,15 @@ async function scope(db: Tx, monthKey: string) {
       })),
     }),
   );
-  return { dealers, names, products, fingerprint, missingLedgerAsZero };
+  return {
+    dealers,
+    salesDealers,
+    names,
+    products,
+    fingerprint,
+    missingLedgerAsZero,
+    includeCompanyActuals,
+  };
 }
 type Scope = Awaited<ReturnType<typeof scope>>;
 function productMap(s: Scope) {
@@ -120,18 +147,18 @@ function productMap(s: Scope) {
 }
 
 export function projectSales(result: SalesResult, s: Scope) {
-  const ledgerNames = new Set(result.ledgers.map((l) => l.name)),
-    needed = new Set(s.dealers.map((d) => d.dealerId));
+  const ledgerNames = new Set(result.ledgers.map((l) => l.name));
+  const dealerNames = new Map(s.salesDealers.map((d) => [d.id, d.name]));
   const byName = new Map(s.names.map((n) => [n.name, n.dealerIds]));
   const held = new Map<
     string,
     { dealerId: string; name: string; reason: string; details: string[] }
   >();
   function hold(id: string, reason: string, detail: string) {
-    if (!needed.has(id)) return;
+    if (!dealerNames.has(id)) return;
     const h = held.get(id) ?? {
       dealerId: id,
-      name: s.dealers.find((d) => d.dealerId === id)!.name,
+      name: dealerNames.get(id)!,
       reason,
       details: [],
     };
@@ -166,7 +193,7 @@ export function projectSales(result: SalesResult, s: Scope) {
       continue;
     }
     const id = ids[0];
-    if (!needed.has(id)) continue;
+    if (!dealerNames.has(id)) continue;
     const rows = totals.get(id) ?? new Map();
     totals.set(id, rows);
     for (const line of v.items) {
@@ -191,10 +218,10 @@ export function projectSales(result: SalesResult, s: Scope) {
     }
   }
   const zeroed = [...missing]
-    .filter(([id]) => needed.has(id) && !matched.has(id) && !held.has(id))
+    .filter(([id]) => dealerNames.has(id) && !matched.has(id) && !held.has(id))
     .map(([dealerId, details]) => ({
       dealerId,
-      name: s.dealers.find((d) => d.dealerId === dealerId)!.name,
+      name: dealerNames.get(dealerId)!,
       reason: "LEDGER_NOT_FOUND_ZEROED",
       details,
     }));
@@ -384,6 +411,31 @@ async function publish(
       summary,
     },
   });
+  if (s.includeCompanyActuals) {
+    // A successful company read replaces this month's dealer/product totals. A dealer
+    // held for mapping review keeps the last verified amounts for this same month.
+    const actualDealerIds = [
+      ...snap.actualDealerIds.filter((id) => heldIds.has(id)),
+      ...s.salesDealers.filter((d) => !heldIds.has(d.id)).map((d) => d.id),
+    ].sort();
+    await db.tallySalesSnapshot.update({ where: { id: snap.id }, data: { actualDealerIds } });
+    await db.tallySalesActual.deleteMany({
+      where: { snapshotId: snap.id, dealerId: { notIn: [...heldIds] } },
+    });
+    const actuals = [...projection.totals].flatMap(([dealerId, rows]) =>
+      heldIds.has(dealerId)
+        ? []
+        : [...rows].map(([productId, total]) => ({
+            snapshotId: snap.id,
+            dealerId,
+            productId,
+            quantity: total.qty,
+            amount: total.amount,
+          })),
+    );
+    for (let offset = 0; offset < actuals.length; offset += 500)
+      await db.tallySalesActual.createMany({ data: actuals.slice(offset, offset + 500) });
+  }
   await db.tallySalesVoucher.deleteMany({ where: { snapshotId: snap.id } });
   const vouchers = result.vouchers.map(({ items, ledgerEntries, ...v }) => ({
     id: randomUUID(),
@@ -535,7 +587,7 @@ export async function salesAgent(req: Request, raw: unknown) {
         // A current-month request queued yesterday must read through today, rather than publish a stale end date.
         const period = salesPeriod(job.monthKey, today),
           current = await scope(db, job.monthKey);
-        if (!current.dealers.length) {
+        if (!current.includeCompanyActuals && !current.dealers.length) {
           await db.tallySalesJob.update({
             where: { id: job.id },
             data: {

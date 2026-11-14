@@ -658,6 +658,8 @@ model Product {
   schemeRequirements     SchemeRequirementProduct[]
   schemeSales            SchemeSale[]
 
+  tallySalesActuals TallySalesActual[]
+
   @@index([categoryId])
   @@index([brandId])
   @@index([isActive])
@@ -721,10 +723,11 @@ model Dealer {
   billingTasks              BillingExceptionTask[]
   lastPayment               DealerLastPayment?
 
+  tallySalesActuals          TallySalesActual[]
+  tallyDaybookMonths         TallyDaybookDealerMonth[]
+
   @@index([isActive])
   @@index([status])
-  tallyDaybookMonths TallyDaybookDealerMonth[]
-
 }
 
 /// Credit Note (CN) Request raised by a Sales Officer for one of their dealers. Workflow:
@@ -2822,6 +2825,9 @@ model TallySalesSnapshot {
   updatedAt    DateTime        @updatedAt
   vouchers     TallySalesVoucher[]
 
+  actuals TallySalesActual[]
+  actualDealerIds String[] @default([])
+
   @@unique([connectionId, monthKey])
 }
 
@@ -2941,4 +2947,19 @@ model TallyDaybookDealerMonth {
 
   @@id([monthKey, dealerId])
   @@index([dealerId, monthKey])
+}
+
+/// Latest verified actuals attributed to Dealer Master, independently of planning workflow.
+model TallySalesActual {
+  snapshotId String
+  dealerId   String
+  productId  String
+  quantity   Decimal            @db.Decimal(18, 6)
+  amount     Decimal            @db.Decimal(14, 4)
+  snapshot   TallySalesSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  dealer     Dealer             @relation(fields: [dealerId], references: [id], onDelete: Cascade)
+  product    Product            @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@id([snapshotId, dealerId, productId])
+  @@index([dealerId])
 }

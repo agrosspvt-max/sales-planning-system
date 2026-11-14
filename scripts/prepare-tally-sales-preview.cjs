@@ -30,6 +30,13 @@ async function apply(db){
   }else if(daybookTables.length!==2){
    throw Error('Partial Daybook schema requires review; no automatic repair attempted');
   }
+  const actualTables=await tx.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='TallySalesActual'`;
+  const actualColumns=await tx.$queryRaw`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='TallySalesSnapshot' AND column_name='actualDealerIds'`;
+  if(!actualTables.length && !actualColumns.length){
+   await applyMigration(tx,'20261114000000_tally_sales_without_plan');
+  }else if(actualTables.length!==1 || actualColumns.length!==1){
+   throw Error('Partial Territory actual-sales schema requires review');
+  }
  },{timeout:55000,maxWait:10000});
 }
 async function main(){

@@ -28,6 +28,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ groupId: st
     const officerId = q.get("officerId")?.trim() || undefined;
     const seasonMetrics = q.get("seasonMetrics") === "filters" ? "filters" : "approved"; // default: Approved Baseline
 
-    return ok(await getGroupProductPlan(auth, groupId, seasonId, { buckets: buckets.length ? buckets : ["approved"], view, monthIds, officerId, seasonMetrics }));
+    return ok(await getGroupProductPlan(auth, groupId, seasonId, {
+      buckets, includeUnplanned: q.get("unplanned") === "true", view, monthIds, officerId, seasonMetrics,
+    }));
   });
 }

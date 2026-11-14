@@ -47,10 +47,12 @@ class ApiError extends Error {
   }
 }
 let missingLedgerZeroPolicy = true;
+let companyActualsEnabled = false;
 const require = createRequire(import.meta.url),
   modules: Record<string, unknown> = {
     "server-only": {},
     "./sales-rollout": {
+      approvedTestPreview: () => companyActualsEnabled,
       salesSyncEnabled: () => process.env.TALLY_SALES_SYNC_ENABLED === "true",
       missingSalesLedgerAsZeroEnabled: () => missingLedgerZeroPolicy,
     },
@@ -840,6 +842,175 @@ async function main() {
   await prisma.tallySalesJob.deleteMany({
     where: { connectionId, status: "QUEUED", monthKey: { not: month } },
   });
+  // Exercise the real territory query with current assignments and a synced month that
+  // has approved, draft, pending, missing-month and missing-season plan cases.
+  companyActualsEnabled = true;
+  await prisma.tallySalesJob.deleteMany({ where: { connectionId, status: "QUEUED" } });
+  const group = await prisma.userGroup.create({ data: { name: "Synthetic Territory" } });
+  await prisma.user.update({ where: { id: "sales-officer" }, data: { groupId: group.id } });
+  await prisma.monthlyPlan.create({
+    data: {
+      seasonPlanId: "sales-plan",
+      seasonMonthId: "sales-old",
+      officerId: "sales-officer",
+      status: "APPROVED",
+    },
+  });
+  const testCases = [
+    { suffix: "draft", qty: "1.250000", amount: "125.00", status: "DRAFT", seasonal: true },
+    {
+      suffix: "pending",
+      qty: "2.500000",
+      amount: "250.00",
+      status: "PENDING_ADMIN",
+      seasonal: true,
+    },
+    { suffix: "missing-month", qty: "4.000000", amount: "400.00", status: null, seasonal: true },
+    {
+      suffix: "missing-seasonal",
+      qty: "-0.750000",
+      amount: "-75.00",
+      status: null,
+      seasonal: false,
+    },
+  ] as const;
+  const additions: ((typeof testCases)[number] & { id: string; guid: string })[] = [];
+  for (const [index, entry] of testCases.entries()) {
+    const id = "territory-" + entry.suffix;
+    await prisma.user.create({
+      data: {
+        id,
+        username: id,
+        name: id,
+        passwordHash: "disabled",
+        groupId: group.id,
+        role: db.Role.SALES_OFFICER,
+      },
+    });
+    await prisma.dealer.create({ data: { id, name: id, isActive: true, status: "ACTIVE" } });
+    await prisma.dealerAssignment.create({
+      data: { dealerId: id, officerId: id, effectiveFrom: new Date("2026-04-01") },
+    });
+    if (entry.seasonal) {
+      await prisma.seasonPlan.create({
+        data: {
+          id,
+          seasonId: "sales-season",
+          officerId: id,
+          status: "DRAFT",
+          dealers: { create: { dealerId: id } },
+        },
+      });
+      if (entry.status)
+        await prisma.monthlyPlan.create({
+          data: {
+            seasonPlanId: id,
+            seasonMonthId: "sales-old",
+            officerId: id,
+            status: entry.status,
+          },
+        });
+    }
+    additions.push({ ...entry, id, guid: prefix + "-" + String(900 + index).padStart(8, "0") });
+  }
+  const beforePlans = await prisma.monthlyPlan.count();
+  await refresh((job) => {
+    const out = result(job);
+    const approvedVoucher = { ...out.vouchers[0], partyName: "New Dealer Name" };
+    out.ledgers = [
+      out.ledgers[0],
+      { name: "New Dealer Name", guid: prefix + "-00000002" },
+      ...additions.map(({ id, guid }) => ({ name: id, guid })),
+    ];
+    out.vouchers = [
+      approvedVoucher,
+      ...additions.map(({ id, guid, qty, amount }) => {
+        assert.ok(job.aliases.includes(id), "claim verifies ledgers even without a plan");
+        return {
+          ...approvedVoucher,
+          guid,
+          partyName: id,
+          family: amount.startsWith("-") ? "Credit Note" : "Sales",
+          items: [{ ...approvedVoucher.items[0], quantity: qty, amount }],
+        };
+      }),
+    ];
+    return out;
+  }, oldKey);
+  assert.equal(await prisma.monthlyPlan.count(), beforePlans);
+  const actuals = await prisma.tallySalesActual.findMany({
+    where: { snapshot: { monthKey: oldKey } },
+    select: { dealerId: true, quantity: true },
+  });
+  assert.equal(actuals.length, 5);
+  assert.equal(
+    actuals.find((a) => a.dealerId === "territory-missing-seasonal")?.quantity.toString(),
+    "-0.75",
+  );
+
+  modules["./territory-sales"] = load("src/features/planning/territory-sales.ts");
+  modules["./group-plan-metrics"] = load("src/features/planning/group-plan-metrics.ts");
+  modules["@/features/tally/sales-rollout"] = modules["./sales-rollout"];
+  modules["@/features/accounts/permissions"] = {
+    isAdministrativeRole: (role: string) => role === "SUPER_ADMIN",
+  };
+  modules["@/lib/season-calendar"] = {
+    SEASON_MONTH_ORDER: [{ order: "asc" }],
+    calendarRows: (rows: unknown[]) => rows,
+  };
+  modules["@/lib/calc"] = {
+    figuresForMode: () => ({ totalQty: 0, amount: 0, nbv: 0 }),
+    nbv: (n: number, pct: number) => n * pct,
+    isQuantityMode: () => true,
+  };
+  modules["@/features/users/catalogue.server"] = { clearanceMapForGroup: async () => new Map() };
+  modules["@/features/products/merge.server"] = {
+    loadEffectiveProduct: async () => ({ effId: (id: string) => id, meta: () => null }),
+  };
+  modules["@/lib/dealer-display-name.server"] = { loadDealerAliasNameMap: async () => new Map() };
+  modules["@/lib/dealer-ownership"] = load("src/lib/dealer-ownership.ts");
+  modules["@/lib/scope"] = load("src/lib/scope.ts");
+  const territory = load<typeof import("@/features/planning/group-plan.server")>(
+    "src/features/planning/group-plan.server.ts",
+  );
+  const report = async (
+    buckets: ("approved" | "draft" | "submitted")[],
+    includeUnplanned: boolean,
+    view: "month" | "total" | "range" = "month",
+    officerId?: string,
+    monthIds = ["sales-old"],
+  ) =>
+    territory.getGroupProductPlan(actor, group.id, "sales-season", {
+      buckets,
+      includeUnplanned,
+      view,
+      monthIds,
+      officerId,
+    });
+  const amount = (r: Awaited<ReturnType<typeof report>>) =>
+    r.products.reduce((sum, p) => sum + p.actual.amount, 0);
+  assert.equal(amount(await report(["approved"], false)), 1040);
+  assert.equal(amount(await report([], true)), 700);
+  assert.equal(amount(await report(["approved"], true)), 1740);
+  assert.equal(
+    amount(await report(["approved", "draft", "submitted"], true, "range")),
+    1740,
+    "draft/pending and Unplanned overlap only once",
+  );
+  assert.equal(
+    amount(await report(["approved"], true, "month", "territory-missing-seasonal")),
+    -75,
+  );
+  const novemberAmount = amount(await report(["approved"], true, "month", undefined, ["sales-month"]));
+  const combined = await report(["approved"], true, "total");
+  assert.equal(amount(combined), 1740 + novemberAmount);
+  assert.equal(
+    combined.products.flatMap((p) => p.drawer).reduce((sum, d) => sum + d.periodSales.amount, 0),
+    1740 + novemberAmount,
+  );
+  console.log("Territory approval filters, missing-plan capture, returns and deduplication: PASS");
+
+  await svc.requestSalesRefresh(actor, month);
   const revokeJob = await claim();
   await (modules["./service.server"] as typeof import("./service.server")).disable(actor);
   await assert.rejects(

@@ -1,3 +1,4 @@
+import { approvedTestPreview } from "@/features/tally/sales-rollout";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { Role } from "@prisma/client";
 import { notFound } from "next/navigation";
@@ -14,5 +15,5 @@ export default async function Page({ params }: { params: Promise<{ groupId: stri
   if (!isAdministrativeRole(role) && role !== Role.REGIONAL_MANAGER) return <Forbidden />;
   const group = (await prisma.userGroup.findUnique({ where: { id: groupId }, select: { name: true } })) as { name: string } | null;
   if (!group) notFound();
-  return <GroupPlanPage groupId={groupId} groupName={group.name} />;
+  return <GroupPlanPage groupId={groupId} groupName={group.name} showUnplanned={approvedTestPreview()} />;
 }

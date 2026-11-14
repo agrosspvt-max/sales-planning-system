@@ -34,8 +34,11 @@ interface Contribution {
 }
 interface BucketTotal { qty: number; amount: number; nbv: number; officerCount: number }
 interface DrawerMeasure { qty: number; amount: number; nbv: number }
+type DrawerBucket = StatusBucket | "unplanned";
+const DRAWER_BUCKETS: DrawerBucket[] = [...ALL_BUCKETS, "unplanned"];
+
 interface DrawerContribution {
-  bucket: StatusBucket; officerId: string; officerName: string; dealerId: string; dealerName: string;
+  bucket: DrawerBucket; officerId: string; officerName: string; dealerId: string; dealerName: string;
   seasonPlan: DrawerMeasure; seasonSales: DrawerMeasure; periodSales: DrawerMeasure;
 }
 type MetricMode = "seasonPlan" | "seasonSales" | "periodSales";
@@ -57,6 +60,7 @@ export interface GroupOfficerBreakdown {
   total: number; includedCount: number;
   byBucket: Record<StatusBucket, OfficerRef[]>;
   excluded: { name: string; reason: string }[];
+  withUnplannedSales?: OfficerRef[];
 }
 interface GroupProductPlan {
   groupName: string; seasonName: string; monthlyMode: PlanningMode; seasonalMode: PlanningMode;
@@ -78,7 +82,7 @@ const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDi
  */
 interface OfficerOpt { id: string; name: string }
 
-export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupName: string }) {
+export function GroupPlanPage({ groupId, groupName, showUnplanned = false }: { groupId: string; groupName: string; showUnplanned?: boolean }) {
   const [tab, setTab] = useState<Tab>("product");
   const [seasonId, setSeasonId] = useState("");
   const [officerId, setOfficerId] = useState(""); // "" = all officers in the group
@@ -138,7 +142,7 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
           Territory Plan — coming soon. This will mirror the Dealer Plan for the whole territory.
         </div>
       ) : tab === "product" ? (
-        <GroupProductPlan groupId={groupId} seasonId={effectiveSeason} officerId={officerId} />
+        <GroupProductPlan groupId={groupId} seasonId={effectiveSeason} officerId={officerId} showUnplanned={showUnplanned} />
       ) : (
         <GroupRecovery groupId={groupId} seasonId={effectiveSeason} officerId={officerId} />
       )}
@@ -148,7 +152,10 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
 
 /* ------------------------------ Product Plan ------------------------------ */
 
-function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: string; seasonId: string; officerId?: string }) {
+function GroupProductPlan({ groupId, seasonId, officerId = "", showUnplanned = false }: {
+  groupId: string; seasonId: string; officerId?: string; showUnplanned?: boolean;
+}) {
+  const [includeUnplanned, setIncludeUnplanned] = useState(false);
   const [view, setView] = useState<View>("total");
   const [monthA, setMonthA] = useState("");
   const [monthB, setMonthB] = useState("");
@@ -187,9 +194,9 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   const bucketsKey = [...buckets].sort().join(",");
   const monthsKey = selectedMonthIds.join(",");
   const { data, isLoading, isFetching } = useQuery<GroupProductPlan>({
-    queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey, officerId, seasonMetrics],
+    queryKey: ["group-product-plan", groupId, seasonId, view, bucketsKey, monthsKey, officerId, seasonMetrics, includeUnplanned],
     refetchInterval: 60000,
-    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey || "approved"}&view=${view}&months=${monthsKey}${officerId ? `&officerId=${officerId}` : ""}&seasonMetrics=${seasonMetrics}`),
+    queryFn: () => api.get(`/api/planning/groups/${groupId}/product-plan?seasonId=${seasonId}&buckets=${bucketsKey}&unplanned=${includeUnplanned}&view=${view}&months=${monthsKey}${officerId ? `&officerId=${officerId}` : ""}&seasonMetrics=${seasonMetrics}`),
     enabled: !!seasonId,
     placeholderData: keepPreviousData,
   });
@@ -201,7 +208,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   const toggleBucket = (b: StatusBucket) =>
     setBuckets((prev) => {
       const next = prev.includes(b) ? prev.filter((x) => x !== b) : [...prev, b];
-      return next.length ? next : prev; // keep at least one selected
+      return next.length || includeUnplanned ? next : prev; // keep at least one selected
     });
 
   if (!seasonId) return <p className="rounded-md border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground">Choose a season to view the group Product Plan.</p>;
@@ -235,7 +242,13 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
-        <StatusFilter buckets={buckets} onToggle={toggleBucket} />
+        <StatusFilter buckets={buckets} onToggle={toggleBucket} unplanned={showUnplanned ? {
+          checked: includeUnplanned,
+          onToggle: () => {
+            if (includeUnplanned && !buckets.length) setBuckets(["approved"]);
+            setIncludeUnplanned(!includeUnplanned);
+          },
+        } : undefined} />
         <OfficersBadge officers={data.officers} />
         <span className="text-sm text-muted-foreground">·</span>
         <span className="text-sm text-muted-foreground">{data.seasonName}</span>
@@ -261,7 +274,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
           </div>
         )}
         <span className="text-xs text-muted-foreground">
-          {view === "total" ? "Filtering Seasonal Plans" : "Filtering Monthly Plans"} by: {buckets.map((b) => BUCKET_LABEL[b]).join(", ")}
+          {view === "total" ? "Filtering Seasonal Plans" : "Filtering Monthly Plans"} by: {[...buckets.map((b) => BUCKET_LABEL[b]), ...(includeUnplanned ? ["Unplanned sales"] : [])].join(", ")}
         </span>
       </div>
 
@@ -284,7 +297,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
       </div>
 
       {data.products.length === 0 ? (
-        <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">No plan data for this group, season and selected states.</div>
+        <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">No sales or plan data for this selection.</div>
       ) : (
         <div className="overflow-auto rounded-lg border bg-background">
           <Table stickyFirstColumn>
@@ -374,7 +387,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
           key={drawerProduct.productId}
           product={drawerProduct}
           seasonName={data.seasonName}
-          filterLabel={`${view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range"} · ${buckets.map((b) => BUCKET_LABEL[b]).join(", ")}`}
+          filterLabel={`${view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range"} · ${[...buckets.map((b) => BUCKET_LABEL[b]), ...(includeUnplanned ? ["Unplanned sales"] : [])].join(", ")}`}
           onClose={() => setDrawerProduct(null)}
         />
       )}
@@ -384,7 +397,11 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
 
 /* ------------------------------ Status filter ----------------------------- */
 
-export function StatusFilter({ buckets, onToggle }: { buckets: StatusBucket[]; onToggle: (b: StatusBucket) => void }) {
+export function StatusFilter({ buckets, onToggle, unplanned }: {
+  buckets: StatusBucket[];
+  onToggle: (b: StatusBucket) => void;
+  unplanned?: { checked: boolean; onToggle: () => void };
+}) {
   return (
     <div className="inline-flex items-center gap-3 rounded-md border bg-background px-3 py-1.5 text-sm">
       <span className="font-medium text-muted-foreground">Included Plans</span>
@@ -394,6 +411,12 @@ export function StatusFilter({ buckets, onToggle }: { buckets: StatusBucket[]; o
           {BUCKET_LABEL[b]}
         </label>
       ))}
+      {unplanned && (
+        <label className="flex cursor-pointer items-center gap-1.5" title="Actuals for months without an approved monthly plan">
+          <input type="checkbox" className="h-4 w-4" checked={unplanned.checked} onChange={unplanned.onToggle} />
+          Unplanned
+        </label>
+      )}
     </div>
   );
 }
@@ -433,6 +456,12 @@ export function OfficersBadge({ officers }: { officers: GroupOfficerBreakdown })
               )}
             </div>
           ))}
+          {!!officers.withUnplannedSales?.length && (
+            <div>
+              <div className="text-xs font-medium">Unplanned sales ({officers.withUnplannedSales.length})</div>
+              <ul>{officers.withUnplannedSales.map((officer) => <li key={officer.id}>{officer.name}</li>)}</ul>
+            </div>
+          )}
           <div className="mt-1 border-t pt-1.5">
             <div className="mb-1 flex items-center gap-1.5 font-semibold text-foreground"><MinusCircle className="h-3.5 w-3.5 text-muted-foreground" /> Not Included ({officers.excluded.length})</div>
             {officers.excluded.length === 0 ? (
@@ -460,7 +489,7 @@ const METRIC_MODES: { id: MetricMode; label: string }[] = [
 ];
 
 function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product: GroupProductRow; seasonName: string; filterLabel: string; onClose: () => void }) {
-  const [openBucket, setOpenBucket] = useState<StatusBucket | null>(null);
+  const [openBucket, setOpenBucket] = useState<DrawerBucket | null>(null);
   const [openOfficer, setOpenOfficer] = useState<string | null>(null);
   // Default to PERIOD SALES every time a product opens (the drawer remounts per product via `key`).
   const [metricMode, setMetricMode] = useState<MetricMode>("periodSales");
@@ -468,15 +497,17 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
   // ONE dataset, three synchronized measures. The selected mode drives grand + officer + dealer alike, so
   // levels can never mix plan and actual. Reuses the server's drawer aggregation (never re-derived here).
   const { byBucket, bucketTotals, grand } = useMemo(() => {
-    const out: Record<StatusBucket, OfficerGroup[]> = { approved: [], submitted: [], draft: [] };
-    const totals: Record<StatusBucket, DrawerMeasure & { officerCount: number }> = {
+    const out: Record<DrawerBucket, OfficerGroup[]> = { approved: [], submitted: [], draft: [], unplanned: [] };
+    const totals: Record<DrawerBucket, DrawerMeasure & { officerCount: number }> = {
       approved: { qty: 0, amount: 0, nbv: 0, officerCount: 0 }, submitted: { qty: 0, amount: 0, nbv: 0, officerCount: 0 }, draft: { qty: 0, amount: 0, nbv: 0, officerCount: 0 },
+      unplanned: { qty: 0, amount: 0, nbv: 0, officerCount: 0 },
     };
     const g: DrawerMeasure = { qty: 0, amount: 0, nbv: 0 };
-    for (const b of ALL_BUCKETS) {
+    for (const b of DRAWER_BUCKETS) {
       const officers = new Map<string, OfficerGroup>();
       for (const c of product.drawer.filter((x) => x.bucket === b)) {
         const m = c[metricMode];
+        if (b === "unplanned" && !m.qty && !m.amount && !m.nbv) continue;
         let og = officers.get(c.officerId);
         if (!og) { og = { officerId: c.officerId, officerName: c.officerName, qty: 0, amount: 0, nbv: 0, dealers: new Map() }; officers.set(c.officerId, og); }
         og.qty += m.qty; og.amount += m.amount; og.nbv += m.nbv;
@@ -520,14 +551,14 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
         </div>
 
         <div className="flex-1 overflow-auto p-3 text-sm">
-          {ALL_BUCKETS.filter((b) => byBucket[b].length > 0).map((b) => {
+          {DRAWER_BUCKETS.filter((b) => byBucket[b].length > 0).map((b) => {
             const bt = bucketTotals[b];
             return (
               <div key={b} className="mb-2 rounded-md border">
                 <button className="flex w-full items-center justify-between gap-2 p-2.5 text-left" onClick={() => setOpenBucket((x) => (x === b ? null : b))}>
                   <span className="flex items-center gap-1.5 font-semibold">
                     <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", openBucket === b && "rotate-90")} />
-                    {BUCKET_LABEL[b]} <span className="text-xs font-normal text-muted-foreground">({bt.officerCount} officer{bt.officerCount === 1 ? "" : "s"})</span>
+                    {b === "unplanned" ? "Unplanned" : BUCKET_LABEL[b]} <span className="text-xs font-normal text-muted-foreground">({bt.officerCount} officer{bt.officerCount === 1 ? "" : "s"})</span>
                   </span>
                   <span className="text-xs tabular-nums text-muted-foreground">{qtyFmt(bt.qty)} · {formatCurrency(bt.amount)} · {formatCurrency(bt.nbv)}</span>
                 </button>

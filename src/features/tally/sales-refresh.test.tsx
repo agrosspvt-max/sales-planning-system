@@ -42,6 +42,14 @@ const load = testLoader({
                   throughDate: "2026-10-31",
                   summary: {
                     changedRows: 4,
+                    unmatchedProductLines: 1,
+                    unmatchedProducts: [
+                      {
+                        dealerId: "dealer-a",
+                        name: "Dealer A",
+                        stockItems: ["MAXX CELODI (50X160)GM"],
+                      },
+                    ],
                     zeroed: [
                       {
                         name: "Kisan Beej Bhandar",
@@ -75,5 +83,8 @@ assert.match(html, /4 product rows changed/);
 assert.doesNotMatch(html, /not enabled for this test website/);
 assert.match(html, /Kisan Beej Bhandar/);
 assert.match(html, /Sales quantity and amount set to 0/);
+assert.match(html, /Tally product line was excluded/);
+assert.match(html, /Product lines excluded pending mapping/);
+assert.match(html, /MAXX CELODI \(50X160\)GM/);
 assert.doesNotMatch(html, /Previous actuals kept/);
 console.log("Sales range validation and rendered controls/saved data during status errors: PASS");

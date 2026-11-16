@@ -177,6 +177,8 @@ export function projectSales(result: SalesResult, s: Scope) {
       else if (!ledgerNames.has(n.name)) hold(id, "LEDGER_NOT_VERIFIED", n.name);
       else matched.add(id);
     }
+  const unmatchedProducts = new Map<string, Set<string>>();
+  let unmatchedProductLines = 0;
   const resolve = productMap(s),
     totals = new Map<
       string,
@@ -199,7 +201,10 @@ export function projectSales(result: SalesResult, s: Scope) {
     for (const line of v.items) {
       const productId = resolve(line.stockItemName);
       if (!productId) {
-        hold(id, "PRODUCT_NOT_UNIQUELY_MAPPED", line.stockItemName);
+        const stockItems = unmatchedProducts.get(id) ?? new Set<string>();
+        if (stockItems.size < 50) stockItems.add(line.stockItemName);
+        unmatchedProducts.set(id, stockItems);
+        unmatchedProductLines++;
         continue;
       }
       const row = rows.get(productId) ?? {
@@ -225,7 +230,19 @@ export function projectSales(result: SalesResult, s: Scope) {
       reason: "LEDGER_NOT_FOUND_ZEROED",
       details,
     }));
-  return { held: [...held.values()], zeroed, totals, unallocated, unmappedVouchers };
+  return {
+    held: [...held.values()],
+    zeroed,
+    totals,
+    unallocated,
+    unmappedVouchers,
+    unmatchedProductLines,
+    unmatchedProducts: [...unmatchedProducts].map(([dealerId, stockItems]) => ({
+      dealerId,
+      name: dealerNames.get(dealerId)!,
+      stockItems: [...stockItems],
+    })),
+  };
 }
 async function publish(
   db: Tx,
@@ -388,6 +405,8 @@ async function publish(
     zeroed: projection.zeroed,
     unallocatedCredits: projection.unallocated,
     unmappedVouchers: projection.unmappedVouchers,
+    unmatchedProductLines: projection.unmatchedProductLines,
+    unmatchedProducts: projection.unmatchedProducts,
     controlMarkerCount: result.controlMarkerCount,
   };
   const snap = await db.tallySalesSnapshot.upsert({

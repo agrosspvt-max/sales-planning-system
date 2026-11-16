@@ -13,6 +13,8 @@ type Summary = {
   voucherCount: number;
   productLines: number;
   unallocatedCredits: number;
+  unmatchedProductLines?: number;
+  unmatchedProducts?: { dealerId: string; name: string; stockItems: string[] }[];
   noEligiblePlans?: boolean;
   changes?: {
     dealer: string;
@@ -139,6 +141,12 @@ function SalesMonthRefresh({
           names.
         </p>
       )}
+      {!!summary?.unmatchedProductLines && (
+        <p className="text-sm">
+          {summary.unmatchedProductLines} Tally product {summary.unmatchedProductLines === 1 ? "line was" : "lines were"} excluded
+          because the product name needs mapping. See ⓘ for details.
+        </p>
+      )}
       {q.data?.snapshot && (
         <p className="text-sm text-muted-foreground">
           Sales read{" "}
@@ -208,6 +216,16 @@ function SalesMonthRefresh({
               <ul>
                 {z.details.map((name) => (
                   <li key={name}>{name}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          {summary.unmatchedProducts?.map(({ dealerId, name, stockItems }) => (
+            <div key={dealerId}>
+              <strong>{name}</strong>: Product lines excluded pending mapping.
+              <ul>
+                {stockItems.map((item) => (
+                  <li key={item}>{item}</li>
                 ))}
               </ul>
             </div>

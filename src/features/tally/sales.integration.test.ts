@@ -619,9 +619,10 @@ async function main() {
   });
   assert.equal(
     (await actual()).saleValue?.toString(),
-    "1040",
-    "unknown product holds whole dealer",
+    "0",
+    "a successful month with only unmapped sales replaces stale matched totals",
   );
+  await refresh((j) => result(j));
   await refresh((j) => {
     const r = result(j);
     r.vouchers[0].cancelled = true;
@@ -1056,6 +1057,69 @@ async function main() {
   assert.equal(filtered[0].products.length, 1, "drawer sees the same category-filtered products");
   console.log("Territory dealer plans, consistent actuals, month selection, and category filtering: PASS");
   console.log("Territory approval filters, missing-plan capture, returns and deduplication: PASS");
+
+  await prisma.product.create({
+    data: { id: "vajeer", name: "VAJEER", rate: 4665, nbvPercent: "0.5" },
+  });
+  const stockItems = [
+    { stockItemName: "MAXX CELODI (50X160)GM", quantity: "150.000000", unit: "Nos", amount: "21750.00" },
+    { stockItemName: "VAJEER 50X50ML", quantity: "2.500000", unit: "LITRE", amount: "11662.50" },
+    { stockItemName: "VAJEER 50X100ML", quantity: "5.000000", unit: "LITRE", amount: "22475.00" },
+  ];
+  const mixedVoucher = (job: any) => {
+    const out = result(job, stockItems.map((item, lineNo) => ({
+      ...item, lineNo, actualQty: `${item.quantity} ${item.unit}`, billedQty: `${item.quantity} ${item.unit}`, rate: "",
+    })));
+    out.ledgers[1].name = "New Dealer Name";
+    out.vouchers[0].partyName = "New Dealer Name";
+    return out;
+  };
+  const mixed = await refresh(mixedVoucher, oldKey);
+  const mixedSnapshot = await prisma.tallySalesSnapshot.findUniqueOrThrow({
+    where: { connectionId_monthKey: { connectionId, monthKey: oldKey } },
+  });
+  const mixedSummary = mixedSnapshot.summary as {
+    held: { dealerId: string }[];
+    unmatchedProductLines: number;
+    unmatchedProducts: { dealerId: string; stockItems: string[] }[];
+  };
+  assert.equal(mixedSummary.unmatchedProductLines, 1);
+  assert.equal(mixedSummary.held.some((dealer) => dealer.dealerId === "a"), false);
+  assert.deepEqual(mixedSummary.unmatchedProducts[0].stockItems, ["MAXX CELODI (50X160)GM"]);
+  assert.equal(
+    await prisma.tallySalesItem.count({ where: {
+      voucher: { snapshotId: mixedSnapshot.id },
+      stockItemName: "MAXX CELODI (50X160)GM",
+    } }),
+    1,
+    "unmatched stock line remains available in the stored voucher",
+  );
+  const vajeerPlanLine = await prisma.planLine.findFirstOrThrow({
+    where: { planDealerId: "pd-a", productId: "vajeer" },
+  });
+  assert.equal((await actual(vajeerPlanLine.id, "sales-old")).saleQty.toString(), "7.5");
+  assert.equal((await actual(vajeerPlanLine.id, "sales-old")).saleValue?.toString(), "34137.5");
+  assert.equal((await actual("line-a", "sales-old")).saleValue?.toString(), "0");
+  assert.equal((await actual("line-a", "sales-old")).planQty, 55);
+  const mixedDealers = await dealerReport({
+    buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"],
+  });
+  assert.equal(mixedDealers.find((d) => d.dealerId === "a")?.actualAmount, 34137.5);
+  assert.equal((await call({ action: "complete", ...mixed.ids })).duplicate, true);
+
+  await prisma.product.create({
+    data: { id: "maxx-celodi", name: "MAXX CELODI", rate: 145, nbvPercent: "0.5" },
+  });
+  await refresh(mixedVoucher, oldKey);
+  const resolvedDealers = await dealerReport({
+    buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"],
+  });
+  assert.equal(resolvedDealers.find((d) => d.dealerId === "a")?.actualAmount, 55887.5);
+  const resolvedSnapshot = await prisma.tallySalesSnapshot.findUniqueOrThrow({
+    where: { connectionId_monthKey: { connectionId, monthKey: oldKey } },
+  });
+  assert.equal((resolvedSnapshot.summary as { unmatchedProductLines: number }).unmatchedProductLines, 0);
+  console.log("Matched sales publish alongside unmatched stock items and reconverge after mapping: PASS");
 
   await svc.requestSalesRefresh(actor, month);
   const revokeJob = await claim();

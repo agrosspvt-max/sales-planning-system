@@ -2767,7 +2767,24 @@ model TallyConnection {
   daybookJobs        TallyDaybookJob[]
   salesJobs          TallySalesJob[]
   salesSnapshots     TallySalesSnapshot[]
+  dealerAudit        TallyDealerAudit?
   createdAt          DateTime             @default(now())
+}
+
+/// Latest dealer reconciliation and its current daily attempt for one office connection.
+model TallyDealerAudit {
+  connectionId   String          @id
+  connection     TallyConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  jobId          String
+  claimRequestId String
+  dayKey         String
+  leaseHash      String
+  leaseExpiresAt DateTime
+  publishedDay   String?
+  completedAt    DateTime?
+  resultHash     String?
+  summary        Json?
+  error          String?
 }
 
 /// Separate queue from Aging; automatic jobs cover only the current India calendar month.

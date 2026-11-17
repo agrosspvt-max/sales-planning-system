@@ -47,7 +47,7 @@ export interface DealerResolver {
   /** Same matching, classified into EXISTING / NEW / INVALID. Reusable by any importer. */
   classify(rawName: string): DealerResolution;
   /** All candidates at the winning matching tier, for imports that require ambiguity review. */
-  candidates(rawName: string): DealerMatchResult[];
+  candidates(rawName: string, options?: { confirmedOnly?: boolean }): DealerMatchResult[];
 }
 
 export async function loadDealerResolver(db: Pick<Prisma.TransactionClient, "dealer" | "dealerAlias"> = prisma, opts: { includeInactive?: boolean } = {}): Promise<DealerResolver> {
@@ -141,13 +141,14 @@ export async function loadDealerResolver(db: Pick<Prisma.TransactionClient, "dea
     dealers,
     resolve,
     resolveWithReason,
-    candidates(rawName: string): DealerMatchResult[] {
+    candidates(rawName: string, options?: { confirmedOnly?: boolean }): DealerMatchResult[] {
       const t = tightKey(rawName), l = looseKey(rawName);
       const ids = new Set(aliasRows.filter((a) => (tightKey(a.tallyName) || a.tallyKey) === t).map((a) => a.systemDealerId));
       const aliases = dealers.filter((d) => ids.has(d.id));
       if (aliases.length) return aliases.map((dealer) => ({ dealer, matchType: "ALIAS", score: 1 }));
       const exact = t ? dealers.filter((d) => d.tight === t) : [];
       if (exact.length) return exact.map((dealer) => ({ dealer, matchType: "EXACT", score: 1 }));
+      if (options?.confirmedOnly) return [];
       const loose = l ? dealers.filter((d) => d.loose === l) : [];
       if (loose.length) return loose.map((dealer) => ({ dealer, matchType: "LOOSE", score: 0.95 }));
       return dealers.map((dealer) => ({ dealer, matchType: "FUZZY" as const, score: dealerSimilarityWithProfile(rawName, dealer.profile) }))

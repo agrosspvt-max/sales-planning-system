@@ -2,6 +2,7 @@
 import { TallySalesRefresh } from "./sales-refresh";
 import { TallyDaybookSync } from "./daybook-sync";
 import { TallyDaybookReview } from "./daybook-review";
+import { TallyDealerAudit } from "./dealer-audit-panel";
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -91,6 +92,7 @@ export function TallySettings({ daybookMonth }: { daybookMonth?: string }) {
         <>
           <TallyDaybookSync currentMonth={daybookMonth} />
           <TallyDaybookReview />
+          <TallyDealerAudit />
         </>
       )}
       <p>

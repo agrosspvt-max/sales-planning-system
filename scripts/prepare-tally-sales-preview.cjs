@@ -37,6 +37,10 @@ async function apply(db){
   }else if(actualTables.length!==1 || actualColumns.length!==1){
    throw Error('Partial Territory actual-sales schema requires review');
   }
+  const dealerAudit=await tx.$queryRaw`SELECT to_regclass('public."TallyDealerAudit"')::text AS name`;
+  if(!dealerAudit[0]?.name){
+   await applyMigration(tx,'20261117000000_tally_dealer_audit');
+  }
  },{timeout:55000,maxWait:10000});
 }
 async function main(){

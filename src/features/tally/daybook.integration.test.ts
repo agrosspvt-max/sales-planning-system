@@ -113,6 +113,98 @@ function credit(n: number, ledgerName: string, creditAmount: string, category = 
   };
 }
 
+async function testDealerAudit() {
+  const audit = load<typeof import("./dealer-audit.server")>(
+    "src/features/tally/dealer-audit.server.ts",
+  );
+  const send = (body: unknown, at: string) =>
+    audit.dealerAuditAgent(
+      new Request("https://test.example/api/tally/dealer-audit-agent", {
+        headers: { "x-agent-id": id, authorization: "Bearer " + secret },
+      }),
+      body,
+      new Date(at),
+    );
+  function ledger(n: number, name: string, group = "Sundry Debtors") {
+    return { guid: prefix + "-" + String(n).padStart(8, "0"), name, group };
+  }
+
+  await prisma.dealerAlias.create({
+    data: {
+      tallyName: "Original Tally Alias",
+      tallyKey: "originaltallyalias",
+      systemDealerId: "daybook-dealer",
+    },
+  });
+  await prisma.tallyLedgerBinding.create({
+    data: { aliasKey: "originaltallyalias", connectionId: id, guid: ledger(2, "").guid },
+  });
+
+  const claimBody = { action: "claim", requestId: randomUUID() };
+  const firstDay = "2026-11-17T08:30:00Z"; // 2:00 pm IST
+  assert.equal((await send(claimBody, "2026-11-17T08:29:59Z")).job, null);
+  const firstJob = (await send(claimBody, firstDay)).job;
+  assert.ok(firstJob);
+  assert.equal((await send({ ...claimBody, requestId: randomUUID() }, firstDay)).job, null);
+  const recoveredJob = (await send(claimBody, firstDay)).job;
+  assert.ok(recoveredJob);
+  assert.equal(recoveredJob.id, firstJob.id);
+
+  const firstRows = [
+    { name: "Anchor", guid: anchor, group: "Sundry Debtors" },
+    ledger(1, "Payment Only Dealer"),
+    ledger(2, "Renamed Ledger"),
+    ledger(3, "Repeat Dealer", "UP"),
+    ledger(4, "repeat  dealer", "MP"),
+    ledger(5, "Employee", "SUNDRY DEBTORS-EMP"),
+  ];
+  const publish = (job: typeof firstJob, ledgers: typeof firstRows, at: string) =>
+    send({ action: "complete", jobId: job.id, leaseToken: job.leaseToken, ledgers }, at);
+  await assert.rejects(publish(firstJob, firstRows, firstDay), /no longer active/);
+  assert.ok((await publish(recoveredJob, firstRows, firstDay)).ok);
+  assert.ok((await publish(recoveredJob, firstRows, firstDay)).duplicate);
+  assert.equal((await send({ ...claimBody, requestId: randomUUID() }, firstDay)).job, null);
+  const initial = await audit.dealerAuditStatus(auth);
+  assert.equal(initial.summary?.scanned, 4);
+  assert.equal(initial.summary?.matched, 2);
+  assert.equal(
+    JSON.stringify(initial.summary?.unmatched.find((r) => r.name === "Repeat Dealer")?.groups),
+    '["MP","UP"]',
+  );
+
+  const nextDay = "2026-11-18T08:30:00Z";
+  const failedJob = (await send({ ...claimBody, requestId: randomUUID() }, nextDay)).job;
+  assert.ok(failedJob);
+  assert.ok((await publish(failedJob, firstRows.slice(1), nextDay)).rejected);
+  const failed = await audit.dealerAuditStatus(auth);
+  assert.equal(failed.failed, true);
+  assert.equal(JSON.stringify(failed.summary), JSON.stringify(initial.summary));
+  assert.equal((await send({ ...claimBody, requestId: randomUUID() }, nextDay)).job, null);
+
+  const retryAt = "2026-11-18T08:35:00Z";
+  const nextJob = (await send({ ...claimBody, requestId: randomUUID() }, retryAt)).job;
+  assert.ok(nextJob);
+  const nextRows = [
+    firstRows[0],
+    firstRows[1],
+    ledger(3, "Repeat Dealer", "WB"),
+    ledger(6, "New Dealer", "CG"),
+  ];
+  assert.ok((await publish(nextJob, nextRows, retryAt)).ok);
+  const latest = await audit.dealerAuditStatus(auth);
+  assert.equal(latest.failed, false);
+  assert.equal(latest.completedAt, new Date(retryAt).toISOString());
+  assert.equal(latest.summary?.unmatched.filter((r) => r.name === "Repeat Dealer").length, 1);
+  assert.equal(
+    latest.summary?.unmatched.find((r) => r.name === "Repeat Dealer")?.groups.join(),
+    "WB",
+  );
+  assert.ok(latest.summary?.unmatched.some((r) => r.name === "New Dealer"));
+  console.log(
+    "Dealer reconciliation timing, matching, deduplication, retries and daily replacement passed.",
+  );
+}
+
 async function main() {
   await prisma.$executeRawUnsafe('TRUNCATE "TallyConnection", "User", "Dealer", "Season" CASCADE');
   await prisma.user.create({
@@ -273,6 +365,7 @@ async function main() {
   const empty = await refresh([]);
   assert.ok(empty.reply.ok);
   assert.equal((await values()).srCr.toFixed(2), "0.00");
+  await testDealerAudit();
   approved = false;
   await assert.rejects(svc.requestDaybookRefresh(auth, month), /approved test Preview/);
   assert.equal(

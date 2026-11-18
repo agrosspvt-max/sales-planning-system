@@ -140,3 +140,9 @@ publication/replay/replacement/holds/Last Payment tests, and 115 Python connecto
 checks (three Windows-only checks skipped on macOS). New cases cover Cheque
 Return debit amounts, Journal exclusion, missing/flagged parties, invalid display
 amounts, bounded all-voucher requests, matching notes and unchanged actuals.
+
+The dealer summary's Voucher types / match column displays the original Tally
+voucher type names (deduplicated per dealer/source ledger) instead of the generic
+Review only note. Matched rows retain their matching status and also list their
+Other voucher types. This uses saved excluded-voucher evidence immediately; no
+connector update or fresh capture is needed for existing 1.6.2-test results.

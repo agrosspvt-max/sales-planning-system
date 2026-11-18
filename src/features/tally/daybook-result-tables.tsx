@@ -24,6 +24,33 @@ export function DaybookResultTables({
   excludedVouchers?: DaybookExcludedVoucher[];
   coverage?: string;
 }) {
+  // Existing saved captures already retain the original Tally types. Index both
+  // confirmed dealer names and source ledgers so aliases share one type list.
+  const typesByParty = new Map<string, Set<string>>();
+  for (const voucher of excludedVouchers) {
+    if (!["unsupported_type", "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"].includes(voucher.reason))
+      continue;
+    const keys = [
+      ...(voucher.dealerName ? ["dealer:" + voucher.dealerName] : []),
+      ...(voucher.ledgerName ? ["ledger:" + voucher.ledgerName] : []),
+      "voucher:" + voucher.guid,
+    ];
+    for (const key of keys) {
+      const types = typesByParty.get(key) ?? new Set<string>();
+      types.add(voucher.voucherType);
+      typesByParty.set(key, types);
+    }
+  }
+  function otherTypes(row: DaybookDealerRow) {
+    const keys = [
+      "dealer:" + row.dealerName,
+      ...row.ledgers.map((name) => "ledger:" + name),
+      row.key,
+    ];
+    return [...new Set(keys.flatMap((key) => [...(typesByParty.get(key) ?? [])]))]
+      .sort((a, b) => a.localeCompare(b))
+      .join(", ");
+  }
   return (
     <div className="space-y-5">
       <section className="space-y-2" aria-label="Daybook dealer summary">
@@ -46,15 +73,17 @@ export function DaybookResultTables({
           <table className="w-full min-w-[52rem] text-sm">
             <thead className="sticky top-0 bg-muted text-left">
               <tr>
-                {["Dealer", "SR/CR", "Receipts", "Other", "Match / notes"].map((label, i) => (
-                  <th
-                    scope="col"
-                    key={label}
-                    className={`border-b p-3 ${i > 0 && i < 4 ? "text-right" : ""}`}
-                  >
-                    {label}
-                  </th>
-                ))}
+                {["Dealer", "SR/CR", "Receipts", "Other", "Voucher types / match"].map(
+                  (label, i) => (
+                    <th
+                      scope="col"
+                      key={label}
+                      className={`border-b p-3 ${i > 0 && i < 4 ? "text-right" : ""}`}
+                    >
+                      {label}
+                    </th>
+                  ),
+                )}
               </tr>
             </thead>
             <tbody>
@@ -76,8 +105,19 @@ export function DaybookResultTables({
                   </td>
                   <td className="p-3 text-right align-top tabular-nums">{money(row.other)}</td>
                   <td className="p-3 align-top">
-                    <div>{row.status}</div>
-                    {row.reason && <p className="text-xs text-muted-foreground">{row.reason}</p>}
+                    <div>
+                      {row.status === "Review only"
+                        ? otherTypes(row) || "Voucher type unavailable"
+                        : row.status}
+                    </div>
+                    {row.status !== "Review only" && otherTypes(row) && (
+                      <p className="text-xs text-muted-foreground">
+                        Other voucher types: {otherTypes(row)}
+                      </p>
+                    )}
+                    {row.status !== "Review only" && row.reason && (
+                      <p className="text-xs text-muted-foreground">{row.reason}</p>
+                    )}
                     {!!row.candidates?.length && (
                       <p className="text-xs text-muted-foreground">
                         Possible matches: {row.candidates.join(", ")}

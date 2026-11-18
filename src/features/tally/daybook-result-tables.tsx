@@ -53,8 +53,10 @@ export function DaybookResultTables({
   }
   return (
     <div className="space-y-5">
-      <section className="space-y-2" aria-label="Daybook dealer summary">
-        <h3 className="font-medium">Dealer summary ({dealerRows.length})</h3>
+      <details className="space-y-2 rounded border p-3" aria-label="Daybook dealer summary">
+        <summary className="cursor-pointer select-none font-medium">
+          Dealer summary ({dealerRows.length})
+        </summary>
         <p className="text-sm text-muted-foreground">
           Receipts and SR/CR update only dealers with a confirmed match. Other shows the total
           amount of other voucher types for review; it does not update Recovery or Last Payment.
@@ -136,9 +138,11 @@ export function DaybookResultTables({
             </tbody>
           </table>
         </div>
-      </section>
-      <section className="space-y-2" aria-label="Excluded vouchers">
-        <h3 className="font-medium">Excluded vouchers ({excludedVouchers.length})</h3>
+      </details>
+      <details className="space-y-2 rounded border p-3" aria-label="Excluded vouchers">
+        <summary className="cursor-pointer select-none font-medium">
+          Excluded vouchers ({excludedVouchers.length})
+        </summary>
         <p className="text-sm text-muted-foreground">
           Voucher types outside Receipt, Credit Note and Sales Return appear here, along with
           cancelled and optional vouchers. Amounts are from the party ledger; Dr/Cr shows its
@@ -208,7 +212,7 @@ export function DaybookResultTables({
             — means the capture did not provide one identifiable party ledger amount.
           </p>
         )}
-      </section>
+      </details>
     </div>
   );
 }

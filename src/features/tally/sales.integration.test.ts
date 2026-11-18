@@ -1084,6 +1084,67 @@ async function main() {
     unmatchedProducts: { dealerId: string; stockItems: string[] }[];
   };
   assert.equal(mixedSummary.unmatchedProductLines, 1);
+  const missingProducts = load<typeof import("./missing-products.server")>(
+    "src/features/tally/missing-products.server.ts",
+  );
+  const reportBeforeMapping = await missingProducts.missingProductsStatus(actor);
+  const missingCelodi = reportBeforeMapping.products.filter(
+    (row) => row.stockItemName === "MAXX CELODI (50X160)GM",
+  );
+  assert.equal(missingCelodi.length, 1);
+  assert.equal(missingCelodi[0].dealerName, "New Dealer Name");
+  assert.ok(missingCelodi[0].months.includes(oldKey));
+  assert.equal(
+    reportBeforeMapping.products.some((row) => row.stockItemName.startsWith("VAJEER")),
+    false,
+  );
+  const celodiItem = await prisma.tallySalesItem.findFirstOrThrow({
+    where: { voucher: { snapshotId: mixedSnapshot.id }, stockItemName: "MAXX CELODI (50X160)GM" },
+  });
+  await prisma.tallySalesItem.create({ data: { ...celodiItem, id: randomUUID(), lineNo: 99 } });
+  assert.equal(
+    (await missingProducts.missingProductsStatus(actor)).products.filter(
+      (row) => row.stockItemName === "MAXX CELODI (50X160)GM",
+    ).length,
+    1,
+  );
+  await prisma.tallySalesVoucher.update({
+    where: { id: celodiItem.voucherId },
+    data: { cancelled: true },
+  });
+  assert.equal(
+    (await missingProducts.missingProductsStatus(actor)).products.some(
+      (row) => row.stockItemName === "MAXX CELODI (50X160)GM",
+    ),
+    false,
+  );
+  await prisma.tallySalesVoucher.update({
+    where: { id: celodiItem.voucherId },
+    data: { cancelled: false, optional: true },
+  });
+  assert.equal(
+    (await missingProducts.missingProductsStatus(actor)).products.some(
+      (row) => row.stockItemName === "MAXX CELODI (50X160)GM",
+    ),
+    false,
+  );
+  await prisma.tallySalesVoucher.update({
+    where: { id: celodiItem.voucherId },
+    data: { optional: false },
+  });
+  await prisma.tallySalesItem.delete({
+    where: {
+      id: (
+        await prisma.tallySalesItem.findFirstOrThrow({
+          where: { voucherId: celodiItem.voucherId, lineNo: 99 },
+        })
+      ).id,
+    },
+  });
+  await assert.rejects(
+    missingProducts.missingProductsStatus({ ...actor, role: db.Role.SALES_OFFICER }),
+    /Super Admin/,
+  );
   assert.equal(mixedSummary.held.some((dealer) => dealer.dealerId === "a"), false);
   assert.deepEqual(mixedSummary.unmatchedProducts[0].stockItems, ["MAXX CELODI (50X160)GM"]);
   assert.equal(
@@ -1110,6 +1171,12 @@ async function main() {
   await prisma.product.create({
     data: { id: "maxx-celodi", name: "MAXX CELODI", rate: 145, nbvPercent: "0.5" },
   });
+  assert.equal(
+    (await missingProducts.missingProductsStatus(actor)).products.some(
+      (row) => row.stockItemName === "MAXX CELODI (50X160)GM",
+    ),
+    false,
+  );
   await refresh(mixedVoucher, oldKey);
   const resolvedDealers = await dealerReport({
     buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"],
@@ -1119,6 +1186,9 @@ async function main() {
     where: { connectionId_monthKey: { connectionId, monthKey: oldKey } },
   });
   assert.equal((resolvedSnapshot.summary as { unmatchedProductLines: number }).unmatchedProductLines, 0);
+  console.log(
+    "Missing products reports captured dealer/month, deduplicates lines, excludes cancelled and optional vouchers, and follows product mappings: PASS",
+  );
   console.log("Matched sales publish alongside unmatched stock items and reconverge after mapping: PASS");
 
   await svc.requestSalesRefresh(actor, month);

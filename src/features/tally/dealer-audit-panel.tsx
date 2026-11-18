@@ -19,13 +19,7 @@ export function TallyDealerAudit() {
   });
   const { configured, completedAt, failed, summary, refreshState } = audit.data ?? {};
   return (
-    <section
-      className="space-y-3 rounded-lg border bg-card p-4"
-      aria-labelledby="tally-dealer-audit-title"
-    >
-      <h2 id="tally-dealer-audit-title" className="text-base font-semibold">
-        Unmatched Tally dealers
-      </h2>
+    <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
         Refreshes daily from 2:00 pm IST while Tally and the office connector are running.
       </p>
@@ -96,6 +90,6 @@ export function TallyDealerAudit() {
           )}
         </>
       )}
-    </section>
+    </div>
   );
 }

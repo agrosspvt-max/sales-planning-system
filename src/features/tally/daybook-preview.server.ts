@@ -4,7 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/http";
 import { loadDealerResolver } from "@/lib/dealer-resolver";
 import { loadEffectiveLastPayments } from "@/lib/dealer-last-payment.server";
-import { indiaDay } from "./billwise";
+import type { DaybookDealerRow } from "./daybook-result-types";
+import { cents, decimal, indiaDay } from "./billwise";
 import { creditTotals, validateDaybookCapture, type DaybookCredit } from "./daybook-preview";
 
 const NON_DEALER_LEDGERS = new Set(["PMVBRY SCHEME - EPF", "BANK CHARGES", "SUSPENSE"]);
@@ -77,6 +78,7 @@ export async function resolveDaybookCapture(
     ledgerName: string;
     candidates: string[];
     candidateIds: string[];
+    reason: string;
     liveRecovery: string;
     srCr: string;
   }[] = [];
@@ -110,6 +112,11 @@ export async function resolveDaybookCapture(
         ledgerName,
         candidateIds: candidates.map((c) => c.dealer.id),
         candidates: candidates.slice(0, 5).map((c) => c.dealer.name),
+        reason: !candidates.length
+          ? "No exact website name or Dealer Alias matches."
+          : candidates.some((c) => ["ALIAS", "EXACT"].includes(c.matchType))
+            ? "More than one website dealer matches this name."
+            : "Possible name matches only; confirm a Dealer Alias.",
         liveRecovery,
         srCr,
       });
@@ -133,7 +140,77 @@ export async function resolveDaybookCapture(
       issue: options.length > 1 ? "Multiple eligible Recovery plans" : "No eligible Recovery plan",
     };
   }
-  return { matches, unmatched, excludedAccounts, uniqueDealer, recoveryFor };
+  const dealerRows = new Map<string, DaybookDealerRow>();
+  for (const [id, match] of matches) {
+    const totals = creditTotals(match.credits);
+    const { plan, issue } = recoveryFor(id);
+    dealerRows.set(id, {
+      key: id,
+      dealerName: match.dealerName,
+      ledgers: match.ledgers,
+      liveRecovery: totals.liveRecovery,
+      srCr: totals.srCr,
+      other: "0.00",
+      status: "Matched",
+      reason: plan ? undefined : issue,
+    });
+  }
+  for (const row of unmatched)
+    dealerRows.set("ledger:" + row.ledgerName, {
+      key: "ledger:" + row.ledgerName,
+      dealerName: row.ledgerName,
+      ledgers: [row.ledgerName],
+      liveRecovery: row.liveRecovery,
+      srCr: row.srCr,
+      other: "0.00",
+      status: "Needs dealer link",
+      reason: row.reason,
+      candidates: row.candidates,
+    });
+  for (const row of excludedAccounts)
+    dealerRows.set("ledger:" + row.ledgerName, {
+      key: "ledger:" + row.ledgerName,
+      dealerName: row.ledgerName,
+      ledgers: [row.ledgerName],
+      liveRecovery: row.liveRecovery,
+      srCr: row.srCr,
+      other: "0.00",
+      status: "Accounting ledger",
+      reason: "Excluded from dealer Recovery figures.",
+    });
+  const excludedVouchers = capture.excludedVouchers.map((voucher) => {
+    const dealer = voucher.ledgerName ? uniqueDealer(voucher.ledgerName) : null;
+    if (["unsupported_type", "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"].includes(voucher.reason)) {
+      const key =
+        dealer?.id ??
+        (voucher.ledgerName ? "ledger:" + voucher.ledgerName : "voucher:" + voucher.guid);
+      const row = dealerRows.get(key) ?? {
+        key,
+        dealerName: dealer?.name ?? voucher.ledgerName ?? "Not supplied by Tally",
+        ledgers: voucher.ledgerName ? [voucher.ledgerName] : [],
+        liveRecovery: "0.00",
+        srCr: "0.00",
+        other: "0.00",
+        status: "Review only",
+        reason: "Other voucher type; no Recovery figures changed.",
+      };
+      row.other =
+        row.other === null || voucher.amount === undefined
+          ? null
+          : decimal(cents(row.other) + cents(voucher.amount));
+      dealerRows.set(key, row);
+    }
+    return { ...voucher, ...(dealer ? { dealerName: dealer.name } : {}) };
+  });
+  return {
+    matches,
+    unmatched,
+    excludedAccounts,
+    uniqueDealer,
+    recoveryFor,
+    dealerRows: [...dealerRows.values()].sort((a, b) => a.dealerName.localeCompare(b.dealerName)),
+    excludedVouchers,
+  };
 }
 
 export async function previewDaybook(raw: unknown) {
@@ -153,10 +230,8 @@ export async function previewDaybook(raw: unknown) {
       "Choose an original Daybook capture from the configured Tally company and approved period.",
     );
   }
-  const { matches, unmatched, excludedAccounts, recoveryFor } = await resolveDaybookCapture(
-    prisma,
-    capture,
-  );
+  const { matches, unmatched, excludedAccounts, recoveryFor, dealerRows, excludedVouchers } =
+    await resolveDaybookCapture(prisma, capture);
   const receiptDealerIds = [...matches]
     .filter(([, match]) => match.credits.some((c) => c.category === "receipt"))
     .map(([id]) => id);
@@ -188,14 +263,17 @@ export async function previewDaybook(raw: unknown) {
     observedAt: capture.observedAt,
     completeMonth: capture.completeMonth,
     excluded: capture.excluded,
-    excludedVouchers: capture.excludedVouchers,
+    excludedVouchers,
+    dealerRows,
+    coverage: capture.coverage,
     totals: creditTotals(capture.credits),
     dealers,
-    unmatched: unmatched.map(({ ledgerName, candidates, liveRecovery, srCr }) => ({
+    unmatched: unmatched.map(({ ledgerName, candidates, liveRecovery, srCr, reason }) => ({
       ledgerName,
       candidates,
       liveRecovery,
       srCr,
+      reason,
     })),
     excludedAccounts,
     review: capture.review,

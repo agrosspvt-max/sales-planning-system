@@ -15,15 +15,24 @@ const day = z
     (value) =>
       !Number.isNaN(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value,
   );
+const displayEvidence = {
+  ledgerName: name.optional(),
+  amount: z
+    .string()
+    .regex(/^(?:0|[1-9]\d{0,11})\.\d{2}$/)
+    .optional(),
+  direction: z.enum(["debit", "credit", "zero"]).optional(),
+};
 const voucher = z.object({
   guid: z.string().regex(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-[0-9a-f]{8}$/i),
   date: day,
   voucherNumber: name.or(z.literal("")),
   voucherType: name,
-  category: z.enum(["receipt", "srCr"]),
+  category: z.enum(["receipt", "srCr", "other"]),
 });
 const included = voucher
   .extend({
+    category: z.enum(["receipt", "srCr"]),
     ledgerName: name,
     creditAmount: z
       .string()
@@ -40,13 +49,20 @@ const capture = z.object({
   throughDate: day,
   observedAt: z.string().datetime({ offset: true }),
   uploaded: z.literal(false),
+  coverage: z.literal("all_vouchers").optional(),
   vouchers: z
     .array(
       z.union([
         included,
-        voucher.extend({ excluded: z.enum(["cancelled", "optional"]) }).strict(),
         voucher
           .extend({
+            excluded: z.enum(["cancelled", "optional", "unsupported_type"]),
+            ...displayEvidence,
+          })
+          .strict(),
+        voucher
+          .extend({
+            ...displayEvidence,
             review: z.enum([
               "CREDIT_AMBIGUOUS",
               "CREDIT_MISSING",
@@ -85,6 +101,9 @@ export function validateDaybookCapture(
     voucherNumber: string;
     voucherType: string;
     reason: string;
+    ledgerName?: string;
+    amount?: string;
+    direction?: "debit" | "credit" | "zero";
   }[] = [];
   const excludedVouchers: (typeof review)[number][] = [];
   for (const row of data.vouchers) {
@@ -100,27 +119,38 @@ export function validateDaybookCapture(
       );
     ids.add(id);
     const type = row.voucherType.toUpperCase();
+    const knownType = type === "RECEIPT" || /SALES RETURN|CREDIT NOTE/.test(type);
     const supported =
-      row.category === "receipt" ? type === "RECEIPT" : /SALES RETURN|CREDIT NOTE/.test(type);
+      row.category === "receipt"
+        ? type === "RECEIPT"
+        : row.category === "srCr" && /SALES RETURN|CREDIT NOTE/.test(type);
     if ("review" in row) {
       // Older connectors report out-of-scope derived types (e.g. Cheque Return) as
       // review items. Match the manual importer: exclude these, but retain credit holds.
       const destination =
-        row.review === "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE" && !supported ? excludedVouchers : review;
+        row.review === "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE" && !knownType ? excludedVouchers : review;
       destination.push({
         guid: id,
         date: row.date,
         voucherNumber: row.voucherNumber,
         voucherType: row.voucherType,
         reason: row.review,
+        ...(row.ledgerName ? { ledgerName: row.ledgerName } : {}),
+        ...(row.amount !== undefined ? { amount: row.amount } : {}),
+        ...(row.direction ? { direction: row.direction } : {}),
       });
     } else if ("excluded" in row) {
+      if (row.excluded === "unsupported_type" && knownType)
+        throw new Error("A supported Daybook voucher cannot be excluded as another type.");
       excludedVouchers.push({
         guid: id,
         date: row.date,
         voucherNumber: row.voucherNumber,
         voucherType: row.voucherType,
         reason: row.excluded,
+        ...(row.ledgerName ? { ledgerName: row.ledgerName } : {}),
+        ...(row.amount !== undefined ? { amount: row.amount } : {}),
+        ...(row.direction ? { direction: row.direction } : {}),
       });
     } else if ("creditAmount" in row) {
       if (!supported) throw new Error("A captured voucher has an unexpected Day Book type.");
@@ -134,6 +164,7 @@ export function validateDaybookCapture(
     completeMonth: data.throughDate === period.throughDate,
     credits,
     review,
+    coverage: data.coverage ?? "receipt_credit_families",
     excluded: excludedVouchers.length,
     excludedVouchers,
   };

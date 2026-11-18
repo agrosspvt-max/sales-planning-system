@@ -5,6 +5,9 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
 
+import { DaybookResultTables } from "./daybook-result-tables";
+import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
+
 type LedgerAmounts = { ledgerName: string; liveRecovery: string; srCr: string };
 type Summary = {
   changedRows?: number;
@@ -12,14 +15,10 @@ type Summary = {
   receiptCount?: number;
   srCrCount?: number;
   excluded?: number;
-  excludedVouchers?: {
-    guid: string;
-    date: string;
-    voucherType: string;
-    voucherNumber: string;
-    reason: string;
-  }[];
-  unmatched?: (LedgerAmounts & { candidates: string[] })[];
+  excludedVouchers?: DaybookExcludedVoucher[];
+  dealerRows?: DaybookDealerRow[];
+  coverage?: string;
+  unmatched?: (LedgerAmounts & { candidates: string[]; reason?: string })[];
   excludedAccounts?: LedgerAmounts[];
   recoveryIssues?: { dealerName: string; issue: string }[];
   heldPrevious?: string[];
@@ -61,9 +60,6 @@ const errors: Record<string, string> = {
   DAYBOOK_ISOPTIONAL_INVALID: "Tally did not return a valid optional-voucher flag.",
   DAYBOOK_ISDEEMEDPOSITIVE_INVALID: "Tally did not return the ledger entry direction.",
 };
-
-const money = (amount: string) =>
-  Number(amount).toLocaleString("en-IN", { style: "currency", currency: "INR" });
 
 export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
   const lastMonth = currentMonth < "2027-03" ? currentMonth : "2027-03";
@@ -148,42 +144,45 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
             {summary.receiptCount} receipts · {summary.srCrCount} SR/CR vouchers ·{" "}
             {summary.matchedDealers} dealers verified · {summary.changedRows} Recovery rows changed
           </p>
-          {!!summary.excludedVouchers?.length && (
-            <details>
-              <summary className="cursor-pointer">
-                Excluded vouchers ({summary.excludedVouchers.length})
-              </summary>
-              <p>Only Receipts, Credit Notes and Sales Returns contribute to these figures.</p>
-              <ul className="ml-5 max-h-64 list-disc overflow-auto">
-                {summary.excludedVouchers.map((v) => (
-                  <li key={v.guid}>
-                    {v.date} · {v.voucherType} {v.voucherNumber} ·{" "}
-                    {v.reason === "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"
-                      ? "Outside the Daybook import rules"
-                      : v.reason}
-                  </li>
-                ))}
-              </ul>
-            </details>
+          <DaybookResultTables
+            dealerRows={
+              summary.dealerRows ?? [
+                ...(summary.unmatched ?? []).map((row) => ({
+                  key: row.ledgerName,
+                  dealerName: row.ledgerName,
+                  ledgers: [row.ledgerName],
+                  liveRecovery: row.liveRecovery,
+                  srCr: row.srCr,
+                  other: null,
+                  status: "Needs dealer link",
+                  reason:
+                    row.reason ??
+                    (row.candidates.length
+                      ? "Possible name matches only; confirm a Dealer Alias."
+                      : "No exact website name or Dealer Alias matches."),
+                  candidates: row.candidates,
+                })),
+                ...(summary.excludedAccounts ?? []).map((row) => ({
+                  key: row.ledgerName,
+                  dealerName: row.ledgerName,
+                  ledgers: [row.ledgerName],
+                  liveRecovery: row.liveRecovery,
+                  srCr: row.srCr,
+                  other: null,
+                  status: "Accounting ledger",
+                  reason: "Excluded from dealer Recovery figures.",
+                })),
+              ]
+            }
+            excludedVouchers={summary.excludedVouchers}
+            coverage={summary.coverage}
+          />
+          {!summary.dealerRows && (
+            <p className="text-sm text-muted-foreground">
+              Refresh Daybook to load the full dealer summary, including matched dealers.
+            </p>
           )}
-          {!!summary.unmatched?.length && (
-            <details>
-              <summary className="cursor-pointer">
-                Ledgers without a unique dealer match ({summary.unmatched.length})
-              </summary>
-              <ul className="ml-5 max-h-64 list-disc overflow-auto">
-                {summary.unmatched.map((row) => (
-                  <li key={row.ledgerName}>
-                    {row.ledgerName} · Receipts {money(row.liveRecovery)} · SR/CR {money(row.srCr)}
-                    {!!row.candidates.length && (
-                      <> · Possible matches {row.candidates.join(", ")}</>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
-          {!!summary.recoveryIssues?.length && (
+          {!summary.dealerRows && !!summary.recoveryIssues?.length && (
             <details>
               <summary className="cursor-pointer">
                 Dealers without a unique Recovery plan ({summary.recoveryIssues.length})
@@ -206,12 +205,6 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
                 ))}
               </ul>
             </details>
-          )}
-          {!!summary.excludedAccounts?.length && (
-            <p>
-              Accounting ledgers excluded from dealer figures:{" "}
-              {summary.excludedAccounts.map((r) => r.ledgerName).join(", ")}
-            </p>
           )}
         </div>
       )}

@@ -217,7 +217,17 @@ export async function publishDaybook(db: Tx, capture: Capture) {
   return {
     ...creditTotals(capture.credits),
     excluded: capture.excluded,
-    excludedVouchers: capture.excludedVouchers,
+    excludedVouchers: scope.excludedVouchers,
+    coverage: capture.coverage,
+    dealerRows: scope.dealerRows.map((row) =>
+      holds.has(row.key)
+        ? {
+            ...row,
+            status: "Prior figures kept",
+            reason: "Resolve the dealer links before these figures can update Recovery.",
+          }
+        : row,
+    ),
     changedRows,
     matchedDealers,
     unmatched: scope.unmatched.map(({ candidateIds: _ids, ...row }) => row),

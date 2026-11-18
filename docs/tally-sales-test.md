@@ -97,3 +97,46 @@ This is compatible with the existing `daybook.capture.v1` payload from connector
 scan or a manual refresh uses the new handling. Disposable PostgreSQL tests cover
 a mixed batch with Cheque Return, exact receipt/SRCR totals, visible exclusion
 details, replay, review holds, replacement and Last Payment; typecheck passed.
+
+### Daybook dealer and excluded-voucher tables — 18 November, 1.6.2-test
+
+Daybook sync and local capture preview now share tables for Dealer, SR/CR,
+Receipts, Other and match notes, followed by Excluded vouchers (dealer/Tally
+ledger, voucher type, source party amount, Dr/Cr direction, date, number and
+reason). Successful summaries retain all matched dealer totals, unmatched Tally
+names and accounting rows. Needs dealer link distinguishes no exact/alias match,
+multiple confirmed candidates and only suggested loose/fuzzy names, with a link
+to Dealer Alias. Suggestions never become automatic financial matches.
+
+Connector 1.6.2-test changes the read-only Daybook collection from Receipt/Credit
+Note families to all Voucher objects in seven-day date-filtered slices, splitting
+oversized/timed-out intervals. Each voucher still passes company-prefix, date,
+flag and duplicate checks; the company anchor is read before and after collection.
+The collection has a seven-minute guard and 10,000-voucher limit; the existing
+2 MiB cloud payload limit still applies. Failure preserves the prior publication.
+The payload remains daybook.capture.v1 with optional coverage=all_vouchers.
+
+Receipt and SR/CR classification and credit selection remain unchanged. Other
+voucher types carry excluded=unsupported_type and category=other. Cancelled and
+optional vouchers remain excluded. For display evidence, the collector uses the
+named PartyLedgerName, or exactly one IsPartyLedger name, and sums only that
+party's ledger entries. Amount is its absolute source value with debit/credit
+or zero direction. Missing/ambiguous parties or malformed display amounts are
+left unknown rather than guessed from a bank/accounting leg. Other sums the
+absolute amounts of unsupported types only; cancelled/optional entries do not
+contribute. A partial unknown Other total is shown as unknown, not a partial sum.
+Other is informational and never written to Recovery, SR/CR, receipts or Last
+Payment. Recognized Receipt/SRCR types cannot be disguised as unsupported_type.
+
+Old 1.6.1 captures still publish and display their available details. Older saved
+summaries without dealerRows use their saved unmatched/accounting data until a
+refresh. Old excluded vouchers did not carry the party/amount, so these cells
+remain unknown and the UI explains the needed connector update. Full details
+require installing the supplied 1.6.2-test update and refreshing the month. No
+schema migration, reauthorization or configuration change is required.
+
+Verification: TypeScript checks, shared table rendering, isolated PostgreSQL
+publication/replay/replacement/holds/Last Payment tests, and 115 Python connector
+checks (three Windows-only checks skipped on macOS). New cases cover Cheque
+Return debit amounts, Journal exclusion, missing/flagged parties, invalid display
+amounts, bounded all-voucher requests, matching notes and unchanged actuals.

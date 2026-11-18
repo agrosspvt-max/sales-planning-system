@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { DaybookResultTables } from "./daybook-result-tables";
 import type { DaybookPreviewResult } from "./daybook-preview.server";
 
 const formatMoney = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" });
@@ -71,23 +72,11 @@ export function TallyDaybookReview() {
             {result.totals.srCrCount} sales returns and credit notes · {money(result.totals.srCr)}.{" "}
             {result.excluded} excluded vouchers.
           </p>
-          {!!result.excludedVouchers.length && (
-            <details>
-              <summary className="cursor-pointer">
-                Excluded vouchers ({result.excludedVouchers.length})
-              </summary>
-              <ul className="ml-5 max-h-64 list-disc overflow-auto">
-                {result.excludedVouchers.map((v) => (
-                  <li key={v.guid}>
-                    {v.date} · {v.voucherType} {v.voucherNumber} ·{" "}
-                    {v.reason === "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"
-                      ? "Outside the Daybook import rules"
-                      : v.reason}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
+          <DaybookResultTables
+            dealerRows={result.dealerRows}
+            excludedVouchers={result.excludedVouchers}
+            coverage={result.coverage}
+          />
           <p>
             {result.dealers.length} matched dealers ·{" "}
             {result.dealers.filter((d) => d.recovery).length} with one eligible Recovery plan
@@ -140,29 +129,6 @@ export function TallyDaybookReview() {
               </tbody>
             </table>
           </div>
-          {!!result.unmatched.length && (
-            <details>
-              <summary className="cursor-pointer">
-                Ledgers without a unique alias or exact match ({result.unmatched.length})
-              </summary>
-              <ul className="ml-5 list-disc">
-                {result.unmatched.map((row) => (
-                  <li key={row.ledgerName}>
-                    {row.ledgerName} · Receipts {money(row.liveRecovery)} · SR/CR {money(row.srCr)}
-                    {!!row.candidates.length && (
-                      <> · Possible matches {row.candidates.join(", ")}</>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
-          {!!result.excludedAccounts.length && (
-            <p>
-              Accounting ledgers excluded from dealer figures:{" "}
-              {result.excludedAccounts.map((r) => r.ledgerName).join(", ")}
-            </p>
-          )}
           {!!result.review.length && (
             <details>
               <summary className="cursor-pointer">

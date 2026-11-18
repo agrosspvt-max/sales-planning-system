@@ -308,7 +308,7 @@ async function main() {
   await svc.requestDaybookRefresh(auth, month);
   await svc.requestDaybookRefresh(auth, month);
   assert.equal(await prisma.tallyDaybookJob.count({ where: { monthKey: month } }), 1);
-  async function refresh(vouchers: unknown[], throughDate = last) {
+  async function refresh(vouchers: unknown[], throughDate = last, coverage?: "all_vouchers") {
     await svc.requestDaybookRefresh(auth, month);
     const { job } = await claim();
     assert.ok(job);
@@ -326,12 +326,13 @@ async function main() {
         throughDate,
         observedAt: new Date().toISOString(),
         uploaded: false,
+        ...(coverage ? { coverage } : {}),
         vouchers,
       },
     };
     return { reply: await call(body), retry: () => call(body) };
   }
-  const vouchers = [
+  const vouchers: unknown[] = [
     { ...credit(1, "Verified Dealer", "5.25"), voucherNumber: "" },
     credit(2, "Verified Dealer", "8.00"),
     credit(3, "Verified Dealer", "10.00", "srCr"),
@@ -348,18 +349,86 @@ async function main() {
       review: "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE",
     },
   ];
-  const first = await refresh(vouchers);
+  vouchers.push(
+    {
+      guid: prefix + "-00000010",
+      date: month + "-02",
+      voucherNumber: "",
+      voucherType: "Cheque Return",
+      category: "other",
+      excluded: "unsupported_type",
+      ledgerName: "Verified Dealer",
+      amount: "25.00",
+      direction: "debit",
+    },
+    {
+      guid: prefix + "-00000011",
+      date: month + "-02",
+      voucherNumber: "J1",
+      voucherType: "Journal",
+      category: "other",
+      excluded: "unsupported_type",
+      ledgerName: "Payment Only Dealer",
+      amount: "45.00",
+      direction: "credit",
+    },
+    {
+      guid: prefix + "-00000012",
+      date: month + "-02",
+      voucherNumber: "R12",
+      voucherType: "Receipt",
+      category: "receipt",
+      excluded: "cancelled",
+      ledgerName: "Verified Dealer",
+      amount: "999.00",
+      direction: "credit",
+    },
+  );
+  const first = await refresh(vouchers, last, "all_vouchers");
   assert.ok(first.reply.ok);
   const published = await svc.daybookStatus(auth, month);
   const summary = published.published!.summary as {
     receiptCount: number;
     srCrCount: number;
+    coverage: string;
     excluded: number;
-    excludedVouchers: { voucherType: string; reason: string }[];
+    excludedVouchers: {
+      voucherType: string;
+      reason: string;
+      dealerName?: string;
+      amount?: string;
+    }[];
+    dealerRows: {
+      dealerName: string;
+      srCr: string;
+      liveRecovery: string;
+      other: string | null;
+      status: string;
+      reason?: string;
+    }[];
   };
+  assert.equal(summary.coverage, "all_vouchers");
   assert.equal(summary.receiptCount, 5);
   assert.equal(summary.srCrCount, 2);
-  assert.equal(summary.excluded, 1);
+  assert.equal(summary.excluded, 4);
+  const verifiedSummary = summary.dealerRows.find((r) => r.dealerName === "Verified Dealer")!;
+  assert.equal(verifiedSummary.liveRecovery, "13.25");
+  assert.equal(verifiedSummary.srCr, "10.00");
+  assert.equal(verifiedSummary.other, "25.00", "cancelled receipts never contribute to Other");
+  assert.equal(
+    summary.dealerRows.find((r) => r.dealerName === "Payment Only Dealer")!.other,
+    "45.00",
+  );
+  assert.equal(
+    summary.dealerRows.find((r) => r.dealerName === "No Candidate")!.status,
+    "Needs dealer link",
+  );
+  assert.match(
+    summary.dealerRows.find((r) => r.dealerName === "No Candidate")!.reason!,
+    /No exact/,
+  );
+  assert.equal(summary.excludedVouchers[1].dealerName, "Verified Dealer");
+  assert.equal(summary.excludedVouchers[1].amount, "25.00");
   assert.equal(summary.excludedVouchers[0].voucherType, "Cheque Return");
   assert.equal(summary.excludedVouchers[0].reason, "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE");
   const replay = await first.retry();
@@ -418,6 +487,18 @@ async function main() {
     assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
     assert.equal((await values()).srCr.toFixed(2), "10.00");
   }
+  const badExclusion = await refresh([
+    {
+      guid: prefix + "-00000013",
+      date: month + "-02",
+      voucherNumber: "R13",
+      voucherType: "Receipt",
+      category: "other",
+      excluded: "unsupported_type",
+    },
+  ]);
+  assert.ok(badExclusion.reply.rejected, "a receipt cannot be disguised as Other");
+  assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
   const cancellation = await refresh(vouchers.slice(2));
   assert.ok(cancellation.reply.ok);
   row = await values();

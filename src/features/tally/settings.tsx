@@ -85,7 +85,7 @@ export function TallySettings({ daybookMonth }: { daybookMonth?: string }) {
     q.data?.refreshRequestedAt,
   );
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="w-full max-w-7xl space-y-4">
       <h1 className="text-xl font-semibold">Tally connection</h1>
       <TallySalesRefresh chooseMonth />
       {daybookMonth && (

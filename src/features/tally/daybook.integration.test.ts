@@ -200,8 +200,29 @@ async function testDealerAudit() {
     "WB",
   );
   assert.ok(latest.summary?.unmatched.some((r) => r.name === "New Dealer"));
+  const manualAt = "2026-11-18T08:40:00Z";
+  await audit.requestDealerAudit(auth, new Date(manualAt));
+  await audit.requestDealerAudit(auth, new Date(manualAt));
+  const manualJob = (await send({ ...claimBody, requestId: randomUUID() }, manualAt)).job;
+  assert.ok(manualJob, "manual refresh can run after today's successful scan");
+  await audit.requestDealerAudit(auth, new Date(manualAt));
+  assert.equal((await send({ ...claimBody, requestId: randomUUID() }, manualAt)).job, null);
+  assert.ok((await publish(manualJob, firstRows, manualAt)).ok);
+  assert.equal((await audit.dealerAuditStatus(auth)).refreshState, null);
+  assert.equal((await send({ ...claimBody, requestId: randomUUID() }, manualAt)).job, null);
+  const morning = "2026-11-19T03:30:00Z";
+  assert.equal((await send({ ...claimBody, requestId: randomUUID() }, morning)).job, null);
+  await assert.rejects(
+    audit.requestDealerAudit({ ...auth, role: Role.SALES_OFFICER }, new Date(morning)),
+    /Super Admin/,
+  );
+  await audit.requestDealerAudit(auth, new Date(morning));
+  const morningJob = (await send({ ...claimBody, requestId: randomUUID() }, morning)).job;
+  assert.ok(morningJob, "manual refresh can run before 2 pm IST");
+  assert.ok((await publish(morningJob, nextRows, morning)).ok);
+  assert.equal((await audit.dealerAuditStatus(auth)).summary?.scanned, latest.summary?.scanned);
   console.log(
-    "Dealer reconciliation timing, matching, deduplication, retries and daily replacement passed.",
+    "Dealer reconciliation scheduling, manual refresh, authorization, deduplication, retries and replacement passed.",
   );
 }
 

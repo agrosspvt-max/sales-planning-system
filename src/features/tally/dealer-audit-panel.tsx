@@ -1,6 +1,7 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
 import type { DealerAuditStatus } from "./dealer-audit";
 
@@ -8,9 +9,15 @@ export function TallyDealerAudit() {
   const audit = useQuery({
     queryKey: ["tally-dealer-audit"],
     queryFn: () => api.get<DealerAuditStatus>("/api/tally/dealer-audit"),
-    refetchInterval: 60_000,
+    refetchInterval: 5_000,
   });
-  const { configured, completedAt, failed, summary } = audit.data ?? {};
+  const refresh = useMutation({
+    mutationFn: () => api.post("/api/tally/dealer-audit", {}),
+    onSuccess: () => {
+      void audit.refetch();
+    },
+  });
+  const { configured, completedAt, failed, summary, refreshState } = audit.data ?? {};
   return (
     <section
       className="space-y-3 rounded-lg border bg-card p-4"
@@ -22,6 +29,21 @@ export function TallyDealerAudit() {
       <p className="text-sm text-muted-foreground">
         Refreshes daily from 2:00 pm IST while Tally and the office connector are running.
       </p>
+      <Button
+        variant="outline"
+        disabled={!configured || audit.isLoading || refresh.isPending || Boolean(refreshState)}
+        onClick={() => refresh.mutate()}
+      >
+        {refresh.isPending || refreshState ? "Refresh requested" : "Refresh dealers from Tally"}
+      </Button>
+      {refreshState && (
+        <p role="status" className="text-sm">
+          {refreshState === "running"
+            ? "Reading dealer ledgers from Tally…"
+            : "Waiting for the office connector."}
+        </p>
+      )}
+      {refresh.error && <p role="alert">{refresh.error.message}</p>}
       {audit.error && <p role="alert">{audit.error.message}</p>}
       {audit.isLoading && <p role="status">Loading dealer reconciliation…</p>}
       {configured === false && <p className="text-sm">Configure the office connector to start.</p>}

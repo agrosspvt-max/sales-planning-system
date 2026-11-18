@@ -41,6 +41,10 @@ async function apply(db){
   if(!dealerAudit[0]?.name){
    await applyMigration(tx,'20261117000000_tally_dealer_audit');
   }
+  const dealerRefresh=await tx.$queryRaw`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='TallyDealerAudit' AND column_name='refreshRequested'`;
+  if(!dealerRefresh.length){
+   await applyMigration(tx,'20261118000000_tally_dealer_manual_refresh');
+  }
  },{timeout:55000,maxWait:10000});
 }
 async function main(){

@@ -106,14 +106,48 @@ export async function dealerAuditStatus(ctx: AuthContext) {
   assertSuper(ctx);
   const connection = await prisma.tallyConnection.findFirst({
     where: { enabled: true },
-    select: { dealerAudit: { select: { completedAt: true, summary: true, error: true } } },
+    select: { dealerAudit: true },
   });
   return {
     configured: Boolean(connection),
     completedAt: connection?.dealerAudit?.completedAt?.toISOString() ?? null,
     summary: (connection?.dealerAudit?.summary as DealerAuditSummary | null | undefined) ?? null,
     failed: Boolean(connection?.dealerAudit?.error),
+    refreshState: connection?.dealerAudit?.refreshRequested
+      ? !connection.dealerAudit.error &&
+        !connection.dealerAudit.resultHash &&
+        connection.dealerAudit.leaseExpiresAt > new Date()
+        ? ("running" as const)
+        : ("queued" as const)
+      : null,
   };
+}
+
+export async function requestDealerAudit(ctx: AuthContext, now = new Date()) {
+  assertTestPreview();
+  assertSuper(ctx);
+  return prisma.$transaction(async (db) => {
+    const connection = await db.tallyConnection.findFirst({
+      where: { enabled: true },
+      select: { id: true },
+    });
+    if (!connection) throw new ApiError(409, "Configure the office connector first.");
+    await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${connection.id}))`;
+    await db.tallyDealerAudit.upsert({
+      where: { connectionId: connection.id },
+      create: {
+        connectionId: connection.id,
+        jobId: randomUUID(),
+        claimRequestId: randomUUID(),
+        dayKey: indiaDay(now),
+        leaseHash: digest(randomBytes(32).toString("base64url")),
+        leaseExpiresAt: now,
+        refreshRequested: true,
+      },
+      update: { refreshRequested: true },
+    });
+    return { queued: true };
+  });
 }
 
 export async function dealerAuditAgent(req: Request, raw: unknown, now = new Date()) {
@@ -127,10 +161,16 @@ export async function dealerAuditAgent(req: Request, raw: unknown, now = new Dat
       const previous = await db.tallyDealerAudit.findUnique({ where });
       if (input.action === "claim") {
         const dayKey = indiaDay(now);
-        if (+indiaHour.format(now) < 14 || previous?.publishedDay === dayKey) return { job: null };
-        const active = previous?.leaseExpiresAt && previous.leaseExpiresAt > now;
-        if (active && (previous.error || previous.claimRequestId !== input.requestId))
+        const active =
+          previous && !previous.error && !previous.resultHash && previous.leaseExpiresAt > now;
+        if (previous?.error && previous.leaseExpiresAt > now) return { job: null };
+        if (
+          !active &&
+          !previous?.refreshRequested &&
+          (+indiaHour.format(now) < 14 || previous?.publishedDay === dayKey)
+        )
           return { job: null };
+        if (active && previous.claimRequestId !== input.requestId) return { job: null };
         const leaseToken = randomBytes(32).toString("base64url");
         const data = {
           jobId: active ? previous.jobId : randomUUID(),
@@ -165,11 +205,7 @@ export async function dealerAuditAgent(req: Request, raw: unknown, now = new Dat
         return previous.error ? { ok: true, rejected: true } : { ok: true, duplicate: true };
       if (input.action === "fail" && previous.error === input.code)
         return { ok: true, duplicate: true };
-      if (
-        previous.error ||
-        previous.publishedDay === previous.dayKey ||
-        previous.leaseExpiresAt <= now
-      )
+      if (previous.error || previous.resultHash || previous.leaseExpiresAt <= now)
         throw new ApiError(409, "Dealer reconciliation lease expired.");
 
       const fail = (code: string) =>
@@ -201,7 +237,14 @@ export async function dealerAuditAgent(req: Request, raw: unknown, now = new Dat
       );
       await db.tallyDealerAudit.update({
         where,
-        data: { publishedDay: previous.dayKey, completedAt: now, resultHash, summary, error: null },
+        data: {
+          publishedDay: previous.dayKey,
+          completedAt: now,
+          resultHash,
+          summary,
+          error: null,
+          refreshRequested: false,
+        },
       });
       return { ok: true };
     },

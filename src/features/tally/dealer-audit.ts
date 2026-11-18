@@ -9,4 +9,5 @@ export type DealerAuditStatus = {
   completedAt: string | null;
   summary: DealerAuditSummary | null;
   failed: boolean;
+  refreshState: "queued" | "running" | null;
 };

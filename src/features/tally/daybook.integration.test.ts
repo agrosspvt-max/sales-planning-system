@@ -339,9 +339,29 @@ async function main() {
     credit(5, "Bank Charges", "900.00"),
     credit(6, "No Candidate", "70.00"),
     credit(7, "Payment Only Dealer", "12.50", "srCr"),
+    {
+      guid: prefix + "-00000008",
+      date: month + "-02",
+      voucherNumber: "",
+      voucherType: "Cheque Return",
+      category: "receipt",
+      review: "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE",
+    },
   ];
   const first = await refresh(vouchers);
   assert.ok(first.reply.ok);
+  const published = await svc.daybookStatus(auth, month);
+  const summary = published.published!.summary as {
+    receiptCount: number;
+    srCrCount: number;
+    excluded: number;
+    excludedVouchers: { voucherType: string; reason: string }[];
+  };
+  assert.equal(summary.receiptCount, 5);
+  assert.equal(summary.srCrCount, 2);
+  assert.equal(summary.excluded, 1);
+  assert.equal(summary.excludedVouchers[0].voucherType, "Cheque Return");
+  assert.equal(summary.excludedVouchers[0].reason, "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE");
   const replay = await first.retry();
   assert.ok("duplicate" in replay && replay.duplicate);
   const values = () =>
@@ -380,6 +400,24 @@ async function main() {
   assert.ok(partial.reply.rejected);
   assert.ok((await partial.retry()).rejected);
   assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+  for (const reason of ["CREDIT_AMBIGUOUS", "CREDIT_MISSING", "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"]) {
+    const held = await refresh([
+      {
+        guid: prefix + "-00000009",
+        date: month + "-02",
+        voucherNumber: "R9",
+        voucherType: "Receipt",
+        category: "receipt",
+        review: reason,
+      },
+    ]);
+    assert.ok(
+      held.reply.rejected,
+      "a supported voucher with unresolved credits still blocks publication",
+    );
+    assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+    assert.equal((await values()).srCr.toFixed(2), "10.00");
+  }
   const cancellation = await refresh(vouchers.slice(2));
   assert.ok(cancellation.reply.ok);
   row = await values();

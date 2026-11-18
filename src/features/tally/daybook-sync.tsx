@@ -11,6 +11,14 @@ type Summary = {
   matchedDealers?: number;
   receiptCount?: number;
   srCrCount?: number;
+  excluded?: number;
+  excludedVouchers?: {
+    guid: string;
+    date: string;
+    voucherType: string;
+    voucherNumber: string;
+    reason: string;
+  }[];
   unmatched?: (LedgerAmounts & { candidates: string[] })[];
   excludedAccounts?: LedgerAmounts[];
   recoveryIssues?: { dealerName: string; issue: string }[];
@@ -40,7 +48,8 @@ const errors: Record<string, string> = {
   DAYBOOK_CAPTURE_REJECTED: "The capture failed validation.",
   DAYBOOK_SCOPE_CHANGED: "The capture did not cover the requested period. Request a fresh read.",
   DAYBOOK_VOUCHERS_NEED_REVIEW: "Some vouchers could not be classified safely.",
-  SALES_FIELD_INVALID: "A voucher field was blank or too long. Install connector 1.6.1-test and refresh to identify the field.",
+  SALES_FIELD_INVALID:
+    "A voucher field was blank or too long. Install connector 1.6.1-test and refresh to identify the field.",
   DAYBOOK_GUID_INVALID: "Tally returned a voucher without a valid identity.",
   DAYBOOK_DATE_INVALID: "Tally returned a voucher without a valid date.",
   DAYBOOK_VOUCHERTYPENAME_INVALID: "A voucher type name was missing or too long.",
@@ -139,6 +148,24 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
             {summary.receiptCount} receipts · {summary.srCrCount} SR/CR vouchers ·{" "}
             {summary.matchedDealers} dealers verified · {summary.changedRows} Recovery rows changed
           </p>
+          {!!summary.excludedVouchers?.length && (
+            <details>
+              <summary className="cursor-pointer">
+                Excluded vouchers ({summary.excludedVouchers.length})
+              </summary>
+              <p>Only Receipts, Credit Notes and Sales Returns contribute to these figures.</p>
+              <ul className="ml-5 max-h-64 list-disc overflow-auto">
+                {summary.excludedVouchers.map((v) => (
+                  <li key={v.guid}>
+                    {v.date} · {v.voucherType} {v.voucherNumber} ·{" "}
+                    {v.reason === "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"
+                      ? "Outside the Daybook import rules"
+                      : v.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           {!!summary.unmatched?.length && (
             <details>
               <summary className="cursor-pointer">

@@ -86,6 +86,7 @@ export function validateDaybookCapture(
     voucherType: string;
     reason: string;
   }[] = [];
+  const excludedVouchers: (typeof review)[number][] = [];
   for (const row of data.vouchers) {
     const id = row.guid.toLowerCase();
     if (
@@ -98,18 +99,31 @@ export function validateDaybookCapture(
         "The capture has a duplicate voucher or a voucher outside its company or date range.",
       );
     ids.add(id);
+    const type = row.voucherType.toUpperCase();
+    const supported =
+      row.category === "receipt" ? type === "RECEIPT" : /SALES RETURN|CREDIT NOTE/.test(type);
     if ("review" in row) {
-      review.push({
+      // Older connectors report out-of-scope derived types (e.g. Cheque Return) as
+      // review items. Match the manual importer: exclude these, but retain credit holds.
+      const destination =
+        row.review === "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE" && !supported ? excludedVouchers : review;
+      destination.push({
         guid: id,
         date: row.date,
         voucherNumber: row.voucherNumber,
         voucherType: row.voucherType,
         reason: row.review,
       });
+    } else if ("excluded" in row) {
+      excludedVouchers.push({
+        guid: id,
+        date: row.date,
+        voucherNumber: row.voucherNumber,
+        voucherType: row.voucherType,
+        reason: row.excluded,
+      });
     } else if ("creditAmount" in row) {
-      const type = row.voucherType.toUpperCase();
-      if (row.category === "receipt" ? type !== "RECEIPT" : !/SALES RETURN|CREDIT NOTE/.test(type))
-        throw new Error("A captured voucher has an unexpected Day Book type.");
+      if (!supported) throw new Error("A captured voucher has an unexpected Day Book type.");
       credits.push(row);
     }
   }
@@ -120,7 +134,8 @@ export function validateDaybookCapture(
     completeMonth: data.throughDate === period.throughDate,
     credits,
     review,
-    excluded: ids.size - credits.length - review.length,
+    excluded: excludedVouchers.length,
+    excludedVouchers,
   };
 }
 

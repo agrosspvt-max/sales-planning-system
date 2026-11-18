@@ -216,6 +216,8 @@ export async function publishDaybook(db: Tx, capture: Capture) {
   }
   return {
     ...creditTotals(capture.credits),
+    excluded: capture.excluded,
+    excludedVouchers: capture.excludedVouchers,
     changedRows,
     matchedDealers,
     unmatched: scope.unmatched.map(({ candidateIds: _ids, ...row }) => row),

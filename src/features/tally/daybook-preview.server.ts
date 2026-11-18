@@ -188,6 +188,7 @@ export async function previewDaybook(raw: unknown) {
     observedAt: capture.observedAt,
     completeMonth: capture.completeMonth,
     excluded: capture.excluded,
+    excludedVouchers: capture.excludedVouchers,
     totals: creditTotals(capture.credits),
     dealers,
     unmatched: unmatched.map(({ ledgerName, candidates, liveRecovery, srCr }) => ({

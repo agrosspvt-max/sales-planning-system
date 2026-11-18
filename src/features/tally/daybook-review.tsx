@@ -71,6 +71,23 @@ export function TallyDaybookReview() {
             {result.totals.srCrCount} sales returns and credit notes · {money(result.totals.srCr)}.{" "}
             {result.excluded} excluded vouchers.
           </p>
+          {!!result.excludedVouchers.length && (
+            <details>
+              <summary className="cursor-pointer">
+                Excluded vouchers ({result.excludedVouchers.length})
+              </summary>
+              <ul className="ml-5 max-h-64 list-disc overflow-auto">
+                {result.excludedVouchers.map((v) => (
+                  <li key={v.guid}>
+                    {v.date} · {v.voucherType} {v.voucherNumber} ·{" "}
+                    {v.reason === "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"
+                      ? "Outside the Daybook import rules"
+                      : v.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           <p>
             {result.dealers.length} matched dealers ·{" "}
             {result.dealers.filter((d) => d.recovery).length} with one eligible Recovery plan

@@ -73,3 +73,27 @@ The claim adds the existing approved company-anchor ledger to the requested ledg
 Summary `zeroed` lists affected dealers and missing names separately from `held`. The refresh UI explains the zero action and selected month. Source bill records remain stored; zeroing only changes actual sales fields in the requested month, preserving plan fields, other months and aging.
 
 Validated using disposable PostgreSQL: no-alias missing name clears quantity/amount, configured missing alias clears, exact no-alias match imports decimals, missing older alias does not erase a readable alias, empty ledger collection preserves values, explicit historical refresh affects only its month, production-mode policy preserves previous behavior, and bill/aging regression checks. Rendered UI tests verify the zero explanation and the Preview/database guard tests reject production, other branches and other databases.
+
+### Daybook unsupported voucher types — 18 November
+
+The office scan reported a blank-number `Cheque Return` on 2 November as
+`VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE`. The server previously rejected the whole month
+for this diagnostic even though the manual Daybook importer deliberately ignores
+types other than exact Receipt, Credit Note or Sales Return (including suffixes
+for the latter two).
+
+The capture validator now independently checks that a type really is outside
+those rules before treating that diagnostic as an exclusion. Valid receipts and
+SR/CR publish normally. Successful sync summaries and local capture previews list
+the excluded voucher date, type, number, identity and reason. Cancelled and
+optional vouchers remain excluded too. No amount is inferred for Cheque Return.
+`CREDIT_AMBIGUOUS`, `CREDIT_MISSING`, and inconsistent review diagnostics for an
+otherwise supported type still reject publication and preserve prior figures.
+Company/date/GUID validation, complete-period coverage and replay checks remain
+in force.
+
+This is compatible with the existing `daybook.capture.v1` payload from connector
+1.6.1-test; no Windows update or database migration is required. The queued next
+scan or a manual refresh uses the new handling. Disposable PostgreSQL tests cover
+a mixed batch with Cheque Return, exact receipt/SRCR totals, visible exclusion
+details, replay, review holds, replacement and Last Payment; typecheck passed.

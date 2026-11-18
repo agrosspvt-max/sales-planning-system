@@ -45,6 +45,12 @@ async function apply(db){
   if(!dealerRefresh.length){
    await applyMigration(tx,'20261118000000_tally_dealer_manual_refresh');
   }
+  const daybookTotals=await tx.$queryRaw`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='TallyDaybookDealerMonth' AND column_name IN ('liveRecovery','srCr')`;
+  if(!daybookTotals.length){
+   await applyMigration(tx,'20261118010000_tally_unplanned_recovery');
+  }else if(daybookTotals.length!==2){
+   throw Error('Partial Daybook recovery totals schema requires review');
+  }
  },{timeout:55000,maxWait:10000});
 }
 async function main(){

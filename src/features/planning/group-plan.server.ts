@@ -140,6 +140,7 @@ export interface GroupOfficerBreakdown {
   byBucket: Record<StatusBucket, OfficerRef[]>;
   excluded: { name: string; reason: string }[];
   withUnplannedSales?: OfficerRef[];
+  withUnplannedRecovery?: OfficerRef[];
 }
 export interface GroupProductPlan {
   groupName: string;

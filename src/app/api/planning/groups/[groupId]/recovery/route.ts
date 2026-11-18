@@ -22,6 +22,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ groupId: st
       .map((s) => s.trim())
       .filter((s): s is StatusBucket => (ALL_BUCKETS as string[]).includes(s));
     const officerId = q.get("officerId")?.trim() || undefined;
-    return ok(await getGroupRecovery(auth, groupId, seasonId, seasonMonthId, buckets.length ? buckets : ["approved"], officerId));
+    return ok(await getGroupRecovery(auth, groupId, seasonId, seasonMonthId, buckets, officerId, q.get("unplanned") === "true"));
   });
 }

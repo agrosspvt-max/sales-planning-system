@@ -66,6 +66,7 @@ export interface GroupOfficerBreakdown {
   byBucket: Record<StatusBucket, OfficerRef[]>;
   excluded: { name: string; reason: string }[];
   withUnplannedSales?: OfficerRef[];
+  withUnplannedRecovery?: OfficerRef[];
 }
 interface GroupProductPlan {
   groupName: string; seasonName: string; monthlyMode: PlanningMode; seasonalMode: PlanningMode;
@@ -144,7 +145,7 @@ export function GroupPlanPage({ groupId, groupName, showUnplanned = false }: { g
       </div>
 
       {tab === "recovery" ? (
-        <GroupRecovery groupId={groupId} seasonId={effectiveSeason} officerId={officerId} />
+        <GroupRecovery groupId={groupId} seasonId={effectiveSeason} officerId={officerId} showUnplanned={showUnplanned} />
       ) : (
         <GroupSalesPlan groupId={groupId} seasonId={effectiveSeason} officerId={officerId}
           officerLabel={officers?.find((officer) => officer.id === officerId)?.name ?? "All Team Members"}
@@ -444,7 +445,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
 export function StatusFilter({ buckets, onToggle, unplanned }: {
   buckets: StatusBucket[];
   onToggle: (b: StatusBucket) => void;
-  unplanned?: { checked: boolean; onToggle: () => void };
+  unplanned?: { checked: boolean; onToggle: () => void; title?: string };
 }) {
   return (
     <div className="inline-flex items-center gap-3 rounded-md border bg-background px-3 py-1.5 text-sm">
@@ -456,7 +457,7 @@ export function StatusFilter({ buckets, onToggle, unplanned }: {
         </label>
       ))}
       {unplanned && (
-        <label className="flex cursor-pointer items-center gap-1.5" title="Actuals for months without an approved monthly plan">
+        <label className="flex cursor-pointer items-center gap-1.5" title={unplanned.title ?? "Actuals for months without an approved monthly plan"}>
           <input type="checkbox" className="h-4 w-4" checked={unplanned.checked} onChange={unplanned.onToggle} />
           Unplanned
         </label>
@@ -504,6 +505,12 @@ export function OfficersBadge({ officers }: { officers: GroupOfficerBreakdown })
             <div>
               <div className="text-xs font-medium">Unplanned sales ({officers.withUnplannedSales.length})</div>
               <ul>{officers.withUnplannedSales.map((officer) => <li key={officer.id}>{officer.name}</li>)}</ul>
+            </div>
+          )}
+          {!!officers.withUnplannedRecovery?.length && (
+            <div>
+              <div className="text-xs font-medium">Unplanned recovery ({officers.withUnplannedRecovery.length})</div>
+              <ul>{officers.withUnplannedRecovery.map((officer) => <li key={officer.id}>{officer.name}</li>)}</ul>
             </div>
           )}
           <div className="mt-1 border-t pt-1.5">

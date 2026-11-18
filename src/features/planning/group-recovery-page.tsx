@@ -22,7 +22,7 @@ import {
 /* --------------------------------- Types ---------------------------------- */
 
 interface TerritoryDealer extends RecoveryCalcDealer { dealerName: string }
-interface RecoveryOfficerRow { officerId: string; officerName: string; bucket: StatusBucket; status: string; recoveryPlanId: string; dealers: TerritoryDealer[] }
+interface RecoveryOfficerRow { officerId: string; officerName: string; bucket: StatusBucket | "unplanned"; status: string; recoveryPlanId: string; dealers: TerritoryDealer[] }
 interface GroupRecoveryData {
   groupName: string; seasonName: string; monthName: string; seasonMonthId: string; weekCount: number;
   months: { id: string; name: string; order: number }[];
@@ -75,17 +75,18 @@ const weekCols = (weekNo: number, weekCount: number): Col<RecoveryWeekTotals>[] 
  * totals are computed by the SHARED recovery-calc (same math as the per-officer Recovery table); the
  * drawer shows the same dealers un-aggregated, so its numbers always equal the row.
  */
-export function GroupRecovery({ groupId, seasonId, officerId = "" }: { groupId: string; seasonId: string; officerId?: string }) {
+export function GroupRecovery({ groupId, seasonId, officerId = "", showUnplanned = false }: { groupId: string; seasonId: string; officerId?: string; showUnplanned?: boolean }) {
   const [month, setMonth] = useState("");
   const [view, setView] = useState<RView>("month");
   const [weekNo, setWeekNo] = useState(1);
   const [buckets, setBuckets] = useState<StatusBucket[]>(["approved", "submitted", "draft"]);
+  const [includeUnplanned, setIncludeUnplanned] = useState(false);
   const [drawer, setDrawer] = useState<RecoveryOfficerRow | null>(null);
 
   const bucketsKey = [...buckets].sort().join(",");
   const { data, isLoading, isFetching } = useQuery<GroupRecoveryData>({
-    queryKey: ["group-recovery", groupId, seasonId, month, bucketsKey, officerId],
-    queryFn: () => api.get(`/api/planning/groups/${groupId}/recovery?seasonId=${seasonId}&month=${month}&buckets=${bucketsKey || "approved"}${officerId ? `&officerId=${officerId}` : ""}`),
+    queryKey: ["group-recovery", groupId, seasonId, month, bucketsKey, officerId, includeUnplanned],
+    queryFn: () => api.get(`/api/planning/groups/${groupId}/recovery?seasonId=${seasonId}&month=${month}&buckets=${bucketsKey}&unplanned=${includeUnplanned}${officerId ? `&officerId=${officerId}` : ""}`),
     enabled: !!seasonId,
     placeholderData: keepPreviousData,
   });
@@ -97,7 +98,7 @@ export function GroupRecovery({ groupId, seasonId, officerId = "" }: { groupId: 
   const toggleBucket = (b: StatusBucket) =>
     setBuckets((prev) => {
       const next = prev.includes(b) ? prev.filter((x) => x !== b) : [...prev, b];
-      return next.length ? next : prev;
+      return next.length || includeUnplanned ? next : prev;
     });
 
   // Grand total across every included officer's dealers — one shared-calc pass over all dealers.
@@ -113,7 +114,14 @@ export function GroupRecovery({ groupId, seasonId, officerId = "" }: { groupId: 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
-        <StatusFilter buckets={buckets} onToggle={toggleBucket} />
+        <StatusFilter buckets={buckets} onToggle={toggleBucket} unplanned={showUnplanned ? {
+          checked: includeUnplanned,
+          onToggle: () => {
+            if (includeUnplanned && !buckets.length) setBuckets(["approved"]);
+            setIncludeUnplanned(!includeUnplanned);
+          },
+          title: "Recovery actuals without an approved Recovery plan",
+        } : undefined} />
         <OfficersBadge officers={data.officers} />
         <span className="text-sm text-muted-foreground">·</span>
         <span className="text-sm text-muted-foreground">{data.seasonName} · {data.monthName}</span>
@@ -163,7 +171,7 @@ export function GroupRecovery({ groupId, seasonId, officerId = "" }: { groupId: 
                     <TableCell className="font-medium">
                       <button className="inline-flex items-center gap-1 text-left text-primary hover:underline" onClick={() => setDrawer(r)}>
                         {r.officerName} <ChevronRight className="h-3.5 w-3.5" />
-                        <span className="ml-1 text-[10px] font-normal text-muted-foreground">{BUCKET_LABEL[r.bucket]}</span>
+                        <span className="ml-1 text-[10px] font-normal text-muted-foreground">{r.bucket === "unplanned" ? "Unplanned" : BUCKET_LABEL[r.bucket]}</span>
                       </button>
                     </TableCell>
                     {(cols as Col<typeof t>[]).map((c) => (
@@ -192,7 +200,7 @@ export function GroupRecovery({ groupId, seasonId, officerId = "" }: { groupId: 
           view={view}
           weekNo={weekNo}
           weekCount={weekCount}
-          filterLabel={`${data.seasonName} · ${data.monthName} · ${view === "month" ? "Month" : `Week ${weekNo}`} · ${buckets.map((b) => BUCKET_LABEL[b]).join(", ")}`}
+          filterLabel={`${data.seasonName} · ${data.monthName} · ${view === "month" ? "Month" : `Week ${weekNo}`} · ${[...buckets.map((b) => BUCKET_LABEL[b]), ...(includeUnplanned ? ["Unplanned"] : [])].join(", ")}`}
           onClose={() => setDrawer(null)}
         />
       )}

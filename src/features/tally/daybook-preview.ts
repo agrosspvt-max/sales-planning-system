@@ -18,7 +18,7 @@ const day = z
 const voucher = z.object({
   guid: z.string().regex(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-[0-9a-f]{8}$/i),
   date: day,
-  voucherNumber: name,
+  voucherNumber: name.or(z.literal("")),
   voucherType: name,
   category: z.enum(["receipt", "srCr"]),
 });

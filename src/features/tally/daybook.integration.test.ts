@@ -332,12 +332,13 @@ async function main() {
     return { reply: await call(body), retry: () => call(body) };
   }
   const vouchers = [
-    credit(1, "Verified Dealer", "5.25"),
+    { ...credit(1, "Verified Dealer", "5.25"), voucherNumber: "" },
     credit(2, "Verified Dealer", "8.00"),
     credit(3, "Verified Dealer", "10.00", "srCr"),
     credit(4, "Payment Only Dealer", "50.00"),
     credit(5, "Bank Charges", "900.00"),
     credit(6, "No Candidate", "70.00"),
+    credit(7, "Payment Only Dealer", "12.50", "srCr"),
   ];
   const first = await refresh(vouchers);
   assert.ok(first.reply.ok);
@@ -364,6 +365,12 @@ async function main() {
     "newer November payment survives October refresh",
   );
   assert.equal(payments.get("daybook-no-plan")?.amount, 50);
+  const noPlanCoverage = await prisma.tallyDaybookDealerMonth.findUniqueOrThrow({
+    where: { monthKey_dealerId: { monthKey: month, dealerId: "daybook-no-plan" } },
+  });
+  assert.equal(noPlanCoverage.liveRecovery.toFixed(2), "50.00");
+  assert.equal(noPlanCoverage.srCr.toFixed(2), "12.50");
+  assert.equal(noPlanCoverage.recoveryPlanId, null);
   assert.equal(payments.has("daybook-bank"), false);
   await assert.rejects(
     prisma.$transaction((tx) => svc.assertManualDaybookMonthAvailable(tx, "daybook-month")),

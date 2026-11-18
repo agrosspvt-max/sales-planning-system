@@ -40,6 +40,17 @@ const errors: Record<string, string> = {
   DAYBOOK_CAPTURE_REJECTED: "The capture failed validation.",
   DAYBOOK_SCOPE_CHANGED: "The capture did not cover the requested period. Request a fresh read.",
   DAYBOOK_VOUCHERS_NEED_REVIEW: "Some vouchers could not be classified safely.",
+  SALES_FIELD_INVALID: "A voucher field was blank or too long. Install connector 1.6.1-test and refresh to identify the field.",
+  DAYBOOK_GUID_INVALID: "Tally returned a voucher without a valid identity.",
+  DAYBOOK_DATE_INVALID: "Tally returned a voucher without a valid date.",
+  DAYBOOK_VOUCHERTYPENAME_INVALID: "A voucher type name was missing or too long.",
+  DAYBOOK_PARTYLEDGERNAME_INVALID: "A party ledger name was invalid or too long.",
+  DAYBOOK_VOUCHERNUMBER_INVALID: "A voucher number was invalid or too long.",
+  DAYBOOK_LEDGERNAME_INVALID: "A ledger entry had an invalid or oversized name.",
+  DAYBOOK_AMOUNT_INVALID: "A ledger entry had an invalid amount.",
+  DAYBOOK_ISCANCELLED_INVALID: "Tally did not return a valid cancellation flag.",
+  DAYBOOK_ISOPTIONAL_INVALID: "Tally did not return a valid optional-voucher flag.",
+  DAYBOOK_ISDEEMEDPOSITIVE_INVALID: "Tally did not return the ledger entry direction.",
 };
 
 const money = (amount: string) =>

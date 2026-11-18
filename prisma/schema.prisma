@@ -2961,6 +2961,8 @@ model TallyDaybookDealerMonth {
   throughDate    String
   ledgerNames    String[]
   receiptDays    Json
+  liveRecovery   Decimal @default(0) @db.Decimal(14, 2)
+  srCr           Decimal @default(0) @db.Decimal(14, 2)
   recoveryPlanId String?
 
   @@id([monthKey, dealerId])

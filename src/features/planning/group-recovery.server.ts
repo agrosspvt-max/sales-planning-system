@@ -11,6 +11,7 @@ import type { RecoveryCalcDealer } from "@/features/recovery/recovery-calc";
 import { loadDealerAliasNameMap } from "@/lib/dealer-display-name.server";
 import { getCurrentOwnerByDealer } from "@/lib/scope";
 import { isCurrentlyOwnedBy } from "@/lib/dealer-ownership";
+import { approvedTestPreview } from "@/features/tally/sales-rollout";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -36,7 +37,7 @@ export interface TerritoryRecoveryDealer extends RecoveryCalcDealer {
 export interface RecoveryOfficerRow {
   officerId: string;
   officerName: string;
-  bucket: StatusBucket;
+  bucket: StatusBucket | "unplanned";
   status: string;
   recoveryPlanId: string;
   dealers: TerritoryRecoveryDealer[];
@@ -48,7 +49,7 @@ export interface GroupRecovery {
   seasonMonthId: string;
   weekCount: number;
   months: { id: string; name: string; order: number; calendarMonth?: number | null; calendarYear?: number | null }[];
-  filter: { buckets: StatusBucket[]; seasonMonthId: string };
+  filter: { buckets: StatusBucket[]; seasonMonthId: string; includeUnplanned: boolean };
   officers: GroupOfficerBreakdown;
   rows: RecoveryOfficerRow[];
 }
@@ -69,7 +70,7 @@ type PlanDealerRow = {
   weekPlans: { weekNo: number; weekRecoveryPlan: unknown; weekRunningRecovery: unknown }[];
 };
 
-export async function getGroupRecovery(ctx: AuthContext, groupId: string, seasonId: string, seasonMonthId: string, bucketsIn: StatusBucket[], officerId?: string): Promise<GroupRecovery> {
+export async function getGroupRecovery(ctx: AuthContext, groupId: string, seasonId: string, seasonMonthId: string, bucketsIn: StatusBucket[], officerId?: string, unplanned = false): Promise<GroupRecovery> {
   if (!isAdministrativeRole(ctx.role) && ctx.role !== Role.REGIONAL_MANAGER) {
     throw new ApiError(403, "Only an admin or manager can view group recovery");
   }
@@ -77,7 +78,8 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
   if (ctx.role === Role.REGIONAL_MANAGER && ctx.groupId !== groupId) {
     throw new ApiError(403, "You can only view your own group's recovery");
   }
-  const buckets = bucketsIn.length ? bucketsIn : (["approved"] as StatusBucket[]);
+  const includeUnplanned = unplanned && approvedTestPreview();
+  const buckets = bucketsIn.length || includeUnplanned ? bucketsIn : (["approved"] as StatusBucket[]);
   const selected = new Set(buckets);
 
   const [group, season] = (await Promise.all([
@@ -88,7 +90,7 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
   if (!season) throw new ApiError(404, "Season not found");
   const month = season.months.find((m) => m.id === seasonMonthId) ?? season.months[0];
   const monthId = month?.id ?? "";
-  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthName: month?.name ?? "", seasonMonthId: monthId, weekCount: BUSINESS_WEEK_COUNT, months: calendarRows(season.months), filter: { buckets, seasonMonthId: monthId } };
+  const base = { groupName: group.name, seasonName: `${season.name} ${season.year}`, monthName: month?.name ?? "", seasonMonthId: monthId, weekCount: BUSINESS_WEEK_COUNT, months: calendarRows(season.months), filter: { buckets, seasonMonthId: monthId, includeUnplanned } };
 
   // Contributors = the group's Sales Officers PLUS its Regional Manager (a contributor to the state's
   // territory). The groupId constraint prevents any cross-group access.
@@ -134,7 +136,7 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
   // Keep only plans whose status bucket is selected.
   const included = plans.filter((p) => {
     const b = bucketOfStatus(p.status);
-    return b !== null && selected.has(b);
+    return b !== null && (selected.has(b) || (includeUnplanned && b !== "approved"));
   });
 
   // CURRENT-OWNERSHIP filter: a plan's dealer rows are historical membership, so a dealer reassigned to a
@@ -176,14 +178,15 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
     }
   }
 
-  const rows: RecoveryOfficerRow[] = included.map((p) => {
+  const rows: RecoveryOfficerRow[] = included.map<RecoveryOfficerRow>((p) => {
     const dealers: TerritoryRecoveryDealer[] = p.dealers.map((d) => {
       const overdue = num(d.overdue);
       const due = num(d.due);
       const srCr = num(d.srCr ?? 0);
       const liveRecovery = num(d.liveRecovery ?? 0);
       const weeks: Record<number, { weekRecoveryPlan: number; weekRunningRecovery: number }> = {};
-      for (const w of d.weekPlans) weeks[w.weekNo] = { weekRecoveryPlan: num(w.weekRecoveryPlan ?? 0), weekRunningRecovery: num(w.weekRunningRecovery ?? 0) };
+      const includePlan = selected.has(bucketOfStatus(p.status)!);
+      if (includePlan) for (const w of d.weekPlans) weeks[w.weekNo] = { weekRecoveryPlan: num(w.weekRecoveryPlan ?? 0), weekRunningRecovery: num(w.weekRunningRecovery ?? 0) };
       return {
         dealerId: d.dealerId,
         dealerName: d.dealer.name,
@@ -197,8 +200,8 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
         liveRecovery,
         // Same derived formula as the per-officer Recovery table (service.server.ts): Live + SR/CR − (Due + Overdue).
         actualRunningRecovery: liveRecovery + srCr - (due + overdue),
-        monthRecoveryPlan: num(d.monthRecoveryPlan ?? 0),
-        monthRunningRecovery: num(d.monthRunningRecovery ?? 0),
+        monthRecoveryPlan: includePlan ? num(d.monthRecoveryPlan ?? 0) : 0,
+        monthRunningRecovery: includePlan ? num(d.monthRunningRecovery ?? 0) : 0,
         weeks,
         dueByWeek: dueByWeek.get(`${p.id}:${d.dealerId}`) ?? { 1: 0, 2: 0, 3: 0, 4: 0 },
       };
@@ -206,12 +209,46 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
     return {
       officerId: p.officerId,
       officerName: officerName.get(p.officerId) ?? p.officerId,
-      bucket: bucketOfStatus(p.status)!,
+      bucket: selected.has(bucketOfStatus(p.status)!) ? bucketOfStatus(p.status)! : "unplanned",
       status: p.status,
       recoveryPlanId: p.id,
       dealers,
     };
   }).sort((a, b) => a.officerName.localeCompare(b.officerName));
+
+  const unplannedOfficers = new Set(included.filter((p) => p.status !== "APPROVED").map((p) => p.officerId));
+  if (includeUnplanned && month?.calendarYear && month.calendarMonth) {
+    const monthKey = `${month.calendarYear}-${String(month.calendarMonth).padStart(2, "0")}`;
+    const actuals = await prisma.tallyDaybookDealerMonth.findMany({
+      where: { monthKey, dealer: { isActive: true, deletedAt: null, status: { not: "DEFAULTER" } } },
+      select: { dealerId: true, dealer: { select: { name: true } }, liveRecovery: true, srCr: true },
+    });
+    const owners = await getCurrentOwnerByDealer(actuals.map((row) => row.dealerId));
+    const includedDealers = new Set(rows.flatMap((row) => row.dealers.map((dealer) => dealer.dealerId)));
+    // A dealer in an approved current-owner plan stays in the Approved bucket.
+    const approvedPlans = plans.filter((p) => p.status === "APPROVED");
+    for (const actual of actuals) {
+      const owner = owners.get(actual.dealerId);
+      if (!owner || !officerName.has(owner) || includedDealers.has(actual.dealerId)) continue;
+      if (approvedPlans.some((p) => p.officerId === owner && p.dealers.some((d) => d.dealerId === actual.dealerId))) continue;
+      let row = rows.find((candidate) => candidate.officerId === owner);
+      if (!row) {
+        row = { officerId: owner, officerName: officerName.get(owner)!, bucket: "unplanned",
+          status: "UNPLANNED", recoveryPlanId: "", dealers: [] };
+        rows.push(row);
+      }
+      const liveRecovery = num(actual.liveRecovery), srCr = num(actual.srCr);
+      row.dealers.push({
+        dealerId: actual.dealerId, dealerName: actual.dealer.name,
+        outstanding: 0, outstandingTillDate: 0, overdue: 0, due: 0, running: 0, runningTillDate: 0,
+        srCr, liveRecovery, actualRunningRecovery: liveRecovery + srCr,
+        monthRecoveryPlan: 0, monthRunningRecovery: 0, weeks: {}, dueByWeek: {},
+      });
+      includedDealers.add(actual.dealerId);
+      unplannedOfficers.add(owner);
+    }
+    rows.sort((a, b) => a.officerName.localeCompare(b.officerName));
+  }
 
   // DISPLAY-only: alias-preferred dealer names for the Territory Recovery dealer rows (identity stays the id).
   const recoveryDealerIds = new Set<string>();
@@ -223,13 +260,14 @@ export async function getGroupRecovery(ctx: AuthContext, groupId: string, season
 
   // Officer breakdown — same shape/logic as Territory Product Plan (buckets from the included rows).
   const byBucketSets: Record<StatusBucket, Set<string>> = { approved: new Set(), submitted: new Set(), draft: new Set() };
-  for (const r of rows) byBucketSets[r.bucket].add(r.officerId);
+  for (const r of rows) if (r.bucket !== "unplanned") byBucketSets[r.bucket].add(r.officerId);
   const includedIds = new Set(rows.map((r) => r.officerId));
   const refs = (ids: Set<string>): OfficerRef[] => [...ids].map((id) => ({ id, name: officerName.get(id) ?? id })).sort((a, b) => a.name.localeCompare(b.name));
   const officerBreakdown: GroupOfficerBreakdown = {
     total: officers.length,
     includedCount: includedIds.size,
     byBucket: { approved: refs(byBucketSets.approved), submitted: refs(byBucketSets.submitted), draft: refs(byBucketSets.draft) },
+    ...(includeUnplanned ? { withUnplannedRecovery: refs(unplannedOfficers) } : {}),
     excluded: officers.filter((o) => !includedIds.has(o.id)).map((o) => ({ name: o.name, reason: "No recovery plan in the selected states" })),
   };
 

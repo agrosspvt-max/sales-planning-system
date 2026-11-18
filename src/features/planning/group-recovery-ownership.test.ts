@@ -68,6 +68,7 @@ function loadService(prisma: object, ownerByDealer: Map<string, string>) {
       ALL_BUCKETS: ["approved", "submitted", "draft"],
     },
     "@/features/recovery/recovery-calc": {},
+    "@/features/tally/sales-rollout": { approvedTestPreview: () => true },
     "@/lib/dealer-display-name.server": { loadDealerAliasNameMap: async () => new Map() },
     // The authoritative current owner — the real function is tested separately; here we inject the known truth.
     "@/lib/scope": { getCurrentOwnerByDealer: async () => ownerByDealer },
@@ -107,7 +108,33 @@ async function main() {
   assert.ok(!(v2?.dealers ?? []).map((d) => d.dealerId).includes(D1), "after reverse, Shivveer no longer shows D1");
   console.log("  ok  reverse reassignment (→ Sunil) follows current owner");
 
-  console.log("\n2 group-recovery ownership integration tests passed");
+  const unplannedDealer = "unplanned-dealer";
+  const fake = makeFakePrisma();
+  const plans = await fake.recoveryPlan.findMany();
+  plans[1].status = "DRAFT";
+  plans[1].dealers[0].liveRecovery = 25;
+  fake.recoveryPlan.findMany = async () => structuredClone(plans);
+  fake.season.findUnique = async () => ({ name: "Kharif", year: 2026,
+    months: [{ id: MONTH, name: "July", order: 1, calendarMonth: 7, calendarYear: 2026 }] });
+  const fakeWithCoverage = { ...fake, tallyDaybookDealerMonth: { findMany: async () => [
+    { dealerId: unplannedDealer, dealer: { name: "Dealer without Recovery plan" }, liveRecovery: 50, srCr: 12 },
+  ] } };
+  const unplannedSvc = loadService(fakeWithCoverage, new Map([[D1, SHIV], [D2, SHIV], [unplannedDealer, SHIV]]));
+  const withActuals = await unplannedSvc.getGroupRecovery(ADMIN, GROUP, SEASON, MONTH, ["approved"], undefined, true);
+  const unplannedRow = withActuals.rows.find((row) => row.officerId === SHIV)!;
+  assert.equal(unplannedRow.bucket, "unplanned");
+  assert.equal(unplannedRow.dealers.length, 3);
+  assert.equal(unplannedRow.dealers.reduce((sum, dealer) => sum + dealer.liveRecovery, 0), 75);
+  assert.equal(unplannedRow.dealers.find((dealer) => dealer.dealerId === unplannedDealer)?.srCr, 12);
+  const allFilters = await unplannedSvc.getGroupRecovery(ADMIN, GROUP, SEASON, MONTH, ["approved","draft","submitted"], undefined, true);
+  assert.equal(allFilters.rows.flatMap((row) => row.dealers).filter((dealer) => dealer.dealerId === D1).length, 1);
+  const onlyUnplanned = await unplannedSvc.getGroupRecovery(ADMIN, GROUP, SEASON, MONTH, [], undefined, true);
+  assert.equal(onlyUnplanned.filter.buckets.length, 0);
+  assert.equal(onlyUnplanned.rows.length, 1);
+  assert.equal(onlyUnplanned.officers.withUnplannedRecovery?.length, 1);
+  console.log("  ok  unapproved and missing-plan Daybook actuals appear once with Unplanned");
+
+  console.log("\n3 group-recovery ownership and unplanned integration tests passed");
 }
 
 main().catch((error) => { console.error(error); process.exit(1); });

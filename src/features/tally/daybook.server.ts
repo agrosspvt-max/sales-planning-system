@@ -174,7 +174,8 @@ export async function publishDaybook(db: Tx, capture: Capture) {
     const recoveryPlanId = plan?.id ?? previous?.recoveryPlanId ?? null;
     coverageRows.push(Prisma.sql`(${capture.month}, ${dealerId}, ${capture.throughDate},
       ARRAY[${Prisma.join(ledgerNames.length ? ledgerNames : [null])}]::text[],
-      ${JSON.stringify(days)}::jsonb, ${recoveryPlanId})`);
+      ${JSON.stringify(days)}::jsonb, ${recoveryPlanId},
+      ${totals.liveRecovery}::decimal, ${totals.srCr}::decimal)`);
     if (match) matchedDealers++;
     if (!plan) {
       if (match) recoveryIssues.push({ dealerName: match.dealerName, issue });
@@ -192,14 +193,17 @@ export async function publishDaybook(db: Tx, capture: Capture) {
   }
   for (let i = 0; i < coverageRows.length; i += 250) {
     await db.$executeRaw`
-      INSERT INTO "TallyDaybookDealerMonth" ("monthKey", "dealerId", "throughDate", "ledgerNames", "receiptDays", "recoveryPlanId")
-      SELECT m, d, t, array_remove(l, NULL), r, p FROM (VALUES ${Prisma.join(coverageRows.slice(i, i + 250))}) AS src(m,d,t,l,r,p)
+      INSERT INTO "TallyDaybookDealerMonth" ("monthKey", "dealerId", "throughDate", "ledgerNames", "receiptDays", "recoveryPlanId", "liveRecovery", "srCr")
+      SELECT m, d, t, array_remove(l, NULL), r, p, live, cr FROM (VALUES ${Prisma.join(coverageRows.slice(i, i + 250))}) AS src(m,d,t,l,r,p,live,cr)
       ON CONFLICT ("monthKey", "dealerId") DO UPDATE SET
         "throughDate" = EXCLUDED."throughDate", "ledgerNames" = EXCLUDED."ledgerNames",
-        "receiptDays" = EXCLUDED."receiptDays", "recoveryPlanId" = EXCLUDED."recoveryPlanId"
+        "receiptDays" = EXCLUDED."receiptDays", "recoveryPlanId" = EXCLUDED."recoveryPlanId",
+        "liveRecovery" = EXCLUDED."liveRecovery", "srCr" = EXCLUDED."srCr"
       WHERE ("TallyDaybookDealerMonth"."throughDate", "TallyDaybookDealerMonth"."ledgerNames",
-             "TallyDaybookDealerMonth"."receiptDays", "TallyDaybookDealerMonth"."recoveryPlanId")
-        IS DISTINCT FROM (EXCLUDED."throughDate", EXCLUDED."ledgerNames", EXCLUDED."receiptDays", EXCLUDED."recoveryPlanId")`;
+             "TallyDaybookDealerMonth"."receiptDays", "TallyDaybookDealerMonth"."recoveryPlanId",
+             "TallyDaybookDealerMonth"."liveRecovery", "TallyDaybookDealerMonth"."srCr")
+        IS DISTINCT FROM (EXCLUDED."throughDate", EXCLUDED."ledgerNames", EXCLUDED."receiptDays", EXCLUDED."recoveryPlanId",
+                          EXCLUDED."liveRecovery", EXCLUDED."srCr")`;
   }
   for (let i = 0; i < recoveryRows.length; i += 250) {
     changedRows += await db.$executeRaw`

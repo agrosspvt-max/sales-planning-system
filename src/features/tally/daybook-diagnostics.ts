@@ -22,6 +22,44 @@ export const daybookDiagnosticsSchema = z
     companyName: text(256).optional(),
     fromDate: day,
     throughDate: day,
+    encoding: z
+      .object({
+        expectedEncoding: z.literal("UTF-8"),
+        byteOffset: z
+          .number()
+          .int()
+          .min(0)
+          .max(8 * 1024 * 1024),
+        byteEnd: z
+          .number()
+          .int()
+          .min(0)
+          .max(8 * 1024 * 1024),
+        responseBytes: z
+          .number()
+          .int()
+          .min(1)
+          .max(8 * 1024 * 1024),
+        decodeReason: text(160),
+        invalidBytesHex: text(128),
+        contextStart: z
+          .number()
+          .int()
+          .min(0)
+          .max(8 * 1024 * 1024),
+        contextHex: text(512),
+        contextText: text(512),
+        responseSha256: z.string().regex(/^[a-f0-9]{64}$/),
+        bom: text(32).optional(),
+        declaredEncoding: text(64).optional(),
+        fieldName: text(128).optional(),
+        metadataRecovered: z.boolean(),
+        localResponseFile: text(1024).optional(),
+        captureStatus: z.enum(["saved", "save_failed", "limit_reached"]).optional(),
+        isolationError: text(80).optional(),
+      })
+      .strict()
+      .optional(),
     voucher: z
       .object({
         guid: text(512).nullish(),

@@ -236,3 +236,45 @@ on macOS); UI renders the info button, fields and escaped source strings; TypeSc
 checks passed. Install the supplied 1.6.3-test package then request May's scan again
 for the actual office voucher details; historical errors cannot be reconstructed
 from their old error code alone.
+
+### Exact encoding-failure evidence — 19 November, 1.6.4-test
+
+The shared UTF-8 reader still rejects undecodable responses. Its EncodingRejected
+exception now carries bounded byte evidence: original-file zero-based start/end,
+decoder reason, rejected hex bytes, context start/hex/escaped text, total byte count,
+XML encoding declaration when readable, recognized BOM and the full response hash.
+A nearby simple ASCII XML field can be identified. Voucher metadata is recovered
+only from independently valid UTF-8 fields inside byte-delimited voucher/ledger
+blocks. This is labelled diagnostic recovery, not accepted accounting data. A BOM
+at the response start does not implicate the first voucher. No replacement decoder
+or guessed alternate encoding supplies any financial value.
+
+Daybook captures encoding failures before attempting smaller intervals, saves the
+original unchanged bytes under the existing state directory's sibling diagnostics
+folder, and bisects failed date intervals down to one day when possible. Transport
+or collection-budget failure during isolation retains the original encoding
+response/evidence and records isolationError. Distinct file content is deduplicated
+by its hash; at most 20 .bin captures are saved per month. File write/limit failures
+are reported alongside the remaining evidence. A successful smaller read still
+passes every existing XML/date/company/amount check. An unresolved failure keeps the
+previous published month. No invalid response is repaired or directly imported.
+
+The Daybook info dialog now presents exact byte/one-based position, rejected hex,
+nearest field, decoder reason, declaration/BOM, escaped context, response size/hash,
+and the path to the local .bin file. Available dealer/bill metadata remains visible
+with the byte-recovery caveat. The full original response stays on the Tally PC;
+only bounded diagnostic evidence is uploaded through the existing authenticated,
+lease-scoped failure payload. Its original .bin file can be supplied for a deeper
+audit; an earlier failed read's discarded response cannot be recovered retroactively.
+
+Office changes: encoding_diagnostics.py (new helper), sales_sync.py,
+daybook_capture.py, daybook_worker.py, sync_all.py, tests/test_encoding_diagnostics.py.
+Website changes: daybook-diagnostics.ts, daybook-error-details.tsx, daybook-sync.tsx
+and daybook.integration.test.ts. No schema or credential update. Install 1.6.4-test,
+restart the existing combined runner and request June 2026 again. Verification:
+127 Python checks passed (three Windows-only skipped on macOS), including invalid
+UTF-8 in narration/ledger names, BOM offsets, UTF-16 markers, truncated sequences,
+valid Unicode, single-day isolation, exact saved bytes, hash deduplication and
+narrowing timeouts. Real Python byte evidence was saved/read through the agent API
+in disposable PostgreSQL without changing financial values. Info dialog rendering
+and TypeScript checks passed.

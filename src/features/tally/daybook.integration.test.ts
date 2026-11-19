@@ -571,6 +571,76 @@ except d.DaybookRejected as error:
       .review[0].details.voucher.dealerName,
     "Verified Dealer",
   );
+  const encodingEvidence = spawnSync(
+    "python3",
+    [
+      "-B",
+      "-c",
+      `
+import json, sys
+import sales_sync as s
+p = json.load(sys.stdin)
+raw = (f'<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION><VOUCHER><GUID>{p["prefix"]}-00000088</GUID><DATE>{p["month"].replace("-", "")}02</DATE><VOUCHERNUMBER>ENC-88</VOUCHERNUMBER><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME><PARTYLEDGERNAME>Verified Dealer</PARTYLEDGERNAME><NARRATION>bad '.encode() + bytes([150]) + b' text</NARRATION></VOUCHER></COLLECTION></DATA></BODY></ENVELOPE>')
+try:
+    s.safe_sales_xml(raw)
+except s.EncodingRejected as error:
+    print(json.dumps({"code": str(error), "details": {"stage": "vouchers", "companyName": "Synthetic Company", "month": p["month"], "fromDate": p["month"] + "-01", "throughDate": p["last"], **error.details}}))
+`,
+    ],
+    {
+      cwd: resolve("../tally-connector-v1.3/Tally-Office-Connector"),
+      input: JSON.stringify({ prefix, month, last }),
+      encoding: "utf8",
+    },
+  );
+  assert.equal(encodingEvidence.status, 0, encodingEvidence.stderr);
+  const encodingFailure = JSON.parse(encodingEvidence.stdout);
+  await svc.requestDaybookRefresh(auth, month);
+  const encodingJob = (await claim()).job!;
+  const encodingBody = {
+    action: "fail",
+    jobId: encodingJob.id,
+    leaseToken: encodingJob.leaseToken,
+    ...encodingFailure,
+  };
+  await assert.rejects(
+    call({
+      ...encodingBody,
+      details: {
+        ...encodingFailure.details,
+        encoding: { ...encodingFailure.details.encoding, byteOffset: -1 },
+      },
+    }),
+  );
+  assert.ok((await call(encodingBody)).ok);
+  assert.ok((await call(encodingBody)).rejected);
+  const encodingStatus = await svc.daybookStatus(auth, month);
+  const storedEncoding = encodingStatus.job?.summary as {
+    diagnostics: {
+      encoding: {
+        byteOffset: number;
+        invalidBytesHex: string;
+        fieldName: string;
+        responseSha256: string;
+      };
+      voucher: { voucherNumber: string; dealerName: string };
+    };
+  };
+  assert.equal(encodingStatus.job?.error, "SALES_ENCODING_REJECTED");
+  assert.equal(
+    storedEncoding.diagnostics.encoding.byteOffset,
+    encodingFailure.details.encoding.byteOffset,
+  );
+  assert.equal(storedEncoding.diagnostics.encoding.invalidBytesHex, "96");
+  assert.equal(storedEncoding.diagnostics.encoding.fieldName, "NARRATION");
+  assert.equal(storedEncoding.diagnostics.encoding.responseSha256.length, 64);
+  assert.equal(storedEncoding.diagnostics.voucher.voucherNumber, "ENC-88");
+  assert.equal(storedEncoding.diagnostics.voucher.dealerName, "Verified Dealer");
+  assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+  assert.equal((await values()).srCr.toFixed(2), "10.00");
+  console.log(
+    "Encoding byte evidence and recovered voucher metadata reach the status API without changing financial data: PASS",
+  );
   const partial = await refresh([], month + "-15");
   assert.ok(partial.reply.rejected);
   assert.ok((await partial.retry()).rejected);

@@ -31,6 +31,7 @@ const stage: Record<string, string> = {
 
 function Evidence({ details }: { details: DaybookDiagnostics }) {
   const voucher = details.voucher;
+  const encoding = details.encoding;
   const fields: [string, string | number | null | undefined][] = [
     ["Tally company", details.companyName],
     ["Reading stage", stage[details.stage] ?? details.stage],
@@ -65,6 +66,80 @@ function Evidence({ details }: { details: DaybookDiagnostics }) {
           </div>
         ))}
       </dl>
+      {encoding && (
+        <section
+          className="space-y-3 rounded border p-3"
+          aria-label="Original response encoding evidence"
+        >
+          <h3 className="text-sm font-medium">Exact response-byte evidence</h3>
+          <p className="text-sm">
+            The UTF-8 decoder stopped at byte {encoding.byteOffset} (position{" "}
+            {encoding.byteOffset + 1} when counting from 1). The original response remains rejected.
+          </p>
+          <dl className="grid gap-x-4 gap-y-2 text-sm sm:grid-cols-[13rem_1fr]">
+            {(
+              [
+                ["Decoder reason", encoding.decodeReason],
+                ["Rejected bytes (hex)", encoding.invalidBytesHex],
+                ["XML field near the byte", encoding.fieldName],
+                ["Encoding declared in XML", encoding.declaredEncoding],
+                ["Response encoding marker", encoding.bom],
+                ["Response size", `${encoding.responseBytes} bytes`],
+                ["Original response file", encoding.localResponseFile],
+                ["Response SHA-256", encoding.responseSha256],
+              ] as [string, string | undefined][]
+            ).map(([label, content]) => (
+              <div key={label} className="contents">
+                <dt className="text-muted-foreground">{label}</dt>
+                <dd className="break-all font-mono text-xs">{value(content)}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="text-xs text-muted-foreground">
+            Surrounding text below is for diagnosis. Invalid bytes are displayed as escaped byte
+            codes; no text substitution is used to import financial data.
+          </p>
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 text-xs">
+            {encoding.contextText}
+          </pre>
+          <details className="text-xs">
+            <summary className="cursor-pointer">
+              Surrounding bytes in hex · starts at byte {encoding.contextStart}
+            </summary>
+            <pre className="mt-2 whitespace-pre-wrap break-all">{encoding.contextHex}</pre>
+          </details>
+          {encoding.metadataRecovered && (
+            <p className="text-xs text-muted-foreground">
+              Voucher metadata above was recovered from nearby XML byte boundaries for diagnosis.
+              Confirm it against the original response file.
+            </p>
+          )}
+          {encoding.isolationError && (
+            <p className="text-xs text-muted-foreground">
+              Narrowing the request to a smaller date range stopped with {encoding.isolationError}.
+              The original response and byte evidence above were retained.
+            </p>
+          )}
+          {encoding.captureStatus === "saved" && (
+            <p className="text-xs text-muted-foreground">
+              The original .bin file is on the Tally computer at the path above. Its bytes were
+              preserved without editing.
+            </p>
+          )}
+          {encoding.captureStatus === "save_failed" && (
+            <p className="text-xs text-muted-foreground">
+              The connector could not save the local response file. The byte evidence above was
+              still recorded.
+            </p>
+          )}
+          {encoding.captureStatus === "limit_reached" && (
+            <p className="text-xs text-muted-foreground">
+              The monthly limit of 20 local encoding captures was reached. Byte evidence was
+              recorded without creating another file.
+            </p>
+          )}
+        </section>
+      )}
       {!voucher && (
         <p className="text-sm text-muted-foreground">
           No individual voucher was identified for this failure. The reading stage and date range
@@ -185,7 +260,7 @@ export function DaybookErrorDetails({
                 ) : (
                   <p className="text-sm text-muted-foreground">
                     This capture did not include the dealer and ledger details. Update the connector
-                    to 1.6.3-test and refresh this month.
+                    to 1.6.4-test and refresh this month.
                   </p>
                 )}
               </section>
@@ -193,7 +268,7 @@ export function DaybookErrorDetails({
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">
-            This failed read did not send voucher details. Install connector 1.6.3-test and refresh
+            This failed read did not send voucher details. Install connector 1.6.4-test and refresh
             this month to collect the error details. For a timeout, Tally may not have returned an
             individual voucher.
           </p>

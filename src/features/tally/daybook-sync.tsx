@@ -61,6 +61,8 @@ const errors: Record<string, string> = {
   DAYBOOK_LEDGERNAME_INVALID: "A ledger entry had an invalid or oversized name.",
   DAYBOOK_LEDGER_SIGN_MISMATCH:
     "A voucher ledger amount and debit/credit flag need checking. Open the info button for details.",
+  SALES_ENCODING_REJECTED:
+    "The Tally response contains bytes that cannot be read as UTF-8. Open the info button for byte evidence and the original response file.",
   TALLY_REQUEST_TIMEOUT: "Tally did not finish responding in time.",
   TALLY_UNAVAILABLE: "The connector could not read a response from Tally.",
   DAYBOOK_AMOUNT_INVALID: "A ledger entry had an invalid amount.",

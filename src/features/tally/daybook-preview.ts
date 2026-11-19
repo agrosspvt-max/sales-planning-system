@@ -2,6 +2,10 @@ import { z } from "zod";
 import { cents, decimal } from "./billwise";
 import { salesPeriod } from "./sales";
 import { daybookDiagnosticsSchema, type DaybookDiagnostics } from "./daybook-diagnostics";
+import {
+  daybookBillAllocationsSchema,
+  type DaybookBillAllocations,
+} from "./daybook-bill-allocations";
 
 export const DAYBOOK_PREVIEW_BYTES = 2 * 1024 * 1024;
 const name = z
@@ -30,6 +34,7 @@ const voucher = z.object({
   voucherNumber: name.or(z.literal("")),
   voucherType: name,
   category: z.enum(["receipt", "srCr", "other"]),
+  billAllocations: daybookBillAllocationsSchema.optional(),
 });
 const included = voucher
   .extend({
@@ -108,6 +113,7 @@ export function validateDaybookCapture(
     ledgerName?: string;
     amount?: string;
     direction?: "debit" | "credit" | "zero";
+    billAllocations?: DaybookBillAllocations;
   }[] = [];
   const excludedVouchers: (typeof review)[number][] = [];
   for (const row of data.vouchers) {
@@ -128,6 +134,15 @@ export function validateDaybookCapture(
       row.category === "receipt"
         ? type === "RECEIPT"
         : row.category === "srCr" && /SALES RETURN|CREDIT NOTE/.test(type);
+    if (
+      "creditAmount" in row &&
+      row.billAllocations &&
+      (row.billAllocations.scope !== "selected_credit" ||
+        row.billAllocations.entries.some(
+          (entry) => entry.ledgerName?.trim().toLowerCase() !== row.ledgerName.toLowerCase(),
+        ))
+    )
+      throw new Error("Bill allocations do not belong to the selected credit ledger.");
     if (
       "details" in row &&
       row.details &&
@@ -151,6 +166,7 @@ export function validateDaybookCapture(
         voucherNumber: row.voucherNumber,
         voucherType: row.voucherType,
         reason: row.review,
+        ...(row.billAllocations ? { billAllocations: row.billAllocations } : {}),
         ...(row.details ? { details: row.details } : {}),
         ...(row.ledgerName ? { ledgerName: row.ledgerName } : {}),
         ...(row.amount !== undefined ? { amount: row.amount } : {}),
@@ -165,6 +181,7 @@ export function validateDaybookCapture(
         voucherNumber: row.voucherNumber,
         voucherType: row.voucherType,
         reason: row.excluded,
+        ...(row.billAllocations ? { billAllocations: row.billAllocations } : {}),
         ...(row.details ? { details: row.details } : {}),
         ...(row.ledgerName ? { ledgerName: row.ledgerName } : {}),
         ...(row.amount !== undefined ? { amount: row.amount } : {}),

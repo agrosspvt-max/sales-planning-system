@@ -1,4 +1,6 @@
 import type { DaybookDiagnostics } from "./daybook-diagnostics";
+import type { DaybookBillAllocations } from "./daybook-bill-allocations";
+import type { DaybookCredit } from "./daybook-preview";
 
 export type DaybookDealerRow = {
   key: string;
@@ -10,6 +12,7 @@ export type DaybookDealerRow = {
   status: string;
   reason?: string;
   candidates?: string[];
+  creditVouchers?: DaybookCredit[];
 };
 export type DaybookExcludedVoucher = {
   guid: string;
@@ -22,4 +25,5 @@ export type DaybookExcludedVoucher = {
   amount?: string;
   direction?: "debit" | "credit" | "zero";
   details?: DaybookDiagnostics;
+  billAllocations?: DaybookBillAllocations;
 };

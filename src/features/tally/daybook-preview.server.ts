@@ -152,6 +152,7 @@ export async function resolveDaybookCapture(
       srCr: totals.srCr,
       other: "0.00",
       status: "Matched",
+      creditVouchers: match.credits,
       reason: plan ? undefined : issue,
     });
   }
@@ -166,6 +167,7 @@ export async function resolveDaybookCapture(
       status: "Needs dealer link",
       reason: row.reason,
       candidates: row.candidates,
+      creditVouchers: grouped.get(row.ledgerName) ?? [],
     });
   for (const row of excludedAccounts)
     dealerRows.set("ledger:" + row.ledgerName, {
@@ -176,6 +178,7 @@ export async function resolveDaybookCapture(
       srCr: row.srCr,
       other: "0.00",
       status: "Accounting ledger",
+      creditVouchers: grouped.get(row.ledgerName) ?? [],
       reason: "Excluded from dealer Recovery figures.",
     });
   const excludedVouchers = capture.excludedVouchers.map((voucher) => {

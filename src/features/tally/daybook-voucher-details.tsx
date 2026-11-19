@@ -1,6 +1,7 @@
 "use client";
 
 import type { DaybookExcludedVoucher } from "./daybook-result-types";
+import { DaybookBillAllocationTable } from "./daybook-bill-allocation-table";
 
 export function voucherLabel(voucher: DaybookExcludedVoucher) {
   return `${voucher.voucherType} · ${voucher.voucherNumber ? `No. ${voucher.voucherNumber}` : "Unnumbered voucher"}`;
@@ -28,24 +29,32 @@ function sourceAmount(value?: string | null) {
 const direction = (flag?: string | null) =>
   flag === "Yes" ? "Debit" : flag === "No" ? "Credit" : flag || "Not returned";
 
-export function DaybookVoucherDetails({ voucher }: { voucher: DaybookExcludedVoucher }) {
+export function DaybookVoucherDetails({
+  voucher,
+  summaryLabel = "Voucher details",
+}: {
+  voucher: DaybookExcludedVoucher;
+  summaryLabel?: string;
+}) {
   const evidence = voucher.details?.voucher;
   return (
     <details
       className="mt-2 rounded border p-2 text-xs"
       aria-label={`Details for ${voucherLabel(voucher)}`}
     >
-      <summary className="cursor-pointer font-medium">Voucher details</summary>
+      <summary className="cursor-pointer font-medium">{summaryLabel}</summary>
       <div className="mt-2 space-y-3">
         <p className="font-medium">
           {voucherLabel(voucher)} · {voucher.date}
         </p>
+        {voucher.ledgerName && <p>Tally ledger: {voucher.ledgerName}</p>}
         {!voucher.ledgerName && (
           <p>
             No single dealer/party was identified. The individual entries below retain their Tally
             ledger names.
           </p>
         )}
+        <DaybookBillAllocationTable allocations={voucher.billAllocations} />
         {evidence ? (
           <>
             {evidence.narration && (
@@ -125,13 +134,13 @@ export function DaybookVoucherDetails({ voucher }: { voucher: DaybookExcludedVou
               <p>No ledger or stock item lines were included in this capture.</p>
             )}
           </>
-        ) : (
+        ) : voucher.reason !== "included" ? (
           <p>
             This saved capture contains the voucher reference above, but no ledger breakdown.
-            Install connector 1.6.5-test and refresh this month to retrieve ledger entries, stock
+            Install connector 1.6.6-test and refresh this month to retrieve ledger entries, stock
             items and narration.
           </p>
-        )}
+        ) : null}
         <p className="break-all text-muted-foreground">Voucher ID: {voucher.guid}</p>
       </div>
     </details>

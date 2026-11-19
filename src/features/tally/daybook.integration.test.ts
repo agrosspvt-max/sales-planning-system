@@ -334,7 +334,32 @@ async function main() {
     return { reply: await call(body), retry: () => call(body) };
   }
   const vouchers: unknown[] = [
-    { ...credit(1, "Verified Dealer", "5.25"), voucherNumber: "" },
+    {
+      ...credit(1, "Verified Dealer", "5.25"),
+      voucherNumber: "",
+      billAllocations: {
+        scope: "selected_credit",
+        entryCount: 2,
+        entries: [
+          {
+            ledgerLineNumber: 1,
+            allocationNumber: 1,
+            ledgerName: "Verified Dealer",
+            billReference: "INV-101",
+            referenceType: "Agst Ref",
+            amount: "3.00",
+          },
+          {
+            ledgerLineNumber: 1,
+            allocationNumber: 2,
+            ledgerName: "Verified Dealer",
+            billReference: "INV-102",
+            referenceType: "Agst Ref",
+            amount: "2.25",
+          },
+        ],
+      },
+    },
     credit(2, "Verified Dealer", "8.00"),
     credit(3, "Verified Dealer", "10.00", "srCr"),
     credit(4, "Payment Only Dealer", "50.00"),
@@ -369,6 +394,20 @@ async function main() {
       voucherType: "Journal",
       category: "other",
       excluded: "unsupported_type",
+      billAllocations: {
+        scope: "voucher_ledgers",
+        entryCount: 1,
+        entries: [
+          {
+            ledgerLineNumber: 1,
+            allocationNumber: 1,
+            ledgerName: "Payment Only Dealer",
+            billReference: "INV-J1",
+            referenceType: "Agst Ref",
+            amount: "45.00",
+          },
+        ],
+      },
       details: {
         stage: "vouchers",
         month,
@@ -429,6 +468,7 @@ async function main() {
       dealerName?: string;
       amount?: string;
       details?: import("./daybook-diagnostics").DaybookDiagnostics;
+      billAllocations?: import("./daybook-bill-allocations").DaybookBillAllocations;
     }[];
     dealerRows: {
       dealerName: string;
@@ -437,6 +477,7 @@ async function main() {
       other: string | null;
       status: string;
       reason?: string;
+      creditVouchers?: import("./daybook-preview").DaybookCredit[];
     }[];
   };
   assert.equal(summary.coverage, "all_vouchers");
@@ -446,6 +487,15 @@ async function main() {
   const verifiedSummary = summary.dealerRows.find((r) => r.dealerName === "Verified Dealer")!;
   assert.equal(verifiedSummary.liveRecovery, "13.25");
   assert.equal(verifiedSummary.srCr, "10.00");
+  const receiptEvidence = verifiedSummary.creditVouchers!.find(
+    (v) => v.guid === prefix + "-00000001",
+  )!;
+  assert.equal(receiptEvidence.billAllocations!.entries[0].billReference, "INV-101");
+  assert.equal(receiptEvidence.billAllocations!.entries[1].billReference, "INV-102");
+  assert.equal(receiptEvidence.billAllocations!.entries[1].amount, "2.25");
+  assert.equal(receiptEvidence.creditAmount, "5.25");
+  assert.equal(verifiedSummary.creditVouchers!.length, 3);
+
   assert.equal(verifiedSummary.other, "25.00", "cancelled receipts never contribute to Other");
   assert.equal(
     summary.dealerRows.find((r) => r.dealerName === "Payment Only Dealer")!.other,
@@ -466,6 +516,11 @@ async function main() {
   assert.equal(journalEvidence.narration, "Adjustment details");
   assert.equal(journalEvidence.ledgerEntries[1].ledgerName, "Adjustment account");
   assert.equal(journalEvidence.ledgerEntries[1].amount, "-45.00");
+  assert.equal(
+    summary.excludedVouchers.find((v) => v.voucherType === "Journal")!.billAllocations!.entries[0]
+      .billReference,
+    "INV-J1",
+  );
 
   assert.equal(summary.excludedVouchers[0].voucherType, "Cheque Return");
   assert.equal(summary.excludedVouchers[0].reason, "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE");

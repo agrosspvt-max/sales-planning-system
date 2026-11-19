@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
+import { DaybookDealerVouchers } from "./daybook-dealer-vouchers";
 import {
   DaybookVoucherDetails,
   voucherLabel,
@@ -32,6 +33,22 @@ export function DaybookResultTables({
   // Existing saved captures already retain the original Tally types. Index both
   // confirmed dealer names and source ledgers so aliases share one type list.
   const typesByParty = new Map<string, Set<string>>();
+  const excludedByParty = new Map<string, DaybookExcludedVoucher[]>();
+  for (const voucher of excludedVouchers) {
+    for (const key of [
+      ...(voucher.dealerName ? ["dealer:" + voucher.dealerName] : []),
+      ...(voucher.ledgerName ? ["ledger:" + voucher.ledgerName] : []),
+    ])
+      excludedByParty.set(key, [...(excludedByParty.get(key) ?? []), voucher]);
+  }
+  function otherVouchers(row: DaybookDealerRow) {
+    const keys = ["dealer:" + row.dealerName, ...row.ledgers.map((name) => "ledger:" + name)];
+    return [
+      ...new Map(
+        keys.flatMap((key) => excludedByParty.get(key) ?? []).map((v) => [v.guid, v]),
+      ).values(),
+    ];
+  }
   const vouchersByKey = new Map(
     excludedVouchers.map((voucher) => ["voucher:" + voucher.guid, voucher]),
   );
@@ -69,7 +86,8 @@ export function DaybookResultTables({
           Receipts and SR/CR update only dealers with a confirmed match. Other shows the total
           amount of other voucher types for review; it does not update Recovery or Last Payment.{" "}
           Open Voucher details for individual ledger amounts and stock items when no single party is
-          identified.
+          identified. Open Vouchers / bill adjustments under a dealer to see each payment and the
+          bill references it adjusts.
         </p>
         {dealerRows.some((row) => row.status === "Needs dealer link") && (
           <p className="text-sm">
@@ -125,6 +143,20 @@ export function DaybookResultTables({
                             Tally: {ledger}
                           </div>
                         ))}
+                      {!voucher &&
+                        (!!row.creditVouchers?.length || !!otherVouchers(row).length) && (
+                          <DaybookDealerVouchers
+                            credits={row.creditVouchers}
+                            excluded={otherVouchers(row)}
+                          />
+                        )}
+                      {!row.creditVouchers &&
+                        (Number(row.liveRecovery) > 0 || Number(row.srCr) > 0) && (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Install connector 1.6.6-test and refresh this month for receipt/SR/CR
+                            bill adjustments.
+                          </p>
+                        )}
                     </td>
                     <td className="p-3 text-right align-top tabular-nums">{money(row.srCr)}</td>
                     <td className="p-3 text-right align-top tabular-nums">
@@ -176,7 +208,7 @@ export function DaybookResultTables({
         </p>
         {coverage !== "all_vouchers" && (
           <p className="text-sm text-muted-foreground">
-            This capture covers Receipt and Credit Note families only. Install connector 1.6.5-test
+            This capture covers Receipt and Credit Note families only. Install connector 1.6.6-test
             and refresh to include all other voucher types and their dealer amounts.
           </p>
         )}

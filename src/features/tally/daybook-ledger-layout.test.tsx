@@ -77,3 +77,17 @@ assert.doesNotMatch(render(legacy), /Problem ledger|Problem amount/);
 console.log(
   "Actual Python conflicting-layout evidence: schema, both source sections, nested bill differences, safe rendering and legacy error guidance: PASS",
 );
+
+const { DaybookLedgerLayoutDetails } = load<typeof import("./daybook-ledger-layout-details")>(
+  "src/features/tally/daybook-ledger-layout-details.tsx",
+);
+for (const resolution of ["enriched", "inventory_complete"] as const) {
+  const enriched = structuredClone(details);
+  enriched.voucher!.layoutResolution = resolution;
+  daybookDiagnosticsSchema.parse(enriched);
+  const rendered = renderToStaticMarkup(<DaybookLedgerLayoutDetails voucher={enriched.voucher!} />);
+  assert.match(
+    rendered,
+    resolution === "enriched" ? /omits only supported optional labels/ : /reconcile exactly/,
+  );
+}

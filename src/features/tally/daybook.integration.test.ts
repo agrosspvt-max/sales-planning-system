@@ -753,8 +753,12 @@ import daybook_capture as d
 p=json.load(sys.stdin)
 raw=f'<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION><VOUCHER><GUID>{p["prefix"]}-00000001</GUID><DATE>{p["last"].replace("-", "")}</DATE><VOUCHERNUMBER/><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME><PARTYLEDGERNAME>Verified Dealer</PARTYLEDGERNAME><ISCANCELLED>No</ISCANCELLED><ISOPTIONAL>No</ISOPTIONAL><ALLLEDGERENTRIES.LIST><LEDGERNAME>Verified Dealer</LEDGERNAME><AMOUNT>5.25</AMOUNT><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><BILLALLOCATIONS.LIST><NAME>INV-101</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>3.00</AMOUNT></BILLALLOCATIONS.LIST><BILLALLOCATIONS.LIST><NAME>INV-102</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>2.25</AMOUNT></BILLALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST></VOUCHER></COLLECTION></DATA></BODY></ENVELOPE>'
 root=ET.fromstring(raw); voucher=root.find('.//VOUCHER'); alternate=copy.deepcopy(voucher.find('ALLLEDGERENTRIES.LIST')); alternate.tag='LEDGERENTRIES.LIST';voucher.append(alternate)
+for bill in alternate.findall('BILLALLOCATIONS.LIST'):
+ for tag in ('NAME','BILLTYPE'):
+  for field in bill.findall(tag): bill.remove(field)
+ET.SubElement(voucher.find('ALLLEDGERENTRIES.LIST'),'ISPARTYLEDGER').text='Yes'
 records=d.parse_vouchers(ET.tostring(root),None,p['prefix'],p['month']+'-01',p['last'])
-alternate.find('.//BILLALLOCATIONS.LIST/NAME').text='INV-CONFLICT'
+ET.SubElement(alternate.find('BILLALLOCATIONS.LIST'),'NAME').text='INV-CONFLICT'
 conflict=ET.tostring(root)
 try:
  d.parse_vouchers(conflict,None,p['prefix'],p['month']+'-01',p['last'])

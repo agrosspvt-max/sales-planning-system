@@ -14,11 +14,15 @@ export function DaybookLedgerLayoutDetails({
       <p>
         {voucher.layoutResolution === "conflicting"
           ? "The two sections contain different entries or details. Neither section has been combined or guessed. Compare the original values below; differences can also be in bill references or other nested fields."
-          : voucher.layoutResolution === "duplicate"
-            ? "The sections contain matching entries, including their nested details. One section is used once."
-            : voucher.ledgerLayouts.every((group) => group.meaningfulEntryCount === 0)
-              ? "Both sections contain only empty placeholders. No credit entry was identified."
-              : "One section contains only empty placeholders. The populated section is used."}
+          : voucher.layoutResolution === "enriched"
+            ? "The direct section matches the complete ledger view and omits only supported optional labels or empty fields. The complete view is used once, retaining its party and bill-reference details."
+            : voucher.layoutResolution === "inventory_complete"
+              ? "The direct entries match the complete view. Additional non-party rows reconcile exactly with the voucher’s inventory accounting allocations, and the complete ledger balances. The complete view is used once."
+              : voucher.layoutResolution === "duplicate"
+                ? "The sections contain matching entries, including their nested details. One section is used once."
+                : voucher.ledgerLayouts.every((group) => group.meaningfulEntryCount === 0)
+                  ? "Both sections contain only empty placeholders. No credit entry was identified."
+                  : "One section contains only empty placeholders. The populated section is used."}
       </p>
       {voucher.ledgerLayouts.map((group) => (
         <div key={group.source} className="space-y-2 rounded border p-2">

@@ -109,7 +109,9 @@ export const daybookDiagnosticsSchema = z
         isPartyLedger: text(64).nullish(),
         ledgerEntries: z.array(ledgerEntry).max(50),
         ledgerEntryCount: z.number().int().min(0).max(1_000_000),
-        layoutResolution: z.enum(["duplicate", "empty_alternate", "conflicting"]).optional(),
+        layoutResolution: z
+          .enum(["duplicate", "empty_alternate", "enriched", "inventory_complete", "conflicting"])
+          .optional(),
         ledgerLayouts: z
           .array(
             z

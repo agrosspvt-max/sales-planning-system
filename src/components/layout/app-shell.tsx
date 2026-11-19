@@ -8,7 +8,7 @@ import { usePathname } from "next/navigation";
 import { Role } from "@prisma/client";
 import { Menu, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useLabel } from "@/features/labels/label-ui";
+import { LabelEditHeaderButton, useLabel } from "@/features/labels/label-ui";
 import type { LabelKey } from "@/features/labels/labels";
 import { navForRole } from "@/features/navigation/nav";
 import { resolveNavState } from "@/features/navigation/nav-state";
@@ -216,6 +216,8 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
           <div className="flex items-center gap-3">
             {user.role !== Role.CUSTOM_ADMIN && <GlobalSearch />}
             <NotificationBell />
+            {/* Phones: Edit Labels lives here instead of floating over the page's last rows (tablet / desktop keep the floating toggle). */}
+            <LabelEditHeaderButton />
             <ThemeToggle />
             <div className="hidden text-right sm:block">
               <p className="text-sm font-medium leading-none">{user.name}</p>
@@ -231,7 +233,7 @@ export function AppShell({ user, children, calendarEnabled = true }: { user: App
             OWN root a definite viewport height (see the grids) so the data grid becomes the one bounded
             scroll region and its sticky header can pin; plain pages just scroll here as normal. */}
         <main className="flex-1 overflow-y-auto">
-          <div className="px-4 py-4 md:px-6 md:py-6"><PermissionContext.Provider value={identity}>{children}</PermissionContext.Provider></div>
+          <div className="app-content px-4 py-4 md:px-6 md:py-6"><PermissionContext.Provider value={identity}>{children}</PermissionContext.Provider></div>
         </main>
       </div>
     </div>

@@ -248,3 +248,15 @@
     overflow-wrap: break-word;
   }
 }
+
+/*
+ * Floating controls must never cover the page's last rows (tables end with their TOTAL row). While the floating Edit Labels toggle is
+ * shown (tablet / desktop — phones get it in the header instead), the content region keeps room below its last row equal to the
+ * toggle's height + offset, so scrolling to the end always brings the totals fully into view above it.
+ */
+@media (min-width: 768px) {
+  html.has-floating-labels .app-content {
+    padding-bottom: 5rem;
+  }
+}
+

@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Check, X, Tag } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -92,9 +92,18 @@ export function L({ k }: { k: LabelKey }): ReactNode {
 
 /* ------------------------- Admin edit-mode toggle ------------------------ */
 
+/**
+ * Floating toggle (tablet / desktop). On phones it would sit on top of the last rows — usually a table's totals — and of sticky mobile
+ * action bars, so below `md` the same toggle lives in the app header instead (LabelEditHeaderButton). While the floating toggle is shown,
+ * `html.has-floating-labels` makes the content region reserve space under its last row (globals.css), so totals can always scroll clear of it.
+ */
 function LabelEditToggle({ editMode, setEditMode }: { editMode: boolean; setEditMode: (on: boolean) => void }) {
+  useEffect(() => {
+    document.documentElement.classList.add("has-floating-labels");
+    return () => document.documentElement.classList.remove("has-floating-labels");
+  }, []);
   return (
-    <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2">
+    <div className="fixed bottom-4 left-4 z-50 hidden items-center gap-2 md:flex">
       {editMode && (
         <span className="rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-xs text-warning shadow-sm">
           Label edit mode — hover a header and click the pencil to rename.
@@ -110,6 +119,28 @@ function LabelEditToggle({ editMode, setEditMode }: { editMode: boolean; setEdit
         <Tag className="h-4 w-4" /> {editMode ? "Done" : "Edit Labels"}
       </button>
     </div>
+  );
+}
+
+/** The Edit Labels toggle for phones: an icon button in the app header (nothing floats over the page content). Same state as the floating toggle. */
+export function LabelEditHeaderButton() {
+  const ctx = useContext(Ctx);
+  if (!ctx?.canEdit) return null;
+  const { editMode, setEditMode } = ctx;
+  return (
+    <button
+      type="button"
+      onClick={() => setEditMode(!editMode)}
+      aria-pressed={editMode}
+      aria-label={editMode ? "Done editing labels" : "Edit Labels"}
+      title={editMode ? "Label edit mode — tap the pencil on a header to rename. Tap again when done." : "Edit Labels"}
+      className={cn(
+        "inline-flex h-9 w-9 items-center justify-center rounded-full border md:hidden",
+        editMode ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background text-foreground hover:bg-muted",
+      )}
+    >
+      {editMode ? <Check className="h-4 w-4" /> : <Tag className="h-4 w-4" />}
+    </button>
   );
 }
 

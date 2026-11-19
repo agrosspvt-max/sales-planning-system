@@ -384,6 +384,11 @@ export function MonthlyPlanner() {
           Additional Products selector directly (context open-state + auto-scroll) without hunting
           at the bottom of the page. Desktop keeps the inline section only. */}
       {isFirstClass && data.canEdit && monthlyPlanId && dealer && (
+        // Room under the last row (the totals) so scrolling to the end lifts it above the floating button — otherwise the button sits
+        // on the right-hand totals just above the sticky action bar. Phones only, like the button.
+        <div aria-hidden className="h-14 sm:hidden" />
+      )}
+      {isFirstClass && data.canEdit && monthlyPlanId && dealer && (
         <Button
           onClick={() => setAdditionalOpen(true)}
           className="fixed bottom-20 right-4 z-40 rounded-full shadow-lg sm:hidden"

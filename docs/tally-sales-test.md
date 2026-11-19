@@ -189,3 +189,50 @@ names/quantities/amounts, alias changes, roles/groups/officer/status/month/range
 filters, and existing aging/sales/Daybook regressions. Render checks cover both
 tabs, lazy loading, retained Product wise output, collapsed bills and category
 filtering. TypeScript checks passed.
+
+### Daybook error information button — 19 November, 1.6.3-test
+
+The Daybook failure message now has an accessible info button. Its dialog shows
+company, read stage and exact requested date slice; voucher number/date/type,
+party/dealer name, problem ledger, original signed amount, IsDeemedPositive,
+IsPartyLedger, ledger line number, GUID, MasterID, AlterID, cancellation/optional
+flags and narration. Up to 50 original ledger entries are listed with the problem
+line highlighted when present. The total entry count and truncation explanation
+remain visible; the offending line's details are retained even beyond the list.
+Missing/invalid source values are shown as unavailable/raw text, never inferred
+amounts. A timeout identifies its stage/date slice without inventing a voucher.
+
+Connector daybook_capture.py now attaches bounded diagnostics to voucher parsing
+errors and ambiguous/missing-credit review records. Optional MasterID, AlterID and
+Narration are fetched for diagnosis. Metadata read failures have contextual date
+ranges too. Control characters are represented visibly and text is length-limited.
+The ledger-sign validation and fail-whole-month publication policy are unchanged;
+this update identifies the issue rather than changing debit/credit calculations.
+
+DaybookWorker.collect converts collector exceptions into an internal
+`daybook.failure.v1` payload. It uses the existing encrypted outbox before sending
+an authenticated `fail` with code and optional `details`. Lost acknowledgments
+replay the same evidence without rereading Tally. The final retry-exhaustion
+notification preserves the original diagnostic rather than replacing it with a
+generic upload error. Successful captures retain daybook.capture.v1. No shared
+SalesWorker transport behavior changed.
+
+The website validates strict bounded diagnostics, binds company/month/date range
+to the active connector lease, and stores them in the failed job's summary JSON.
+Failure hashes make identical failure acknowledgments replay-safe; changed stale
+attempts cannot overwrite the evidence. Existing fail messages without details
+remain accepted, and the info dialog explains the 1.6.3-test upgrade/fresh-read
+requirement for those older failures. Review-record diagnostics travel with the
+existing complete-capture rejection. No database migration is needed.
+
+Files: daybook-diagnostics.ts, daybook-error-details.tsx, daybook-sync.tsx,
+daybook-preview.ts, daybook.server.ts and daybook.integration.test.ts; office
+changes are daybook_capture.py, daybook_worker.py, sync_all.py and
+tests/test_daybook_worker.py. Verification: real Python sign-error evidence through
+the authenticated agent into disposable PostgreSQL/status; out-of-scope/oversized
+diagnostics rejected; identical failed uploads replayed; existing Recovery/SRCR/
+Last Payment preserved; 119 Python tests passed (three Windows-only checks skipped
+on macOS); UI renders the info button, fields and escaped source strings; TypeScript
+checks passed. Install the supplied 1.6.3-test package then request May's scan again
+for the actual office voucher details; historical errors cannot be reconstructed
+from their old error code alone.

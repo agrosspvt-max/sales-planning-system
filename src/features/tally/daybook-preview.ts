@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { cents, decimal } from "./billwise";
 import { salesPeriod } from "./sales";
+import { daybookDiagnosticsSchema, type DaybookDiagnostics } from "./daybook-diagnostics";
 
 export const DAYBOOK_PREVIEW_BYTES = 2 * 1024 * 1024;
 const name = z
@@ -63,6 +64,7 @@ const capture = z.object({
         voucher
           .extend({
             ...displayEvidence,
+            details: daybookDiagnosticsSchema.optional(),
             review: z.enum([
               "CREDIT_AMBIGUOUS",
               "CREDIT_MISSING",
@@ -101,6 +103,7 @@ export function validateDaybookCapture(
     voucherNumber: string;
     voucherType: string;
     reason: string;
+    details?: DaybookDiagnostics;
     ledgerName?: string;
     amount?: string;
     direction?: "debit" | "credit" | "zero";
@@ -125,6 +128,15 @@ export function validateDaybookCapture(
         ? type === "RECEIPT"
         : row.category === "srCr" && /SALES RETURN|CREDIT NOTE/.test(type);
     if ("review" in row) {
+      if (
+        row.details &&
+        (row.details.month !== data.month ||
+          (row.details.companyName !== undefined && row.details.companyName !== data.companyName) ||
+          row.details.fromDate < data.fromDate ||
+          row.details.throughDate > data.throughDate ||
+          row.details.fromDate > row.details.throughDate)
+      )
+        throw new Error("Voucher review details are outside the capture scope.");
       // Older connectors report out-of-scope derived types (e.g. Cheque Return) as
       // review items. Match the manual importer: exclude these, but retain credit holds.
       const destination =
@@ -135,6 +147,7 @@ export function validateDaybookCapture(
         voucherNumber: row.voucherNumber,
         voucherType: row.voucherType,
         reason: row.review,
+        ...(row.details ? { details: row.details } : {}),
         ...(row.ledgerName ? { ledgerName: row.ledgerName } : {}),
         ...(row.amount !== undefined ? { amount: row.amount } : {}),
         ...(row.direction ? { direction: row.direction } : {}),

@@ -1,6 +1,7 @@
 /** Only run against a fresh disposable PostgreSQL instance. */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -464,6 +465,111 @@ async function main() {
   await assert.rejects(
     prisma.$transaction((tx) => svc.assertManualDaybookMonthAvailable(tx, "daybook-month")),
     /Tally Daybook manages/,
+  );
+  // Exercise actual Python parser evidence -> authenticated agent failure -> saved UI status.
+  const signEvidence = spawnSync(
+    "python3",
+    [
+      "-B",
+      "-c",
+      `
+import json, sys
+import daybook_capture as d
+p = json.load(sys.stdin)
+raw = f'<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION><VOUCHER><GUID>{p["prefix"]}-00000099</GUID><DATE>{p["month"].replace("-", "")}02</DATE><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME><VOUCHERNUMBER>RCPT-99</VOUCHERNUMBER><PARTYLEDGERNAME>Verified Dealer</PARTYLEDGERNAME><MASTERID>99</MASTERID><ALTERID>100</ALTERID><ISCANCELLED>No</ISCANCELLED><ISOPTIONAL>No</ISOPTIONAL><ALLLEDGERENTRIES.LIST><LEDGERNAME>Verified Dealer</LEDGERNAME><AMOUNT>-125.50</AMOUNT><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISPARTYLEDGER>Yes</ISPARTYLEDGER></ALLLEDGERENTRIES.LIST></VOUCHER></COLLECTION></DATA></BODY></ENVELOPE>'
+try:
+    d.parse_vouchers(raw.encode(), None, p["prefix"], p["month"] + "-01", p["last"])
+except d.DaybookRejected as error:
+    print(json.dumps({"code": str(error), "details": {"companyName": "Synthetic Company", **error.details}}))
+`,
+    ],
+    {
+      cwd: resolve("../tally-connector-v1.3/Tally-Office-Connector"),
+      input: JSON.stringify({ prefix, month, last }),
+      encoding: "utf8",
+    },
+  );
+  assert.equal(signEvidence.status, 0, signEvidence.stderr);
+  const evidence = JSON.parse(signEvidence.stdout);
+  assert.equal(evidence.details.voucher.amount, "-125.50");
+  await svc.requestDaybookRefresh(auth, month);
+  const failureJob = (await claim()).job!;
+  const failureBody = {
+    action: "fail",
+    jobId: failureJob.id,
+    leaseToken: failureJob.leaseToken,
+    ...evidence,
+  };
+  await assert.rejects(
+    call({ ...failureBody, details: { ...evidence.details, companyName: "Another Company" } }),
+    /do not match/,
+  );
+  await assert.rejects(
+    call({ ...failureBody, details: { ...evidence.details, month: "2025-01" } }),
+    /do not match/,
+  );
+  await assert.rejects(
+    call({
+      ...failureBody,
+      details: {
+        ...evidence.details,
+        voucher: { ...evidence.details.voucher, narration: "x".repeat(2049) },
+      },
+    }),
+  );
+  assert.ok((await call(failureBody)).ok);
+  assert.ok((await call(failureBody)).rejected, "lost failure acknowledgment can replay safely");
+  const failureStatus = await svc.daybookStatus(auth, month);
+  assert.equal(failureStatus.job?.error, "DAYBOOK_LEDGER_SIGN_MISMATCH");
+  const savedDetails = failureStatus.job?.summary as {
+    diagnostics: {
+      voucher: {
+        voucherNumber: string;
+        dealerName: string;
+        ledgerName: string;
+        amount: string;
+        isDeemedPositive: string;
+        masterId: string;
+        ledgerEntries: unknown[];
+      };
+    };
+  };
+  assert.equal(savedDetails.diagnostics.voucher.voucherNumber, "RCPT-99");
+  assert.equal(savedDetails.diagnostics.voucher.dealerName, "Verified Dealer");
+  assert.equal(savedDetails.diagnostics.voucher.ledgerName, "Verified Dealer");
+  assert.equal(savedDetails.diagnostics.voucher.isDeemedPositive, "No");
+  assert.equal(savedDetails.diagnostics.voucher.masterId, "99");
+  assert.equal(savedDetails.diagnostics.voucher.ledgerEntries.length, 1);
+  assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+  assert.equal((await values()).srCr.toFixed(2), "10.00");
+  assert.equal(
+    (await report.loadEffectiveLastPayments([dealerId], today)).get(dealerId)?.amount,
+    333,
+  );
+  await assert.rejects(
+    call({ ...failureBody, details: { ...evidence.details, stage: "changed" } }),
+    /lease expired/,
+  );
+  console.log(
+    "Daybook Python error evidence, scoped validation, durable failure replay and preservation: PASS",
+  );
+  const reviewWithDetails = await refresh([
+    {
+      guid: prefix + "-00000098",
+      date: month + "-02",
+      voucherNumber: "R98",
+      voucherType: "Receipt",
+      category: "receipt",
+      review: "CREDIT_AMBIGUOUS",
+      details: evidence.details,
+    },
+  ]);
+  assert.ok(reviewWithDetails.reply.rejected);
+  const reviewStatus = await svc.daybookStatus(auth, month);
+  assert.equal(
+    (reviewStatus.job?.summary as { review: { details: { voucher: { dealerName: string } } }[] })
+      .review[0].details.voucher.dealerName,
+    "Verified Dealer",
   );
   const partial = await refresh([], month + "-15");
   assert.ok(partial.reply.rejected);

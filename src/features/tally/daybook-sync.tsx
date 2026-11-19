@@ -5,11 +5,14 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
 
+import { DaybookErrorDetails } from "./daybook-error-details";
+import type { DaybookDiagnostics } from "./daybook-diagnostics";
 import { DaybookResultTables } from "./daybook-result-tables";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 
 type LedgerAmounts = { ledgerName: string; liveRecovery: string; srCr: string };
 type Summary = {
+  diagnostics?: DaybookDiagnostics;
   changedRows?: number;
   matchedDealers?: number;
   receiptCount?: number;
@@ -28,6 +31,7 @@ type Summary = {
     voucherType: string;
     voucherNumber: string;
     reason: string;
+    details?: DaybookDiagnostics;
   }[];
 };
 type Status = {
@@ -55,6 +59,10 @@ const errors: Record<string, string> = {
   DAYBOOK_PARTYLEDGERNAME_INVALID: "A party ledger name was invalid or too long.",
   DAYBOOK_VOUCHERNUMBER_INVALID: "A voucher number was invalid or too long.",
   DAYBOOK_LEDGERNAME_INVALID: "A ledger entry had an invalid or oversized name.",
+  DAYBOOK_LEDGER_SIGN_MISMATCH:
+    "A voucher ledger amount and debit/credit flag need checking. Open the info button for details.",
+  TALLY_REQUEST_TIMEOUT: "Tally did not finish responding in time.",
+  TALLY_UNAVAILABLE: "The connector could not read a response from Tally.",
   DAYBOOK_AMOUNT_INVALID: "A ledger entry had an invalid amount.",
   DAYBOOK_ISCANCELLED_INVALID: "Tally did not return a valid cancellation flag.",
   DAYBOOK_ISOPTIONAL_INVALID: "Tally did not return a valid optional-voucher flag.",
@@ -116,7 +124,17 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
               ? "No Daybook refresh for this month yet."
               : ""}
       </p>
-      {job?.error && <p className="text-sm">{errors[job.error] ?? job.error}</p>}
+      {job?.error && (
+        <div className="flex items-center gap-3">
+          <p className="text-sm">{errors[job.error] ?? job.error}</p>
+          <DaybookErrorDetails
+            month={month}
+            code={job.error}
+            diagnostics={job.summary?.diagnostics}
+            review={job.summary?.review}
+          />
+        </div>
+      )}
       {!!job?.summary?.review?.length && (
         <details className="text-sm">
           <summary className="cursor-pointer">

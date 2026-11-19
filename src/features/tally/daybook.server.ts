@@ -8,6 +8,7 @@ import { cents, decimal, indiaDay } from "./billwise";
 import { creditTotals, validateDaybookCapture, type DaybookCredit } from "./daybook-preview";
 import { resolveDaybookCapture } from "./daybook-preview.server";
 import { hashSales, salesPeriod } from "./sales";
+import { daybookDiagnosticsSchema } from "./daybook-diagnostics";
 import { approvedTestPreview } from "./sales-rollout";
 import { assertSuper, authenticateConnector, lockConnector } from "./service.server";
 
@@ -245,7 +246,12 @@ const agentInput = z.discriminatedUnion("action", [
   z.object({ action: z.literal("claim"), requestId: z.string().uuid() }).strict(),
   z.object({ action: z.literal("complete"), ...identity, capture: z.unknown() }).strict(),
   z
-    .object({ action: z.literal("fail"), ...identity, code: z.string().regex(/^[A-Z_]{1,80}$/) })
+    .object({
+      action: z.literal("fail"),
+      ...identity,
+      code: z.string().regex(/^[A-Z_]{1,80}$/),
+      details: daybookDiagnosticsSchema.optional(),
+    })
     .strict(),
 ]);
 
@@ -335,8 +341,10 @@ export async function daybookAgent(req: Request, raw: unknown) {
       )
         throw new ApiError(409, "Daybook attempt is no longer active.");
       const resultHash =
-        input.action === "complete" ? hashSales(JSON.stringify(input.capture ?? null)) : null;
-      if (input.action === "complete" && job.resultHash === resultHash) {
+        input.action === "complete"
+          ? hashSales(JSON.stringify(input.capture ?? null))
+          : hashSales(JSON.stringify({ code: input.code, details: input.details ?? null }));
+      if (job.resultHash === resultHash) {
         if (job.status === "SUCCEEDED") return { ok: true, duplicate: true };
         if (job.status === "FAILED") return { ok: true, rejected: true };
       }
@@ -355,7 +363,19 @@ export async function daybookAgent(req: Request, raw: unknown) {
         });
         return input.action === "complete" ? { ok: true, rejected: true } : { ok: true };
       };
-      if (input.action === "fail") return fail(input.code);
+      if (input.action === "fail") {
+        const details = input.details;
+        if (
+          details &&
+          (details.month !== job.monthKey ||
+            (details.companyName !== undefined && details.companyName !== connection.companyName) ||
+            details.fromDate < job.fromDate ||
+            details.throughDate > job.throughDate ||
+            details.fromDate > details.throughDate)
+        )
+          throw new ApiError(422, "Daybook error details do not match this request.");
+        return fail(input.code, details ? { diagnostics: details } : undefined);
+      }
       let capture: Capture;
       try {
         capture = validateDaybookCapture(input.capture, connection, today);

@@ -100,7 +100,6 @@ export async function getDaybookBillProducts(
     take: 21,
     orderBy: [{ billDate: "desc" }, { guid: "asc" }],
     select: {
-      id: true,
       guid: true,
       billDate: true,
       billNumber: true,
@@ -122,10 +121,7 @@ export async function getDaybookBillProducts(
         "No saved sales bill matches this party and reference. The bill may belong to an older year or may not have been captured yet.",
     };
   const versions = new Map<string, (typeof candidates)[number]>();
-  for (const candidate of candidates) {
-    const { id: _id, ...content } = candidate;
-    versions.set(JSON.stringify(content), candidate);
-  }
+  for (const candidate of candidates) versions.set(JSON.stringify(candidate), candidate);
   if (candidates.length > 20 || versions.size !== 1)
     return {
       status: "ambiguous",

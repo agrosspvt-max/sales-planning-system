@@ -45,7 +45,7 @@ const source = {
 };
 let open = false;
 let options: { enabled: boolean; queryFn: () => Promise<DaybookBillProducts> };
-let requests: string[] = [];
+const requests: string[] = [];
 let error: Error | null = null;
 const load = testLoader({
   react: { ...React, useState: () => [open, () => {}] },

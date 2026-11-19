@@ -2,6 +2,7 @@
 
 import type { DaybookExcludedVoucher } from "./daybook-result-types";
 import { DaybookBillAllocationTable } from "./daybook-bill-allocation-table";
+import { DaybookLedgerLayoutDetails } from "./daybook-ledger-layout-details";
 
 export function voucherLabel(voucher: DaybookExcludedVoucher) {
   return `${voucher.voucherType} · ${voucher.voucherNumber ? `No. ${voucher.voucherNumber}` : "Unnumbered voucher"}`;
@@ -54,13 +55,17 @@ export function DaybookVoucherDetails({
             ledger names.
           </p>
         )}
-        <DaybookBillAllocationTable allocations={voucher.billAllocations} />
+        <DaybookBillAllocationTable
+          allocations={voucher.billAllocations}
+          layoutConflict={evidence?.layoutResolution === "conflicting"}
+        />
+        {evidence?.ledgerLayouts && <DaybookLedgerLayoutDetails voucher={evidence} />}
         {evidence ? (
           <>
             {evidence.narration && (
               <p className="whitespace-pre-wrap">Narration: {evidence.narration}</p>
             )}
-            {evidence.ledgerEntries.length > 0 && (
+            {evidence.ledgerEntries.length > 0 && evidence.layoutResolution !== "conflicting" && (
               <div className="overflow-x-auto">
                 <p className="mb-1 font-medium">Ledger entries ({evidence.ledgerEntryCount})</p>
                 <table className="w-full text-left">

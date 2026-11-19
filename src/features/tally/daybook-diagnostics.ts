@@ -13,6 +13,23 @@ const ledgerEntry = z
     amount: text(128).nullish(),
     isDeemedPositive: text(64).nullish(),
     isPartyLedger: text(64).nullish(),
+    sourceHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    billReferences: z
+      .array(
+        z
+          .object({
+            name: text(512).nullish(),
+            type: text(128).nullish(),
+            amount: text(128).nullish(),
+          })
+          .strict(),
+      )
+      .max(20)
+      .optional(),
+    billReferenceCount: z.number().int().min(0).max(1_000_000).optional(),
   })
   .strict();
 export const daybookDiagnosticsSchema = z
@@ -22,6 +39,19 @@ export const daybookDiagnosticsSchema = z
     companyName: text(256).optional(),
     fromDate: day,
     throughDate: day,
+    layoutResponse: z
+      .object({
+        responseSha256: z.string().regex(/^[a-f0-9]{64}$/),
+        responseBytes: z
+          .number()
+          .int()
+          .min(1)
+          .max(8 * 1024 * 1024),
+        localResponseFile: text(1024).optional(),
+        captureStatus: z.enum(["saved", "save_failed", "limit_reached"]),
+      })
+      .strict()
+      .optional(),
     encoding: z
       .object({
         expectedEncoding: z.literal("UTF-8"),
@@ -79,6 +109,20 @@ export const daybookDiagnosticsSchema = z
         isPartyLedger: text(64).nullish(),
         ledgerEntries: z.array(ledgerEntry).max(50),
         ledgerEntryCount: z.number().int().min(0).max(1_000_000),
+        layoutResolution: z.enum(["duplicate", "empty_alternate", "conflicting"]).optional(),
+        ledgerLayouts: z
+          .array(
+            z
+              .object({
+                source: z.enum(["ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST"]),
+                entryCount: z.number().int().min(0).max(1_000_000),
+                meaningfulEntryCount: z.number().int().min(0).max(1_000_000),
+                entries: z.array(ledgerEntry).max(50),
+              })
+              .strict(),
+          )
+          .max(2)
+          .optional(),
         inventoryEntries: z
           .array(
             z

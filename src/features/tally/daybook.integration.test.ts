@@ -741,6 +741,78 @@ except s.EncodingRejected as error:
   console.log(
     "Encoding byte evidence and recovered voucher metadata reach the status API without changing financial data: PASS",
   );
+  const layoutEvidence = spawnSync(
+    "python3",
+    [
+      "-B",
+      "-c",
+      `
+import copy,json,sys,tempfile,xml.etree.ElementTree as ET
+from pathlib import Path
+import daybook_capture as d
+p=json.load(sys.stdin)
+raw=f'<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION><VOUCHER><GUID>{p["prefix"]}-00000001</GUID><DATE>{p["last"].replace("-", "")}</DATE><VOUCHERNUMBER/><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME><PARTYLEDGERNAME>Verified Dealer</PARTYLEDGERNAME><ISCANCELLED>No</ISCANCELLED><ISOPTIONAL>No</ISOPTIONAL><ALLLEDGERENTRIES.LIST><LEDGERNAME>Verified Dealer</LEDGERNAME><AMOUNT>5.25</AMOUNT><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><BILLALLOCATIONS.LIST><NAME>INV-101</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>3.00</AMOUNT></BILLALLOCATIONS.LIST><BILLALLOCATIONS.LIST><NAME>INV-102</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>2.25</AMOUNT></BILLALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST></VOUCHER></COLLECTION></DATA></BODY></ENVELOPE>'
+root=ET.fromstring(raw); voucher=root.find('.//VOUCHER'); alternate=copy.deepcopy(voucher.find('ALLLEDGERENTRIES.LIST')); alternate.tag='LEDGERENTRIES.LIST';voucher.append(alternate)
+records=d.parse_vouchers(ET.tostring(root),None,p['prefix'],p['month']+'-01',p['last'])
+alternate.find('.//BILLALLOCATIONS.LIST/NAME').text='INV-CONFLICT'
+conflict=ET.tostring(root)
+try:
+ d.parse_vouchers(conflict,None,p['prefix'],p['month']+'-01',p['last'])
+except d.DaybookRejected as e:
+ with tempfile.TemporaryDirectory() as folder:
+  error=d.save_layout_response({'stateDir':str(Path(folder)/'state')},conflict,e,p['month']+'-01')
+  print(json.dumps({'records':records,'failure':{'code':str(error),'details':{'companyName':'Synthetic Company',**error.details}}}))
+`,
+    ],
+    {
+      cwd: resolve("../tally-connector-v1.3/Tally-Office-Connector"),
+      input: JSON.stringify({ prefix, month, last }),
+      encoding: "utf8",
+    },
+  );
+  assert.equal(layoutEvidence.status, 0, layoutEvidence.stderr);
+  const layoutPayload = JSON.parse(layoutEvidence.stdout.trim().split("\n").at(-1)!);
+  const compatible = await refresh(
+    [...layoutPayload.records, ...vouchers.slice(1)],
+    last,
+    "all_vouchers",
+  );
+  assert.ok(compatible.reply.ok);
+  assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+  assert.equal((await values()).srCr.toFixed(2), "10.00");
+  const compatibleReplay = await compatible.retry();
+  assert.ok("duplicate" in compatibleReplay && compatibleReplay.duplicate);
+  await svc.requestDaybookRefresh(auth, month);
+  const layoutJob = (await claim()).job!;
+  const layoutBody = {
+    action: "fail",
+    jobId: layoutJob.id,
+    leaseToken: layoutJob.leaseToken,
+    ...layoutPayload.failure,
+  };
+  assert.ok((await call(layoutBody)).ok);
+  assert.ok((await call(layoutBody)).rejected);
+  const layoutStatus = await svc.daybookStatus(auth, month);
+  const layoutDetails = (
+    layoutStatus.job!.summary as { diagnostics: import("./daybook-diagnostics").DaybookDiagnostics }
+  ).diagnostics;
+  assert.equal(layoutStatus.job!.error, "DAYBOOK_LEDGER_LAYOUT_AMBIGUOUS");
+  assert.equal(layoutDetails.voucher!.ledgerLayouts!.length, 2);
+  assert.equal(
+    layoutDetails.voucher!.ledgerLayouts![0].entries[0].billReferences![0].name,
+    "INV-101",
+  );
+  assert.equal(
+    layoutDetails.voucher!.ledgerLayouts![1].entries[0].billReferences![0].name,
+    "INV-CONFLICT",
+  );
+  assert.equal(layoutDetails.layoutResponse!.captureStatus, "saved");
+  assert.equal(layoutDetails.layoutResponse!.responseSha256.length, 64);
+  assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+  assert.equal((await values()).srCr.toFixed(2), "10.00");
+  console.log(
+    "Compatible ledger layouts publish once; conflicting bill references retain both sections/source file evidence without changing financial data: PASS",
+  );
   const partial = await refresh([], month + "-15");
   assert.ok(partial.reply.rejected);
   assert.ok((await partial.retry()).rejected);

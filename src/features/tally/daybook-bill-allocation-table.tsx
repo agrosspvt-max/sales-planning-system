@@ -11,15 +11,22 @@ function allocationAmount(value?: string | null) {
 
 export function DaybookBillAllocationTable({
   allocations,
+  layoutConflict = false,
 }: {
   allocations?: DaybookBillAllocations;
+  layoutConflict?: boolean;
 }) {
   return (
     <div className="space-y-2">
       <p className="font-medium">
         Bill adjustments{allocations ? ` (${allocations.entryCount})` : ""}
       </p>
-      {!allocations ? (
+      {layoutConflict ? (
+        <p>
+          The ledger sections conflict, so no combined bill-allocation list is shown. Review the
+          separate sections below.
+        </p>
+      ) : !allocations ? (
         <p>
           This saved capture has no bill-allocation details. Install connector 1.6.6-test and
           refresh this month to read the bill references and amounts recorded in Tally.

@@ -11,6 +11,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import type { DaybookDiagnostics } from "./daybook-diagnostics";
+import { DaybookLedgerLayoutDetails } from "./daybook-ledger-layout-details";
 
 type Review = {
   guid: string;
@@ -29,9 +30,11 @@ const stage: Record<string, string> = {
   collection: "Reading Daybook",
 };
 
-function Evidence({ details }: { details: DaybookDiagnostics }) {
+function Evidence({ details, code }: { details: DaybookDiagnostics; code?: string }) {
   const voucher = details.voucher;
   const encoding = details.encoding;
+  const layoutConflict =
+    code === "DAYBOOK_LEDGER_LAYOUT_AMBIGUOUS" || voucher?.layoutResolution === "conflicting";
   const fields: [string, string | number | null | undefined][] = [
     ["Tally company", details.companyName],
     ["Reading stage", stage[details.stage] ?? details.stage],
@@ -42,11 +45,15 @@ function Evidence({ details }: { details: DaybookDiagnostics }) {
           ["Voucher date", voucher.date],
           ["Voucher type", voucher.voucherType],
           ["Dealer / party name", voucher.dealerName],
-          ["Problem ledger", voucher.ledgerName],
-          ["Problem amount (as returned)", voucher.amount],
-          ["Debit/credit flag (IsDeemedPositive)", voucher.isDeemedPositive],
-          ["Ledger line number", voucher.lineNumber],
-          ["Party-ledger flag", voucher.isPartyLedger],
+          ...(layoutConflict
+            ? []
+            : [
+                ["Problem ledger", voucher.ledgerName],
+                ["Problem amount (as returned)", voucher.amount],
+                ["Debit/credit flag (IsDeemedPositive)", voucher.isDeemedPositive],
+                ["Ledger line number", voucher.lineNumber],
+                ["Party-ledger flag", voucher.isPartyLedger],
+              ]),
           ["Voucher GUID", voucher.guid],
           ["Tally master ID", voucher.masterId],
           ["Tally alteration ID", voucher.alterId],
@@ -58,6 +65,12 @@ function Evidence({ details }: { details: DaybookDiagnostics }) {
   ];
   return (
     <div className="space-y-4">
+      {layoutConflict && (
+        <p className="text-sm">
+          The connector could not select one consistent ledger section. This is a whole-voucher
+          layout issue; no single ledger amount has been identified as wrong.
+        </p>
+      )}
       <dl className="grid gap-x-4 gap-y-2 text-sm sm:grid-cols-[13rem_1fr]">
         {fields.map(([label, content]) => (
           <div key={label} className="contents">
@@ -66,6 +79,35 @@ function Evidence({ details }: { details: DaybookDiagnostics }) {
           </div>
         ))}
       </dl>
+      {voucher?.ledgerLayouts && <DaybookLedgerLayoutDetails voucher={voucher} />}
+      {layoutConflict && !voucher?.ledgerLayouts && (
+        <p className="text-sm">
+          This older error saved only one ledger section. Install connector 1.6.7-test and refresh
+          the month to compare both sections.
+        </p>
+      )}
+      {details.layoutResponse && (
+        <section
+          className="space-y-2 rounded border p-3 text-sm"
+          aria-label="Original ledger-layout response"
+        >
+          <h4 className="font-medium">Original response evidence</h4>
+          <p>Response size: {details.layoutResponse.responseBytes} bytes</p>
+          <p className="break-all">SHA-256: {details.layoutResponse.responseSha256}</p>
+          {details.layoutResponse.captureStatus === "saved" ? (
+            <p className="break-all">
+              Unchanged response saved on the Tally PC: {details.layoutResponse.localResponseFile}
+            </p>
+          ) : (
+            <p>
+              {details.layoutResponse.captureStatus === "limit_reached"
+                ? "The monthly limit of 20 layout evidence files was reached."
+                : "The original response could not be saved on the Tally PC."}{" "}
+              The bounded comparison above remains available.
+            </p>
+          )}
+        </section>
+      )}
       {encoding && (
         <section
           className="space-y-3 rounded border p-3"
@@ -146,7 +188,7 @@ function Evidence({ details }: { details: DaybookDiagnostics }) {
           above show where it stopped.
         </p>
       )}
-      {voucher && (
+      {voucher && !layoutConflict && (
         <>
           <h4 className="text-sm font-medium">
             Ledger entries in this voucher ({voucher.ledgerEntryCount})
@@ -246,7 +288,7 @@ export function DaybookErrorDetails({
           </p>
         )}
         {diagnostics ? (
-          <Evidence details={diagnostics} />
+          <Evidence details={diagnostics} code={code} />
         ) : review.length ? (
           <div className="space-y-4">
             {review.map((row) => (
@@ -256,7 +298,7 @@ export function DaybookErrorDetails({
                 </h3>
                 <p className="text-sm">{row.reason}</p>
                 {row.details ? (
-                  <Evidence details={row.details} />
+                  <Evidence details={row.details} code={row.reason} />
                 ) : (
                   <p className="text-sm text-muted-foreground">
                     This capture did not include the dealer and ledger details. Update the connector

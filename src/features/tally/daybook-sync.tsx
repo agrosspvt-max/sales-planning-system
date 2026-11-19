@@ -47,6 +47,8 @@ const statusText: Record<string, string> = {
   FAILED: "Daybook refresh failed. The last published figures are still in use.",
 };
 const errors: Record<string, string> = {
+  DAYBOOK_LEDGER_LAYOUT_AMBIGUOUS:
+    "Tally returned conflicting ledger sections. Open the info button to compare them; previously published figures are preserved.",
   LEASE_EXPIRED: "The office connector did not finish this request in time.",
   DAYBOOK_CAPTURE_REJECTED: "The capture failed validation.",
   DAYBOOK_SCOPE_CHANGED: "The capture did not cover the requested period. Request a fresh read.",

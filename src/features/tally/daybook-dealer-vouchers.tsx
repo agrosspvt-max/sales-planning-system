@@ -7,9 +7,11 @@ import { DaybookVoucherDetails, voucherLabel } from "./daybook-voucher-details";
 export function DaybookDealerVouchers({
   credits = [],
   excluded = [],
+  sourceJobId,
 }: {
   credits?: DaybookCredit[];
   excluded?: DaybookExcludedVoucher[];
+  sourceJobId?: string;
 }) {
   const vouchers: DaybookExcludedVoucher[] = [
     ...credits.map((v) => ({ ...v, amount: v.creditAmount, reason: "included" })),
@@ -24,6 +26,7 @@ export function DaybookDealerVouchers({
         <DaybookVoucherDetails
           key={voucher.guid}
           voucher={voucher}
+          sourceJobId={sourceJobId}
           summaryLabel={`${voucherLabel(voucher)} · ${voucher.date}${voucher.amount !== undefined ? ` · ${Number(voucher.amount).toLocaleString("en-IN", { style: "currency", currency: "INR" })}` : ""}`}
         />
       ))}

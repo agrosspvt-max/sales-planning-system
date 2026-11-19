@@ -25,10 +25,12 @@ export function DaybookResultTables({
   dealerRows,
   excludedVouchers = [],
   coverage,
+  sourceJobId,
 }: {
   dealerRows: DaybookDealerRow[];
   excludedVouchers?: DaybookExcludedVoucher[];
   coverage?: string;
+  sourceJobId?: string;
 }) {
   // Existing saved captures already retain the original Tally types. Index both
   // confirmed dealer names and source ledgers so aliases share one type list.
@@ -133,7 +135,7 @@ export function DaybookResultTables({
                           {voucherLedgerSummary(voucher) && (
                             <p className="mt-1 text-xs">{voucherLedgerSummary(voucher)}</p>
                           )}
-                          <DaybookVoucherDetails voucher={voucher} />
+                          <DaybookVoucherDetails voucher={voucher} sourceJobId={sourceJobId} />
                         </>
                       )}
                       {row.ledgers
@@ -148,6 +150,7 @@ export function DaybookResultTables({
                           <DaybookDealerVouchers
                             credits={row.creditVouchers}
                             excluded={otherVouchers(row)}
+                            sourceJobId={sourceJobId}
                           />
                         )}
                       {!row.creditVouchers &&
@@ -245,7 +248,7 @@ export function DaybookResultTables({
                     {!v.ledgerName && voucherLedgerSummary(v) && (
                       <p className="mt-1 text-xs">{voucherLedgerSummary(v)}</p>
                     )}
-                    <DaybookVoucherDetails voucher={v} />
+                    <DaybookVoucherDetails voucher={v} sourceJobId={sourceJobId} />
                   </td>
                   <td className="p-3 align-top">{v.voucherType}</td>
                   <td className="p-3 text-right align-top tabular-nums">

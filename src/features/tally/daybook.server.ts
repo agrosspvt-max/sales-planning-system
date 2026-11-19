@@ -79,7 +79,7 @@ export async function daybookStatus(ctx: AuthContext, month: string) {
         prisma.tallyDaybookJob.findFirst({
           where: { ...where, status: "SUCCEEDED" },
           orderBy: { completedAt: "desc" },
-          select: { completedAt: true, throughDate: true, summary: true },
+          select: { id: true, completedAt: true, throughDate: true, summary: true },
         }),
       ])
     : [null, null];

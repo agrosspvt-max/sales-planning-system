@@ -37,7 +37,7 @@ type Summary = {
 type Status = {
   configured: boolean;
   job: { status: string; error: string | null; summary: Summary | null } | null;
-  published: { completedAt: string; throughDate: string; summary: Summary } | null;
+  published: { id: string; completedAt: string; throughDate: string; summary: Summary } | null;
 };
 
 const statusText: Record<string, string> = {
@@ -198,6 +198,7 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
             }
             excludedVouchers={summary.excludedVouchers}
             coverage={summary.coverage}
+            sourceJobId={published.id}
           />
           {!summary.dealerRows && (
             <p className="text-sm text-muted-foreground">

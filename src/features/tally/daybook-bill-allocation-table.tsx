@@ -1,6 +1,9 @@
 "use client";
 
+import { Fragment } from "react";
 import type { DaybookBillAllocations } from "./daybook-bill-allocations";
+import type { DaybookVoucherSource } from "./daybook-bill-products";
+import { DaybookReferencedBillProducts } from "./daybook-referenced-bill-products";
 
 function allocationAmount(value?: string | null) {
   const amount = value?.trim();
@@ -12,9 +15,11 @@ function allocationAmount(value?: string | null) {
 export function DaybookBillAllocationTable({
   allocations,
   layoutConflict = false,
+  source,
 }: {
   allocations?: DaybookBillAllocations;
   layoutConflict?: boolean;
+  source?: DaybookVoucherSource;
 }) {
   return (
     <div className="space-y-2">
@@ -58,24 +63,44 @@ export function DaybookBillAllocationTable({
                   const type = entry.referenceType?.trim().toLowerCase();
                   const noSpecificBill = type === "on account" || type === "advance";
                   return (
-                    <tr
-                      key={`${entry.ledgerLineNumber}:${entry.allocationNumber}`}
-                      className="border-t"
-                    >
-                      {allocations.scope === "voucher_ledgers" && (
+                    <Fragment key={`${entry.ledgerLineNumber}:${entry.allocationNumber}`}>
+                      <tr className="border-t">
+                        {allocations.scope === "voucher_ledgers" && (
+                          <td className="p-1">
+                            {entry.ledgerName || `Ledger line ${entry.ledgerLineNumber}`}
+                          </td>
+                        )}
                         <td className="p-1">
-                          {entry.ledgerName || `Ledger line ${entry.ledgerLineNumber}`}
+                          {entry.billReference ||
+                            (noSpecificBill ? "No specific bill" : "Bill reference not returned")}
                         </td>
+                        <td className="p-1">{entry.referenceType || "Type not returned"}</td>
+                        <td className="whitespace-nowrap p-1 text-right tabular-nums">
+                          {allocationAmount(entry.amount)}
+                        </td>
+                      </tr>
+                      {type === "agst ref" && !!entry.billReference?.trim() && (
+                        <tr>
+                          <td
+                            colSpan={allocations.scope === "voucher_ledgers" ? 4 : 3}
+                            className="p-1 pb-2"
+                          >
+                            <DaybookReferencedBillProducts source={source} entry={entry} />
+                          </td>
+                        </tr>
                       )}
-                      <td className="p-1">
-                        {entry.billReference ||
-                          (noSpecificBill ? "No specific bill" : "Bill reference not returned")}
-                      </td>
-                      <td className="p-1">{entry.referenceType || "Type not returned"}</td>
-                      <td className="whitespace-nowrap p-1 text-right tabular-nums">
-                        {allocationAmount(entry.amount)}
-                      </td>
-                    </tr>
+                      {noSpecificBill && (
+                        <tr>
+                          <td
+                            colSpan={allocations.scope === "voucher_ledgers" ? 4 : 3}
+                            className="p-1 pb-2 text-muted-foreground"
+                          >
+                            {entry.referenceType}: no specific sales bill is linked by this
+                            allocation.
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>

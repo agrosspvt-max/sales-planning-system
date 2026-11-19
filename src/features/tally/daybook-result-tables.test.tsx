@@ -57,6 +57,13 @@ assert.equal(capture.credits[0].billAllocations?.entries[1].billReference, "INV-
 assert.equal(capture.excludedVouchers[0].amount, undefined);
 assert.equal(capture.excludedVouchers[0].details?.voucher?.ledgerEntries[0].amount, "-250.00");
 const load = testLoader({
+  "@/lib/api-client": {
+    api: {
+      get: () => {
+        throw new Error("Unexpected product fetch without a published source");
+      },
+    },
+  },
   "next/link": {
     default: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
   },

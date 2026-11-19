@@ -33,9 +33,11 @@ const direction = (flag?: string | null) =>
 export function DaybookVoucherDetails({
   voucher,
   summaryLabel = "Voucher details",
+  sourceJobId,
 }: {
   voucher: DaybookExcludedVoucher;
   summaryLabel?: string;
+  sourceJobId?: string;
 }) {
   const evidence = voucher.details?.voucher;
   return (
@@ -58,6 +60,7 @@ export function DaybookVoucherDetails({
         <DaybookBillAllocationTable
           allocations={voucher.billAllocations}
           layoutConflict={evidence?.layoutResolution === "conflicting"}
+          source={sourceJobId ? { jobId: sourceJobId, voucherGuid: voucher.guid } : undefined}
         />
         {evidence?.ledgerLayouts && <DaybookLedgerLayoutDetails voucher={evidence} />}
         {evidence ? (

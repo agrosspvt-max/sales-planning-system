@@ -1,6 +1,8 @@
 import { type NextRequest } from "next/server";
 import { handle, ok, requireAuth, ApiError } from "@/lib/http";
-import { getGroupProductPlan, ALL_BUCKETS, type StatusBucket, type GroupPlanFilter } from "@/features/planning/group-plan.server";
+import { getGroupProductPlan } from "@/features/planning/group-plan.server";
+
+import { readGroupPlanFilter } from "@/features/planning/group-plan-query.server";
 
 /**
  * Read-only Territory (Group) Product Plan aggregated across every officer's plans for a season.
@@ -18,21 +20,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ groupId: st
     const seasonId = q.get("seasonId");
     if (!seasonId) throw new ApiError(422, "seasonId is required");
 
-    const buckets = (q.get("buckets") ?? "approved")
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s): s is StatusBucket => (ALL_BUCKETS as string[]).includes(s));
-    const rawView = q.get("view") ?? "total";
-    const view: GroupPlanFilter["view"] = rawView === "month" || rawView === "range" ? rawView : "total";
-    const monthIds = (q.get("months") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    const officerId = q.get("officerId")?.trim() || undefined;
-    const seasonMetrics = q.get("seasonMetrics") === "filters" ? "filters" : "approved"; // default: Approved Baseline
-
-    return ok(await getGroupProductPlan(auth, groupId, seasonId, {
-      buckets, includeUnplanned: q.get("unplanned") === "true", view, monthIds, officerId, seasonMetrics,
-      fromMonthId: q.get("fromMonth") ?? undefined,
-      toMonthId: q.get("toMonth") ?? undefined,
-      groupBy: q.get("groupBy") === "dealer" ? "dealer" : undefined,
-    }));
+    return ok(await getGroupProductPlan(auth, groupId, seasonId, readGroupPlanFilter(q)));
   });
 }

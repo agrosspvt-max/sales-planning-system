@@ -146,3 +146,46 @@ voucher type names (deduplicated per dealer/source ledger) instead of the generi
 Review only note. Matched rows retain their matching status and also list their
 Other voucher types. This uses saved excluded-voucher evidence immediately; no
 connector update or fresh capture is needed for existing 1.6.2-test results.
+
+### Territory dealer drilldown: Bill wise / Product wise — 19 November
+
+The Territory Plan dealer drawer now has Bill wise and Product wise tabs. Product
+wise retains its existing aggregated quantities/actual amounts and is the initial
+view. Bill wise lazily requests only this dealer's stored source vouchers, grouped
+by bill date with newest dates first. Each bill starts collapsed and shows its
+original number/type and product subtotal; expanding it shows original Tally stock
+names, quantities (six-decimal precision), units and source amounts. Blank numbers
+use a readable placeholder while distinct database voucher identities keep equal
+numbers separate. Credit Note quantities/amounts stay negative. Cancelled/optional
+bills are labelled and remain excluded from sales totals. Financial-only vouchers
+show that they have no product lines. Product subtotals are not invoice totals with
+taxes or charges.
+
+The authenticated read-only endpoint is
+`/api/planning/groups/[groupId]/dealer-sales-bills`. It reuses getGroupProductPlan's
+role/group checks, season/month range normalization, active group officers, current
+dealer ownership (including the existing plan-owner fallback for legacy dealers),
+and monthly status / Unplanned inclusion. Only snapshot IDs admitted by that same
+policy can be queried. A shared group-plan-query.server parser keeps report and
+bill query parameters identical. Category filtering keeps the source lines whose
+resolved product IDs are in the dealer's current category-filtered Product wise
+rows; all-category mode also shows unmatched source products with a mapping note.
+
+Source-party attribution uses the exact alias/master-name policy from sales
+publication, extracted unchanged into sales-party-names.ts. It detects collisions
+across all aliases and avoids fuzzy guessing. Current alias changes affect source
+bill lookup; an old name that no longer maps is not guessed. Product resolution
+uses the shared source-name cleanup/unique resolver, including merged products.
+No new connector, credential, data write or migration is required. Summary uploads
+without source vouchers remain visible in Product wise; no bills are invented.
+
+Files: dealer-sales-drawer.tsx, dealer-bill-list.tsx, dealer-sales-bills.ts,
+dealer-sales-bills.server.ts, group-plan-query.server.ts, group-plan-page.tsx,
+group-plan.server.ts and the dealer-sales-bills API route. Tally's sales.server.ts
+uses the same extracted sales-party-names helper; its financial behavior is
+unchanged. Verification covers real disposable PostgreSQL publication and bill
+reads, signed returns, blank/duplicate numbers, date ordering, source product
+names/quantities/amounts, alias changes, roles/groups/officer/status/month/range
+filters, and existing aging/sales/Daybook regressions. Render checks cover both
+tabs, lazy loading, retained Product wise output, collapsed bills and category
+filtering. TypeScript checks passed.

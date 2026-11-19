@@ -16,6 +16,7 @@ import { indiaDay } from "./billwise";
 import { assertEnabled, assertSuper, authenticateConnector, lockConnector } from "./service.server";
 import { hashSales, salesPeriod, validateSales, type SalesResult } from "./sales";
 
+import { salesPartyNames } from "./sales-party-names";
 import { salesMonths } from "./sales-range";
 
 type Tx = Prisma.TransactionClient;
@@ -93,26 +94,7 @@ async function scope(db: Tx, monthKey: string) {
         orderBy: { id: "asc" },
       })
     : [...new Map(dealers.map((d) => [d.dealerId, { id: d.dealerId, name: d.name }])).values()];
-  const needed = new Set(salesDealers.map((d) => d.id));
-  // All aliases participate in collision detection, including dealers outside this month's plans.
-  const candidates = new Map<string, Set<string>>();
-  const add = (name: string, id: string) => {
-    const set = candidates.get(name) ?? new Set<string>();
-    set.add(id);
-    candidates.set(name, set);
-  };
-  for (const a of aliases) add(a.tallyName.trim(), a.systemDealerId);
-  const aliasOwners = new Set(aliases.map((a) => a.systemDealerId));
-  const configuredAliasNames = new Set(candidates.keys());
-  for (const d of salesDealers) {
-    const name = d.name.trim();
-    if (includeCompanyActuals ? !configuredAliasNames.has(name) : !aliasOwners.has(d.id))
-      add(name, d.id);
-  }
-  const names = [...candidates]
-    .filter(([, ids]) => [...ids].some((id) => needed.has(id)))
-    .map(([name, ids]) => ({ name, dealerIds: [...ids].sort() }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const names = salesPartyNames(salesDealers, aliases, includeCompanyActuals);
   if (names.length > 2000 || dealers.length > 2000)
     throw new ApiError(422, "Sales scope is too large");
   const missingLedgerAsZero = missingSalesLedgerAsZeroEnabled();

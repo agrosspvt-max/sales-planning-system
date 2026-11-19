@@ -88,6 +88,8 @@ function load<T>(file: string): T {
   });
   return mod.exports as T;
 }
+modules["./sales-party-names"] = load("src/features/tally/sales-party-names.ts");
+modules["@/features/tally/sales-party-names"] = modules["./sales-party-names"];
 modules["./sales-range"] = load("src/features/tally/sales-range.ts");
 modules["@/lib/import/workbook"] = {};
 modules["@/lib/match-key"] = load("src/lib/match-key.ts");
@@ -1057,6 +1059,128 @@ async function main() {
   assert.equal(filtered[0].products.length, 1, "drawer sees the same category-filtered products");
   console.log("Territory dealer plans, consistent actuals, month selection, and category filtering: PASS");
   console.log("Territory approval filters, missing-plan capture, returns and deduplication: PASS");
+
+  modules["./group-plan.server"] = territory;
+  const billService = load<typeof import("@/features/planning/dealer-sales-bills.server")>(
+    "src/features/planning/dealer-sales-bills.server.ts",
+  );
+  const billFilter = {
+    buckets: ["approved"] as const,
+    includeUnplanned: false,
+    view: "month" as const,
+    monthIds: [],
+    fromMonthId: "sales-old",
+  };
+  const readBills = (
+    dealerId: string,
+    changes: Partial<Parameters<typeof territory.getGroupProductPlan>[3]> = {},
+  ) =>
+    billService.getDealerSalesBills(actor, group.id, "sales-season", dealerId, {
+      ...billFilter,
+      buckets: ["approved"],
+      ...changes,
+    });
+  const billA = await readBills("a");
+  assert.equal(billA.bills.length, 1);
+  assert.equal(billA.bills[0].number, "S1");
+  assert.equal(billA.bills[0].date, oldKey + "-01");
+  assert.equal(billA.bills[0].items[0].productName, "Product 10X1L");
+  assert.equal(billA.bills[0].items[0].productId, "sales-product");
+  assert.equal(billA.bills[0].items[0].quantity, 14.4);
+  assert.equal(billA.bills[0].items[0].amount, dealerA!.actualAmount);
+  assert.equal((await readBills("territory-draft")).bills.length, 0);
+  assert.equal((await readBills("territory-draft", { buckets: ["draft"] })).bills.length, 1);
+  assert.equal((await readBills("territory-missing-seasonal")).bills.length, 0);
+  const returnBills = await readBills("territory-missing-seasonal", { includeUnplanned: true });
+  assert.equal(returnBills.bills.length, 1);
+  assert.equal(returnBills.bills[0].family, "Credit Note");
+  assert.equal(returnBills.bills[0].items[0].quantity, -0.75);
+  assert.equal(returnBills.bills[0].items[0].amount, -75);
+  assert.equal((await readBills("a", { officerId: "territory-missing-seasonal" })).bills.length, 0);
+  assert.equal((await readBills("not-a-dealer")).bills.length, 0);
+  await assert.rejects(
+    billService.getDealerSalesBills(
+      { ...actor, role: db.Role.REGIONAL_MANAGER, groupId: "another-group" },
+      group.id,
+      "sales-season",
+      "a",
+      { ...billFilter, buckets: ["approved"] },
+    ),
+    /own group's planning/,
+  );
+  await assert.rejects(
+    billService.getDealerSalesBills(
+      { ...actor, role: db.Role.SALES_OFFICER },
+      group.id,
+      "sales-season",
+      "a",
+      { ...billFilter, buckets: ["approved"] },
+    ),
+    /admin or manager/,
+  );
+  // Source names must have an exact current attribution; renamed aliases are not guessed.
+  await prisma.dealerAlias.updateMany({
+    where: { systemDealerId: "a" },
+    data: { tallyName: "Alias after publication" },
+  });
+  assert.equal((await readBills("a")).bills.length, 0);
+  await prisma.dealerAlias.updateMany({
+    where: { systemDealerId: "a" },
+    data: { tallyName: "New Dealer Name" },
+  });
+  const snapshot = await prisma.tallySalesSnapshot.findFirstOrThrow({
+    where: { monthKey: oldKey },
+  });
+  const diagnosticIds: string[] = [];
+  for (const [n, cancelled] of [false, true].entries()) {
+    const v = await prisma.tallySalesVoucher.create({
+      data: {
+        snapshotId: snapshot.id,
+        guid: prefix + "-0000999" + n,
+        masterId: "test",
+        alterId: "test",
+        billDate: oldKey + (cancelled ? "-03" : "-02"),
+        billNumber: cancelled ? "S1" : "",
+        typeName: "Credit Note",
+        family: "Credit Note",
+        partyName: "New Dealer Name",
+        cancelled,
+        optional: false,
+        ledgerEntries: [],
+      },
+    });
+    diagnosticIds.push(v.id);
+  }
+  const datedBills = await readBills("a");
+  assert.equal(datedBills.bills.length, 3);
+  assert.equal(datedBills.bills[0].cancelled, true);
+  assert.equal(datedBills.bills[1].number, "");
+  assert.equal(datedBills.bills[1].items.length, 0);
+  assert.equal(
+    datedBills.bills[2].id,
+    billA.bills[0].id,
+    "duplicate bill numbers remain separate vouchers",
+  );
+  await prisma.tallySalesVoucher.deleteMany({ where: { id: { in: diagnosticIds } } });
+  const allBills = await readBills("a", { view: "total", includeUnplanned: true });
+  const rangeBills = await readBills("a", {
+    view: "range",
+    fromMonthId: "sales-month",
+    toMonthId: "sales-old",
+    includeUnplanned: true,
+  });
+  assert.equal(JSON.stringify(allBills), JSON.stringify(rangeBills));
+  const outside = await prisma.userGroup.create({ data: { name: "Outside bill group" } });
+  await prisma.user.update({ where: { id: "sales-officer" }, data: { groupId: outside.id } });
+  assert.equal(
+    (await readBills("a")).bills.length,
+    0,
+    "dealer bills cannot escape current group membership",
+  );
+  await prisma.user.update({ where: { id: "sales-officer" }, data: { groupId: group.id } });
+  console.log(
+    "Dealer bill drilldown: exact source lines, exact aliases, dates, duplicate/blank numbers, returns, status/month/range/officer/group/role filters: PASS",
+  );
 
   await prisma.product.create({
     data: { id: "vajeer", name: "VAJEER", rate: 4665, nbvPercent: "0.5" },

@@ -421,6 +421,10 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
 
       {dealerView && !isPlaceholderData && drawerDealer && (
         <DealerSalesDrawer
+          key={drawerDealer.dealerId}
+          groupId={groupId}
+          queryParams={params.toString()}
+          categoryFiltered={!!categoryFilter}
           dealer={drawerDealer}
           periodLabel={`${selectedPeriodLabel} · ${data.seasonName}`}
           onClose={() => setDrawerDealerId(null)}

@@ -153,6 +153,7 @@ export interface GroupProductPlan {
   packSizes: { id: string; name: string }[];
   products: GroupProductRow[];
   dealerProducts?: DealerProductFinancialRow[];
+  dealerBillScope?: { snapshotId: string; monthKey: string }[];
 }
 
 const emptyBucketTotals = (): Record<StatusBucket, BucketTotal> => ({
@@ -163,7 +164,7 @@ const emptyBucketTotals = (): Record<StatusBucket, BucketTotal> => ({
 
 type SeasonPlanRow = { id: string; officerId: string; version: number; status: string; isActiveVersion: boolean };
 
-export async function getGroupProductPlan(ctx: AuthContext, groupId: string, seasonId: string, filter: GroupPlanFilter): Promise<GroupProductPlan> {
+export async function getGroupProductPlan(ctx: AuthContext, groupId: string, seasonId: string, filter: GroupPlanFilter, billDealerId?: string): Promise<GroupProductPlan> {
   if (!isAdministrativeRole(ctx.role) && ctx.role !== Role.REGIONAL_MANAGER) {
     throw new ApiError(403, "Only an admin or manager can view group planning");
   }
@@ -552,6 +553,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     }
   }
   const unplannedOfficers = new Set<string>();
+  const dealerBillScope: NonNullable<GroupProductPlan["dealerBillScope"]> = [];
   if (companyActuals) {
     type DealerPlan = (typeof monthlyDealers)[number];
     const dealerPlans = new Map<string, DealerPlan>();
@@ -570,6 +572,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       orderBy: [{ observedAt: "desc" }, { id: "desc" }],
       distinct: ["monthKey"],
       select: {
+        id: true,
         monthKey: true,
         actualDealerIds: true,
         actuals: {
@@ -643,8 +646,21 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       }
     }
 
+    // Bill reads reuse the same ownership, month and monthly-status policy as the
+    // actuals below. This internal scope is only requested by the dealer bill API.
+    const billPlan = billDealerId ? dealerPlans.get(billDealerId) : undefined;
+    const billOwner = billDealerId ? (await getCurrentOwnerByDealer([billDealerId])).get(billDealerId)
+      ?? monthlyOwnerByDealer.get(billDealerId)
+      ?? (billPlan ? planById.get(billPlan.seasonPlanId)?.officerId : undefined) : undefined;
     for (const snapshot of snapshots) {
       const monthId = monthByKey.get(snapshot.monthKey)!;
+      if (billDealerId && billOwner && officerName.has(billOwner) && snapshot.actualDealerIds.includes(billDealerId)) {
+        const pd = dealerPlans.get(billDealerId);
+        const state = pd ? monthlyStatus.get(`${pd.seasonPlanId}:${monthId}`) : undefined;
+        const bucket = state ? bucketOfStatus(state) : null;
+        if ((isTotal || selectedMonthSet.has(monthId)) && includesTerritorySale(bucket, selected, includeUnplanned))
+          dealerBillScope.push({ snapshotId: snapshot.id, monthKey: snapshot.monthKey });
+      }
       for (const actual of snapshot.actuals) {
         const pd = dealerPlans.get(actual.dealerId);
         const survivor = eff.effId(actual.productId);
@@ -702,7 +718,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     const rows = [...dealerProducts.values()];
     const names = await loadDealerAliasNameMap([...new Set(rows.map((dealer) => dealer.dealerId))]);
     for (const row of rows) row.name = names.get(row.dealerId) ?? row.name;
-    return { ...base, officers: officerBreakdown, products: [], dealerProducts: rows };
+    return { ...base, officers: officerBreakdown, products: [], dealerProducts: rows, ...(billDealerId ? { dealerBillScope } : {}) };
   }
 
   // Annotate clearance (group-specific, by groupId + productId) — display-only.

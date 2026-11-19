@@ -1,0 +1,139 @@
+"use client";
+
+import type { DaybookExcludedVoucher } from "./daybook-result-types";
+
+export function voucherLabel(voucher: DaybookExcludedVoucher) {
+  return `${voucher.voucherType} · ${voucher.voucherNumber ? `No. ${voucher.voucherNumber}` : "Unnumbered voucher"}`;
+}
+
+export function voucherLedgerSummary(voucher: DaybookExcludedVoucher) {
+  const evidence = voucher.details?.voucher;
+  const names = [
+    ...new Set([
+      ...(evidence?.ledgerEntries.map((entry) => entry.ledgerName).filter(Boolean) ?? []),
+      ...(evidence?.inventoryEntries?.map((entry) => entry.productName).filter(Boolean) ?? []),
+    ]),
+  ];
+  return names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3} more` : "");
+}
+
+// These are display-only source amounts, never inputs to Recovery calculations.
+function sourceAmount(value?: string | null) {
+  const amount = value?.trim();
+  return amount && /^-?\d{1,12}(?:\.\d{1,2})?$/.test(amount)
+    ? Number(amount).toLocaleString("en-IN", { style: "currency", currency: "INR" })
+    : value || "Not returned";
+}
+
+const direction = (flag?: string | null) =>
+  flag === "Yes" ? "Debit" : flag === "No" ? "Credit" : flag || "Not returned";
+
+export function DaybookVoucherDetails({ voucher }: { voucher: DaybookExcludedVoucher }) {
+  const evidence = voucher.details?.voucher;
+  return (
+    <details
+      className="mt-2 rounded border p-2 text-xs"
+      aria-label={`Details for ${voucherLabel(voucher)}`}
+    >
+      <summary className="cursor-pointer font-medium">Voucher details</summary>
+      <div className="mt-2 space-y-3">
+        <p className="font-medium">
+          {voucherLabel(voucher)} · {voucher.date}
+        </p>
+        {!voucher.ledgerName && (
+          <p>
+            No single dealer/party was identified. The individual entries below retain their Tally
+            ledger names.
+          </p>
+        )}
+        {evidence ? (
+          <>
+            {evidence.narration && (
+              <p className="whitespace-pre-wrap">Narration: {evidence.narration}</p>
+            )}
+            {evidence.ledgerEntries.length > 0 && (
+              <div className="overflow-x-auto">
+                <p className="mb-1 font-medium">Ledger entries ({evidence.ledgerEntryCount})</p>
+                <table className="w-full text-left">
+                  <thead>
+                    <tr>
+                      <th className="p-1">Ledger</th>
+                      <th className="p-1 text-right">Amount as returned</th>
+                      <th className="p-1">Dr / Cr</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {evidence.ledgerEntries.map((entry) => (
+                      <tr key={entry.lineNumber} className="border-t">
+                        <td className="p-1">
+                          {entry.ledgerName || `Unnamed ledger · line ${entry.lineNumber}`}
+                        </td>
+                        <td className="whitespace-nowrap p-1 text-right tabular-nums">
+                          {sourceAmount(entry.amount)}
+                        </td>
+                        <td className="p-1">{direction(entry.isDeemedPositive)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {evidence.ledgerEntryCount > evidence.ledgerEntries.length && (
+                  <p>
+                    Showing the first {evidence.ledgerEntries.length} ledger lines of{" "}
+                    {evidence.ledgerEntryCount}.
+                  </p>
+                )}
+              </div>
+            )}
+            {!!evidence.inventoryEntries?.length && (
+              <div className="overflow-x-auto">
+                <p className="mb-1 font-medium">
+                  Stock items ({evidence.inventoryEntryCount ?? evidence.inventoryEntries.length})
+                </p>
+                <table className="w-full text-left">
+                  <thead>
+                    <tr>
+                      <th className="p-1">Product</th>
+                      <th className="p-1">Actual qty</th>
+                      <th className="p-1">Billed qty</th>
+                      <th className="p-1 text-right">Amount as returned</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {evidence.inventoryEntries.map((entry) => (
+                      <tr key={entry.lineNumber} className="border-t">
+                        <td className="p-1">
+                          {entry.productName || `Unnamed item · line ${entry.lineNumber}`}
+                        </td>
+                        <td className="p-1">{entry.actualQty || "Not returned"}</td>
+                        <td className="p-1">{entry.billedQty || "Not returned"}</td>
+                        <td className="whitespace-nowrap p-1 text-right tabular-nums">
+                          {sourceAmount(entry.amount)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {(evidence.inventoryEntryCount ?? 0) > evidence.inventoryEntries.length && (
+                  <p>
+                    Showing the first {evidence.inventoryEntries.length} stock lines of{" "}
+                    {evidence.inventoryEntryCount}.
+                  </p>
+                )}
+              </div>
+            )}
+            {!evidence.ledgerEntries.length && !evidence.inventoryEntries?.length && (
+              <p>No ledger or stock item lines were included in this capture.</p>
+            )}
+          </>
+        ) : (
+          <p>
+            This saved capture contains the voucher reference above, but no ledger breakdown.
+            Install connector 1.6.5-test and refresh this month to retrieve ledger entries, stock
+            items and narration.
+          </p>
+        )}
+        <p className="break-all text-muted-foreground">Voucher ID: {voucher.guid}</p>
+      </div>
+    </details>
+  );
+}

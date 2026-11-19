@@ -79,6 +79,22 @@ export const daybookDiagnosticsSchema = z
         isPartyLedger: text(64).nullish(),
         ledgerEntries: z.array(ledgerEntry).max(50),
         ledgerEntryCount: z.number().int().min(0).max(1_000_000),
+        inventoryEntries: z
+          .array(
+            z
+              .object({
+                lineNumber: z.number().int().min(1).max(1_000_000),
+                productName: text(512).nullish(),
+                actualQty: text(128).nullish(),
+                billedQty: text(128).nullish(),
+                amount: text(128).nullish(),
+                isDeemedPositive: text(64).nullish(),
+              })
+              .strict(),
+          )
+          .max(50)
+          .optional(),
+        inventoryEntryCount: z.number().int().min(0).max(1_000_000).optional(),
       })
       .strict()
       .optional(),

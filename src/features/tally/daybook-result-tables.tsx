@@ -2,6 +2,11 @@
 
 import Link from "next/link";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
+import {
+  DaybookVoucherDetails,
+  voucherLabel,
+  voucherLedgerSummary,
+} from "./daybook-voucher-details";
 
 const money = (amount: string | null | undefined) =>
   amount == null
@@ -27,6 +32,9 @@ export function DaybookResultTables({
   // Existing saved captures already retain the original Tally types. Index both
   // confirmed dealer names and source ledgers so aliases share one type list.
   const typesByParty = new Map<string, Set<string>>();
+  const vouchersByKey = new Map(
+    excludedVouchers.map((voucher) => ["voucher:" + voucher.guid, voucher]),
+  );
   for (const voucher of excludedVouchers) {
     if (!["unsupported_type", "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"].includes(voucher.reason))
       continue;
@@ -59,7 +67,9 @@ export function DaybookResultTables({
         </summary>
         <p className="text-sm text-muted-foreground">
           Receipts and SR/CR update only dealers with a confirmed match. Other shows the total
-          amount of other voucher types for review; it does not update Recovery or Last Payment.
+          amount of other voucher types for review; it does not update Recovery or Last Payment.{" "}
+          Open Voucher details for individual ledger amounts and stock items when no single party is
+          identified.
         </p>
         {dealerRows.some((row) => row.status === "Needs dealer link") && (
           <p className="text-sm">
@@ -75,7 +85,7 @@ export function DaybookResultTables({
           <table className="w-full min-w-[52rem] text-sm">
             <thead className="sticky top-0 bg-muted text-left">
               <tr>
-                {["Dealer", "SR/CR", "Receipts", "Other", "Voucher types / match"].map(
+                {["Dealer / voucher", "SR/CR", "Receipts", "Other", "Voucher types / match"].map(
                   (label, i) => (
                     <th
                       scope="col"
@@ -89,45 +99,61 @@ export function DaybookResultTables({
               </tr>
             </thead>
             <tbody>
-              {dealerRows.map((row) => (
-                <tr key={row.key} className="border-b last:border-0">
-                  <td className="p-3 align-top">
-                    <div className="font-medium">{row.dealerName}</div>
-                    {row.ledgers
-                      .filter((ledger) => ledger !== row.dealerName)
-                      .map((ledger) => (
-                        <div key={ledger} className="text-xs text-muted-foreground">
-                          Tally: {ledger}
-                        </div>
-                      ))}
-                  </td>
-                  <td className="p-3 text-right align-top tabular-nums">{money(row.srCr)}</td>
-                  <td className="p-3 text-right align-top tabular-nums">
-                    {money(row.liveRecovery)}
-                  </td>
-                  <td className="p-3 text-right align-top tabular-nums">{money(row.other)}</td>
-                  <td className="p-3 align-top">
-                    <div>
-                      {row.status === "Review only"
-                        ? otherTypes(row) || "Voucher type unavailable"
-                        : row.status}
-                    </div>
-                    {row.status !== "Review only" && otherTypes(row) && (
-                      <p className="text-xs text-muted-foreground">
-                        Other voucher types: {otherTypes(row)}
-                      </p>
-                    )}
-                    {row.status !== "Review only" && row.reason && (
-                      <p className="text-xs text-muted-foreground">{row.reason}</p>
-                    )}
-                    {!!row.candidates?.length && (
-                      <p className="text-xs text-muted-foreground">
-                        Possible matches: {row.candidates.join(", ")}
-                      </p>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {dealerRows.map((row) => {
+                const voucher = vouchersByKey.get(row.key);
+                return (
+                  <tr key={row.key} className="border-b last:border-0">
+                    <td className="p-3 align-top">
+                      <div className="font-medium">
+                        {voucher ? voucherLabel(voucher) : row.dealerName}
+                      </div>
+                      {voucher && (
+                        <>
+                          <p className="text-xs text-muted-foreground">
+                            {voucher.date} · No single dealer/party identified
+                          </p>
+                          {voucherLedgerSummary(voucher) && (
+                            <p className="mt-1 text-xs">{voucherLedgerSummary(voucher)}</p>
+                          )}
+                          <DaybookVoucherDetails voucher={voucher} />
+                        </>
+                      )}
+                      {row.ledgers
+                        .filter((ledger) => ledger !== row.dealerName)
+                        .map((ledger) => (
+                          <div key={ledger} className="text-xs text-muted-foreground">
+                            Tally: {ledger}
+                          </div>
+                        ))}
+                    </td>
+                    <td className="p-3 text-right align-top tabular-nums">{money(row.srCr)}</td>
+                    <td className="p-3 text-right align-top tabular-nums">
+                      {money(row.liveRecovery)}
+                    </td>
+                    <td className="p-3 text-right align-top tabular-nums">{money(row.other)}</td>
+                    <td className="p-3 align-top">
+                      <div>
+                        {row.status === "Review only"
+                          ? otherTypes(row) || "Voucher type unavailable"
+                          : row.status}
+                      </div>
+                      {row.status !== "Review only" && otherTypes(row) && (
+                        <p className="text-xs text-muted-foreground">
+                          Other voucher types: {otherTypes(row)}
+                        </p>
+                      )}
+                      {row.status !== "Review only" && row.reason && (
+                        <p className="text-xs text-muted-foreground">{row.reason}</p>
+                      )}
+                      {!!row.candidates?.length && (
+                        <p className="text-xs text-muted-foreground">
+                          Possible matches: {row.candidates.join(", ")}
+                        </p>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
               {!dealerRows.length && (
                 <tr>
                   <td colSpan={5} className="p-4 text-center text-muted-foreground">
@@ -150,7 +176,7 @@ export function DaybookResultTables({
         </p>
         {coverage !== "all_vouchers" && (
           <p className="text-sm text-muted-foreground">
-            This capture covers Receipt and Credit Note families only. Install connector 1.6.2-test
+            This capture covers Receipt and Credit Note families only. Install connector 1.6.5-test
             and refresh to include all other voucher types and their dealer amounts.
           </p>
         )}
@@ -180,10 +206,14 @@ export function DaybookResultTables({
               {excludedVouchers.map((v) => (
                 <tr key={v.guid} className="border-b last:border-0">
                   <td className="p-3 align-top">
-                    {v.dealerName ?? v.ledgerName ?? "Not supplied in this capture"}
+                    {v.dealerName ?? v.ledgerName ?? voucherLabel(v)}
                     {v.dealerName && v.ledgerName !== v.dealerName && (
                       <div className="text-xs text-muted-foreground">Tally: {v.ledgerName}</div>
                     )}
+                    {!v.ledgerName && voucherLedgerSummary(v) && (
+                      <p className="mt-1 text-xs">{voucherLedgerSummary(v)}</p>
+                    )}
+                    <DaybookVoucherDetails voucher={v} />
                   </td>
                   <td className="p-3 align-top">{v.voucherType}</td>
                   <td className="p-3 text-right align-top tabular-nums">

@@ -59,6 +59,7 @@ const capture = z.object({
           .extend({
             excluded: z.enum(["cancelled", "optional", "unsupported_type"]),
             ...displayEvidence,
+            details: daybookDiagnosticsSchema.optional(),
           })
           .strict(),
         voucher
@@ -127,16 +128,19 @@ export function validateDaybookCapture(
       row.category === "receipt"
         ? type === "RECEIPT"
         : row.category === "srCr" && /SALES RETURN|CREDIT NOTE/.test(type);
+    if (
+      "details" in row &&
+      row.details &&
+      (row.details.month !== data.month ||
+        (row.details.companyName !== undefined && row.details.companyName !== data.companyName) ||
+        row.details.fromDate < data.fromDate ||
+        row.details.throughDate > data.throughDate ||
+        row.details.fromDate > row.details.throughDate ||
+        (row.details.voucher?.guid != null && row.details.voucher.guid.toLowerCase() !== id) ||
+        (row.details.voucher?.date != null && row.details.voucher.date !== row.date))
+    )
+      throw new Error("Voucher details are outside the capture scope.");
     if ("review" in row) {
-      if (
-        row.details &&
-        (row.details.month !== data.month ||
-          (row.details.companyName !== undefined && row.details.companyName !== data.companyName) ||
-          row.details.fromDate < data.fromDate ||
-          row.details.throughDate > data.throughDate ||
-          row.details.fromDate > row.details.throughDate)
-      )
-        throw new Error("Voucher review details are outside the capture scope.");
       // Older connectors report out-of-scope derived types (e.g. Cheque Return) as
       // review items. Match the manual importer: exclude these, but retain credit holds.
       const destination =
@@ -161,6 +165,7 @@ export function validateDaybookCapture(
         voucherNumber: row.voucherNumber,
         voucherType: row.voucherType,
         reason: row.excluded,
+        ...(row.details ? { details: row.details } : {}),
         ...(row.ledgerName ? { ledgerName: row.ledgerName } : {}),
         ...(row.amount !== undefined ? { amount: row.amount } : {}),
         ...(row.direction ? { direction: row.direction } : {}),

@@ -186,7 +186,10 @@ export async function resolveDaybookCapture(
         (voucher.ledgerName ? "ledger:" + voucher.ledgerName : "voucher:" + voucher.guid);
       const row = dealerRows.get(key) ?? {
         key,
-        dealerName: dealer?.name ?? voucher.ledgerName ?? "Not supplied by Tally",
+        dealerName:
+          dealer?.name ??
+          voucher.ledgerName ??
+          `${voucher.voucherType} · ${voucher.voucherNumber ? `No. ${voucher.voucherNumber}` : "Unnumbered voucher"} · ${voucher.date}`,
         ledgers: voucher.ledgerName ? [voucher.ledgerName] : [],
         liveRecovery: "0.00",
         srCr: "0.00",

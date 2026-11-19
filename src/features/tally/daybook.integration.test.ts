@@ -369,6 +369,36 @@ async function main() {
       voucherType: "Journal",
       category: "other",
       excluded: "unsupported_type",
+      details: {
+        stage: "vouchers",
+        month,
+        fromDate: month + "-01",
+        throughDate: last,
+        voucher: {
+          guid: prefix + "-00000011",
+          date: month + "-02",
+          voucherNumber: "J1",
+          voucherType: "Journal",
+          narration: "Adjustment details",
+          ledgerEntryCount: 2,
+          ledgerEntries: [
+            {
+              lineNumber: 1,
+              ledgerName: "Payment Only Dealer",
+              amount: "45.00",
+              isDeemedPositive: "No",
+            },
+            {
+              lineNumber: 2,
+              ledgerName: "Adjustment account",
+              amount: "-45.00",
+              isDeemedPositive: "Yes",
+            },
+          ],
+          inventoryEntries: [],
+          inventoryEntryCount: 0,
+        },
+      },
       ledgerName: "Payment Only Dealer",
       amount: "45.00",
       direction: "credit",
@@ -398,6 +428,7 @@ async function main() {
       reason: string;
       dealerName?: string;
       amount?: string;
+      details?: import("./daybook-diagnostics").DaybookDiagnostics;
     }[];
     dealerRows: {
       dealerName: string;
@@ -430,6 +461,12 @@ async function main() {
   );
   assert.equal(summary.excludedVouchers[1].dealerName, "Verified Dealer");
   assert.equal(summary.excludedVouchers[1].amount, "25.00");
+  const journalEvidence = summary.excludedVouchers.find((v) => v.voucherType === "Journal")!
+    .details!.voucher!;
+  assert.equal(journalEvidence.narration, "Adjustment details");
+  assert.equal(journalEvidence.ledgerEntries[1].ledgerName, "Adjustment account");
+  assert.equal(journalEvidence.ledgerEntries[1].amount, "-45.00");
+
   assert.equal(summary.excludedVouchers[0].voucherType, "Cheque Return");
   assert.equal(summary.excludedVouchers[0].reason, "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE");
   const replay = await first.retry();
@@ -561,7 +598,15 @@ except d.DaybookRejected as error:
       voucherType: "Receipt",
       category: "receipt",
       review: "CREDIT_AMBIGUOUS",
-      details: evidence.details,
+      details: {
+        ...evidence.details,
+        voucher: {
+          ...evidence.details.voucher,
+          guid: prefix + "-00000098",
+          date: month + "-02",
+          voucherNumber: "R98",
+        },
+      },
     },
   ]);
   assert.ok(reviewWithDetails.reply.rejected);

@@ -1,3 +1,5 @@
+import type { DaybookDiagnostics } from "./daybook-diagnostics";
+
 export type DaybookDealerRow = {
   key: string;
   dealerName: string;
@@ -19,4 +21,5 @@ export type DaybookExcludedVoucher = {
   ledgerName?: string;
   amount?: string;
   direction?: "debit" | "credit" | "zero";
+  details?: DaybookDiagnostics;
 };

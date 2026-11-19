@@ -278,3 +278,16 @@ valid Unicode, single-day isolation, exact saved bytes, hash deduplication and
 narrowing timeouts. Real Python byte evidence was saved/read through the agent API
 in disposable PostgreSQL without changing financial values. Info dialog rendering
 and TypeScript checks passed.
+
+
+## 19 November: Identify unnamed Daybook vouchers (connector 1.6.5-test)
+
+Unnamed excluded entries now show their original voucher type, number and date in the dealer summary. A ledger/stock-name overview and an initially collapsed Voucher details section identify each record; the same section is available for every excluded voucher. It displays available narration, individual ledger names, original signed amounts, debit/credit flags, stock names, actual/billed quantities, stock amounts and the voucher GUID. Missing party identification never assigns a bank/expense ledger as a dealer or creates a guessed aggregate amount. Other remains unknown when a single party amount cannot be identified.
+
+`daybook_capture.py` requests inventory fields using the same AllInventoryEntries and nested ledger InventoryAllocations paths already used by the sales collector. Excluded vouchers now retain bounded diagnostic metadata, including up to 50 ledger and 50 stock lines with full source counts. Stock and ledger display values never feed receipt/SRCR totals, matching, Recovery or Last Payment. Source text controls are escaped for display; React escapes markup. Existing response/upload size limits and month publication guards remain in force. No migration or financial-rule change.
+
+Website files: `daybook-voucher-details.tsx`, `daybook-result-tables.tsx`, `daybook-result-types.ts`, `daybook-diagnostics.ts`, `daybook-preview.ts` and `daybook-preview.server.ts`. Optional excluded-voucher details use the existing scoped diagnostic schema; company/date/month/voucher-GUID checks bind the evidence to the enclosing capture and record. Old connector captures remain accepted: their existing voucher references display immediately; missing ledger/stock breakdown requires connector 1.6.5-test and a fresh refresh. Both summaries remain collapsed initially.
+
+Verification: actual Python Journal/Stock Journal output through TypeScript validation and React rendering; anonymous ledger evidence, signed amounts, stock quantities, safe markup, closed disclosures, older captures and mismatched evidence rejection. Disposable PostgreSQL publication/replay tests retain excluded ledger evidence without changing receipt/SRCR totals. TypeScript passed. Connector suite: 129 tests, 126 passed and 3 Windows-only skipped (the local-server tests were rerun successfully with local-server permission).
+
+Update package: `outputs/Tally-Connector-Voucher-Details-Update-v1.6.5-test.zip` in the shared task directory. Includes all runtime files from 1.6.4 plus the new evidence capture. Preserve configured Windows folder, config/keys/state; install files, restart Run-All-Sync.cmd, then refresh the selected Daybook month. No live Windows/Tally run was performed from this Mac.

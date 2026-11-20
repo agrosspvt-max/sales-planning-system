@@ -49,6 +49,8 @@ const Table = React.forwardRef<
      * globals.css. Combine freely with `stickyFirstColumn`; the frozen corner cell layers above both.
      */
     stickyHeader?: boolean;
+    /** Pin the Total footer to the same scroll region as the column header, on both axes. */
+    stickyFooter?: boolean;
     /**
      * Opt-in: an ANCESTOR is the scroll container (both axes), not this wrapper. Used where the whole
      * page section is one scroll region so the surrounding content (e.g. a page header) can scroll away
@@ -64,7 +66,7 @@ const Table = React.forwardRef<
     numberStart?: number;
     numberLabel?: React.ReactNode;
   }
->(({ className, stickyFirstColumn, stickyHeader, externalScroll, numbered, numberStart = 1, numberLabel = "S.No", ...props }, ref) => (
+>(({ className, stickyFirstColumn, stickyHeader, stickyFooter, externalScroll, numbered, numberStart = 1, numberLabel = "S.No", ...props }, ref) => (
   <Numbering.Provider value={numbered ? { start: numberStart, label: numberLabel } : null}>
   <div className={cn("relative w-full", !externalScroll && "overflow-auto", stickyHeader && !externalScroll && "h-full min-h-0 flex-1")}>
     <table
@@ -74,6 +76,7 @@ const Table = React.forwardRef<
         stickyFirstColumn && "sticky-first-col",
         stickyFirstColumn && numbered && "numbered-sticky",
         stickyHeader && "sticky-head",
+        stickyFooter && "sticky-foot",
         className,
       )}
       {...props}

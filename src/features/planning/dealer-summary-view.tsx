@@ -66,8 +66,8 @@ export function DealerSummaryView() {
   }, [rows]);
 
   const seasonalTable = (
-    <div className="overflow-auto rounded-lg border bg-background">
-      <Table stickyFirstColumn>
+    <div className="w-max min-w-full rounded-lg border bg-background">
+      <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
         <TableHeader>
           <TableRow>
             <Th labelKey="col.dealer" className="min-w-[160px]" />

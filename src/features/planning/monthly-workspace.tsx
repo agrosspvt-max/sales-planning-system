@@ -31,8 +31,9 @@ export function MonthlyWorkspace({ planId }: { planId: string }) {
   ];
 
   return (
-    <div className="space-y-4">
+    <div data-planning-scroll className={cn("space-y-4", tab !== "history" && "h-[calc(100dvh-5.5rem)] overflow-auto md:h-[calc(100dvh-6.5rem)]")}>
       <PageHeader
+        pinned={false}
         backTo={`/planning/${planId}`}
         crumbs={[{ label: "Planning" }, { label: "View Approved Plans", href: "/planning/sales/plans" }, { label: data.seasonName }, { label: "Monthly Planning" }]}
         title={`${data.seasonName} — Monthly Planning`}

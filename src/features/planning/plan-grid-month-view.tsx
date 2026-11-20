@@ -12,6 +12,8 @@ import { SectionColgroup } from "@/components/ui/table-group";
 import { Th, LabelSectionHeaderRow, type LabelSection } from "@/features/labels/label-ui";
 import { ProductName } from "@/components/ui/product-name";
 import { useCategories } from "@/lib/use-categories";
+import { hasPlanningFigures } from "@/lib/product-row-order";
+import { ProductRows } from "./product-rows";
 
 /**
  * Read-only MONTH VIEW of an approved Seasonal Plan's Dealer Plan. It is a VIEW only — it never
@@ -134,8 +136,8 @@ export function PlanGridMonthView({
         </div>
       )}
 
-      <div className="overflow-auto rounded-lg border bg-background">
-        <Table stickyFirstColumn>
+      <div className="w-max min-w-full rounded-lg border bg-background">
+        <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
           <SectionColgroup leading={1} sections={sections} />
           <TableHeader>
             <LabelSectionHeaderRow leading={1} sections={sections} />
@@ -162,7 +164,10 @@ export function PlanGridMonthView({
                 </TableCell>
               </TableRow>
             ) : (
-              rows.map((r) => (
+              <ProductRows rows={rows} nameOf={(r) => r.productName} idOf={(r) => r.productId} columns={12}
+                scope={`${seasonPlanId}|${dealerId}|${monthId}`}
+                hasValues={(r) => hasPlanningFigures(r.monthlyPlannedQty, r.amount, r.nbv, r.actualQty, r.actualAmount, r.actualNbv, r.liveQty, r.liveAmount, r.liveNbv, r.seasonMinusMonth, r.pending)}>
+              {(r) => (
                 <TableRow key={r.productId}>
                   <TableCell className="font-medium"><ProductName name={r.productName} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty} /></TableCell>
                   <TableCell className="text-right">{qtyMode ? fmtNum(r.monthlyPlannedQty) : (r.amount === null ? "—" : formatCurrency(r.amount))}</TableCell>
@@ -177,7 +182,7 @@ export function PlanGridMonthView({
                   <TableCell className="text-right text-muted-foreground">{fmtNum(r.seasonMinusMonth)}</TableCell>
                   <TableCell className="text-right text-muted-foreground">{fmtNum(r.pending)}</TableCell>
                 </TableRow>
-              ))
+              )}</ProductRows>
             )}
           </TableBody>
           {rows.length > 0 && (

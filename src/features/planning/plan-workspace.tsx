@@ -93,10 +93,10 @@ export function PlanWorkspace({
     // Dealer grid tab: the ROOT is the single scroll region (definite viewport height, both axes). The upper
     // section scrolls fully off the top; only the dealer table's own sticky header/first column pin against
     // this scroller. Other tabs flow normally in the page.
-    <div className={cn(tab === "dealer" ? "h-[calc(100dvh-5.5rem)] space-y-4 overflow-auto md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
+    <div data-planning-scroll className={cn(tab !== "history" ? "h-[calc(100dvh-5.5rem)] space-y-4 overflow-auto md:h-[calc(100dvh-6.5rem)]" : "space-y-4")}>
       {/* Upper section — on the grid tab it is `sticky left-0` ONLY, so it never drifts sideways with the
           wide table yet still scrolls completely off the top vertically (nothing stays pinned to the top). */}
-      <div className={cn("space-y-4", tab === "dealer" && "sticky left-0 z-10 bg-background")}>
+      <div className={cn("space-y-4", tab !== "history" && "sticky left-0 z-10 bg-background")}>
       {/* Mobile: slim context bar only (Back · Season · Officer). Desktop/tablet: full header. */}
       <MobileContextBar
         backTo={detail.status === "APPROVED" ? "/planning/sales/plans" : "/planning/sales"}

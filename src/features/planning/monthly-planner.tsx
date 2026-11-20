@@ -32,6 +32,8 @@ import type { MonthlyProductRow } from "./types";
 import { DealerProgressBar, NoPlanDialog, type StatusCounts } from "./dealer-completion";
 import { DealerPlanningStatus } from "./dealer-status";
 import { AddDealerButton, EditDealerButton, AdditionalProductsSection } from "./monthly-additional-ui";
+import { hasPlanningFigures } from "@/lib/product-row-order";
+import { ProductRows } from "./product-rows";
 
 const OPTION_COLOR: Record<DealerPlanningStatus, string | undefined> = {
   [DealerPlanningStatus.COMPLETED]: "hsl(var(--success))",
@@ -263,7 +265,7 @@ export function MonthlyPlanner() {
       {/* Horizontal scroll on small screens so the wide product grid never overflows the page (req #4).
           The Product column is frozen (stickyFirstColumn) so it stays visible while scrolling sideways. */}
       <div className="w-max min-w-full rounded-lg border bg-background">
-        <Table stickyFirstColumn stickyHeader externalScroll>
+        <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
           <TableHeader>
             <TableRow>
               <Th labelKey="col.product" className="min-w-[150px]" />
@@ -288,7 +290,15 @@ export function MonthlyPlanner() {
                 </TableCell>
               </TableRow>
             ) : (
-              visibleProducts.map((p) => {
+              <ProductRows rows={visibleProducts} nameOf={(p) => p.productName} idOf={(p) => p.planLineId} columns={isApproved ? 12 : 9}
+                scope={`${monthlyPlanId ?? data.planId}|${dealerId}|${monthId}|${categoryFilter}`}
+                hasValues={(p) => {
+                  const v = rowValues(p);
+                  return hasPlanningFigures(p.target, p.seasonSaleQty, p.seasonSaleValue, v.totalPlanned, v.remaining, v.seasonSale, v.seasonPending,
+                    v.cur.plan, v.cur.sale, v.plannedAmount, v.plannedNbv, v.actualAmount,
+                    ...data.months.flatMap((m) => { const c = cellFor(p.planLineId, m.id); return [c.plan, c.sale, p.monthly[m.id]?.saleAmount]; }));
+                }}>
+              {(p) => {
                 const { totalPlanned, remaining, excess, isOver, cur, plannedAmount, actualAmount, seasonSale, seasonPending, plannedNbv } = rowValues(p);
                 return (
                   <TableRow key={p.planLineId} className={cn(isOver && "bg-warning/10")}>
@@ -332,7 +342,7 @@ export function MonthlyPlanner() {
                     {isApproved && <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(actualAmount)}</TableCell>}
                   </TableRow>
                 );
-              })
+              }}</ProductRows>
             )}
           </TableBody>
           {/* Permanent Total footer — a dedicated summary row (NOT part of the product data array),
@@ -391,7 +401,8 @@ export function MonthlyPlanner() {
       {isFirstClass && data.canEdit && monthlyPlanId && dealer && (
         <Button
           onClick={() => setAdditionalOpen(true)}
-          className="fixed bottom-20 right-4 z-40 rounded-full shadow-lg sm:hidden"
+          className="fixed right-4 z-40 rounded-full shadow-lg sm:hidden"
+          style={{ bottom: "calc(var(--table-footer-bottom, 0px) + 3.5rem)" }}
           size="sm"
         >
           <Plus className="h-4 w-4" /> Add Product

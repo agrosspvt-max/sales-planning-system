@@ -16,6 +16,8 @@ import { ProductName } from "@/components/ui/product-name";
 import { useCategories } from "@/lib/use-categories";
 import { usePlanEdit } from "./plan-edit-context";
 import { SeasonalMonthlyView } from "./seasonal-monthly-view";
+import { hasPlanningFigures } from "@/lib/product-row-order";
+import { ProductRows } from "./product-rows";
 
 const qty = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n));
 
@@ -100,7 +102,7 @@ export function ProductPlan() {
         row.actualNbv += calcNbv(aAmt, l.nbvPercent);
       }
     }
-    return Array.from(byProduct.values()).sort((a, b) => b.planAmount - a.planAmount);
+    return Array.from(byProduct.values());
   }, [detail, cells, packMode, lineFig]);
 
   const totals = useMemo(() => {
@@ -118,8 +120,8 @@ export function ProductPlan() {
   }, [rows, packColumns]);
 
   const seasonalTable = (
-    <div className="overflow-auto rounded-lg border bg-background">
-      <Table stickyFirstColumn>
+    <div className="w-max min-w-full rounded-lg border bg-background">
+      <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
         <TableHeader>
           <TableRow>
             <Th labelKey="col.product" className="min-w-[160px]" />
@@ -140,7 +142,9 @@ export function ProductPlan() {
               </TableCell>
             </TableRow>
           ) : (
-            rows.map((r) => (
+            <ProductRows rows={rows} nameOf={(r) => r.name} idOf={(r) => r.productId} columns={packMode ? packColumns.length + 7 : 7}
+              scope={detail.id} hasValues={(r) => hasPlanningFigures(r.planQty, r.planAmount, r.planNbv, r.actualQty, r.actualAmount, r.actualNbv, ...Object.values(r.packSums))}>
+            {(r) => (
               <TableRow key={r.productId}>
                 <TableCell className="font-medium">
                   <ProductName name={r.name} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty} />
@@ -155,7 +159,7 @@ export function ProductPlan() {
                 <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualAmount)}</TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualNbv)}</TableCell>
               </TableRow>
-            ))
+            )}</ProductRows>
           )}
         </TableBody>
         <tfoot>

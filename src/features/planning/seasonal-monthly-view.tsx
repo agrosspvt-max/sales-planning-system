@@ -17,6 +17,8 @@ import {
 import { Th } from "@/features/labels/label-ui";
 import { ProductName } from "@/components/ui/product-name";
 import { useCategories } from "@/lib/use-categories";
+import { hasPlanningFigures } from "@/lib/product-row-order";
+import { ProductRows } from "./product-rows";
 
 const qtyFmt = (n: number) => new Intl.NumberFormat("en-IN").format(Math.round(n));
 
@@ -150,7 +152,8 @@ export function SeasonalMonthlyView({
         row.soldNbv += nbv(soldAmount, p.nbvPercent);
       }
     }
-    return Array.from(acc.values()).sort((a, b) => b.planAmount - a.planAmount);
+    const result = Array.from(acc.values());
+    return groupBy === "dealer" ? result.sort((a, b) => b.planAmount - a.planAmount) : result;
   }, [data, selectedMonthIds, groupBy]);
 
   const totals = useMemo(() => {
@@ -166,6 +169,22 @@ export function SeasonalMonthlyView({
       { planQty: 0, planAmount: 0, planNbv: 0, soldQty: 0, soldAmount: 0, soldNbv: 0 },
     );
   }, [rows]);
+
+  const renderRow = (r: AggRow) => (
+    <TableRow key={r.id}>
+      <TableCell className="font-medium">
+        {groupBy === "product"
+          ? <ProductName name={r.name} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty} />
+          : r.name}
+      </TableCell>
+      <TableCell className="text-right tabular-nums">{qtyFmt(r.planQty)}</TableCell>
+      <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>
+      <TableCell className="text-right tabular-nums">{formatCurrency(r.planNbv)}</TableCell>
+      <TableCell className="text-right tabular-nums text-muted-foreground">{qtyFmt(r.soldQty)}</TableCell>
+      <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.soldAmount)}</TableCell>
+      <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.soldNbv)}</TableCell>
+    </TableRow>
+  );
 
   return (
     <div className="space-y-3">
@@ -203,8 +222,8 @@ export function SeasonalMonthlyView({
       ) : months.length === 0 || rows.length === 0 ? (
         <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">{EMPTY_MSG}</div>
       ) : (
-        <div className="overflow-auto rounded-lg border bg-background">
-          <Table stickyFirstColumn>
+        <div className="w-max min-w-full rounded-lg border bg-background">
+          <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
             <TableHeader>
               <TableRow>
                 <Th labelKey={groupBy === "product" ? "col.product" : "col.dealer"} className="min-w-[160px]" />
@@ -217,21 +236,13 @@ export function SeasonalMonthlyView({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="font-medium">
-                    {groupBy === "product"
-                      ? <ProductName name={r.name} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty} />
-                      : r.name}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{qtyFmt(r.planQty)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatCurrency(r.planAmount)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatCurrency(r.planNbv)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{qtyFmt(r.soldQty)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.soldAmount)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.soldNbv)}</TableCell>
-                </TableRow>
-              ))}
+              {groupBy === "product" ? (
+                <ProductRows rows={rows} nameOf={(r) => r.name} idOf={(r) => r.id} columns={7}
+                  scope={`${seasonPlanId}|${view}|${selectedMonthIds.join(",")}`}
+                  hasValues={(r) => hasPlanningFigures(r.planQty, r.planAmount, r.planNbv, r.soldQty, r.soldAmount, r.soldNbv)}>
+                  {renderRow}
+                </ProductRows>
+              ) : rows.map(renderRow)}
             </TableBody>
             <tfoot>
               <TableRow className="bg-muted/40 font-semibold">

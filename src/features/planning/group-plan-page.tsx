@@ -19,6 +19,8 @@ import { useCategories } from "@/lib/use-categories";
 import { categoryForNbv, matchesCategoryFilter } from "@/lib/product-category";
 import { GroupRecovery } from "./group-recovery-page";
 import { isNegativeTerritoryPlanMetric } from "./group-plan-metrics";
+import { hasPlanningFigures } from "@/lib/product-row-order";
+import { ProductRows } from "./product-rows";
 
 /* ------------------------------- Shared types ----------------------------- */
 
@@ -95,8 +97,10 @@ export function GroupPlanPage({ groupId, groupName }: { groupId: string; groupNa
   const effectiveSeason = seasonId || seasons?.[0]?.id || "";
 
   return (
-    <div className="space-y-4">
+    <div data-planning-scroll className={cn("space-y-4", tab === "product" && "h-[calc(100dvh-5.5rem)] overflow-auto md:h-[calc(100dvh-6.5rem)]")}>
       <PageHeader
+        pinned={tab !== "product"}
+        className={tab === "product" ? "sticky left-0 !mx-0 !mt-0 bg-background" : undefined}
         crumbs={[{ label: "Masters" }, { label: "Users", href: "/masters/users" }, { label: groupName }, { label: "Territory Plan" }]}
         title={`${groupName} — Territory Plan`}
         subtitle="Read-only analytics aggregated across every team member (Sales Officers + Regional Manager) in this group. Nothing here is editable."
@@ -206,8 +210,9 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
   if (!seasonId) return <p className="rounded-md border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground">Choose a season to view the group Product Plan.</p>;
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
 
-  // Column totals across every product (Season Baseline qty+amount, and period).
-  const T = data.products.reduce(
+  const rows = data.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories));
+  // Totals use every category-filtered row, including products behind Show more.
+  const T = rows.reduce(
     (a, r) => ({
       seasonQty: a.seasonQty + r.seasonQty,
       plannedAllMonths: a.plannedAllMonths + r.plannedAllMonths,
@@ -285,8 +290,8 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
       {data.products.length === 0 ? (
         <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">No plan data for this group, season and selected states.</div>
       ) : (
-        <div className="overflow-auto rounded-lg border bg-background">
-          <Table stickyFirstColumn>
+        <div className="w-max min-w-full rounded-lg border bg-background">
+          <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
             <TableHeader>
               {/* Grouping row: SEASON BASELINE never changes with the period; THIS PERIOD + FINANCIALS do. */}
               <TableRow className="text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -316,7 +321,12 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)).map((r) => (
+              <ProductRows rows={rows} nameOf={(r) => r.productName} idOf={(r) => r.productId} columns={seasonSpan + 7}
+                scope={`${groupId}|${seasonId}|${officerId}|${view}|${monthsKey}|${bucketsKey}|${seasonMetrics}|${categoryFilter}`}
+                hasValues={(r) => hasPlanningFigures(r.seasonQty, r.plannedAllMonths, r.remaining, r.seasonSales, r.pendingSales,
+                  r.seasonAmount, r.plannedAllMonthsAmount, r.remainingAmount, r.seasonSalesAmount, r.pendingAmount,
+                  ...Object.values(r.total), ...Object.values(r.actual))}>
+              {(r) => (
                 <TableRow key={r.productId}>
                   <TableCell className="font-medium">
                     <button className="inline-flex flex-wrap items-center gap-1 text-left hover:underline" onClick={() => setDrawerProduct(r)}>
@@ -341,7 +351,7 @@ function GroupProductPlan({ groupId, seasonId, officerId = "" }: { groupId: stri
                   <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actual.amount)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actual.nbv)}</TableCell>
                 </TableRow>
-              ))}
+              )}</ProductRows>
             </TableBody>
             <tfoot>
               <TableRow className="bg-muted/40 font-semibold">

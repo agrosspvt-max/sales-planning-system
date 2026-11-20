@@ -8,6 +8,8 @@ import { ProductName } from "@/components/ui/product-name";
 import { CategoryFilter } from "@/components/ui/category-filter";
 import { useCategories } from "@/lib/use-categories";
 import { matchesCategoryFilter } from "@/lib/product-category";
+import { hasPlanningFigures } from "@/lib/product-row-order";
+import { ProductRows } from "./product-rows";
 import {
   Table,
   TableBody,
@@ -99,10 +101,12 @@ export function MonthlyProductPlan() {
       row.actualAmount += r.saleAmount;
       row.actualNbv += nbv(r.saleAmount, r.nbvPercent);
     }
-    return Array.from(byEff.values()).sort((a, b) => b.planAmount - a.planAmount);
+    return Array.from(byEff.values());
   }, [data, monthIds, monthlyMode, cellFor]);
 
-  const totals = rows.reduce(
+  const filteredRows = rows.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories));
+
+  const totals = filteredRows.reduce(
     (t, r) => ({
       planQty: t.planQty + r.planQty, planAmount: t.planAmount + r.planAmount, planNbv: t.planNbv + r.planNbv,
       soldQty: t.soldQty + r.soldQty, actualAmount: t.actualAmount + r.actualAmount, actualNbv: t.actualNbv + r.actualNbv,
@@ -119,7 +123,7 @@ export function MonthlyProductPlan() {
         <CategoryFilter categories={categories} value={categoryFilter} onChange={setCategoryFilter} />
       </div>
       <div className="w-max min-w-full rounded-lg border bg-background">
-        <Table stickyFirstColumn stickyHeader externalScroll>
+        <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
           <TableHeader>
             <TableRow>
               <TableHead>Product</TableHead>
@@ -132,10 +136,13 @@ export function MonthlyProductPlan() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)).length === 0 ? (
+            {filteredRows.length === 0 ? (
               <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">Nothing planned.</TableCell></TableRow>
             ) : (
-              rows.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)).map((r) => (
+              <ProductRows rows={filteredRows} nameOf={(r) => r.name} idOf={(r) => r.productId} columns={7}
+                scope={`${data.planId}|${monthIds.join(",")}|${categoryFilter}`}
+                hasValues={(r) => hasPlanningFigures(r.planQty, r.planAmount, r.planNbv, r.soldQty, r.actualAmount, r.actualNbv)}>
+              {(r) => (
                 <TableRow key={r.productId}>
                   <TableCell className="font-medium">
                     <ProductName name={r.name} nbvPercent={r.nbvPercent} categories={categories} isClearance={r.isClearance} clearanceQty={r.clearanceQty}>
@@ -149,7 +156,7 @@ export function MonthlyProductPlan() {
                   <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualAmount)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{formatCurrency(r.actualNbv)}</TableCell>
                 </TableRow>
-              ))
+              )}</ProductRows>
             )}
           </TableBody>
           <tfoot>

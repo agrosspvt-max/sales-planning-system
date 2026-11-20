@@ -1,7 +1,7 @@
 "use client";
 
 import { AutosaveStatus } from "@/features/planning/autosave-status";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Role } from "@prisma/client";
 import { api } from "@/lib/api-client";
@@ -88,7 +88,7 @@ export function MonthlyPlanWorkspace({
     // The data-grid tabs (Dealer Plan, Product Plan, Dealer Summary): the ROOT is the single scroll region
     // (definite viewport height, both axes). The upper section scrolls fully off the top; only each table's
     // own sticky header/first column pin against this scroller. History flows normally.
-    <div className={cn(tab === "history" ? "space-y-4" : "h-[calc(100dvh-5.5rem)] space-y-4 overflow-auto md:h-[calc(100dvh-6.5rem)]")}>
+    <div data-planning-scroll className={cn(tab === "history" ? "space-y-4" : "h-[calc(100dvh-5.5rem)] space-y-4 overflow-auto md:h-[calc(100dvh-6.5rem)]")}>
       {/* Upper section — on the grid tabs it is `sticky left-0` ONLY, so it never drifts sideways with a wide
           table yet still scrolls completely off the top vertically. */}
       <div className={cn("space-y-4", tab !== "history" && "sticky left-0 z-10 bg-background")}>
@@ -169,9 +169,21 @@ function MonthlyMobileActionBar({
   actionProps: React.ComponentProps<typeof MonthlyPlanActions>;
 }) {
   const { data, saving, saveStatus, flush, setAdditionalOpen } = useMonthlyEdit();
+  const barRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const bar = barRef.current;
+    const scrollArea = bar?.closest<HTMLElement>("[data-planning-scroll]");
+    if (!bar || !scrollArea) return;
+    // Observe the actual mobile bar height (including breakpoint/font changes), keeping Total above it.
+    const update = () => scrollArea.style.setProperty("--table-footer-bottom", `${bar.offsetHeight}px`);
+    const observer = new ResizeObserver(update);
+    observer.observe(bar);
+    update();
+    return () => { observer.disconnect(); scrollArea.style.removeProperty("--table-footer-bottom"); };
+  }, [data.canEdit]);
   if (!data.canEdit) return null;
   return (
-    <div className="sticky bottom-0 z-30 -mx-4 mt-4 flex items-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur sm:hidden">
+    <div ref={barRef} className="sticky bottom-0 z-30 -mx-4 mt-4 flex items-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur sm:hidden">
       <AutosaveStatus className="text-xs text-muted-foreground" saving={saving} {...saveStatus} />
       <Button size="sm" variant="outline" onClick={() => void flush().catch(() => undefined)} disabled={saving}>
         <Save className="h-4 w-4" /> Save

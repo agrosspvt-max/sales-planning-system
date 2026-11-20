@@ -41,6 +41,8 @@ import {
 } from "./dealer-completion";
 import { DealerPlanningStatus } from "./dealer-status";
 import { AdminEditBar, EditPlanButton, ChangeReviewDialog } from "./admin-edit-ui";
+import { hasPlanningFigures } from "@/lib/product-row-order";
+import { ProductRows } from "./product-rows";
 
 const fmtNum = (n: number | null) => (n === null ? "—" : String(Math.round(n)));
 
@@ -281,7 +283,7 @@ export function PlanGrid() {
         </div>
       ) : !dealer ? null : (
         <div className="w-max min-w-full rounded-lg border bg-background">
-          <Table stickyFirstColumn stickyHeader externalScroll>
+          <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
             {/* Excel-style sections (visual grouping only — the workbook layout). */}
             <SectionColgroup leading={1} sections={seasonalSections} />
             <TableHeader>
@@ -308,7 +310,10 @@ export function PlanGrid() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {dealer?.lines.map((l) => {
+              <ProductRows rows={dealer.lines} nameOf={(l) => l.effectiveProductName ?? l.productName} idOf={(l) => l.productId}
+                columns={1 + seasonalSections.reduce((sum, section) => sum + section.span, 0)} scope={`${detail.id}|${dealerId}`}
+                hasValues={(l) => { const c = cellFor(l.productId); const f = lineFig(dealerId, l); return hasPlanningFigures(c.value, ...Object.values(c.packs), f.totalQty, f.amount, f.nbv, l.actualQty, l.actualAmount, l.liveMonthlyQty); }}>
+              {(l) => {
                 const cell = cellFor(l.productId);
                 const fig = lineFig(dealerId, l);
                 // Actual amount comes from the uploaded sales value, never from the price list.
@@ -405,7 +410,7 @@ export function PlanGrid() {
                     <TableCell className="text-right text-muted-foreground">{target - l.actualQty}</TableCell>
                   </TableRow>
                 );
-              })}
+              }}</ProductRows>
             </TableBody>
             <tfoot>
               <TableRow className="bg-muted/40 font-semibold">

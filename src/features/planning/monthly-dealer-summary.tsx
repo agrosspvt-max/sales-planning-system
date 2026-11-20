@@ -54,7 +54,7 @@ export function MonthlyDealerSummary() {
     <div className="space-y-3">
       <MonthFilter months={data.months} state={filter} onChange={setFilter} />
       <div className="w-max min-w-full rounded-lg border bg-background">
-        <Table stickyFirstColumn stickyHeader externalScroll>
+        <Table stickyFirstColumn stickyHeader stickyFooter externalScroll>
           <TableHeader>
             <TableRow>
               <TableHead>Dealer</TableHead>

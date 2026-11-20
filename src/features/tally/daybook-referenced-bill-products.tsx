@@ -92,6 +92,37 @@ export function DaybookBillProductResult({
           </tbody>
         </table>
       </div>
+      {bill.amounts && (
+        <dl
+          className="ml-auto max-w-md space-y-2 rounded border p-3"
+          aria-label="Bill amount breakdown"
+        >
+          <div className="flex justify-between gap-4">
+            <dt>Product amount (excl. GST)</dt>
+            <dd className="whitespace-nowrap tabular-nums">
+              {bill.amounts.subtotal === null ? "Not recorded" : money(bill.amounts.subtotal)}
+            </dd>
+          </div>
+          {bill.amounts.taxes.map((tax, index) => (
+            <div key={index} className="flex justify-between gap-4">
+              <dt>{tax.name}</dt>
+              <dd className="whitespace-nowrap tabular-nums">{money(tax.amount)}</dd>
+            </div>
+          ))}
+          {bill.amounts.adjustments !== null && Number(bill.amounts.adjustments) !== 0 && (
+            <div className="flex justify-between gap-4">
+              <dt>Other adjustments</dt>
+              <dd className="whitespace-nowrap tabular-nums">{money(bill.amounts.adjustments)}</dd>
+            </div>
+          )}
+          <div className="flex justify-between gap-4 border-t pt-2 font-medium">
+            <dt>Bill total</dt>
+            <dd className="whitespace-nowrap tabular-nums">
+              {bill.amounts.total === null ? "Not recorded" : money(bill.amounts.total)}
+            </dd>
+          </div>
+        </dl>
+      )}
       <details className="text-xs text-muted-foreground">
         <summary className="w-fit cursor-pointer">ⓘ Product details</summary>
         <div className="mt-2 space-y-2 rounded border p-3">
@@ -112,6 +143,25 @@ export function DaybookBillProductResult({
             {!result.ownVoucher &&
               " The amount adjusted against this bill is shown separately above."}
           </p>
+          {bill.amounts && (
+            <p>
+              Taxes use the named Tally ledgers. Other adjustments are the remaining difference,
+              including any charges, discounts or round-off; they are not assumed to be GST.
+            </p>
+          )}
+          {!!bill.ledgerEntries?.length && (
+            <details>
+              <summary className="w-fit cursor-pointer">Original bill ledger amounts</summary>
+              <dl className="mt-2 space-y-1">
+                {bill.ledgerEntries.map((entry, index) => (
+                  <div key={index} className="flex justify-between gap-4">
+                    <dt>{entry.name}</dt>
+                    <dd className="whitespace-nowrap tabular-nums">{money(entry.amount)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </details>
+          )}
           <p>
             Returns use negative quantities for comparison with Sales. Blank quantities remain
             unrecorded.

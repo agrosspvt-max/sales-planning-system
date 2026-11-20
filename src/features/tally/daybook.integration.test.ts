@@ -680,6 +680,17 @@ async function main() {
     "product evidence publishes with its Daybook job",
   );
   assert.ok(!("_daybookProducts" in summary), "product data is not exposed in status polling");
+  const publicHeaders = (published.published!.summary as { billHeaders?: Record<string, unknown> })
+    .billHeaders;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(publicHeaders?.[prefix + "-00000003"])),
+    {
+      subtotal: "-10.00",
+      family: "Credit Note",
+      active: true,
+    },
+    "status exposes only the small pre-tax bill header, not full comparison evidence",
+  );
   assert.equal(summary.coverage, "all_vouchers");
   assert.equal(summary.receiptCount, 5);
   assert.equal(summary.srCrCount, 2);
@@ -1225,6 +1236,36 @@ except d.DaybookRejected as e:
   });
   assert.equal(own.ownVoucher, true);
   assert.equal(own.bill!.items.length, 2);
+  assert.equal(own.bill!.amounts!.subtotal, "145.25");
+  assert.equal(
+    own.bill!.amounts!.total,
+    null,
+    "a missing party ledger cannot be replaced with an inferred gross total",
+  );
+  capturedBills = [
+    {
+      ...firstBill,
+      ledgerEntries: [
+        { name: firstBill.partyName, amount: "-152.51" },
+        { name: "CGST", amount: "3.63" },
+        { name: "SGST", amount: "3.63" },
+      ],
+    },
+    secondBill,
+  ];
+  await saveEvidence();
+  const taxBill = await billLookup.getDaybookBillProducts(auth, {
+    jobId: historicalJob.id,
+    voucherGuid: firstBill.guid,
+    view: "voucher",
+  });
+  assert.equal(taxBill.bill!.amounts!.total, "152.51");
+  assert.equal(taxBill.bill!.amounts!.adjustments, "0.00");
+  assert.equal(taxBill.bill!.amounts!.taxes[0].kind, "CGST");
+  assert.equal(taxBill.bill!.amounts!.taxes[1].kind, "SGST");
+  assert.equal(taxBill.bill!.ledgerEntries![0].amount, "-152.51");
+  capturedBills = [firstBill, secondBill];
+  await saveEvidence();
   // Mutating the independent Sales fixture must affect only the comparison, never displayed Daybook products.
   await prisma.tallySalesItem.update({
     where: { voucherId_lineNo: { voucherId: originalBill.id, lineNo: 0 } },

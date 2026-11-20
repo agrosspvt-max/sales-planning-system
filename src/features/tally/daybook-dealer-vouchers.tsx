@@ -3,17 +3,20 @@ import type { DaybookCredit } from "./daybook-preview";
 import type { DaybookExcludedVoucher } from "./daybook-result-types";
 import { DaybookVoucherDetails } from "./daybook-voucher-details";
 import { creditVoucher, groupVouchers, shortVoucherLabel } from "./daybook-view";
+import type { DaybookBillHeaders } from "./daybook-bill-amounts";
 
 export function DaybookDealerVouchers({
   credits = [],
   excluded = [],
   sourceJobId,
+  billHeaders = {},
 }: {
   credits?: DaybookCredit[];
   excluded?: DaybookExcludedVoucher[];
   sourceJobId?: string;
+  billHeaders?: DaybookBillHeaders;
 }) {
-  const groups = groupVouchers([...credits.map(creditVoucher), ...excluded]);
+  const groups = groupVouchers([...credits.map(creditVoucher), ...excluded], billHeaders);
   return (
     <div className="space-y-5">
       {groups.map((group) => (
@@ -29,7 +32,8 @@ export function DaybookDealerVouchers({
               key={voucher.guid}
               voucher={voucher}
               sourceJobId={sourceJobId}
-              summaryLabel={shortVoucherLabel(voucher)}
+              summaryLabel={shortVoucherLabel(voucher, billHeaders[voucher.guid.toLowerCase()])}
+              billHeader={billHeaders[voucher.guid.toLowerCase()]}
               compact
             />
           ))}

@@ -10,9 +10,11 @@ import type { DaybookDiagnostics } from "./daybook-diagnostics";
 import { DaybookResultTables } from "./daybook-result-tables";
 import { DaybookSalesComparisonDialog } from "./daybook-sales-comparison-dialog";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
+import type { DaybookBillHeaders } from "./daybook-bill-amounts";
 
 type LedgerAmounts = { ledgerName: string; liveRecovery: string; srCr: string };
 type Summary = {
+  billHeaders?: DaybookBillHeaders;
   diagnostics?: DaybookDiagnostics;
   changedRows?: number;
   matchedDealers?: number;
@@ -209,6 +211,7 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
             excludedVouchers={summary.excludedVouchers}
             coverage={summary.coverage}
             sourceJobId={published.id}
+            billHeaders={summary.billHeaders}
           />
           {!summary.dealerRows && (
             <p className="text-sm text-muted-foreground">

@@ -12,6 +12,7 @@ import {
 } from "./daybook-product-source.server";
 import type { DaybookProductVoucher } from "./daybook-products";
 import type { DaybookBillProducts } from "./daybook-bill-products";
+import { daybookBillAmounts } from "./daybook-bill-amounts";
 
 const base = z.object({
   jobId: z.string().uuid(),
@@ -53,6 +54,8 @@ function result(
       partyName: bill.partyName,
       cancelled: bill.cancelled,
       optional: bill.optional,
+      amounts: daybookBillAmounts(bill),
+      ledgerEntries: bill.ledgerEntries,
       items: bill.items.map((item) => ({
         lineNo: item.lineNo,
         productName: item.stockItemName,

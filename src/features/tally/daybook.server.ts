@@ -10,6 +10,8 @@ import { resolveDaybookCapture } from "./daybook-preview.server";
 import { hashSales, salesPeriod } from "./sales";
 import { daybookDiagnosticsSchema } from "./daybook-diagnostics";
 import { approvedTestPreview } from "./sales-rollout";
+import { savedDaybookProducts } from "./daybook-products";
+import { daybookBillHeaders } from "./daybook-bill-amounts";
 import { assertSuper, authenticateConnector, lockConnector } from "./service.server";
 import {
   DAYBOOK_CHUNK_BYTES,
@@ -27,6 +29,15 @@ type Capture = ReturnType<typeof validateDaybookCapture>;
 function publicSummary(value: Prisma.JsonValue | null) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "_daybookProducts"));
+}
+
+function publishedSummary(value: Prisma.JsonValue | null) {
+  const summary = publicSummary(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return summary;
+  const products = savedDaybookProducts.safeParse(value._daybookProducts);
+  return products.success && products.data.capture.status === "complete"
+    ? { ...(summary as object), billHeaders: daybookBillHeaders(products.data.capture.vouchers) }
+    : summary;
 }
 
 export function assertDaybookEnabled() {
@@ -116,7 +127,7 @@ export async function daybookStatus(ctx: AuthContext, month: string) {
           ...(expired ? { status: "FAILED", error: "LEASE_EXPIRED" } : {}),
         }
       : null,
-    published: published ? { ...published, summary: publicSummary(published.summary) } : null,
+    published: published ? { ...published, summary: publishedSummary(published.summary) } : null,
   };
 }
 

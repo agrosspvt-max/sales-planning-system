@@ -1,5 +1,7 @@
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 import type { DaybookCredit } from "./daybook-preview";
+import type { DaybookBillHeader, DaybookBillHeaders } from "./daybook-bill-amounts";
+import { sumDisplayAmounts } from "./daybook-bill-amounts";
 export type VoucherGroup = "Sales" | "Receipts" | "Returns & credit notes" | "Other";
 export const voucherGroupOrder: VoucherGroup[] = [
   "Sales",
@@ -7,8 +9,14 @@ export const voucherGroupOrder: VoucherGroup[] = [
   "Returns & credit notes",
   "Other",
 ];
-export function voucherGroup(voucher: DaybookExcludedVoucher): VoucherGroup {
+export function voucherGroup(
+  voucher: DaybookExcludedVoucher,
+  header?: DaybookBillHeader,
+): VoucherGroup {
   if (["cancelled", "optional"].includes(voucher.reason)) return "Other";
+  if (header && !header.active) return "Other";
+  if (header?.family === "Sales") return "Sales";
+  if (header?.family === "Credit Note") return "Returns & credit notes";
   const type = voucher.voucherType.toUpperCase();
   if (type === "RECEIPT") return "Receipts";
   if (/SALES RETURN|CREDIT NOTE/.test(type)) return "Returns & credit notes";
@@ -18,7 +26,10 @@ export function voucherGroup(voucher: DaybookExcludedVoucher): VoucherGroup {
 export function creditVoucher(row: DaybookCredit): DaybookExcludedVoucher {
   return { ...row, amount: row.creditAmount, reason: "included" };
 }
-export function groupVouchers(vouchers: DaybookExcludedVoucher[]) {
+export function groupVouchers(
+  vouchers: DaybookExcludedVoucher[],
+  headers: DaybookBillHeaders = {},
+) {
   const unique = [
     ...new Map(vouchers.map((voucher) => [voucher.guid.toLowerCase(), voucher])).values(),
   ];
@@ -26,7 +37,7 @@ export function groupVouchers(vouchers: DaybookExcludedVoucher[]) {
     .map((label) => ({
       label,
       vouchers: unique
-        .filter((voucher) => voucherGroup(voucher) === label)
+        .filter((voucher) => voucherGroup(voucher, headers[voucher.guid.toLowerCase()]) === label)
         .sort(
           (a, b) =>
             a.date.localeCompare(b.date) ||
@@ -42,6 +53,29 @@ export type DealerView = {
   row?: DaybookDealerRow;
   vouchers: DaybookExcludedVoucher[];
 };
+export function dealerDisplayAmounts(dealer: DealerView, headers: DaybookBillHeaders = {}) {
+  return groupVouchers(dealer.vouchers, headers).flatMap((group) => {
+    const productAmount = ["Sales", "Returns & credit notes"].includes(group.label);
+    const vouchers = group.vouchers.filter(
+      (voucher) =>
+        !["cancelled", "optional"].includes(voucher.reason) &&
+        headers[voucher.guid.toLowerCase()]?.active !== false,
+    );
+    if (!vouchers.length) return [];
+    return [
+      {
+        label: group.label + (productAmount ? " (excl. GST)" : ""),
+        amount: sumDisplayAmounts(
+          vouchers.map((voucher) =>
+            productAmount
+              ? (headers[voucher.guid.toLowerCase()]?.subtotal ?? null)
+              : (voucher.amount ?? null),
+          ),
+        ),
+      },
+    ];
+  });
+}
 export function isWebsiteDealer(dealer: DealerView) {
   if (dealer.row)
     return (
@@ -107,8 +141,8 @@ export function matchesDealerSearch(dealer: DealerView, search: string) {
     ].some((text) => text.toLocaleLowerCase().includes(query))
   );
 }
-export function shortVoucherLabel(voucher: DaybookExcludedVoucher) {
-  const group = voucherGroup(voucher),
+export function shortVoucherLabel(voucher: DaybookExcludedVoucher, header?: DaybookBillHeader) {
+  const group = voucherGroup(voucher, header),
     type = voucher.voucherType.toUpperCase();
   const label =
     group === "Sales"

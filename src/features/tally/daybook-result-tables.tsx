@@ -4,7 +4,13 @@ import Link from "next/link";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 import { DaybookDealerVouchers } from "./daybook-dealer-vouchers";
 import { DaybookVoucherDetails, voucherLabel } from "./daybook-voucher-details";
-import { dealerViews, isWebsiteDealer, matchesDealerSearch } from "./daybook-view";
+import {
+  dealerDisplayAmounts,
+  dealerViews,
+  isWebsiteDealer,
+  matchesDealerSearch,
+} from "./daybook-view";
+import type { DaybookBillHeaders } from "./daybook-bill-amounts";
 
 const money = (amount: string | null | undefined) =>
   amount == null
@@ -15,11 +21,13 @@ export function DaybookResultTables({
   excludedVouchers = [],
   coverage,
   sourceJobId,
+  billHeaders = {},
 }: {
   dealerRows: DaybookDealerRow[];
   excludedVouchers?: DaybookExcludedVoucher[];
   coverage?: string;
   sourceJobId?: string;
+  billHeaders?: DaybookBillHeaders;
 }) {
   const [search, setSearch] = useState("");
   const [scope, setScope] = useState<"all" | "dealers">("all");
@@ -81,6 +89,11 @@ export function DaybookResultTables({
             dealer. All records are from the selected Daybook capture.
           </p>
           <p>
+            Sales and returns/credit notes show product amounts excluding GST. A dash means the
+            product amount is unavailable. Original captured totals remain in Dealer & matching
+            details; bill totals and recorded taxes appear inside each bill.
+          </p>
+          <p>
             Receipts and SR/CR update Recovery only for confirmed dealer matches. Other totals are
             for review and do not update Recovery or Last Payment.
           </p>
@@ -116,27 +129,40 @@ export function DaybookResultTables({
                       {dealer.row.status}
                     </span>
                   )}
-                {dealer.row && (
+                {!!dealer.vouchers.length ? (
                   <span className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                    <span>
-                      Receipts{" "}
-                      <strong className="font-medium text-foreground">
-                        {money(dealer.row.liveRecovery)}
-                      </strong>
-                    </span>
-                    <span>
-                      SR/CR{" "}
-                      <strong className="font-medium text-foreground">
-                        {money(dealer.row.srCr)}
-                      </strong>
-                    </span>
-                    <span>
-                      Other{" "}
-                      <strong className="font-medium text-foreground">
-                        {money(dealer.row.other)}
-                      </strong>
-                    </span>
+                    {dealerDisplayAmounts(dealer, billHeaders).map((entry) => (
+                      <span key={entry.label}>
+                        {entry.label}{" "}
+                        <strong className="font-medium text-foreground">
+                          {money(entry.amount)}
+                        </strong>
+                      </span>
+                    ))}
                   </span>
+                ) : (
+                  dealer.row && (
+                    <span className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span>
+                        Receipts{" "}
+                        <strong className="font-medium text-foreground">
+                          {money(dealer.row.liveRecovery)}
+                        </strong>
+                      </span>
+                      <span>
+                        SR/CR (bill total){" "}
+                        <strong className="font-medium text-foreground">
+                          {money(dealer.row.srCr)}
+                        </strong>
+                      </span>
+                      <span>
+                        Other (bill totals){" "}
+                        <strong className="font-medium text-foreground">
+                          {money(dealer.row.other)}
+                        </strong>
+                      </span>
+                    </span>
+                  )
                 )}
               </span>
             </summary>
@@ -153,6 +179,10 @@ export function DaybookResultTables({
                       <p key={ledger}>Tally: {ledger}</p>
                     ))}
                     {dealer.row.reason && <p>{dealer.row.reason}</p>}
+                    <p>
+                      Original captured totals: Receipts {money(dealer.row.liveRecovery)} · SR/CR{" "}
+                      {money(dealer.row.srCr)} · Other {money(dealer.row.other)}
+                    </p>
                     {!!dealer.row.candidates?.length && (
                       <p>Possible matches: {dealer.row.candidates.join(", ")}</p>
                     )}
@@ -160,7 +190,11 @@ export function DaybookResultTables({
                 </details>
               )}
               {!!dealer.vouchers.length ? (
-                <DaybookDealerVouchers excluded={dealer.vouchers} sourceJobId={sourceJobId} />
+                <DaybookDealerVouchers
+                  excluded={dealer.vouchers}
+                  sourceJobId={sourceJobId}
+                  billHeaders={billHeaders}
+                />
               ) : (
                 <p className="text-sm text-muted-foreground">
                   This older capture has totals only. Refresh Daybook for individual bills and
@@ -194,6 +228,7 @@ export function DaybookResultTables({
               key={voucher.guid}
               voucher={voucher}
               sourceJobId={sourceJobId}
+              billHeader={billHeaders[voucher.guid.toLowerCase()]}
               summaryLabel={voucherLabel(voucher)}
               compact
             />

@@ -5,6 +5,7 @@ import type { DaybookExcludedVoucher } from "./daybook-result-types";
 import { DaybookBillAllocationTable } from "./daybook-bill-allocation-table";
 import { DaybookLedgerLayoutDetails } from "./daybook-ledger-layout-details";
 import { DaybookOwnProducts } from "./daybook-referenced-bill-products";
+import type { DaybookBillHeader } from "./daybook-bill-amounts";
 
 export function voucherLabel(voucher: DaybookExcludedVoucher) {
   return `${voucher.voucherType} · ${voucher.voucherNumber ? `No. ${voucher.voucherNumber}` : "Unnumbered voucher"}`;
@@ -37,17 +38,23 @@ export function DaybookVoucherDetails({
   summaryLabel = "Voucher details",
   sourceJobId,
   compact = false,
+  billHeader,
 }: {
   voucher: DaybookExcludedVoucher;
   summaryLabel?: string;
   sourceJobId?: string;
   compact?: boolean;
+  billHeader?: DaybookBillHeader;
 }) {
   const evidence = voucher.details?.voucher;
   const [open, setOpen] = useState(false);
-  const isSale =
-    /SALE/i.test(voucher.voucherType) && !/RETURN|CREDIT NOTE/i.test(voucher.voucherType);
-  const hasOwnProducts = !!sourceJobId && /SALE|CREDIT NOTE/i.test(voucher.voucherType);
+  const isSale = billHeader
+    ? billHeader.family === "Sales"
+    : /SALE/i.test(voucher.voucherType) && !/RETURN|CREDIT NOTE/i.test(voucher.voucherType);
+  const isProductBill =
+    !!billHeader ||
+    (/SALE|CREDIT NOTE/i.test(voucher.voucherType) && !/ORDER/i.test(voucher.voucherType));
+  const hasOwnProducts = !!sourceJobId && isProductBill;
   const mainReferences =
     !isSale ||
     voucher.billAllocations?.entries.some(
@@ -79,8 +86,15 @@ export function DaybookVoucherDetails({
                   timeZone: "Asia/Kolkata",
                 })}
               </span>
-              {voucher.amount !== undefined && (
-                <span className="font-medium tabular-nums">{sourceAmount(voucher.amount)}</span>
+              {isProductBill ? (
+                <span className="font-medium tabular-nums">
+                  {billHeader?.subtotal != null ? sourceAmount(billHeader.subtotal) : "—"}{" "}
+                  <span className="text-xs font-normal text-muted-foreground">excl. GST</span>
+                </span>
+              ) : (
+                voucher.amount !== undefined && (
+                  <span className="font-medium tabular-nums">{sourceAmount(voucher.amount)}</span>
+                )
               )}
             </>
           )}

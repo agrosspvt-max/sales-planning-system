@@ -1,3 +1,4 @@
+import type { DaybookBillAmounts } from "./daybook-bill-amounts";
 export type DaybookVoucherSource = { jobId: string; voucherGuid: string };
 export type DaybookBillProducts = {
   status: "matched" | "missing" | "ambiguous" | "unlinked";
@@ -12,6 +13,8 @@ export type DaybookBillProducts = {
     partyName: string;
     cancelled: boolean;
     optional: boolean;
+    amounts?: DaybookBillAmounts;
+    ledgerEntries?: { name: string; amount: string }[];
     items: {
       lineNo: number;
       productName: string;

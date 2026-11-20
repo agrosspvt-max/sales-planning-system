@@ -74,9 +74,10 @@ export async function submitRecoveryPlan(ctx: AuthContext, id: string) {
   // "No Plan". Historical rows are preserved; they are only excluded from the gate.
   const dealers = await prisma.recoveryPlanDealer.findMany({
     where: { recoveryPlanId: id, dealer: { isActive: true } },
-    select: { noPlan: true, monthRecoveryPlan: true, monthRunningRecovery: true, dealer: { select: { name: true } } },
+    select: { noPlan: true, monthRecoveryPlan: true, monthRunningRecovery: true, weekPlans: { select: { weekRecoveryPlan: true, weekRunningRecovery: true } }, dealer: { select: { name: true } } },
   });
-  const remaining = dealers.filter((d) => !d.noPlan && num(d.monthRecoveryPlan ?? 0) <= 0 && num(d.monthRunningRecovery ?? 0) <= 0);
+  const remaining = dealers.filter((d) => !d.noPlan && num(d.monthRecoveryPlan ?? 0) <= 0 && num(d.monthRunningRecovery ?? 0) <= 0
+    && !d.weekPlans.some((w) => num(w.weekRecoveryPlan ?? 0) > 0 || num(w.weekRunningRecovery ?? 0) > 0));
   if (dealers.length === 0 || remaining.length > 0) {
     throw new ApiError(422, `Every dealer must be planned or marked "No Plan". Not yet accounted for: ${remaining.map((r) => r.dealer.name).slice(0, 20).join(", ")}`);
   }

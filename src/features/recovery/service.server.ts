@@ -792,6 +792,7 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
       for (const w of d.weekPlans) weeks[w.weekNo] = { weekRecoveryPlan: num(w.weekRecoveryPlan ?? 0), weekRunningRecovery: num(w.weekRunningRecovery ?? 0) };
       const monthRecoveryPlan = num(d.monthRecoveryPlan ?? 0);
       const monthRunningRecovery = num(d.monthRunningRecovery ?? 0);
+      const completed = recoveryDealerCompleted(monthRecoveryPlan, monthRunningRecovery, weeks);
       const prev = prevByDealer.get(d.dealerId) ?? null;
       const cur = { outstanding: num(d.outstanding), overdue: num(d.overdue), due: num(d.due), running: num(d.running) };
       const changed = prev ? prev.outstanding !== cur.outstanding || prev.overdue !== cur.overdue || prev.due !== cur.due || prev.running !== cur.running : false;
@@ -821,10 +822,10 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         actualRunningRecovery: num(d.liveRecovery ?? 0) + num(d.srCr ?? 0) - (cur.due + cur.overdue),
         monthRecoveryPlan,
         monthRunningRecovery,
-        noPlan: d.noPlan,
+        noPlan: d.noPlan && !completed,
         noPlanReason: d.noPlanReason,
         noPlanReasonDetail: (d as { noPlanReasonDetail?: string | null }).noPlanReasonDetail ?? null,
-        completed: recoveryDealerCompleted(monthRecoveryPlan, monthRunningRecovery), // shared with the editor cache update (src/lib/recovery-plan-cache.ts)
+        completed,
         weeks,
         // Month's Due split across the four business weeks by due date (Week View uses the selected
         // week; Month View keeps the aggregate `due`).
@@ -931,7 +932,11 @@ export async function saveRecoveryMonth(ctx: AuthContext, id: string, raw: unkno
     const known = entries.filter((e) => rowByDealer.has(e.dealerId));
     const written = known.length === 0 ? [] : await (tx as Prisma.TransactionClient).$queryRaw<{ dealerId: string; monthRecoveryPlan: string | null; monthRunningRecovery: string | null }[]>(Prisma.sql`
       UPDATE "RecoveryPlanDealer" r
-      SET "monthRecoveryPlan" = COALESCE(v."plan", r."monthRecoveryPlan"), "monthRunningRecovery" = COALESCE(v."running", r."monthRunningRecovery")
+      SET "monthRecoveryPlan" = COALESCE(v."plan", r."monthRecoveryPlan"), "monthRunningRecovery" = COALESCE(v."running", r."monthRunningRecovery"),
+          "noPlan" = CASE WHEN COALESCE(v."plan", r."monthRecoveryPlan", 0) > 0
+            OR COALESCE(v."running", r."monthRunningRecovery", 0) > 0
+            OR EXISTS (SELECT 1 FROM "RecoveryWeekPlan" w WHERE w."recoveryPlanDealerId" = r."id" AND (w."weekRecoveryPlan" > 0 OR w."weekRunningRecovery" > 0))
+            THEN false ELSE r."noPlan" END
       FROM unnest(${known.map((e) => e.dealerId)}::text[], ${known.map((e) => decimalText(e.monthRecoveryPlan))}::numeric[], ${known.map((e) => decimalText(e.monthRunningRecovery))}::numeric[]) AS v("dealerId", "plan", "running")
       WHERE r."recoveryPlanId" = ${id} AND r."dealerId" = v."dealerId"
       RETURNING r."dealerId", r."monthRecoveryPlan"::text AS "monthRecoveryPlan", r."monthRunningRecovery"::text AS "monthRunningRecovery"`);
@@ -997,14 +1002,23 @@ export async function saveRecoveryWeek(ctx: AuthContext, id: string, raw: unknow
     // ONE upsert for every saved row; a value the request leaves out keeps its stored value (a new row stores none), as the former upsert did.
     const known = entries.filter((e) => rowByDealer.has(e.dealerId));
     const written = known.length === 0 ? [] : await (tx as Prisma.TransactionClient).$queryRaw<{ recoveryPlanDealerId: string; weekRecoveryPlan: string | null; weekRunningRecovery: string | null }[]>(Prisma.sql`
-      INSERT INTO "RecoveryWeekPlan" ("id", "recoveryPlanDealerId", "weekNo", "weekRecoveryPlan", "weekRunningRecovery")
+      WITH saved AS (INSERT INTO "RecoveryWeekPlan" ("id", "recoveryPlanDealerId", "weekNo", "weekRecoveryPlan", "weekRunningRecovery")
       SELECT v."id", v."rpd", ${weekNo}, v."plan", v."running"
       FROM unnest(${known.map(() => randomUUID())}::text[], ${known.map((e) => rowByDealer.get(e.dealerId)!.id)}::text[], ${known.map((e) => decimalText(e.weekRecoveryPlan))}::numeric[], ${known.map((e) => decimalText(e.weekRunningRecovery))}::numeric[])
         AS v("id", "rpd", "plan", "running")
       ON CONFLICT ("recoveryPlanDealerId", "weekNo") DO UPDATE SET
         "weekRecoveryPlan" = COALESCE(EXCLUDED."weekRecoveryPlan", "RecoveryWeekPlan"."weekRecoveryPlan"),
         "weekRunningRecovery" = COALESCE(EXCLUDED."weekRunningRecovery", "RecoveryWeekPlan"."weekRunningRecovery")
-      RETURNING "recoveryPlanDealerId", "weekRecoveryPlan"::text AS "weekRecoveryPlan", "weekRunningRecovery"::text AS "weekRunningRecovery"`);
+      RETURNING "recoveryPlanDealerId", "weekRecoveryPlan", "weekRunningRecovery"),
+      unskipped AS (
+        UPDATE "RecoveryPlanDealer" r SET "noPlan" = false
+        FROM saved s WHERE r."id" = s."recoveryPlanDealerId" AND r."noPlan" = true
+          AND (s."weekRecoveryPlan" > 0 OR s."weekRunningRecovery" > 0
+            OR r."monthRecoveryPlan" > 0 OR r."monthRunningRecovery" > 0
+            OR EXISTS (SELECT 1 FROM "RecoveryWeekPlan" w WHERE w."recoveryPlanDealerId" = r."id" AND w."weekNo" <> ${weekNo} AND (w."weekRecoveryPlan" > 0 OR w."weekRunningRecovery" > 0)))
+        RETURNING r."id"
+      )
+      SELECT "recoveryPlanDealerId", "weekRecoveryPlan"::text AS "weekRecoveryPlan", "weekRunningRecovery"::text AS "weekRunningRecovery" FROM saved`);
     const dealerByRpd = new Map(dealerRows.map((d) => [d.id, d.dealerId]));
     const saved = await tx.recoveryPlan.update({ where: { id }, data: { lastSavedAt: new Date() }, select: { lastSavedAt: true } });
     // Returned: the stored week values.
@@ -1024,6 +1038,17 @@ export async function setRecoveryDealerNoPlan(ctx: AuthContext, id: string, deal
     const plan = await lockEditablePlan(tx, ctx, id);
     if (!EDITABLE.includes(plan.status as PlanStatus)) throw new ApiError(409, "This recovery plan is not editable");
     assertRecoveryLive(plan);
+    if (noPlan) {
+      const dealer = await tx.recoveryPlanDealer.findUnique({
+        where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId } },
+        select: { monthRecoveryPlan: true, monthRunningRecovery: true, weekPlans: { select: { weekRecoveryPlan: true, weekRunningRecovery: true } } },
+      });
+      if (!dealer) throw new ApiError(404, "Recovery dealer not found");
+      if (recoveryDealerCompleted(num(dealer.monthRecoveryPlan ?? 0), num(dealer.monthRunningRecovery ?? 0))
+        || dealer.weekPlans.some((w: { weekRecoveryPlan: unknown; weekRunningRecovery: unknown }) => num(w.weekRecoveryPlan ?? 0) > 0 || num(w.weekRunningRecovery ?? 0) > 0)) {
+        throw new ApiError(409, "This dealer has recovery planning amounts and cannot be marked No Plan.");
+      }
+    }
     if (isOther && !detail) throw new ApiError(422, "Enter a reason when 'Other' is selected");
     await tx.recoveryPlanDealer.update({
       where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId } },

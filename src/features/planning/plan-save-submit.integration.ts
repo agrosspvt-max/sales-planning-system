@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { Prisma, PrismaClient, Role, PlanStatus } from "@prisma/client";
 import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
 import type { AuthContext } from "@/lib/http";
+import { repairRecoveryNoPlan } from "@/lib/recovery-no-plan-repair";
 
 const raw = process.env.PLAN_TX_TEST_URL;
 if (!raw || !["localhost", "127.0.0.1"].includes(new URL(raw).hostname) || new URL(raw).pathname !== "/plan_tx_test")
@@ -34,6 +35,7 @@ const planning = load<typeof import("./service.server")>("src/features/planning/
 const monthly = load<typeof import("./monthly-plan.server")>("src/features/planning/monthly-plan.server.ts");
 const recovery = load<typeof import("@/features/recovery/service.server")>("src/features/recovery/service.server.ts");
 const recoveryApproval = load<typeof import("@/features/recovery/approval.server")>("src/features/recovery/approval.server.ts");
+const adminEdit = load<typeof import("./admin-edit.server")>("src/features/planning/admin-edit.server.ts");
 
 const so1 = { userId: "so1", username: "so1", role: Role.SALES_OFFICER, groupId: "g1" } as AuthContext;
 const code = (p: Promise<unknown>) => p.then(() => 0, (e: { status?: number }) => e.status ?? -1);
@@ -116,6 +118,83 @@ async function measure(f: Fixture) {
   record(f.name, "recovery.submit", (await count(() => recoveryApproval.submitRecoveryPlan(so1, s.recoveryPlanId))).n);
 }
 
+async function recoveryNoPlanRegression() {
+  const s = await seed(FIXTURES[0]!);
+  const id = s.recoveryPlanId;
+  const dealerId = s.dealerIds[0]!;
+  const where = { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId } };
+  const row = () => base.recoveryPlanDealer.findUniqueOrThrow({ where, include: { weekPlans: true } });
+  const reset = async () => {
+    await base.recoveryWeekPlan.deleteMany({ where: { recoveryPlanDealer: { recoveryPlanId: id } } });
+    await base.recoveryPlanDealer.updateMany({ where: { recoveryPlanId: id }, data: { monthRecoveryPlan: 0, monthRunningRecovery: 0, noPlan: false } });
+  };
+  const skip = () => recovery.setRecoveryDealerNoPlan(so1, id, dealerId, true, "CN not updated");
+  const month = () => recovery.saveRecoveryMonth(so1, id, { entries: [{ dealerId, monthRecoveryPlan: 500 }] });
+  const week = () => recovery.saveRecoveryWeek(so1, id, { weekNo: 1, entries: [{ dealerId, weekRecoveryPlan: 100 }] });
+
+  await skip();
+  await month();
+  assert.equal((await row()).noPlan, false, "saving a positive month clears No Plan");
+  assert.equal((await row()).noPlanReason, "CN not updated", "preserve historical reason text");
+  assert.equal(await code(skip()), 409, "No Plan cannot hide a saved month amount");
+  await recovery.saveRecoveryMonth(so1, id, { entries: [{ dealerId, monthRunningRecovery: 0 }] });
+  assert.equal(Number((await row()).monthRecoveryPlan), 500, "partial saves keep other amounts");
+
+  await reset();
+  await skip();
+  await week();
+  assert.equal((await row()).noPlan, false, "saving a positive week clears No Plan");
+  assert.equal(await code(skip()), 409, "No Plan cannot hide a saved week amount");
+  await recovery.saveRecoveryMonth(so1, id, { entries: [{ dealerId, monthRecoveryPlan: 0 }] });
+  assert.equal((await row()).noPlan, false, "zero month cannot hide a positive week");
+
+  for (const save of [month, week]) {
+    for (const first of ["save", "skip"] as const) {
+      await reset();
+      const outcomes = await Promise.all(first === "save" ? [code(save()), code(skip())] : [code(skip()), code(save())]);
+      assert(outcomes.every((x) => x === 0 || x === 409), "only No Plan may conflict with a concurrent save");
+      const saved = await row();
+      assert.equal(saved.noPlan, false, "positive values win either race order");
+      assert(Number(saved.monthRecoveryPlan) > 0 || saved.weekPlans.some((w) => Number(w.weekRecoveryPlan) > 0), "the planning amount survives");
+    }
+  }
+
+  await reset();
+  await base.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.APPROVED } });
+  const admin = { userId: "admin", role: Role.SUPER_ADMIN } as AuthContext;
+  await base.recoveryPlanDealer.update({ where, data: { noPlan: true } });
+  await adminEdit.adminEditRecoveryMonth(admin, id, [{ dealerId, monthRecoveryPlan: 250 }], "Regression check");
+  assert.equal((await row()).noPlan, false, "admin month edits also clear No Plan");
+  await base.recoveryPlanDealer.update({ where, data: { noPlan: true, monthRecoveryPlan: 0 } });
+  await adminEdit.adminEditRecoveryWeek(admin, id, 1, [{ dealerId, weekRecoveryPlan: 50 }], "Regression check");
+  assert.equal((await row()).noPlan, false, "admin week edits also clear No Plan");
+  assert.equal(await base.adminEditAudit.count({ where: { planId: id } }), 2, "admin amount audit is preserved");
+
+  // Weekly-only values count as Completed for submission as well as on screen.
+  await base.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.DRAFT } });
+  await base.recoveryPlanDealer.updateMany({ where: { recoveryPlanId: id, dealerId: { not: dealerId } }, data: { noPlan: true } });
+  await recoveryApproval.submitRecoveryPlan(so1, id);
+  assert.equal((await base.recoveryPlan.findUniqueOrThrow({ where: { id } })).status, PlanStatus.PENDING_RM);
+
+  // Legacy conflicts: correct only flagged rows with planning inputs; preserve every stored amount.
+  await base.recoveryPlan.update({ where: { id }, data: { status: PlanStatus.APPROVED } });
+  await base.recoveryPlanDealer.update({ where, data: { noPlan: true, noPlanReason: "CN not updated", monthRecoveryPlan: 473000 } });
+  const weeklyDealer = await base.recoveryPlanDealer.findUniqueOrThrow({ where: { recoveryPlanId_dealerId: { recoveryPlanId: id, dealerId: s.dealerIds[2]! } } });
+  await base.recoveryWeekPlan.create({ data: { recoveryPlanDealerId: weeklyDealer.id, weekNo: 2, weekRunningRecovery: 75 } });
+  const allRows = () => base.recoveryPlanDealer.findMany({ where: { recoveryPlanId: id }, include: { weekPlans: { orderBy: { id: "asc" } } }, orderBy: { id: "asc" } });
+  const before = await allRows();
+  assert.equal((await repairRecoveryNoPlan(base)).correctedRows, 2, "preview counts month and week conflicts");
+  assert.equal(JSON.stringify(await allRows()), JSON.stringify(before), "preview makes no changes");
+  const repaired = await repairRecoveryNoPlan(base, true, "admin");
+  assert.equal(repaired.correctedRows, 2);
+  assert.equal(JSON.stringify(await allRows()), JSON.stringify(before.map((d) => ({ ...d, noPlan: d.dealerId === s.dealerIds[1] }))), "repair changes only conflicting No Plan flags, preserving all amounts and reasons");
+  assert.equal((await base.recoveryPlan.findUniqueOrThrow({ where: { id } })).status, PlanStatus.APPROVED, "approval status is preserved");
+  assert.equal((await repairRecoveryNoPlan(base, true, "admin")).correctedRows, 0, "repair is idempotent");
+  assert.equal(await base.auditLog.count({ where: { entityId: id } }), 1, "one repair audit per plan");
+  console.log("recovery No Plan — monthly, weekly, partial saves, concurrent priority, admin edits and weekly-only submission passed");
+  console.log("recovery No Plan repair — dry run, amount preservation, zero-plan exclusion, approval preservation and idempotence passed");
+}
+
 async function main() {
   const only = process.env.FIXTURE;
   for (const f of FIXTURES.filter((x) => !only || x.name === only)) await measure(f);
@@ -124,6 +203,7 @@ async function main() {
     console.log(`  [${fixture}]`);
     for (const [k, n] of Object.entries(rows)) console.log(`    ${k.padEnd(48)} ${n}`);
   }
+  await recoveryNoPlanRegression();
   void assert; void code; void rtt;
   console.log("plan-save-submit.integration.ts — measurements complete");
 }

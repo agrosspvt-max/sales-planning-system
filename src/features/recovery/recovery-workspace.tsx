@@ -1,6 +1,6 @@
 "use client";
 import { AutosaveStatus } from "@/features/planning/autosave-status";
-import { applySavedMonth, applySavedWeek } from "@/lib/recovery-plan-cache";
+import { applySavedMonth, applySavedWeek, recoveryDealerCompleted } from "@/lib/recovery-plan-cache";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { formatDMY } from "@/lib/date-format";
 
@@ -275,9 +275,9 @@ export function RecoveryWorkspace({ id, role, userId }: { id: string; role: Role
   if (isLoading || !data) return <Skeleton className="h-64 w-full" />;
 
   const remaining = data.dealers.filter((d) => !d.noPlan && !d.completed);
-  const noPlanDealers = data.dealers.filter((d) => d.noPlan);
+  const noPlanDealers = data.dealers.filter((d) => d.noPlan && !d.completed);
   const counts: StatusCounts = {
-    completed: data.dealers.filter((d) => !d.noPlan && d.completed).length,
+    completed: data.dealers.filter((d) => d.completed).length,
     noPlan: noPlanDealers.length,
     remaining: remaining.length,
     total: data.dealers.length,
@@ -533,15 +533,17 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
               const cnStatus = cnStatusPresentation(d.cnRequestStatus);
               const monthTotal = v.plan + v.running;
               const recPct = d.running > 0 ? v.running / d.running : 0;
-              const status = d.noPlan ? DealerPlanningStatus.NO_PLAN : monthTotal > 0 ? DealerPlanningStatus.COMPLETED : DealerPlanningStatus.REMAINING;
+              const completed = recoveryDealerCompleted(v.plan, v.running, d.weeks);
+              const noPlan = d.noPlan && !completed;
+              const status = completed ? DealerPlanningStatus.COMPLETED : noPlan ? DealerPlanningStatus.NO_PLAN : DealerPlanningStatus.REMAINING;
               // Row-level Due↔Running lock: Running is editable only once Due ≥ Overdue+Due; Due locks once
               // Running has a value. Skipped in admin-edit mode so a Super Admin can freely correct.
               const rowLock = rowLockState(v.plan, v.running, d.overdue + d.due, adminMode, detail.dueValidation);
               return (
-                <TableRow data-dealer-id={d.dealerId} key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
+                <TableRow data-dealer-id={d.dealerId} key={d.dealerId} className={cn(noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
                   <TableCell className="font-medium" style={{ color: status === DealerPlanningStatus.COMPLETED ? "hsl(var(--success))" : status === DealerPlanningStatus.NO_PLAN ? "hsl(var(--noplan))" : undefined }}>
                     {status === DealerPlanningStatus.COMPLETED ? "✓ " : status === DealerPlanningStatus.NO_PLAN ? "⦸ " : ""}<DealerName id={d.dealerId} name={d.dealerName} />
-                    {d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}
+                    {noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}
                     {d.missingInLatestAging && <span className="ml-1.5 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning" title="This dealer is not in the latest Aging Report; the figures shown are the last known values.">Missing in latest aging</span>}
                   </TableCell>
                   {/* Section 1 — Dealer & Closing Balance. Current Outstanding KEEPS its amount change
@@ -558,13 +560,13 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
                   {/* Due + Overdue — display-only combined pending amount. */}
                   <TableCell className="text-right tabular-nums font-medium">{money(d.due + d.overdue)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan || rowLock.dueLocked} title={rowLock.dueLocked ? "Locked — clear Running Recovery Plan first" : undefined} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!editable && !adminMode) || noPlan || rowLock.dueLocked} title={rowLock.dueLocked ? "Locked — clear Running Recovery Plan first" : undefined} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress. Running O/S Till Date is frozen after first import. */}
                   <TableCell className="text-right tabular-nums">{money(d.running)}</TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.runningTillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!editable && !adminMode) || d.noPlan || rowLock.runningDisabled} title={rowLock.runningDisabled ? "Enter a Due Recovery Plan ≥ Overdue + Due to enable" : undefined} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!editable && !adminMode) || noPlan || rowLock.runningDisabled} title={rowLock.runningDisabled ? "Enter a Due Recovery Plan ≥ Overdue + Due to enable" : undefined} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                     {rowLock.showWarning && <div className="mt-0.5 text-[10px] leading-tight text-destructive">Due Recovery Plan must be equal to or greater than Overdue + Due amount.</div>}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{pct(recPct)}</TableCell>
@@ -601,10 +603,10 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
                   </TableCell>
                   {editable && (
                     <TableCell className="text-right">
-                      {d.noPlan ? (
+                      {noPlan ? (
                         <Button size="sm" variant="ghost" onClick={() => noPlanMut.mutate({ dealerId: d.dealerId, noPlan: false })} disabled={noPlanMut.isPending}>Undo</Button>
                       ) : (
-                        <Button size="sm" variant="ghost" className="text-noplan" onClick={() => setNoPlanFor(d)}><Ban className="h-4 w-4" /></Button>
+                        <Button size="sm" variant="ghost" className="text-noplan" aria-label="Mark No Plan" disabled={completed || savePending > 0 || saving || noPlanMut.isPending} onClick={() => { noPlanMut.reset(); setNoPlanFor(d); }}><Ban className="h-4 w-4" /></Button>
                       )}
                     </TableCell>
                   )}
@@ -644,6 +646,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
           dealerName={noPlanFor.dealerName}
           onOpenChange={(o) => !o && setNoPlanFor(null)}
           saving={noPlanMut.isPending}
+          error={noPlanMut.error?.message}
           reasons={RECOVERY_NO_PLAN_REASONS}
           captureDetail
           onConfirm={(reason, detail) => { void flush().then(() => noPlanMut.mutate({ dealerId: noPlanFor.dealerId, noPlan: true, reason, reasonDetail: detail })).catch(() => undefined); /* a failed save keeps the edits and shows "Not saved"; No Plan waits */ }}
@@ -892,14 +895,16 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
             {detail.dealers.map((d) => {
               const v = valFor(d.dealerId);
               const weekTotal = v.plan + v.running;
+              const completed = recoveryDealerCompleted(d.monthRecoveryPlan, d.monthRunningRecovery, { ...d.weeks, [weekNo]: { weekRecoveryPlan: v.plan, weekRunningRecovery: v.running } });
+              const noPlan = d.noPlan && !completed;
               const monthTotal = d.monthRecoveryPlan + d.monthRunningRecovery;
               const diff = monthTotal - allWeeksTotal(d);
               const tillDate = tillDateTotal(d);
               // Row-level Due↔Running lock — threshold = Overdue + THIS WEEK'S Due (same figures shown here).
               const rowLock = rowLockState(v.plan, v.running, d.overdue + (d.dueByWeek?.[weekNo] ?? 0), adminMode, detail.dueValidation);
               return (
-                <TableRow data-dealer-id={d.dealerId} key={d.dealerId} className={cn(d.noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
-                  <TableCell className="font-medium"><DealerName id={d.dealerId} name={d.dealerName} />{d.noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}</TableCell>
+                <TableRow data-dealer-id={d.dealerId} key={d.dealerId} className={cn(noPlan && "opacity-60", d.changed && "bg-amber-100/40 dark:bg-amber-900/15")}>
+                  <TableCell className="font-medium"><DealerName id={d.dealerId} name={d.dealerName} />{noPlan && <NoPlanInfo reason={d.noPlanReason} detail={d.noPlanReasonDetail} />}</TableCell>
                   {/* Section 1 — Dealer & Closing Balance. Current Outstanding keeps its delta; Outstanding
                       Till Date (same calc as Month View) added beside it. */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
@@ -910,7 +915,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
                   <TableCell className="text-right tabular-nums">{money(d.dueByWeek?.[weekNo] ?? 0)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan || rowLock.dueLocked} title={rowLock.dueLocked ? "Locked — clear Running Recovery Plan first" : undefined} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.plan === 0 ? "" : v.plan} placeholder="0" disabled={(!canEditWeek && !adminMode) || noPlan || rowLock.dueLocked} title={rowLock.dueLocked ? "Locked — clear Running Recovery Plan first" : undefined} onChange={(e) => set(d.dealerId, "plan", e.target.value)} />
                   </TableCell>
                   {/* Section 3 — Recovery Progress */}
                   {/* "Running Plan Month" is the Month View's Running Recovery Plan. Labels are
@@ -918,7 +923,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.monthRunningRecovery)}</TableCell>
                   <TableCell className="text-right tabular-nums font-medium">{money(tillDate)}</TableCell>
                   <TableCell className="p-1 text-center">
-                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!canEditWeek && !adminMode) || d.noPlan || rowLock.runningDisabled} title={rowLock.runningDisabled ? "Enter a Due Recovery Plan ≥ Overdue + This Week's Due to enable" : undefined} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
+                    <Input type="number" min={0} className="h-8 w-24 text-right" value={v.running === 0 ? "" : v.running} placeholder="0" disabled={(!canEditWeek && !adminMode) || noPlan || rowLock.runningDisabled} title={rowLock.runningDisabled ? "Enter a Due Recovery Plan ≥ Overdue + This Week's Due to enable" : undefined} onChange={(e) => set(d.dealerId, "running", e.target.value)} />
                     {rowLock.showWarning && <div className="mt-0.5 text-[10px] leading-tight text-destructive">Due Recovery Plan must be equal to or greater than Overdue + Due amount.</div>}
                   </TableCell>
                   {/* Section 4 — Results */}

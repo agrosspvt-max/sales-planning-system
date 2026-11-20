@@ -83,6 +83,7 @@ export function NoPlanDialog({
   saving,
   reasons = REASONS,
   captureDetail = false,
+  error,
 }: {
   open: boolean;
   dealerName: string;
@@ -91,6 +92,7 @@ export function NoPlanDialog({
   saving?: boolean;
   reasons?: string[];
   captureDetail?: boolean;
+  error?: string;
 }) {
   const [reason, setReason] = useState("");
   const [other, setOther] = useState("");
@@ -133,6 +135,7 @@ export function NoPlanDialog({
             </div>
           )}
         </div>
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button onClick={confirm} disabled={disabled} className={cn(saving && "opacity-70")}>

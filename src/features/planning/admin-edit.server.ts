@@ -5,6 +5,7 @@ import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { PlanStatus, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
+import { lockRecoveryPlan } from "@/lib/plan-row-lock.server";
 
 /**
  * Admin Override / Edit Mode — a controlled way for a SUPER_ADMIN to correct the INPUT fields of an
@@ -292,7 +293,21 @@ async function persist(
   if (audits.length === 0) return { changedFields: 0 };
   await prisma.$transaction(
     async (tx) => {
+      if (planModel === "recoveryPlan") {
+        const locked = await lockRecoveryPlan(tx, planId);
+        if (!locked || locked.status !== PlanStatus.APPROVED || locked.lifecycleState !== "ACTIVE") {
+          throw new ApiError(409, "Admin Edit is only available on an approved, active recovery plan");
+        }
+      }
       for (const w of writes) await w(tx);
+      if (planModel === "recoveryPlan") {
+        await tx.$executeRaw`
+          UPDATE "RecoveryPlanDealer" r SET "noPlan" = false
+          WHERE r."recoveryPlanId" = ${planId} AND r."noPlan" = true
+            AND (r."monthRecoveryPlan" > 0 OR r."monthRunningRecovery" > 0
+              OR EXISTS (SELECT 1 FROM "RecoveryWeekPlan" w WHERE w."recoveryPlanDealerId" = r."id"
+                AND (w."weekRecoveryPlan" > 0 OR w."weekRunningRecovery" > 0)))`;
+      }
       await tx.adminEditAudit.createMany({ data: audits });
       // Touch lastSavedAt so completion/read caches refresh. Explicit per-model branches keep full type
       // safety (Prisma's generated delegates are not structurally interchangeable).

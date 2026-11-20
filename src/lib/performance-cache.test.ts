@@ -110,6 +110,18 @@ async function main() {
     const w = applySavedWeek(m, 2, [{ dealerId: "d1", weekRecoveryPlan: 40, weekRunningRecovery: 10 }]);
     assert.deepEqual(w.dealers[0]!.weeks, { 1: { weekRecoveryPlan: 1, weekRunningRecovery: 0 }, 2: { weekRecoveryPlan: 40, weekRunningRecovery: 10 } }, "other weeks kept");
     assert.equal(w.dealers[1], m.dealers[1]);
+
+    const skipped = { dealers: [{ ...detail.dealers[0]!, noPlan: true, noPlanReason: "CN not updated" }] };
+    const monthly = applySavedMonth(skipped, [{ dealerId: "d1", monthRecoveryPlan: 0, monthRunningRecovery: 50 }]);
+    assert.deepEqual([monthly.dealers[0]!.noPlan, monthly.dealers[0]!.completed, monthly.dealers[0]!.noPlanReason], [false, true, "CN not updated"]);
+    const weekly = applySavedWeek(skipped, 2, [{ dealerId: "d1", weekRecoveryPlan: 25, weekRunningRecovery: 0 }]);
+    assert.deepEqual([weekly.dealers[0]!.noPlan, weekly.dealers[0]!.completed], [false, true], "weekly amounts override No Plan too");
+    const zeroMonth = applySavedMonth(skipped, [{ dealerId: "d1", monthRecoveryPlan: 0, monthRunningRecovery: 0 }]);
+    assert.equal(zeroMonth.dealers[0]!.noPlan, false, "clearing monthly values preserves completion from another week");
+    const empty = { dealers: [{ ...skipped.dealers[0]!, weeks: {} }] };
+    const stillSkipped = applySavedWeek(empty, 1, [{ dealerId: "d1", weekRecoveryPlan: 0, weekRunningRecovery: 0 }]);
+    assert.deepEqual([stillSkipped.dealers[0]!.noPlan, stillSkipped.dealers[0]!.completed], [true, false], "zero alone is not a plan");
+    assert.equal(skipped.dealers[0]!.noPlan, true, "the saved cache must not mutate previous data");
   }
 
   // ── Daily Report: ticks / Submit Report from the save response, following the server's rule ──

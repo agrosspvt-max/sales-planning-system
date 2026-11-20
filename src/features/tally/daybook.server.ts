@@ -17,6 +17,12 @@ const LEASE_DURATION = 10 * 60 * 1000;
 type Tx = Prisma.TransactionClient;
 type Capture = ReturnType<typeof validateDaybookCapture>;
 
+// Full comparison evidence is fetched on demand, never in the five-second status poll.
+function publicSummary(value: Prisma.JsonValue | null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "_daybookProducts"));
+}
+
 export function assertDaybookEnabled() {
   if (!approvedTestPreview())
     throw new ApiError(404, "Daybook sync is available on the approved test Preview.");
@@ -87,8 +93,14 @@ export async function daybookStatus(ctx: AuthContext, month: string) {
     job?.status === "RUNNING" && job.leaseExpiresAt && job.leaseExpiresAt <= new Date();
   return {
     configured: Boolean(connection),
-    job: expired ? { ...job, status: "FAILED", error: "LEASE_EXPIRED" } : job,
-    published,
+    job: job
+      ? {
+          ...job,
+          summary: publicSummary(job.summary),
+          ...(expired ? { status: "FAILED", error: "LEASE_EXPIRED" } : {}),
+        }
+      : null,
+    published: published ? { ...published, summary: publicSummary(published.summary) } : null,
   };
 }
 
@@ -235,6 +247,14 @@ export async function publishDaybook(db: Tx, capture: Capture) {
     excludedAccounts: scope.excludedAccounts,
     recoveryIssues,
     heldPrevious: [...new Set(heldPrevious)],
+    ...(capture.productCapture
+      ? {
+          _daybookProducts: {
+            observedAt: capture.observedAt,
+            capture: capture.productCapture,
+          },
+        }
+      : {}),
   };
 }
 

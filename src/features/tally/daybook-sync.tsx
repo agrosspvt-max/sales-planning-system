@@ -8,6 +8,7 @@ import { api } from "@/lib/api-client";
 import { DaybookErrorDetails } from "./daybook-error-details";
 import type { DaybookDiagnostics } from "./daybook-diagnostics";
 import { DaybookResultTables } from "./daybook-result-tables";
+import { DaybookSalesComparisonDialog } from "./daybook-sales-comparison-dialog";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 
 type LedgerAmounts = { ledgerName: string; liveRecovery: string; srCr: string };
@@ -165,6 +166,11 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
           <p>
             {summary.receiptCount} receipts · {summary.srCrCount} SR/CR vouchers ·{" "}
             {summary.matchedDealers} dealers verified · {summary.changedRows} Recovery rows changed
+          </p>
+          <DaybookSalesComparisonDialog jobId={published.id} />
+          <p className="text-muted-foreground">
+            Bill products below come from Daybook during this trial. Territory Plan continues using
+            the existing Sales collection.
           </p>
           <DaybookResultTables
             dealerRows={

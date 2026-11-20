@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { PrismaClient, Role } from "@prisma/client";
+import { PrismaClient, Role, type Prisma } from "@prisma/client";
 import { indiaDay } from "./billwise";
 import { hashSales, salesPeriod } from "./sales";
 
@@ -309,7 +309,12 @@ async function main() {
   await svc.requestDaybookRefresh(auth, month);
   await svc.requestDaybookRefresh(auth, month);
   assert.equal(await prisma.tallyDaybookJob.count({ where: { monthKey: month } }), 1);
-  async function refresh(vouchers: unknown[], throughDate = last, coverage?: "all_vouchers") {
+  async function refresh(
+    vouchers: unknown[],
+    throughDate = last,
+    coverage?: "all_vouchers",
+    productCapture?: unknown,
+  ) {
     await svc.requestDaybookRefresh(auth, month);
     const { job } = await claim();
     assert.ok(job);
@@ -328,6 +333,7 @@ async function main() {
         observedAt: new Date().toISOString(),
         uploaded: false,
         ...(coverage ? { coverage } : {}),
+        ...(productCapture ? { productCapture } : {}),
         vouchers,
       },
     };
@@ -454,7 +460,41 @@ async function main() {
       direction: "credit",
     },
   );
-  const first = await refresh(vouchers, last, "all_vouchers");
+  const firstProducts = {
+    version: "daybook.products.v1",
+    status: "complete",
+    voucherTypes: [
+      { typeName: "Sales", family: "Sales" },
+      { typeName: "SALES RETURN-MP", family: "Credit Note" },
+    ],
+    vouchers: [3, 7].map((number) => ({
+      guid: prefix + "-" + String(number).padStart(8, "0"),
+      masterId: String(number),
+      alterId: "1",
+      billDate: last,
+      billNumber: String(number),
+      typeName: "SALES RETURN-MP",
+      family: "Credit Note",
+      partyName: number === 3 ? "Verified Dealer" : "Payment Only Dealer",
+      cancelled: false,
+      optional: false,
+      references: [],
+      ledgerEntries: [],
+      items: [
+        {
+          lineNo: 0,
+          stockItemName: "Original return product",
+          quantity: "-1.000000",
+          amount: number === 3 ? "-10.00" : "-12.50",
+          unit: "Kg",
+          actualQty: "1 Kg",
+          billedQty: "1 Kg",
+          rate: "",
+        },
+      ],
+    })),
+  };
+  const first = await refresh(vouchers, last, "all_vouchers", firstProducts);
   assert.ok(first.reply.ok);
   const published = await svc.daybookStatus(auth, month);
   const summary = published.published!.summary as {
@@ -480,6 +520,16 @@ async function main() {
       creditVouchers?: import("./daybook-preview").DaybookCredit[];
     }[];
   };
+  const storedProductJob = await prisma.tallyDaybookJob.findUniqueOrThrow({
+    where: { id: published.published!.id },
+  });
+  assert.equal(
+    (storedProductJob.summary as { _daybookProducts: { capture: { status: string } } })
+      ._daybookProducts.capture.status,
+    "complete",
+    "product evidence publishes with its Daybook job",
+  );
+  assert.ok(!("_daybookProducts" in summary), "product data is not exposed in status polling");
   assert.equal(summary.coverage, "all_vouchers");
   assert.equal(summary.receiptCount, 5);
   assert.equal(summary.srCrCount, 2);
@@ -820,7 +870,12 @@ except d.DaybookRejected as e:
   const billLookup = load<typeof import("./daybook-bill-products.server")>(
     "src/features/tally/daybook-bill-products.server.ts",
   );
+  const comparison = load<typeof import("./daybook-sales-comparison.server")>(
+    "src/features/tally/daybook-sales-comparison.server.ts",
+  );
   const sourceJobId = published.published!.id;
+  const sourceJob = await prisma.tallyDaybookJob.findUniqueOrThrow({ where: { id: sourceJobId } });
+  const sourceSummary = sourceJob.summary as Prisma.JsonObject;
   const lookupInput = {
     jobId: sourceJobId,
     voucherGuid: prefix + "-00000001",
@@ -830,6 +885,10 @@ except d.DaybookRejected as e:
   };
   await assert.rejects(
     billLookup.getDaybookBillProducts({ ...auth, role: Role.SALES_OFFICER }, lookupInput),
+    /Super Admin/,
+  );
+  await assert.rejects(
+    comparison.compareDaybookSales({ ...auth, role: Role.SALES_OFFICER }, sourceJobId),
     /Super Admin/,
   );
   await assert.rejects(
@@ -903,7 +962,7 @@ except d.DaybookRejected as e:
       },
     },
   });
-  const sameNumberOtherParty = await prisma.tallySalesVoucher.create({
+  const otherBill = await prisma.tallySalesVoucher.create({
     data: {
       snapshotId: snapshot.id,
       guid: prefix + "-0000abce",
@@ -919,73 +978,201 @@ except d.DaybookRejected as e:
       ledgerEntries: [],
     },
   });
-  const productResult = await billLookup.getDaybookBillProducts(auth, lookupInput);
-  assert.equal(productResult.status, "matched");
   assert.equal(
-    productResult.bill!.date,
-    invoiceMonth + "-03",
-    "bill lookup crosses month boundaries",
+    (await billLookup.getDaybookBillProducts(auth, lookupInput)).status,
+    "missing",
+    "old Daybook captures never fall back to existing Sales products",
   );
+  assert.equal((await comparison.compareDaybookSales(auth, sourceJobId)).status, "unavailable");
+  const types = [
+    { typeName: "Sales", family: "Sales" },
+    { typeName: "Credit Note", family: "Credit Note" },
+  ];
+  const makeEvidence = (vouchers: unknown[]) => ({
+    observedAt: new Date().toISOString(),
+    capture: { version: "daybook.products.v1", status: "complete", voucherTypes: types, vouchers },
+  });
+  await prisma.tallyDaybookJob.update({
+    where: { id: sourceJobId },
+    data: {
+      summary: { ...sourceSummary, _daybookProducts: makeEvidence([]) } as Prisma.InputJsonValue,
+    },
+  });
+  const asEvidence = async (billId: string) => {
+    const bill = await prisma.tallySalesVoucher.findUniqueOrThrow({
+      where: { id: billId },
+      include: { items: { orderBy: { lineNo: "asc" } } },
+    });
+    return {
+      guid: bill.guid,
+      masterId: bill.masterId,
+      alterId: bill.alterId,
+      billDate: bill.billDate,
+      billNumber: bill.billNumber,
+      typeName: bill.typeName,
+      family: bill.family as "Sales" | "Credit Note",
+      partyName: bill.partyName,
+      cancelled: bill.cancelled,
+      optional: bill.optional,
+      ledgerEntries: [],
+      references: [bill.billNumber],
+      items: bill.items.map((item) => ({
+        lineNo: item.lineNo,
+        stockItemName: item.stockItemName,
+        quantity: item.quantity.toFixed(6),
+        amount: item.amount.toFixed(2),
+        unit: item.unit,
+        actualQty: item.actualQty,
+        billedQty: item.billedQty,
+        rate: item.rate,
+      })),
+    };
+  };
+  const firstBill = await asEvidence(originalBill.id),
+    secondBill = await asEvidence(otherBill.id);
+  let capturedBills = [firstBill, secondBill];
+  const historicalJob = await prisma.tallyDaybookJob.create({
+    data: {
+      connectionId: id,
+      monthKey: invoiceMonth,
+      fromDate: snapshot.fromDate,
+      throughDate: snapshot.throughDate,
+      status: "SUCCEEDED",
+      completedAt: new Date(),
+      summary: {},
+    },
+  });
+  const saveEvidence = async () =>
+    prisma.tallyDaybookJob.update({
+      where: { id: historicalJob.id },
+      data: {
+        summary: {
+          excludedVouchers: capturedBills.map((bill) => ({
+            guid: bill.guid,
+            voucherType: bill.typeName,
+          })),
+          _daybookProducts: makeEvidence(capturedBills),
+        } as Prisma.InputJsonValue,
+      },
+    });
+  await saveEvidence();
+  const found = await billLookup.getDaybookBillProducts(auth, lookupInput);
+  assert.equal(found.status, "matched");
+  assert.equal(found.source, "daybook");
+  assert.equal(found.bill!.date, invoiceMonth + "-03", "references search earlier Daybook months");
+  assert.equal(found.bill!.partyName, "Original Tally Alias");
+  assert.equal(found.bill!.items[0].quantity, "1.500000");
+  assert.equal(found.bill!.items[0].amount, "100.25", "no proration to payment amount");
+  assert.equal((await comparison.compareDaybookSales(auth, historicalJob.id)).status, "matched");
   assert.equal(
-    productResult.bill!.partyName,
-    "Original Tally Alias",
-    "confirmed aliases reuse Territory source attribution",
+    (await comparison.compareDaybookSales(auth, historicalJob.id)).counts!.matchedBills,
+    2,
   );
-  assert.equal(productResult.bill!.items[0].productName, "NEON original pack");
-  assert.equal(productResult.bill!.items[0].quantity, "1.500000");
+  const own = await billLookup.getDaybookBillProducts(auth, {
+    jobId: historicalJob.id,
+    voucherGuid: firstBill.guid,
+    view: "voucher",
+  });
+  assert.equal(own.ownVoucher, true);
+  assert.equal(own.bill!.items.length, 2);
+  // Mutating the independent Sales fixture must affect only the comparison, never displayed Daybook products.
+  await prisma.tallySalesItem.update({
+    where: { voucherId_lineNo: { voucherId: originalBill.id, lineNo: 0 } },
+    data: { quantity: "9.000000" },
+  });
   assert.equal(
-    productResult.bill!.items[0].amount,
-    "100.25",
-    "full bill amount is never prorated to the 3.00 adjustment",
+    (await billLookup.getDaybookBillProducts(auth, lookupInput)).bill!.items[0].quantity,
+    "1.500000",
   );
-  assert.equal(productResult.bill!.items.length, 2);
+  const different = await comparison.compareDaybookSales(auth, historicalJob.id);
+  assert.equal(different.status, "different");
+  assert.equal(different.counts!.differentBills, 1);
+  assert.equal(different.differences![0].sales!.items[0].quantity, "9.000000");
+  await prisma.tallySalesItem.update({
+    where: { voucherId_lineNo: { voucherId: originalBill.id, lineNo: 0 } },
+    data: { quantity: "1.500000" },
+  });
+  await prisma.tallySalesVoucher.update({
+    where: { id: originalBill.id },
+    data: { ledgerEntries: [{ name: "Financial adjustment", amount: "-7.00" }] },
+  });
+  assert.equal(
+    (await comparison.compareDaybookSales(auth, historicalJob.id)).status,
+    "different",
+    "financial-only differences must also be visible",
+  );
+  await prisma.tallySalesVoucher.update({
+    where: { id: originalBill.id },
+    data: { ledgerEntries: [] },
+  });
+  // Product order is presentational; repeated lines must still retain their multiplicity.
+  firstBill.items.reverse();
+  await saveEvidence();
+  assert.equal((await comparison.compareDaybookSales(auth, historicalJob.id)).status, "matched");
+  firstBill.items.push({ ...firstBill.items[0], lineNo: 99 });
+  await saveEvidence();
+  assert.equal((await comparison.compareDaybookSales(auth, historicalJob.id)).status, "different");
+  firstBill.items.pop();
+  firstBill.items.reverse();
+  firstBill.billNumber = "PRINTED-NUMBER";
+  await saveEvidence();
+  assert.equal(
+    (await billLookup.getDaybookBillProducts(auth, lookupInput)).bill!.number,
+    "PRINTED-NUMBER",
+    "Tally New Ref may differ from printed number",
+  );
+  firstBill.billNumber = "INV-101";
   const missingInput = { ...lookupInput, allocationNumber: 2, reference: "INV-102" };
+  await saveEvidence();
   assert.equal((await billLookup.getDaybookBillProducts(auth, missingInput)).status, "missing");
-  const duplicateBill = await prisma.tallySalesVoucher.create({
-    data: {
-      snapshotId: snapshot.id,
-      guid: prefix + "-0000abcf",
-      masterId: "15",
-      alterId: "16",
-      billDate: invoiceMonth + "-04",
-      billNumber: "INV-101",
-      typeName: "Sales",
-      family: "Sales",
-      partyName: "Original Tally Alias",
-      cancelled: false,
-      optional: false,
-      ledgerEntries: [],
-    },
-  });
+  capturedBills = [firstBill];
+  await saveEvidence();
+  assert.equal((await comparison.compareDaybookSales(auth, historicalJob.id)).counts!.onlySales, 1);
+  capturedBills = [
+    firstBill,
+    secondBill,
+    { ...secondBill, guid: prefix + "-0000abcf", partyName: firstBill.partyName },
+  ];
+  await saveEvidence();
   assert.equal((await billLookup.getDaybookBillProducts(auth, lookupInput)).status, "ambiguous");
-  await prisma.tallySalesVoucher.delete({ where: { id: duplicateBill.id } });
-  await prisma.tallySalesVoucher.update({
-    where: { id: originalBill.id },
-    data: { cancelled: true },
-  });
+  assert.equal(
+    (await comparison.compareDaybookSales(auth, historicalJob.id)).counts!.onlyDaybook,
+    1,
+  );
+  capturedBills = [firstBill, secondBill];
+  firstBill.cancelled = true;
+  await saveEvidence();
   assert.equal((await billLookup.getDaybookBillProducts(auth, lookupInput)).bill!.cancelled, true);
-  await prisma.tallySalesVoucher.update({
-    where: { id: originalBill.id },
-    data: { cancelled: false },
-  });
-  const emptyBill = await prisma.tallySalesVoucher.create({
-    data: {
-      snapshotId: snapshot.id,
-      guid: prefix + "-0000abd0",
-      masterId: "17",
-      alterId: "18",
-      billDate: invoiceMonth + "-04",
-      billNumber: "INV-102",
-      typeName: "Sales",
-      family: "Sales",
-      partyName: "Original Tally Alias",
-      cancelled: false,
-      optional: false,
-      ledgerEntries: [],
-    },
-  });
+  assert.equal((await comparison.compareDaybookSales(auth, historicalJob.id)).status, "different");
+  firstBill.cancelled = false;
+  const emptyBill = {
+    ...secondBill,
+    guid: prefix + "-0000abd0",
+    partyName: firstBill.partyName,
+    billNumber: "INV-102",
+    references: ["INV-102"],
+  };
+  capturedBills.push(emptyBill);
+  await saveEvidence();
   assert.equal((await billLookup.getDaybookBillProducts(auth, missingInput)).bill!.items.length, 0);
-  const alternateJob = await prisma.tallyDaybookJob.create({
+  await prisma.tallySalesSnapshot.update({
+    where: { id: snapshot.id },
+    data: { throughDate: invoiceMonth + "-27" },
+  });
+  assert.equal(
+    (await comparison.compareDaybookSales(auth, historicalJob.id)).status,
+    "period_mismatch",
+  );
+  await prisma.tallySalesSnapshot.update({
+    where: { id: snapshot.id },
+    data: { throughDate: snapshot.throughDate },
+  });
+  const publicStatus = await svc.daybookStatus(auth, month);
+  assert.ok(
+    !("_daybookProducts" in (publicStatus.published!.summary as Record<string, unknown>)),
+    "full product dataset is not in status polling responses",
+  );
+  const advanceJob = await prisma.tallyDaybookJob.create({
     data: {
       connectionId: id,
       monthKey: month,
@@ -1026,21 +1213,14 @@ except d.DaybookRejected as e:
     (
       await billLookup.getDaybookBillProducts(auth, {
         ...lookupInput,
-        jobId: alternateJob.id,
+        jobId: advanceJob.id,
         voucherGuid: prefix + "-00000097",
       })
     ).status,
     "unlinked",
-    "advance numbers are not treated as invoices",
   );
-  await prisma.tallyDaybookJob.update({
-    where: { id: alternateJob.id },
-    data: { status: "FAILED" },
-  });
-  await assert.rejects(
-    billLookup.getDaybookBillProducts(auth, { ...lookupInput, jobId: alternateJob.id }),
-    /unavailable/,
-  );
+  await prisma.tallyDaybookJob.update({ where: { id: advanceJob.id }, data: { status: "FAILED" } });
+  await assert.rejects(comparison.compareDaybookSales(auth, advanceJob.id), /unavailable/);
   const otherConnection = await prisma.tallyConnection.create({
     data: {
       companyName: "Other Company",
@@ -1051,38 +1231,23 @@ except d.DaybookRejected as e:
       enabled: false,
     },
   });
-  const otherSnapshot = await prisma.tallySalesSnapshot.create({
+  await prisma.tallyDaybookJob.create({
     data: {
       connectionId: otherConnection.id,
       monthKey: invoiceMonth,
-      fromDate: invoiceMonth + "-01",
-      throughDate: invoiceMonth + "-28",
-      observedAt: new Date(),
-      sourceHash: hashSales("other-bill"),
-      jobId: "other-test",
-      summary: {},
-    },
-  });
-  await prisma.tallySalesVoucher.create({
-    data: {
-      snapshotId: otherSnapshot.id,
-      guid: prefix + "-0000abcd",
-      masterId: "11",
-      alterId: "12",
-      billDate: invoiceMonth + "-03",
-      billNumber: "INV-101",
-      typeName: "Sales",
-      family: "Sales",
-      partyName: "Original Tally Alias",
-      cancelled: false,
-      optional: false,
-      ledgerEntries: [],
+      fromDate: snapshot.fromDate,
+      throughDate: snapshot.throughDate,
+      status: "SUCCEEDED",
+      completedAt: new Date(),
+      summary: {
+        _daybookProducts: makeEvidence([{ ...firstBill, guid: prefix + "-0000ffff" }]),
+      } as Prisma.InputJsonValue,
     },
   });
   assert.equal(
     (await billLookup.getDaybookBillProducts(auth, lookupInput)).status,
     "matched",
-    "another company cannot create a false bill match",
+    "other company product evidence cannot contaminate matches",
   );
   await prisma.tallyConnection.update({ where: { id }, data: { enabled: false } });
   await assert.rejects(billLookup.getDaybookBillProducts(auth, lookupInput), /unavailable/);
@@ -1091,15 +1256,27 @@ except d.DaybookRejected as e:
   assert.equal(afterLookup.liveRecovery.toFixed(2), beforeLookup.liveRecovery.toFixed(2));
   assert.equal(afterLookup.srCr.toFixed(2), beforeLookup.srCr.toFixed(2));
   assert.equal(afterLookup.outstanding.toFixed(2), beforeLookup.outstanding.toFixed(2));
-  await prisma.tallySalesVoucher.deleteMany({
-    where: { id: { in: [originalBill.id, sameNumberOtherParty.id, emptyBill.id] } },
-  });
-  await prisma.tallyConnection.delete({ where: { id: otherConnection.id } });
-  await prisma.tallyDaybookJob.delete({ where: { id: alternateJob.id } });
-  console.log(
-    "Daybook bill products: saved source proof, exact party/alias/reference matching across months, full original lines, missing/ambiguous/advance/cancelled cases, role/company boundaries and financial preservation: PASS",
+  assert.equal(
+    (
+      await prisma.tallySalesItem.findUniqueOrThrow({
+        where: { voucherId_lineNo: { voucherId: originalBill.id, lineNo: 0 } },
+      })
+    ).amount.toFixed(2),
+    "100.25",
   );
+  await prisma.tallySalesSnapshot.delete({ where: { id: snapshot.id } });
+  await prisma.tallyConnection.delete({ where: { id: otherConnection.id } });
+  await prisma.tallyDaybookJob.deleteMany({
+    where: { id: { in: [historicalJob.id, advanceJob.id] } },
+  });
+  await prisma.tallyDaybookJob.update({
+    where: { id: sourceJobId },
+    data: { summary: sourceSummary as Prisma.InputJsonValue },
+  });
   await prisma.dealerAlias.delete({ where: { id: lookupAlias.id } });
+  console.log(
+    "Daybook-only products and read-only Sales comparison: independent source, New Ref matching, historical captures, full/duplicate/empty lines, complete period checks, differences, role/company boundaries and financial preservation: PASS",
+  );
   const partial = await refresh([], month + "-15");
   assert.ok(partial.reply.rejected);
   assert.ok((await partial.retry()).rejected);

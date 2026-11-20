@@ -3,6 +3,7 @@
 import type { DaybookExcludedVoucher } from "./daybook-result-types";
 import { DaybookBillAllocationTable } from "./daybook-bill-allocation-table";
 import { DaybookLedgerLayoutDetails } from "./daybook-ledger-layout-details";
+import { DaybookOwnProducts } from "./daybook-referenced-bill-products";
 
 export function voucherLabel(voucher: DaybookExcludedVoucher) {
   return `${voucher.voucherType} · ${voucher.voucherNumber ? `No. ${voucher.voucherNumber}` : "Unnumbered voucher"}`;
@@ -62,6 +63,9 @@ export function DaybookVoucherDetails({
           layoutConflict={evidence?.layoutResolution === "conflicting"}
           source={sourceJobId ? { jobId: sourceJobId, voucherGuid: voucher.guid } : undefined}
         />
+        {sourceJobId && /SALE|CREDIT NOTE/i.test(voucher.voucherType) && (
+          <DaybookOwnProducts source={{ jobId: sourceJobId, voucherGuid: voucher.guid }} />
+        )}
         {evidence?.ledgerLayouts && <DaybookLedgerLayoutDetails voucher={evidence} />}
         {evidence ? (
           <>

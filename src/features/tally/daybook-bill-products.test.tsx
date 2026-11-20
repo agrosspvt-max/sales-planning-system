@@ -6,6 +6,7 @@ import type { DaybookBillProducts } from "./daybook-bill-products";
 
 const result: DaybookBillProducts = {
   status: "matched",
+  source: "daybook",
   bill: {
     number: "INV-101",
     date: "2026-05-03",
@@ -91,7 +92,8 @@ async function main() {
     "Nos",
     "100.25",
     "full original bill",
-    "adjusted by this payment",
+    "Source: Daybook",
+    "adjusted against this bill",
   ])
     assert.ok(html.includes(text), text);
   assert.equal(options!.enabled, true);

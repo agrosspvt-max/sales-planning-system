@@ -2,12 +2,13 @@ import { z } from "zod";
 import { cents, decimal } from "./billwise";
 import { salesPeriod } from "./sales";
 import { daybookDiagnosticsSchema, type DaybookDiagnostics } from "./daybook-diagnostics";
+import { daybookProductCapture, validateProductEvidence } from "./daybook-products";
 import {
   daybookBillAllocationsSchema,
   type DaybookBillAllocations,
 } from "./daybook-bill-allocations";
 
-export const DAYBOOK_PREVIEW_BYTES = 2 * 1024 * 1024;
+export const DAYBOOK_PREVIEW_BYTES = 4 * 1024 * 1024;
 const name = z
   .string()
   .min(1)
@@ -56,6 +57,7 @@ const capture = z.object({
   observedAt: z.string().datetime({ offset: true }),
   uploaded: z.literal(false),
   coverage: z.literal("all_vouchers").optional(),
+  productCapture: daybookProductCapture.optional(),
   vouchers: z
     .array(
       z.union([
@@ -192,6 +194,7 @@ export function validateDaybookCapture(
       credits.push(row);
     }
   }
+  validateProductEvidence(data.productCapture, data.vouchers, prefix);
   return {
     month: data.month,
     throughDate: data.throughDate,
@@ -202,6 +205,7 @@ export function validateDaybookCapture(
     coverage: data.coverage ?? "receipt_credit_families",
     excluded: excludedVouchers.length,
     excludedVouchers,
+    productCapture: data.productCapture,
   };
 }
 

@@ -11,6 +11,12 @@ import { hashSales, salesPeriod } from "./sales";
 import { daybookDiagnosticsSchema } from "./daybook-diagnostics";
 import { approvedTestPreview } from "./sales-rollout";
 import { assertSuper, authenticateConnector, lockConnector } from "./service.server";
+import {
+  DAYBOOK_CHUNK_BYTES,
+  daybookUploadChunk,
+  daybookUploadHash,
+  daybookUploadManifest,
+} from "./daybook-upload";
 
 const REFRESH_INTERVAL = 15 * 60 * 1000;
 const LEASE_DURATION = 10 * 60 * 1000;
@@ -41,6 +47,16 @@ function checkedPeriod(month: string, today = indiaDay()) {
 
 function lockMonth(db: Tx, month: string) {
   return db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"tally-daybook:" + month}))`;
+}
+
+async function expireUploads(db: Tx, connectionId: string, now: Date) {
+  await db.tallyDaybookJob.updateMany({
+    where: { connectionId, status: "RUNNING", leaseExpiresAt: { lte: now } },
+    data: { status: "FAILED", error: "LEASE_EXPIRED", completedAt: now },
+  });
+  await db.tallyDaybookChunk.deleteMany({
+    where: { job: { connectionId, status: { in: ["FAILED", "SUCCEEDED"] } } },
+  });
 }
 
 export async function assertManualDaybookMonthAvailable(db: Tx, seasonMonthId: string) {
@@ -116,14 +132,7 @@ export async function requestDaybookRefresh(ctx: AuthContext, month: string) {
       });
       if (!connection) throw new ApiError(409, "Configure the office connector first.");
       await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${connection.id}))`;
-      await db.tallyDaybookJob.updateMany({
-        where: {
-          connectionId: connection.id,
-          status: "RUNNING",
-          leaseExpiresAt: { lte: new Date() },
-        },
-        data: { status: "FAILED", error: "LEASE_EXPIRED", completedAt: new Date() },
-      });
+      await expireUploads(db, connection.id, new Date());
       const existing = await db.tallyDaybookJob.findFirst({
         where: {
           connectionId: connection.id,
@@ -264,7 +273,16 @@ const identity = {
 };
 const agentInput = z.discriminatedUnion("action", [
   z.object({ action: z.literal("claim"), requestId: z.string().uuid() }).strict(),
-  z.object({ action: z.literal("complete"), ...identity, capture: z.unknown() }).strict(),
+  z.object({ action: z.literal("begin"), ...identity, manifest: daybookUploadManifest }).strict(),
+  z.object({ action: z.literal("chunk"), ...identity, ...daybookUploadChunk }).strict(),
+  z
+    .object({
+      action: z.literal("complete"),
+      ...identity,
+      capture: z.unknown().optional(),
+      uploadHash: daybookUploadHash.optional(),
+    })
+    .strict(),
   z
     .object({
       action: z.literal("fail"),
@@ -286,10 +304,7 @@ export async function daybookAgent(req: Request, raw: unknown) {
       const now = new Date();
       const today = indiaDay(now);
       if (input.action === "claim") {
-        await db.tallyDaybookJob.updateMany({
-          where: { connectionId, status: "RUNNING", leaseExpiresAt: { lte: now } },
-          data: { status: "FAILED", error: "LEASE_EXPIRED", completedAt: now },
-        });
+        await expireUploads(db, connectionId, now);
         let job = await db.tallyDaybookJob.findUnique({
           where: { connectionId_claimRequestId: { connectionId, claimRequestId: input.requestId } },
         });
@@ -360,9 +375,74 @@ export async function daybookAgent(req: Request, raw: unknown) {
         !timingSafeEqual(Buffer.from(job.leaseHash), Buffer.from(hashSales(input.leaseToken)))
       )
         throw new ApiError(409, "Daybook attempt is no longer active.");
+      if (input.action === "complete") {
+        const hasCapture = "capture" in input;
+        const hasHash = "uploadHash" in input;
+        if (hasCapture === hasHash)
+          throw new ApiError(422, "Supply exactly one Daybook capture or batch completion hash.");
+      }
+      // The immutable manifest identifies the encrypted outbox. A lost acknowledgement
+      // may replay begin/complete even after publication and batch cleanup.
+      if (input.action === "begin" || input.action === "chunk") {
+        const manifest = daybookUploadManifest.safeParse(job.manifest);
+        if (job.status === "SUCCEEDED" || job.status === "FAILED") {
+          if (
+            manifest.success &&
+            input.action === "begin" &&
+            JSON.stringify(manifest.data) === JSON.stringify(input.manifest) &&
+            job.resultHash === manifest.data.sha256
+          )
+            return job.status === "SUCCEEDED"
+              ? { ok: true, duplicate: true }
+              : { ok: true, rejected: true };
+          throw new ApiError(409, "Daybook attempt is no longer active.");
+        }
+        if (job.status !== "RUNNING" || !job.leaseExpiresAt || job.leaseExpiresAt <= now)
+          throw new ApiError(409, "Daybook lease expired.");
+        if (input.action === "begin") {
+          if (
+            job.manifest &&
+            (!manifest.success || JSON.stringify(manifest.data) !== JSON.stringify(input.manifest))
+          )
+            throw new ApiError(409, "Daybook upload manifest changed.");
+          await db.tallyDaybookJob.update({
+            where: { id: job.id },
+            data: {
+              manifest: input.manifest,
+              leaseExpiresAt: new Date(+now + LEASE_DURATION),
+            },
+          });
+          return { ok: true };
+        }
+        if (!manifest.success) throw new ApiError(422, "Begin the Daybook batch upload first.");
+        const expected =
+          input.sequence === manifest.data.chunks - 1
+            ? manifest.data.bytes - input.sequence * DAYBOOK_CHUNK_BYTES
+            : DAYBOOK_CHUNK_BYTES;
+        if (
+          input.sequence >= manifest.data.chunks ||
+          input.data.length !== expected ||
+          hashSales(input.data) !== input.hash
+        )
+          throw new ApiError(422, "Daybook batch length or checksum does not match.");
+        const existing = await db.tallyDaybookChunk.findUnique({
+          where: { jobId_sequence: { jobId: job.id, sequence: input.sequence } },
+        });
+        if (existing && (existing.hash !== input.hash || existing.data !== input.data))
+          throw new ApiError(409, "Daybook batch content changed.");
+        if (!existing)
+          await db.tallyDaybookChunk.create({
+            data: { jobId: job.id, sequence: input.sequence, hash: input.hash, data: input.data },
+          });
+        await db.tallyDaybookJob.update({
+          where: { id: job.id },
+          data: { leaseExpiresAt: new Date(+now + LEASE_DURATION) },
+        });
+        return { ok: true, ...(existing ? { duplicate: true } : {}) };
+      }
       const resultHash =
         input.action === "complete"
-          ? hashSales(JSON.stringify(input.capture ?? null))
+          ? (input.uploadHash ?? hashSales(JSON.stringify(input.capture ?? null)))
           : hashSales(JSON.stringify({ code: input.code, details: input.details ?? null }));
       if (job.resultHash === resultHash) {
         if (job.status === "SUCCEEDED") return { ok: true, duplicate: true };
@@ -371,6 +451,7 @@ export async function daybookAgent(req: Request, raw: unknown) {
       if (job.status !== "RUNNING" || !job.leaseExpiresAt || job.leaseExpiresAt <= now)
         throw new ApiError(409, "Daybook lease expired.");
       const fail = async (error: string, summary?: Prisma.InputJsonValue) => {
+        await db.tallyDaybookChunk.deleteMany({ where: { jobId: job.id } });
         await db.tallyDaybookJob.update({
           where: { id: job.id },
           data: {
@@ -396,9 +477,34 @@ export async function daybookAgent(req: Request, raw: unknown) {
           throw new ApiError(422, "Daybook error details do not match this request.");
         return fail(input.code, details ? { diagnostics: details } : undefined);
       }
+      let rawCapture = input.capture;
+      if (input.uploadHash) {
+        const manifest = daybookUploadManifest.safeParse(job.manifest);
+        if (!manifest.success || manifest.data.sha256 !== input.uploadHash)
+          throw new ApiError(409, "Daybook completion does not match its upload manifest.");
+        const chunks = await db.tallyDaybookChunk.findMany({
+          where: { jobId: job.id },
+          orderBy: { sequence: "asc" },
+        });
+        if (
+          chunks.length !== manifest.data.chunks ||
+          chunks.some((chunk, i) => chunk.sequence !== i)
+        )
+          throw new ApiError(422, "Daybook batches are incomplete. Retry the upload.");
+        const text = chunks.map((chunk) => chunk.data).join("");
+        if (text.length !== manifest.data.bytes || hashSales(text) !== manifest.data.sha256)
+          return fail("DAYBOOK_UPLOAD_CHECKSUM_MISMATCH");
+        try {
+          rawCapture = JSON.parse(text);
+        } catch {
+          return fail("DAYBOOK_CAPTURE_REJECTED");
+        }
+      } else if (job.manifest) {
+        throw new ApiError(409, "Complete the staged Daybook upload using its manifest hash.");
+      }
       let capture: Capture;
       try {
-        capture = validateDaybookCapture(input.capture, connection, today);
+        capture = validateDaybookCapture(rawCapture, connection, today);
         const observed = Date.parse(capture.observedAt);
         if (
           !capture.completeMonth ||
@@ -420,6 +526,7 @@ export async function daybookAgent(req: Request, raw: unknown) {
         where: { id: job.id },
         data: { status: "SUCCEEDED", resultHash, summary, completedAt: new Date() },
       });
+      await db.tallyDaybookChunk.deleteMany({ where: { jobId: job.id } });
       return { ok: true };
     },
     { timeout: 45000, maxWait: 10000 },

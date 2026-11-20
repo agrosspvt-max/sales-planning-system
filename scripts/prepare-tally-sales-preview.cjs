@@ -31,6 +31,13 @@ async function apply(db){
    throw Error('Partial Daybook schema requires review; no automatic repair attempted');
   }
   const actualTables=await tx.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='TallySalesActual'`;
+  const daybookChunks=await tx.$queryRaw`SELECT to_regclass('public."TallyDaybookChunk"')::text AS name`;
+  const daybookManifest=await tx.$queryRaw`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='TallyDaybookJob' AND column_name='manifest'`;
+  if(!daybookChunks[0]?.name && !daybookManifest.length){
+   await applyMigration(tx,'20261120000000_tally_daybook_batches');
+  }else if(!daybookChunks[0]?.name || daybookManifest.length!==1){
+   throw Error('Partial Daybook batch schema requires review');
+  }
   const actualColumns=await tx.$queryRaw`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='TallySalesSnapshot' AND column_name='actualDealerIds'`;
   if(!actualTables.length && !actualColumns.length){
    await applyMigration(tx,'20261114000000_tally_sales_without_plan');

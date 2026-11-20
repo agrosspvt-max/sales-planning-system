@@ -2941,16 +2941,30 @@ model TallyDaybookJob {
   claimRequestId String?
   leaseHash      String?
   leaseExpiresAt DateTime?
+  manifest       Json?
   resultHash     String?
   summary        Json?
   error          String?
   createdAt      DateTime        @default(now())
   startedAt      DateTime?
   completedAt    DateTime?
+  chunks         TallyDaybookChunk[]
 
   @@unique([connectionId, claimRequestId])
   @@index([connectionId, status, createdAt])
   @@index([connectionId, monthKey, createdAt])
+}
+
+/// Unpublished, retry-safe transport batches; removed on success/failure/lease expiry.
+model TallyDaybookChunk {
+  id       String          @id @default(cuid())
+  jobId    String
+  job      TallyDaybookJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  sequence Int
+  hash     String
+  data     String
+
+  @@unique([jobId, sequence])
 }
 
 /// Current verified coverage per dealer/month. Daily receipt sums replace the same coverage on refresh.

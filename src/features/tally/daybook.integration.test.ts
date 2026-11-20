@@ -10,6 +10,7 @@ import ts from "typescript";
 import { PrismaClient, Role, type Prisma } from "@prisma/client";
 import { indiaDay } from "./billwise";
 import { hashSales, salesPeriod } from "./sales";
+import { DAYBOOK_CHUNK_BYTES, DAYBOOK_CAPTURE_BYTES } from "./daybook-upload";
 
 const url = process.env.TALLY_DISPOSABLE_TEST_URL;
 if (
@@ -96,7 +97,7 @@ function call(body: unknown) {
     body,
   );
 }
-async function claim(requestId = randomUUID()) {
+async function claim(requestId: string = randomUUID()) {
   const response = await call({ action: "claim", requestId });
   assert.ok("job" in response);
   return { job: response.job };
@@ -1311,6 +1312,203 @@ except d.DaybookRejected as e:
   ]);
   assert.ok(badExclusion.reply.rejected, "a receipt cannot be disguised as Other");
   assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+  // Exercise the actual Python batch transport through the real agent/database.
+  {
+    const bigProducts = {
+      ...firstProducts,
+      vouchers: firstProducts.vouchers.map((bill) => ({
+        ...bill,
+        items: Array.from({ length: 6000 }, (_, lineNo) => ({
+          ...bill.items[0],
+          lineNo,
+          stockItemName: "Original हिन्दी product " + "x".repeat(200),
+        })),
+      })),
+    };
+    const priorPublished = (await svc.daybookStatus(auth, month)).published!.id;
+    const newBatchJob = async () => {
+      await svc.requestDaybookRefresh(auth, month);
+      const { job } = await claim();
+      assert.ok(job);
+      return { jobId: job.id, leaseToken: job.leaseToken };
+    };
+    const ids = await newBatchJob();
+    const capture = {
+      version: "daybook.capture.v1",
+      companyName: "Synthetic Company",
+      month,
+      ...salesPeriod(month, today),
+      observedAt: new Date().toISOString(),
+      uploaded: false,
+      coverage: "all_vouchers",
+      vouchers,
+      productCapture: bigProducts,
+    };
+    // salesPeriod also returns monthKey; remove it from the transport capture.
+    delete (capture as { monthKey?: string }).monthKey;
+    const python = spawnSync(
+      "python3",
+      [
+        "-c",
+        `
+import json,sys
+from daybook_worker import DaybookWorker
+payload=json.dumps(json.load(sys.stdin),ensure_ascii=True,separators=(',',':'))
+messages=[]
+class Cloud:
+ def call(self,action,**fields):
+  messages.append({'action':action,**fields})
+  return {'ok':True}
+worker=object.__new__(DaybookWorker)
+worker.cloud=Cloud()
+worker.collection_contact=lambda *args:None
+worker.save=lambda *args:None
+worker.send({'jobId':'unused','leaseToken':'unused','payload':payload})
+print(json.dumps(messages,separators=(',',':')))
+`,
+      ],
+      {
+        cwd: resolve("../tally-connector-v1.3/Tally-Office-Connector"),
+        input: JSON.stringify(capture),
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    );
+    assert.equal(python.status, 0, python.stderr);
+    const messages = JSON.parse(python.stdout) as {
+      action: string;
+      manifest?: { chunks: number; bytes: number; sha256: string };
+      sequence?: number;
+      data?: string;
+      hash?: string;
+      uploadHash?: string;
+    }[];
+    const manifest = messages[0].manifest!;
+    const batches = messages.filter((message) => message.action === "chunk");
+    assert.ok(manifest.bytes > 4 * 1024 * 1024 && manifest.bytes < DAYBOOK_CAPTURE_BYTES);
+    assert.equal(batches.length, manifest.chunks);
+    for (const batch of batches) {
+      assert.ok(batch.data!.length <= DAYBOOK_CHUNK_BYTES);
+      assert.ok(Buffer.byteLength(JSON.stringify({ ...batch, ...ids })) < 1024 * 1024);
+    }
+    const begin = { action: "begin", ...ids, manifest };
+    const complete = { action: "complete", ...ids, uploadHash: manifest.sha256 };
+    await assert.rejects(call({ ...batches[0], ...ids }), /Begin/);
+    await call(begin);
+    await call(begin); // lost begin reply
+    await assert.rejects(
+      call({ ...begin, manifest: { ...manifest, sha256: "0".repeat(64) } }),
+      /manifest changed/,
+    );
+    await assert.rejects(
+      call({
+        action: "begin",
+        ...ids,
+        manifest: { ...manifest, bytes: DAYBOOK_CAPTURE_BYTES + 1 },
+      }),
+    );
+    await assert.rejects(
+      call({ action: "complete", ...ids, capture, uploadHash: manifest.sha256 }),
+      /exactly one/,
+    );
+    await assert.rejects(call({ action: "complete", ...ids, capture }), /manifest hash/);
+    await assert.rejects(call({ ...complete, uploadHash: "0".repeat(64) }), /manifest/);
+    await assert.rejects(call(complete), /incomplete/);
+    const firstBatch = { ...batches[0], ...ids };
+    await call(firstBatch);
+    assert.ok(((await call(firstBatch)) as { duplicate?: boolean }).duplicate);
+    assert.equal(await prisma.tallyDaybookChunk.count({ where: { jobId: ids.jobId } }), 1);
+    await assert.rejects(call({ ...firstBatch, hash: "0".repeat(64) }), /checksum/);
+    const changedData = "!" + batches[0].data!.slice(1);
+    await assert.rejects(
+      call({ ...firstBatch, data: changedData, hash: hashSales(changedData) }),
+      /content changed/,
+    );
+    await assert.rejects(call({ ...firstBatch, sequence: manifest.chunks }), /length or checksum/);
+    await assert.rejects(call({ ...firstBatch, leaseToken: "Z".repeat(43) }), /no longer active/);
+    assert.equal((await svc.daybookStatus(auth, month)).published!.id, priorPublished);
+    assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+    const partialStatus = await svc.daybookStatus(auth, month);
+    assert.ok(!JSON.stringify(partialStatus.job).includes("Original हिन्दी product"));
+    // A recovering durable claim rotates the lease but preserves acknowledged batches.
+    const staged = await prisma.tallyDaybookJob.findUniqueOrThrow({ where: { id: ids.jobId } });
+    const recovered = await claim(staged.claimRequestId!);
+    assert.equal(recovered.job!.id, ids.jobId);
+    await assert.rejects(call(firstBatch), /no longer active/);
+    ids.leaseToken = recovered.job!.leaseToken;
+    begin.leaseToken = ids.leaseToken;
+    complete.leaseToken = ids.leaseToken;
+    await call(begin);
+    // Out-of-order arrival is reassembled by sequence, never arrival order.
+    for (const batch of batches.slice(1).reverse()) await call({ ...batch, ...ids });
+    await prisma.tallyDaybookJob.update({
+      where: { id: ids.jobId },
+      data: { leaseExpiresAt: new Date(Date.now() + 1000) },
+    });
+    await call({ ...batches[0], ...ids });
+    assert.ok(
+      +(await prisma.tallyDaybookJob.findUniqueOrThrow({ where: { id: ids.jobId } }))
+        .leaseExpiresAt! >
+        Date.now() + 5 * 60 * 1000,
+    );
+    assert.ok((await call(complete)).ok);
+    assert.ok(((await call(complete)) as { duplicate?: boolean }).duplicate); // lost completion reply
+    assert.ok(((await call(begin)) as { duplicate?: boolean }).duplicate); // restarted outbox after completion
+    assert.equal(await prisma.tallyDaybookChunk.count({ where: { jobId: ids.jobId } }), 0);
+    const saved = await prisma.tallyDaybookJob.findUniqueOrThrow({ where: { id: ids.jobId } });
+    const productSummary = saved.summary as { _daybookProducts: { capture: typeof bigProducts } };
+    assert.equal(productSummary._daybookProducts.capture.status, "complete");
+    assert.equal(productSummary._daybookProducts.capture.vouchers[0].items.length, 6000);
+    assert.equal(
+      productSummary._daybookProducts.capture.vouchers[1].items[5999].quantity,
+      "-1.000000",
+    );
+    assert.equal(
+      productSummary._daybookProducts.capture.vouchers[0].items[0].stockItemName,
+      bigProducts.vouchers[0].items[0].stockItemName,
+    );
+    assert.equal((await values()).liveRecovery.toFixed(2), "13.25");
+    assert.equal((await values()).srCr.toFixed(2), "10.00");
+    assert.ok(
+      !(
+        "_daybookProducts" in
+        ((await svc.daybookStatus(auth, month)).published!.summary as Record<string, unknown>)
+      ),
+    );
+    // Corrupt complete content cannot replace published figures and is cleaned up.
+    const corruptIds = await newBatchJob();
+    const corruptManifest = { ...manifest, sha256: "1".repeat(64) };
+    await call({ action: "begin", ...corruptIds, manifest: corruptManifest });
+    for (const batch of batches) await call({ ...batch, ...corruptIds });
+    assert.ok(
+      (await call({ action: "complete", ...corruptIds, uploadHash: corruptManifest.sha256 }))
+        .rejected,
+    );
+    assert.equal(
+      (await prisma.tallyDaybookJob.findUniqueOrThrow({ where: { id: corruptIds.jobId } })).error,
+      "DAYBOOK_UPLOAD_CHECKSUM_MISMATCH",
+    );
+    assert.equal(await prisma.tallyDaybookChunk.count({ where: { jobId: corruptIds.jobId } }), 0);
+    assert.equal((await svc.daybookStatus(auth, month)).published!.id, ids.jobId);
+    // Explicit cancellation/failure and expired abandoned uploads remove staged data.
+    for (const expired of [false, true]) {
+      const abandoned = await newBatchJob();
+      await call({ action: "begin", ...abandoned, manifest });
+      await call({ ...batches[0], ...abandoned });
+      if (expired) {
+        await prisma.tallyDaybookJob.update({
+          where: { id: abandoned.jobId },
+          data: { leaseExpiresAt: new Date(0) },
+        });
+        await assert.rejects(call({ ...batches[1], ...abandoned }), /expired/);
+        await svc.requestDaybookRefresh(auth, month);
+      } else await call({ action: "fail", ...abandoned, code: "TEST_UPLOAD_FAILED" });
+      assert.equal(await prisma.tallyDaybookChunk.count({ where: { jobId: abandoned.jobId } }), 0);
+    }
+    console.log(
+      "Daybook Python >4MiB batch transport: complete products, resume/lease rotation, missing/corrupt/duplicate/out-of-order batches, atomic financial preservation, replay and cleanup: PASS",
+    );
+  }
   const cancellation = await refresh(vouchers.slice(2));
   assert.ok(cancellation.reply.ok);
   row = await values();

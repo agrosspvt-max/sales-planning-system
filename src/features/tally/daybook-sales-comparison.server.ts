@@ -13,6 +13,7 @@ import {
   comparisonSignature,
   billMismatchDetails,
   type ComparisonSourceBill,
+  isIgnoredBillNumberCase,
 } from "./daybook-comparison-details";
 import type { DaybookSalesComparison, ComparisonBill } from "./daybook-sales-comparison";
 
@@ -198,8 +199,10 @@ export async function compareDaybookSales(
     differentBills: 0,
     onlyDaybook: 0,
     onlySales: 0,
+    ignoredBills: 0,
   };
   const differences: NonNullable<DaybookSalesComparison["differences"]> = [];
+  const ignoredCases: NonNullable<DaybookSalesComparison["differences"]> = [];
   let differenceCount = 0;
   let differenceBytes = 0;
   for (const guid of new Set([...daybook.keys(), ...sales.keys()])) {
@@ -207,6 +210,23 @@ export async function compareDaybookSales(
       b = sales.get(guid);
     if (a && b && comparisonSignature(a) === comparisonSignature(b)) {
       counts.matchedBills++;
+      continue;
+    }
+    if (
+      isIgnoredBillNumberCase(
+        { companyName: dates.companyName, fromDate: job.fromDate, throughDate: job.throughDate },
+        a,
+        b,
+      )
+    ) {
+      counts.ignoredBills++;
+      ignoredCases.push({
+        guid,
+        ...billMismatchDetails(a!, b!),
+        reason: "Ignored at your request: cancelled voucher bill-number difference",
+        daybook: display(a!, originals.get(guid)),
+        sales: display(b!),
+      });
       continue;
     }
     if (!a) counts.onlySales++;
@@ -252,12 +272,19 @@ export async function compareDaybookSales(
   }
   return {
     ...dates,
-    status: differenceCount ? "different" : "matched",
+    status: differenceCount
+      ? "different"
+      : counts.ignoredBills
+        ? "matched_with_ignored"
+        : "matched",
     message: differenceCount
       ? "The saved Daybook and Sales bill/product records have differences."
-      : "The saved Daybook and Sales bill/product records match for this period.",
+      : counts.ignoredBills
+        ? "All other saved bills match. One specific cancelled-voucher number difference is ignored at your request."
+        : "The saved Daybook and Sales bill/product records match for this period.",
     counts,
     differences,
     differenceCount,
+    ignoredCases,
   };
 }

@@ -32,6 +32,41 @@ export function comparisonSignature(bill: ComparisonSourceBill) {
     items: bill.items.map(itemKey).sort(),
   });
 }
+
+// User-requested exception for the audited empty cancelled July voucher only.
+// Any changed identity, status, party, amounts or products restores normal checking.
+export function isIgnoredBillNumberCase(
+  scope: { companyName: string; fromDate: string; throughDate: string },
+  a: ComparisonSourceBill | undefined,
+  b: ComparisonSourceBill | undefined,
+) {
+  if (
+    !a ||
+    !b ||
+    scope.companyName !== "Agromaxx Industry (2026-27)" ||
+    scope.fromDate !== "2026-07-01" ||
+    scope.throughDate !== "2026-07-31"
+  )
+    return false;
+  return (
+    a.billNumber !== b.billNumber &&
+    [a, b].every(
+      (bill) =>
+        bill.guid.toLowerCase() === "cb293b57-f31b-464e-b2e1-42d4edb59b7d-00010135" &&
+        bill.masterId === "65845" &&
+        bill.alterId === "152380" &&
+        bill.billDate === "2026-07-23" &&
+        bill.typeName === "CREDIT SALE-CG" &&
+        bill.family === "Sales" &&
+        bill.partyName === "" &&
+        bill.cancelled &&
+        bill.optional &&
+        bill.items.length === 0 &&
+        bill.ledgerEntries.length === 0 &&
+        /^CG\/RB\/26-27\/[0-9]{4,}$/.test(bill.billNumber),
+    )
+  );
+}
 // Cancel out identical occurrences, not just distinct values: repeated lines matter.
 function unmatched<T>(a: T[], b: T[], key: (item: T) => string) {
   const counts = new Map<string, number>();

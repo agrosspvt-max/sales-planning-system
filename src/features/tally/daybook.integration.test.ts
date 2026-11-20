@@ -228,6 +228,155 @@ async function testDealerAudit() {
   );
 }
 
+async function testIgnoredComparison() {
+  const comparison = load<typeof import("./daybook-sales-comparison.server")>(
+    "src/features/tally/daybook-sales-comparison.server.ts",
+  );
+  const connection = await prisma.tallyConnection.create({
+    data: {
+      companyName: "Agromaxx Industry (2026-27)",
+      anchorName: "Anchor",
+      anchorGuid: "cb293b57-f31b-464e-b2e1-42d4edb59b7d-00000001",
+      credentialHash: hashSales(secret),
+      authorizedById: auth.userId,
+    },
+  });
+  try {
+    const emptyBill = {
+      guid: "cb293b57-f31b-464e-b2e1-42d4edb59b7d-00010135",
+      masterId: "65845",
+      alterId: "152380",
+      billDate: "2026-07-23",
+      billNumber: "CG/RB/26-27/0217",
+      typeName: "CREDIT SALE-CG",
+      family: "Sales",
+      partyName: "",
+      cancelled: true,
+      optional: true,
+      items: [],
+      ledgerEntries: [],
+    };
+    const otherBill = {
+      ...emptyBill,
+      guid: "cb293b57-f31b-464e-b2e1-42d4edb59b7d-00011479",
+      masterId: "70777",
+      alterId: "163473",
+      billDate: "2026-07-24",
+      billNumber: "CG/RB/26-27/0215",
+      partyName: "Synthetic Branch",
+      cancelled: false,
+      optional: false,
+      items: [
+        {
+          lineNo: 0,
+          stockItemName: "Synthetic product",
+          quantity: "1.000000",
+          unit: "Kg",
+          amount: "10.00",
+          actualQty: "1 Kg",
+          billedQty: "1 Kg",
+          rate: "10/Kg",
+        },
+      ],
+    };
+    const snapshot = await prisma.tallySalesSnapshot.create({
+      data: {
+        connectionId: connection.id,
+        monthKey: "2026-07",
+        fromDate: "2026-07-01",
+        throughDate: "2026-07-31",
+        observedAt: new Date(),
+        sourceHash: hashSales("ignored-case-test"),
+        jobId: "ignored-case-test",
+        summary: {},
+      },
+    });
+    const source = await prisma.tallySalesVoucher.create({
+      data: {
+        ...emptyBill,
+        billNumber: "CG/RB/26-27/0215",
+        snapshotId: snapshot.id,
+        items: undefined,
+      },
+    });
+    const { items, ...otherFields } = otherBill;
+    const other = await prisma.tallySalesVoucher.create({
+      data: { ...otherFields, snapshotId: snapshot.id, items: { create: items } },
+    });
+    const job = await prisma.tallyDaybookJob.create({
+      data: {
+        connectionId: connection.id,
+        monthKey: "2026-07",
+        fromDate: "2026-07-01",
+        throughDate: "2026-07-31",
+        status: "SUCCEEDED",
+        completedAt: new Date(),
+      },
+    });
+    const save = (includeCase = true) =>
+      prisma.tallyDaybookJob.update({
+        where: { id: job.id },
+        data: {
+          summary: {
+            _daybookProducts: {
+              observedAt: new Date().toISOString(),
+              capture: {
+                version: "daybook.products.v1",
+                status: "complete",
+                voucherTypes: [
+                  { typeName: "CREDIT SALE-CG", family: "Sales" },
+                  { typeName: "Credit Note", family: "Credit Note" },
+                ],
+                vouchers: (includeCase ? [emptyBill, otherBill] : [otherBill]).map((bill) => ({
+                  ...bill,
+                  references: [],
+                })),
+              },
+            },
+          } as Prisma.InputJsonValue,
+        },
+      });
+    await save();
+    const result = await comparison.compareDaybookSales(auth, job.id);
+    assert.equal(result.status, "matched_with_ignored");
+    assert.equal(result.counts!.matchedBills, 1);
+    assert.equal(result.counts!.ignoredBills, 1);
+    assert.equal(result.counts!.differentBills, 0);
+    assert.equal(result.differenceCount, 0);
+    assert.equal(result.ignoredCases![0].sales!.number, "CG/RB/26-27/0215");
+    assert.equal(result.ignoredCases![0].daybook!.number, "CG/RB/26-27/0217");
+    await prisma.tallySalesItem.update({
+      where: { voucherId_lineNo: { voucherId: other.id, lineNo: 0 } },
+      data: { quantity: "2.000000" },
+    });
+    const changed = await comparison.compareDaybookSales(auth, job.id);
+    assert.equal(changed.status, "different");
+    assert.equal(changed.counts!.ignoredBills, 1);
+    assert.equal(
+      changed.counts!.differentBills,
+      1,
+      "An unrelated real quantity mismatch is never suppressed",
+    );
+    await prisma.tallySalesVoucher.update({ where: { id: source.id }, data: { cancelled: false } });
+    const active = await comparison.compareDaybookSales(auth, job.id);
+    assert.equal(active.counts!.ignoredBills, 0);
+    assert.equal(
+      active.counts!.differentBills,
+      2,
+      "The exception stops applying if this record's status changes",
+    );
+    await save(false);
+    const missing = await comparison.compareDaybookSales(auth, job.id);
+    assert.equal(missing.counts!.onlySales, 1);
+    assert.equal(missing.counts!.ignoredBills, 0, "A missing side is not ignored");
+    console.log(
+      "Specific user-requested comparison exception: separate ignored count/evidence, other active same-number bills still checked, changed status and missing side not suppressed: PASS",
+    );
+  } finally {
+    await prisma.tallyConnection.delete({ where: { id: connection.id } });
+  }
+}
+
 async function main() {
   await prisma.$executeRawUnsafe('TRUNCATE "TallyConnection", "User", "Dealer", "Season" CASCADE');
   await prisma.user.create({
@@ -1673,6 +1822,7 @@ print(json.dumps(messages,separators=(',',':')))
   const empty = await refresh([]);
   assert.ok(empty.reply.ok);
   assert.equal((await values()).srCr.toFixed(2), "0.00");
+  await testIgnoredComparison();
   await testDealerAudit();
   approved = false;
   await assert.rejects(svc.requestDaybookRefresh(auth, month), /approved test Preview/);

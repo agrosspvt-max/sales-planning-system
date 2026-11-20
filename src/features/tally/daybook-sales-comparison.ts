@@ -48,7 +48,7 @@ export type ComparisonLedgerChange = {
   salesLineCount: number;
 };
 export type DaybookSalesComparison = {
-  status: "matched" | "different" | "unavailable" | "period_mismatch";
+  status: "matched" | "matched_with_ignored" | "different" | "unavailable" | "period_mismatch";
   message: string;
   fromDate: string;
   throughDate: string;
@@ -65,6 +65,7 @@ export type DaybookSalesComparison = {
     differentBills: number;
     onlyDaybook: number;
     onlySales: number;
+    ignoredBills?: number;
   };
   differences?: {
     guid: string;
@@ -82,4 +83,5 @@ export type DaybookSalesComparison = {
     sales?: ComparisonBill;
   }[];
   differenceCount?: number;
+  ignoredCases?: NonNullable<DaybookSalesComparison["differences"]>;
 };

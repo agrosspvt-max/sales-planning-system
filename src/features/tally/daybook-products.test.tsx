@@ -4,7 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { testLoader } from "../dealer-tags/test-loader";
 import { daybookProductCapture, validateProductEvidence } from "./daybook-products";
 import type { DaybookSalesComparison } from "./daybook-sales-comparison";
-import { billMismatchDetails, comparisonSignature } from "./daybook-comparison-details";
+import {
+  billMismatchDetails,
+  comparisonSignature,
+  isIgnoredBillNumberCase,
+} from "./daybook-comparison-details";
 const prefix = "cb293b57-f31b-464e-b2e1-42d4edb59b7d";
 const bill = {
   guid: prefix + "-00000001",
@@ -50,6 +54,57 @@ const cancelledDaybook = {
   items: [],
 };
 const cancelledSales = { ...cancelledDaybook, billNumber: "CG/RB/26-27/0215" };
+const ignoredScope = {
+  companyName: "Agromaxx Industry (2026-27)",
+  fromDate: "2026-07-01",
+  throughDate: "2026-07-31",
+};
+const ignoredA = {
+  ...cancelledDaybook,
+  guid: prefix + "-00010135",
+  masterId: "65845",
+  alterId: "152380",
+  billDate: "2026-07-23",
+  typeName: "CREDIT SALE-CG",
+};
+const ignoredB = { ...ignoredA, billNumber: "CG/RB/26-27/0215" };
+assert.ok(isIgnoredBillNumberCase(ignoredScope, ignoredA, ignoredB));
+assert.ok(isIgnoredBillNumberCase(ignoredScope, ignoredB, ignoredA));
+assert.ok(
+  isIgnoredBillNumberCase(ignoredScope, ignoredA, { ...ignoredB, billNumber: "CG/RB/26-27/0218" }),
+  "The same cancelled identity's next number remains the one approved case",
+);
+for (const changed of [
+  { ...ignoredB, guid: prefix + "-00010136" },
+  { ...ignoredB, masterId: "65846" },
+  { ...ignoredB, alterId: "152381" },
+  { ...ignoredB, partyName: "Active branch" },
+  { ...ignoredB, cancelled: false },
+  { ...ignoredB, optional: false },
+  { ...ignoredB, billDate: "2026-07-24" },
+  { ...ignoredB, typeName: "Other Sales" },
+  { ...ignoredB, billNumber: "OTHER-SERIES-218" },
+  { ...ignoredB, items: bill.items },
+  { ...ignoredB, ledgerEntries: [{ name: "Party", amount: "0.00" }] },
+])
+  assert.equal(
+    isIgnoredBillNumberCase(ignoredScope, ignoredA, changed),
+    false,
+    "A different record or changed source data must remain checked",
+  );
+assert.equal(
+  isIgnoredBillNumberCase({ ...ignoredScope, companyName: "Other Company" }, ignoredA, ignoredB),
+  false,
+);
+assert.equal(
+  isIgnoredBillNumberCase({ ...ignoredScope, throughDate: "2026-07-30" }, ignoredA, ignoredB),
+  false,
+);
+assert.equal(
+  isIgnoredBillNumberCase(ignoredScope, ignoredA, ignoredA),
+  false,
+  "Identical records count as matched normally",
+);
 const exact = billMismatchDetails(cancelledDaybook, cancelledSales);
 assert.deepEqual(exact.fields, [
   { field: "Bill number", daybook: "CG/RB/26-27/0217", sales: "CG/RB/26-27/0215" },
@@ -342,6 +397,29 @@ for (const text of [
 assert.match(rich.replace(/<[^>]+>/g, " "), /Recorded cancelled\s+No/);
 assert.match(rich.replace(/<[^>]+>/g, " "), /Recorded optional\s+No/);
 assert.doesNotMatch(rich, /<script>/);
+const ignoredHtml = renderToStaticMarkup(
+  <DaybookComparisonResult
+    result={{
+      ...result,
+      status: "matched_with_ignored",
+      message:
+        "All other saved bills match. One specific cancelled-voucher number difference is ignored at your request.",
+      counts: { ...result.counts!, matchedBills: 0, differentBills: 0, ignoredBills: 1 },
+      differences: [],
+      differenceCount: 0,
+      ignoredCases: [
+        {
+          ...result.differences![0],
+          reason: "Ignored at your request: cancelled voucher bill-number difference",
+        },
+      ],
+    }}
+  />,
+);
+assert.match(ignoredHtml, /Ignored cases/);
+assert.match(ignoredHtml, /excluded from the mismatch count at your request/);
+assert.match(ignoredHtml, /Original|original evidence/);
+assert.match(ignoredHtml, /Pack &lt;one&gt;/, "Ignored cases retain their evidence");
 const unavailable = renderToStaticMarkup(
   <DaybookComparisonResult
     result={{

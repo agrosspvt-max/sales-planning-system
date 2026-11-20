@@ -234,6 +234,164 @@ function BillDetails({
   );
 }
 export function DaybookComparisonResult({ result }: { result: DaybookSalesComparison }) {
+  const renderDifference = (
+    difference: NonNullable<DaybookSalesComparison["differences"]>[number],
+  ) => (
+    <details className="rounded border p-3" key={difference.guid}>
+      <summary className="cursor-pointer font-medium">
+        {difference.reason} · {(difference.daybook ?? difference.sales)?.number || "Unnumbered"} ·{" "}
+        {(difference.daybook ?? difference.sales)?.party || "Party not recorded"}
+      </summary>
+      <div className="mt-3 space-y-4">
+        <p className="break-all text-xs text-muted-foreground">
+          Paired by Tally voucher GUID: {difference.guid}
+        </p>
+        {!!difference.fields?.length && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm" aria-label="Exact bill field differences">
+              <thead>
+                <tr>
+                  <th className="p-2">Different field</th>
+                  <th className="p-2">Daybook</th>
+                  <th className="p-2">Sales</th>
+                </tr>
+              </thead>
+              <tbody>
+                {difference.fields.map((field) => (
+                  <tr className="border-t" key={field.field}>
+                    <th className="p-2 font-medium">{field.field}</th>
+                    <td className="break-words p-2">{recorded(field.daybook)}</td>
+                    <td className="break-words p-2">{recorded(field.sales)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {(difference.products ?? []).map((product) => (
+          <details className="rounded border p-2" key={product.productName}>
+            <summary className="cursor-pointer">
+              {product.productName}: {product.fields.join(", ")}
+            </summary>
+            <div className="mt-2 grid gap-3 lg:grid-cols-2">
+              {(["daybook", "sales"] as const).map((source) => (
+                <div key={source}>
+                  <h5 className="font-medium">
+                    {source === "daybook" ? "Daybook" : "Sales"} —{" "}
+                    {product[source === "daybook" ? "daybookLineCount" : "salesLineCount"]}{" "}
+                    differing line(s)
+                  </h5>
+                  <ProductLines items={product[source]} copies />
+                  {product[source].reduce((total, line) => total + line.copies, 0) <
+                    product[source === "daybook" ? "daybookLineCount" : "salesLineCount"] && (
+                    <p>Showing the first {product[source].length} distinct differing lines.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </details>
+        ))}
+        {!!difference.productDifferenceCount &&
+          difference.productDifferenceCount > (difference.products?.length ?? 0) && (
+            <p>
+              Showing {difference.products?.length} of {difference.productDifferenceCount} differing
+              products. All were compared.
+            </p>
+          )}
+        {!!difference.ledgers?.length && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs" aria-label="Exact ledger differences">
+              <thead>
+                <tr>
+                  <th className="p-2">Ledger / account</th>
+                  <th className="p-2">Daybook signed amounts</th>
+                  <th className="p-2">Sales signed amounts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {difference.ledgers.map((ledger) => (
+                  <tr className="border-t" key={ledger.name}>
+                    <th className="p-2 font-medium">{ledger.name}</th>
+                    <td className="p-2">
+                      {ledger.daybook.length
+                        ? ledger.daybook
+                            .map((line) => `${money(line.amount)} × ${line.copies}`)
+                            .join("; ")
+                        : "No matching line"}
+                      {ledger.daybook.reduce((sum, line) => sum + line.copies, 0) <
+                        ledger.daybookLineCount &&
+                        ` · Showing first ${ledger.daybook.length} distinct lines`}
+                    </td>
+                    <td className="p-2">
+                      {ledger.sales.length
+                        ? ledger.sales
+                            .map((line) => `${money(line.amount)} × ${line.copies}`)
+                            .join("; ")
+                        : "No matching line"}
+                      {ledger.sales.reduce((sum, line) => sum + line.copies, 0) <
+                        ledger.salesLineCount &&
+                        ` · Showing first ${ledger.sales.length} distinct lines`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {!!difference.ledgerDifferenceCount &&
+          difference.ledgerDifferenceCount > (difference.ledgers?.length ?? 0) && (
+            <p>
+              Showing {difference.ledgers?.length} of {difference.ledgerDifferenceCount} differing
+              ledger names. All were compared.
+            </p>
+          )}
+        <div className="grid gap-3 lg:grid-cols-2">
+          <BillDetails
+            bill={difference.daybook}
+            label="Daybook"
+            captured={result.daybookCapturedAt}
+          />
+          <BillDetails bill={difference.sales} label="Sales" captured={result.salesCapturedAt} />
+        </div>
+        {difference.numberMatches && (
+          <details className="rounded border p-3">
+            <summary className="cursor-pointer">
+              Other vouchers using either printed bill number ({difference.numberMatches.count})
+            </summary>
+            <p className="my-2 text-xs text-muted-foreground">
+              Checked within these two saved captures for the selected period. These have a
+              different GUID and are separate vouchers.
+            </p>
+            {difference.numberMatches.vouchers.length ? (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {difference.numberMatches.vouchers.map(({ source, bill }) => (
+                  <BillDetails
+                    key={`${source}:${bill.guid}`}
+                    bill={bill}
+                    label={source}
+                    captured={
+                      source === "Daybook" ? result.daybookCapturedAt : result.salesCapturedAt
+                    }
+                    compact
+                  />
+                ))}
+              </div>
+            ) : (
+              <p>
+                No other vouchers with either printed number were found in these saved captures.
+              </p>
+            )}
+            {difference.numberMatches.count > difference.numberMatches.vouchers.length && (
+              <p>
+                Showing {difference.numberMatches.vouchers.length} of{" "}
+                {difference.numberMatches.count} other source records.
+              </p>
+            )}
+          </details>
+        )}
+      </div>
+    </details>
+  );
   return (
     <div className="space-y-4 text-sm">
       <p className="font-medium" role="status">
@@ -284,6 +442,7 @@ export function DaybookComparisonResult({ result }: { result: DaybookSalesCompar
             "Different bills": result.counts.differentBills,
             "Only in Daybook": result.counts.onlyDaybook,
             "Only in Sales": result.counts.onlySales,
+            ...(result.counts.ignoredBills ? { "Ignored cases": result.counts.ignoredBills } : {}),
           }).map(([label, count]) => (
             <div key={label}>
               <dt>{label}</dt>
@@ -292,169 +451,19 @@ export function DaybookComparisonResult({ result }: { result: DaybookSalesCompar
           ))}
         </dl>
       )}
-      {(result.differences ?? []).map((difference) => (
-        <details className="rounded border p-3" key={difference.guid}>
+      {(result.differences ?? []).map(renderDifference)}
+      {!!result.ignoredCases?.length && (
+        <details className="rounded border p-3" aria-label="Ignored comparison cases">
           <summary className="cursor-pointer font-medium">
-            {difference.reason} · {(difference.daybook ?? difference.sales)?.number || "Unnumbered"}{" "}
-            · {(difference.daybook ?? difference.sales)?.party || "Party not recorded"}
+            Ignored cases ({result.counts?.ignoredBills ?? result.ignoredCases.length})
           </summary>
-          <div className="mt-3 space-y-4">
-            <p className="break-all text-xs text-muted-foreground">
-              Paired by Tally voucher GUID: {difference.guid}
-            </p>
-            {!!difference.fields?.length && (
-              <div className="overflow-x-auto">
-                <table
-                  className="w-full text-left text-sm"
-                  aria-label="Exact bill field differences"
-                >
-                  <thead>
-                    <tr>
-                      <th className="p-2">Different field</th>
-                      <th className="p-2">Daybook</th>
-                      <th className="p-2">Sales</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {difference.fields.map((field) => (
-                      <tr className="border-t" key={field.field}>
-                        <th className="p-2 font-medium">{field.field}</th>
-                        <td className="break-words p-2">{recorded(field.daybook)}</td>
-                        <td className="break-words p-2">{recorded(field.sales)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {(difference.products ?? []).map((product) => (
-              <details className="rounded border p-2" key={product.productName}>
-                <summary className="cursor-pointer">
-                  {product.productName}: {product.fields.join(", ")}
-                </summary>
-                <div className="mt-2 grid gap-3 lg:grid-cols-2">
-                  {(["daybook", "sales"] as const).map((source) => (
-                    <div key={source}>
-                      <h5 className="font-medium">
-                        {source === "daybook" ? "Daybook" : "Sales"} —{" "}
-                        {product[source === "daybook" ? "daybookLineCount" : "salesLineCount"]}{" "}
-                        differing line(s)
-                      </h5>
-                      <ProductLines items={product[source]} copies />
-                      {product[source].reduce((total, line) => total + line.copies, 0) <
-                        product[source === "daybook" ? "daybookLineCount" : "salesLineCount"] && (
-                        <p>Showing the first {product[source].length} distinct differing lines.</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </details>
-            ))}
-            {!!difference.productDifferenceCount &&
-              difference.productDifferenceCount > (difference.products?.length ?? 0) && (
-                <p>
-                  Showing {difference.products?.length} of {difference.productDifferenceCount}{" "}
-                  differing products. All were compared.
-                </p>
-              )}
-            {!!difference.ledgers?.length && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs" aria-label="Exact ledger differences">
-                  <thead>
-                    <tr>
-                      <th className="p-2">Ledger / account</th>
-                      <th className="p-2">Daybook signed amounts</th>
-                      <th className="p-2">Sales signed amounts</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {difference.ledgers.map((ledger) => (
-                      <tr className="border-t" key={ledger.name}>
-                        <th className="p-2 font-medium">{ledger.name}</th>
-                        <td className="p-2">
-                          {ledger.daybook.length
-                            ? ledger.daybook
-                                .map((line) => `${money(line.amount)} × ${line.copies}`)
-                                .join("; ")
-                            : "No matching line"}
-                          {ledger.daybook.reduce((sum, line) => sum + line.copies, 0) <
-                            ledger.daybookLineCount &&
-                            ` · Showing first ${ledger.daybook.length} distinct lines`}
-                        </td>
-                        <td className="p-2">
-                          {ledger.sales.length
-                            ? ledger.sales
-                                .map((line) => `${money(line.amount)} × ${line.copies}`)
-                                .join("; ")
-                            : "No matching line"}
-                          {ledger.sales.reduce((sum, line) => sum + line.copies, 0) <
-                            ledger.salesLineCount &&
-                            ` · Showing first ${ledger.sales.length} distinct lines`}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {!!difference.ledgerDifferenceCount &&
-              difference.ledgerDifferenceCount > (difference.ledgers?.length ?? 0) && (
-                <p>
-                  Showing {difference.ledgers?.length} of {difference.ledgerDifferenceCount}{" "}
-                  differing ledger names. All were compared.
-                </p>
-              )}
-            <div className="grid gap-3 lg:grid-cols-2">
-              <BillDetails
-                bill={difference.daybook}
-                label="Daybook"
-                captured={result.daybookCapturedAt}
-              />
-              <BillDetails
-                bill={difference.sales}
-                label="Sales"
-                captured={result.salesCapturedAt}
-              />
-            </div>
-            {difference.numberMatches && (
-              <details className="rounded border p-3">
-                <summary className="cursor-pointer">
-                  Other vouchers using either printed bill number ({difference.numberMatches.count})
-                </summary>
-                <p className="my-2 text-xs text-muted-foreground">
-                  Checked within these two saved captures for the selected period. These have a
-                  different GUID and are separate vouchers.
-                </p>
-                {difference.numberMatches.vouchers.length ? (
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    {difference.numberMatches.vouchers.map(({ source, bill }) => (
-                      <BillDetails
-                        key={`${source}:${bill.guid}`}
-                        bill={bill}
-                        label={source}
-                        captured={
-                          source === "Daybook" ? result.daybookCapturedAt : result.salesCapturedAt
-                        }
-                        compact
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p>
-                    No other vouchers with either printed number were found in these saved captures.
-                  </p>
-                )}
-                {difference.numberMatches.count > difference.numberMatches.vouchers.length && (
-                  <p>
-                    Showing {difference.numberMatches.vouchers.length} of{" "}
-                    {difference.numberMatches.count} other source records.
-                  </p>
-                )}
-              </details>
-            )}
-          </div>
+          <p className="my-2 text-xs text-muted-foreground">
+            This specific cancelled-voucher number discrepancy is excluded from the mismatch count
+            at your request. Its original evidence is retained below.
+          </p>
+          <div className="space-y-2">{result.ignoredCases.map(renderDifference)}</div>
         </details>
-      ))}
+      )}
       {!!result.differenceCount && result.differenceCount > (result.differences?.length ?? 0) && (
         <p>
           Showing the first {result.differences?.length} of {result.differenceCount} bill

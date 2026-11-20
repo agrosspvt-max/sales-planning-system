@@ -1015,7 +1015,7 @@ except d.DaybookRejected as e:
       partyName: bill.partyName,
       cancelled: bill.cancelled,
       optional: bill.optional,
-      ledgerEntries: [],
+      ledgerEntries: bill.ledgerEntries as { name: string; amount: string }[],
       references: [bill.billNumber],
       items: bill.items.map((item) => ({
         lineNo: item.lineNo,
@@ -1089,6 +1089,12 @@ except d.DaybookRejected as e:
   assert.equal(different.status, "different");
   assert.equal(different.counts!.differentBills, 1);
   assert.equal(different.differences![0].sales!.items[0].quantity, "9.000000");
+  assert.deepEqual(Array.from(different.differences![0].products![0].fields), ["Quantity"]);
+  assert.equal(different.differences![0].daybook!.masterId, "11");
+  assert.equal(different.differences![0].daybook!.productTotal, "145.25");
+  assert.equal(different.companyName, "Synthetic Company");
+  assert.equal(different.daybookJobId, historicalJob.id);
+  assert.equal(different.salesSnapshotId, snapshot.id);
   await prisma.tallySalesItem.update({
     where: { voucherId_lineNo: { voucherId: originalBill.id, lineNo: 0 } },
     data: { quantity: "1.500000" },
@@ -1146,6 +1152,151 @@ except d.DaybookRejected as e:
   assert.equal((await billLookup.getDaybookBillProducts(auth, lookupInput)).bill!.cancelled, true);
   assert.equal((await comparison.compareDaybookSales(auth, historicalJob.id)).status, "different");
   firstBill.cancelled = false;
+  // A cancelled, renumbered source record must not mislabel a separate active
+  // branch-transfer voucher sharing its old printed number.
+  {
+    const cancelledSource = await prisma.tallySalesVoucher.create({
+      data: {
+        snapshotId: snapshot.id,
+        guid: prefix + "-0000abc1",
+        masterId: "42",
+        alterId: "100",
+        billDate: invoiceMonth + "-23",
+        billNumber: "CG/RB/26-27/0215",
+        typeName: "Sales",
+        family: "Sales",
+        partyName: "",
+        cancelled: true,
+        optional: true,
+        ledgerEntries: [],
+      },
+    });
+    const branchSource = await prisma.tallySalesVoucher.create({
+      data: {
+        snapshotId: snapshot.id,
+        guid: prefix + "-0000abc2",
+        masterId: "43",
+        alterId: "101",
+        billDate: invoiceMonth + "-23",
+        billNumber: "CG/RB/26-27/0215",
+        typeName: "Sales",
+        family: "Sales",
+        partyName: "Example Branch",
+        cancelled: false,
+        optional: false,
+        ledgerEntries: [
+          { name: "Example Branch", amount: "-12500.00" },
+          { name: "Branch Transfer", amount: "12500.00" },
+        ],
+        items: {
+          create: [
+            {
+              lineNo: 0,
+              stockItemName: "Transfer product",
+              quantity: "5.000000",
+              unit: "Kg",
+              amount: "12500.00",
+              actualQty: "5 Kg",
+              billedQty: "5 Kg",
+              rate: "2500/Kg",
+            },
+          ],
+        },
+      },
+    });
+    const cancelledEvidence = {
+      ...(await asEvidence(cancelledSource.id)),
+      billNumber: "CG/RB/26-27/0217",
+      alterId: "200",
+    };
+    const branchEvidence = await asEvidence(branchSource.id);
+    const details = {
+      stage: "vouchers",
+      month: invoiceMonth,
+      companyName: "Synthetic Company",
+      fromDate: snapshot.fromDate,
+      throughDate: snapshot.throughDate,
+      voucher: {
+        guid: cancelledEvidence.guid,
+        date: cancelledEvidence.billDate,
+        voucherNumber: cancelledEvidence.billNumber,
+        masterId: cancelledEvidence.masterId,
+        alterId: cancelledEvidence.alterId,
+        narration: "Original saved narration <not HTML>",
+        cancelled: "Yes",
+        optional: "Yes",
+        ledgerEntries: [],
+        ledgerEntryCount: 0,
+      },
+    };
+    await prisma.tallyDaybookJob.update({
+      where: { id: historicalJob.id },
+      data: {
+        summary: {
+          excludedVouchers: [
+            { guid: cancelledEvidence.guid, details },
+            { guid: branchEvidence.guid, amount: "12500.00", direction: "debit" },
+          ],
+          _daybookProducts: makeEvidence([
+            firstBill,
+            secondBill,
+            cancelledEvidence,
+            branchEvidence,
+          ]),
+        } as Prisma.InputJsonValue,
+      },
+    });
+    const detailed = await comparison.compareDaybookSales(auth, historicalJob.id);
+    assert.equal(detailed.counts!.matchedBills, 3);
+    assert.equal(detailed.counts!.differentBills, 1);
+    assert.equal(detailed.counts!.onlySales, 0);
+    assert.equal(detailed.counts!.onlyDaybook, 0);
+    const mismatch = detailed.differences![0];
+    assert.equal(mismatch.guid, cancelledEvidence.guid);
+    assert.equal(mismatch.reason, "Changed: Bill number");
+    assert.equal(mismatch.fields![0].daybook, "CG/RB/26-27/0217");
+    assert.equal(mismatch.fields![0].sales, "CG/RB/26-27/0215");
+    assert.equal(mismatch.daybook!.rawCancelled, "Yes");
+    assert.equal(mismatch.daybook!.narration, details.voucher.narration);
+    assert.equal(mismatch.daybook!.alterId, "200");
+    assert.equal(mismatch.sales!.alterId, "100");
+    assert.equal(
+      mismatch.daybook!.productTotal,
+      null,
+      "Missing amounts remain unavailable, never invented zero",
+    );
+    assert.equal(mismatch.sales!.partyLedgerAmount, null);
+    assert.ok(
+      !("cancelledAt" in mismatch.daybook!),
+      "Capture time or Alter ID cannot invent a cancellation timestamp",
+    );
+    assert.equal(
+      mismatch.numberMatches!.count,
+      2,
+      "Same printed number is searched in both complete period captures",
+    );
+    for (const match of mismatch.numberMatches!.vouchers) {
+      assert.equal(match.bill.guid, branchSource.guid);
+      assert.equal(match.bill.party, "Example Branch");
+      assert.equal(match.bill.cancelled, false);
+      assert.equal(match.bill.optional, false);
+      assert.equal(match.bill.partyLedgerAmount, "-12500.00");
+      assert.equal(match.bill.productTotal, "12500.00");
+    }
+    assert.equal(
+      mismatch.numberMatches!.vouchers.find((match) => match.source === "Daybook")!.bill
+        .capturedAmount!.amount,
+      "12500.00",
+    );
+    assert.equal((await values()).liveRecovery.toFixed(2), beforeLookup.liveRecovery.toFixed(2));
+    await prisma.tallySalesVoucher.deleteMany({
+      where: { id: { in: [cancelledSource.id, branchSource.id] } },
+    });
+    await saveEvidence();
+    console.log(
+      "Comparison diagnostics: exact bill-number difference, real saved flags, separate same-number branch voucher, party/product amounts, source IDs/raw narration and no invented cancellation time: PASS",
+    );
+  }
   const emptyBill = {
     ...secondBill,
     guid: prefix + "-0000abd0",

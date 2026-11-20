@@ -7,50 +7,73 @@ import {
   productsInJob,
   unavailableProducts,
 } from "./daybook-product-source.server";
-import type { DaybookProductVoucher } from "./daybook-products";
+import { cents, decimal } from "./billwise";
+import { daybookDiagnosticsSchema } from "./daybook-diagnostics";
+import {
+  comparisonSignature,
+  billMismatchDetails,
+  type ComparisonSourceBill,
+} from "./daybook-comparison-details";
 import type { DaybookSalesComparison, ComparisonBill } from "./daybook-sales-comparison";
 
-type Bill = Omit<DaybookProductVoucher, "references">;
-const whitespace = (text: string) => text.trim().replace(/\s+/g, " ");
-function signature(bill: Bill) {
-  return JSON.stringify({
-    date: bill.billDate,
-    number: bill.billNumber,
-    party: bill.partyName,
-    type: bill.typeName,
-    family: bill.family,
-    cancelled: bill.cancelled,
-    optional: bill.optional,
-    ledgerEntries: bill.ledgerEntries
-      .map((entry) => JSON.stringify([entry.name, entry.amount]))
-      .sort(),
-    // Keep duplicate lines; only their display order and whitespace may differ.
-    items: bill.items
-      .map((item) =>
-        JSON.stringify([
-          item.stockItemName,
-          item.quantity,
-          item.unit,
-          item.amount,
-          whitespace(item.actualQty),
-          whitespace(item.billedQty),
-          whitespace(item.rate),
-        ]),
-      )
-      .sort(),
-  });
+type Bill = ComparisonSourceBill;
+const sourceEvidence = z.object({
+  guid: z.string(),
+  amount: z.string().optional(),
+  direction: z.string().optional(),
+  details: daybookDiagnosticsSchema.optional(),
+});
+type SourceEvidence = z.infer<typeof sourceEvidence>;
+function diagnosticVouchers(summary: unknown) {
+  const saved = z.object({ excludedVouchers: z.array(z.unknown()).optional() }).safeParse(summary);
+  const entries = new Map<string, SourceEvidence>();
+  for (const value of saved.success ? (saved.data.excludedVouchers ?? []) : []) {
+    const row = sourceEvidence.safeParse(value);
+    if (row.success) entries.set(row.data.guid.toLowerCase(), row.data);
+  }
+  return entries;
 }
-function display(bill: Bill): ComparisonBill {
+function display(bill: Bill, original?: SourceEvidence, includeLines = true): ComparisonBill {
+  const partyEntries = bill.partyName
+    ? bill.ledgerEntries.filter(
+        (entry) => entry.name.toLowerCase() === bill.partyName.toLowerCase(),
+      )
+    : [];
+  const details = original?.details?.voucher;
+  const references =
+    "references" in bill && Array.isArray(bill.references)
+      ? (bill.references as string[])
+      : undefined;
   return {
+    guid: bill.guid,
+    masterId: bill.masterId,
+    alterId: bill.alterId,
+    family: bill.family,
+    productTotal: bill.items.length
+      ? decimal(bill.items.reduce((sum, item) => sum + cents(item.amount), 0n))
+      : null,
+    partyLedgerAmount: partyEntries.length
+      ? decimal(partyEntries.reduce((sum, entry) => sum + cents(entry.amount), 0n))
+      : null,
+    ...(details?.narration ? { narration: details.narration } : {}),
+    ...(details?.cancelled ? { rawCancelled: details.cancelled } : {}),
+    ...(details?.optional ? { rawOptional: details.optional } : {}),
+    ...(original?.amount !== undefined
+      ? { capturedAmount: { amount: original.amount, direction: original.direction } }
+      : {}),
+    ...(references
+      ? { references: references.slice(0, 50), referenceCount: references.length }
+      : {}),
     number: bill.billNumber,
     date: bill.billDate,
     party: bill.partyName,
     type: bill.typeName,
     cancelled: bill.cancelled,
     optional: bill.optional,
-    ledgerEntries: bill.ledgerEntries,
+    ledgerEntries: includeLines ? bill.ledgerEntries.slice(0, 100) : [],
+    ledgerCount: bill.ledgerEntries.length,
     itemCount: bill.items.length,
-    items: bill.items.slice(0, 100).map((item) => ({
+    items: (includeLines ? bill.items.slice(0, 100) : []).map((item) => ({
       productName: item.stockItemName,
       quantity: item.quantity,
       unit: item.unit,
@@ -68,6 +91,7 @@ export async function compareDaybookSales(
   const job = await authorizedProductJob(ctx, z.string().uuid().parse(rawJobId));
   const evidence = productsInJob(job);
   const base = {
+    daybookJobId: job.id,
     fromDate: job.fromDate,
     throughDate: job.throughDate,
     ...(evidence ? { daybookCapturedAt: evidence.observedAt } : {}),
@@ -76,7 +100,13 @@ export async function compareDaybookSales(
     return { ...base, status: "unavailable", message: unavailableProducts(job) };
   const snapshot = await prisma.tallySalesSnapshot.findUnique({
     where: { connectionId_monthKey: { connectionId: job.connectionId, monthKey: job.monthKey } },
-    select: { id: true, fromDate: true, throughDate: true, observedAt: true },
+    select: {
+      id: true,
+      fromDate: true,
+      throughDate: true,
+      observedAt: true,
+      connection: { select: { companyName: true } },
+    },
   });
   if (!snapshot)
     return {
@@ -87,6 +117,8 @@ export async function compareDaybookSales(
     };
   const dates = {
     ...base,
+    companyName: snapshot.connection.companyName,
+    salesSnapshotId: snapshot.id,
     salesCapturedAt: snapshot.observedAt.toISOString(),
     salesThroughDate: snapshot.throughDate,
   };
@@ -144,6 +176,21 @@ export async function compareDaybookSales(
     ]),
   );
   const daybook = new Map(evidence.capture.vouchers.map((bill) => [bill.guid.toLowerCase(), bill]));
+  const originals = diagnosticVouchers(job.summary);
+  const numberIndex = new Map<string, { source: "Daybook" | "Sales"; bill: Bill }[]>();
+  for (const [source, bills] of [
+    ["Daybook", daybook],
+    ["Sales", sales],
+  ] as const) {
+    for (const bill of bills.values()) {
+      const number = bill.billNumber.trim().toLowerCase();
+      if (number) {
+        const entries = numberIndex.get(number) ?? [];
+        entries.push({ source, bill });
+        numberIndex.set(number, entries);
+      }
+    }
+  }
   const counts = {
     daybookBills: daybook.size,
     salesBills: sales.size,
@@ -158,7 +205,7 @@ export async function compareDaybookSales(
   for (const guid of new Set([...daybook.keys(), ...sales.keys()])) {
     const a = daybook.get(guid),
       b = sales.get(guid);
-    if (a && b && signature(a) === signature(b)) {
+    if (a && b && comparisonSignature(a) === comparisonSignature(b)) {
       counts.matchedBills++;
       continue;
     }
@@ -167,15 +214,34 @@ export async function compareDaybookSales(
     else counts.differentBills++;
     differenceCount++;
     if (differences.length < 100) {
+      const numbers = new Set(
+        [a?.billNumber, b?.billNumber]
+          .filter((number): number is string => !!number?.trim())
+          .map((number) => number.trim().toLowerCase()),
+      );
+      const numberMatches = [...numbers]
+        .flatMap((number) => numberIndex.get(number) ?? [])
+        .filter((entry) => entry.bill.guid.toLowerCase() !== guid);
       const difference = {
         guid,
-        reason: !a
-          ? "Only in Sales"
+        ...(!a
+          ? { reason: "Only in Sales" }
           : !b
-            ? "Only in Daybook"
-            : "Bill identity, flags or product details differ",
-        ...(a ? { daybook: display(a) } : {}),
+            ? { reason: "Only in Daybook" }
+            : billMismatchDetails(a, b)),
+        ...(a ? { daybook: display(a, originals.get(guid)) } : {}),
         ...(b ? { sales: display(b) } : {}),
+        numberMatches: {
+          count: numberMatches.length,
+          vouchers: numberMatches.slice(0, 10).map(({ source, bill }) => ({
+            source,
+            bill: display(
+              bill,
+              source === "Daybook" ? originals.get(bill.guid.toLowerCase()) : undefined,
+              false,
+            ),
+          })),
+        },
       };
       const bytes = Buffer.byteLength(JSON.stringify(difference));
       if (differenceBytes + bytes <= 1_500_000) {

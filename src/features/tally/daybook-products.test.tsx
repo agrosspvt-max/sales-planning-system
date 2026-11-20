@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { testLoader } from "../dealer-tags/test-loader";
 import { daybookProductCapture, validateProductEvidence } from "./daybook-products";
 import type { DaybookSalesComparison } from "./daybook-sales-comparison";
+import { billMismatchDetails, comparisonSignature } from "./daybook-comparison-details";
 const prefix = "cb293b57-f31b-464e-b2e1-42d4edb59b7d";
 const bill = {
   guid: prefix + "-00000001",
@@ -40,6 +41,75 @@ const evidence = {
   ],
   vouchers: [bill],
 };
+const cancelledDaybook = {
+  ...bill,
+  billNumber: "CG/RB/26-27/0217",
+  partyName: "",
+  cancelled: true,
+  optional: true,
+  items: [],
+};
+const cancelledSales = { ...cancelledDaybook, billNumber: "CG/RB/26-27/0215" };
+const exact = billMismatchDetails(cancelledDaybook, cancelledSales);
+assert.deepEqual(exact.fields, [
+  { field: "Bill number", daybook: "CG/RB/26-27/0217", sales: "CG/RB/26-27/0215" },
+]);
+assert.equal(exact.reason, "Changed: Bill number");
+assert.equal(exact.productDifferenceCount, 0);
+assert.equal(
+  comparisonSignature(bill),
+  comparisonSignature({ ...bill, alterId: "999" }),
+  "An edit version is diagnostic metadata, not a fabricated bill-data mismatch",
+);
+const flags = billMismatchDetails(bill, { ...bill, cancelled: true, optional: true });
+assert.deepEqual(
+  flags.fields.map((row) => row.field),
+  ["Recorded cancelled", "Recorded optional"],
+);
+const quantity = billMismatchDetails(bill, {
+  ...bill,
+  items: [{ ...bill.items[0], quantity: "2.000000" }],
+});
+assert.deepEqual(quantity.products[0].fields, ["Quantity"]);
+assert.equal(quantity.products[0].daybook[0].quantity, "1.500000");
+assert.equal(quantity.products[0].sales[0].quantity, "2.000000");
+const repeat = billMismatchDetails(
+  { ...bill, items: [bill.items[0], { ...bill.items[0], lineNo: 1 }] },
+  bill,
+);
+assert.equal(
+  repeat.products[0].daybookLineCount,
+  1,
+  "Identical shared occurrences are cancelled out once",
+);
+assert.equal(repeat.products[0].salesLineCount, 0);
+const sameTotals = billMismatchDetails(
+  {
+    ...bill,
+    items: [
+      { ...bill.items[0], quantity: "1.000000", amount: "10.00" },
+      { ...bill.items[0], lineNo: 1, quantity: "2.000000", amount: "20.00" },
+    ],
+  },
+  {
+    ...bill,
+    items: [
+      { ...bill.items[0], quantity: "2.000000", amount: "10.00" },
+      { ...bill.items[0], lineNo: 1, quantity: "1.000000", amount: "20.00" },
+    ],
+  },
+);
+assert.deepEqual(
+  sameTotals.products[0].fields,
+  ["Line combinations / repetitions"],
+  "Equal field totals do not hide different original line combinations",
+);
+const ledgerChange = billMismatchDetails(
+  { ...bill, ledgerEntries: [{ name: "Ledger", amount: "0.00" }] },
+  { ...bill, ledgerEntries: [{ name: "Ledger", amount: "-10.00" }] },
+);
+assert.equal(ledgerChange.ledgers[0].daybook[0].amount, "0.00");
+assert.equal(ledgerChange.ledgers[0].sales[0].amount, "-10.00");
 const sources = [
   {
     guid: bill.guid,
@@ -189,6 +259,89 @@ for (const text of [
 ])
   assert.ok(html.includes(text), text);
 assert.doesNotMatch(html, /Pack <one>/);
+const rich = renderToStaticMarkup(
+  <DaybookComparisonResult
+    result={{
+      ...result,
+      companyName: "Example Company",
+      daybookCapturedAt: "2026-11-20T09:15:14Z",
+      salesCapturedAt: "2026-11-16T12:05:26Z",
+      differences: [
+        {
+          guid: bill.guid,
+          ...exact,
+          daybook: {
+            ...result.differences![0].daybook!,
+            guid: bill.guid,
+            masterId: "62001",
+            alterId: "140222",
+            number: cancelledDaybook.billNumber,
+            party: "",
+            cancelled: true,
+            optional: true,
+            productTotal: null,
+            partyLedgerAmount: null,
+            items: [],
+            narration: "<script>source narration</script>",
+            rawCancelled: "Yes",
+            rawOptional: "Yes",
+          },
+          sales: {
+            ...result.differences![0].daybook!,
+            guid: bill.guid,
+            masterId: "62001",
+            alterId: "140111",
+            number: cancelledSales.billNumber,
+            party: "",
+            cancelled: true,
+            optional: true,
+            productTotal: null,
+            partyLedgerAmount: null,
+            items: [],
+          },
+          numberMatches: {
+            count: 1,
+            vouchers: [
+              {
+                source: "Sales",
+                bill: {
+                  ...result.differences![0].daybook!,
+                  guid: prefix + "-00000099",
+                  number: cancelledSales.billNumber,
+                  party: "Example Branch",
+                  cancelled: false,
+                  optional: false,
+                  productTotal: "15.00",
+                  partyLedgerAmount: "-15.00",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }}
+  />,
+);
+for (const text of [
+  "Changed: Bill number",
+  "Exact bill field differences",
+  "Example Branch",
+  "62001",
+  "140222",
+  "140111",
+  bill.guid,
+  "Cancellation time",
+  "Not captured",
+  "Raw IsCancelled",
+  "&lt;script&gt;source narration&lt;/script&gt;",
+  "different GUID",
+  "not a live Tally check",
+  "not cancellation or edit times",
+])
+  assert.ok(rich.includes(text), text);
+assert.match(rich.replace(/<[^>]+>/g, " "), /Recorded cancelled\s+No/);
+assert.match(rich.replace(/<[^>]+>/g, " "), /Recorded optional\s+No/);
+assert.doesNotMatch(rich, /<script>/);
 const unavailable = renderToStaticMarkup(
   <DaybookComparisonResult
     result={{

@@ -21,6 +21,9 @@ export function DaybookBillAllocationTable({
   layoutConflict?: boolean;
   source?: DaybookVoucherSource;
 }) {
+  const showLedger =
+    allocations?.scope === "voucher_ledgers" &&
+    new Set(allocations.entries.map((entry) => entry.ledgerName)).size > 1;
   return (
     <div className="space-y-2">
       <p className="font-medium">
@@ -44,17 +47,13 @@ export function DaybookBillAllocationTable({
         </p>
       ) : (
         <>
-          <p className="text-muted-foreground">
-            Bill/reference names and types are as recorded in Tally. Advance and on-account entries
-            may have no specific bill. Amounts retain their original signs.
-          </p>
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead>
                 <tr>
-                  {allocations.scope === "voucher_ledgers" && <th className="p-1">Ledger</th>}
-                  <th className="p-1">Bill / reference no.</th>
-                  <th className="p-1">Reference type</th>
+                  {showLedger && <th className="p-1">Ledger</th>}
+                  <th className="p-2">Bill / reference</th>
+                  <th className="p-2">Type</th>
                   <th className="p-1 text-right">Amount adjusted</th>
                 </tr>
               </thead>
@@ -65,7 +64,7 @@ export function DaybookBillAllocationTable({
                   return (
                     <Fragment key={`${entry.ledgerLineNumber}:${entry.allocationNumber}`}>
                       <tr className="border-t">
-                        {allocations.scope === "voucher_ledgers" && (
+                        {showLedger && (
                           <td className="p-1">
                             {entry.ledgerName || `Ledger line ${entry.ledgerLineNumber}`}
                           </td>
@@ -81,10 +80,7 @@ export function DaybookBillAllocationTable({
                       </tr>
                       {type === "agst ref" && !!entry.billReference?.trim() && (
                         <tr>
-                          <td
-                            colSpan={allocations.scope === "voucher_ledgers" ? 4 : 3}
-                            className="p-1 pb-2"
-                          >
+                          <td colSpan={showLedger ? 4 : 3} className="p-1 pb-2">
                             <DaybookReferencedBillProducts source={source} entry={entry} />
                           </td>
                         </tr>
@@ -92,11 +88,10 @@ export function DaybookBillAllocationTable({
                       {noSpecificBill && (
                         <tr>
                           <td
-                            colSpan={allocations.scope === "voucher_ledgers" ? 4 : 3}
+                            colSpan={showLedger ? 4 : 3}
                             className="p-1 pb-2 text-muted-foreground"
                           >
-                            {entry.referenceType}: no specific sales bill is linked by this
-                            allocation.
+                            {entry.referenceType}: no specific bill.
                           </td>
                         </tr>
                       )}
@@ -106,6 +101,23 @@ export function DaybookBillAllocationTable({
               </tbody>
             </table>
           </div>
+          <details className="text-xs text-muted-foreground">
+            <summary className="w-fit cursor-pointer">ⓘ Reference details</summary>
+            <div className="mt-2 space-y-1 rounded border p-2">
+              <p>
+                Bill/reference names, types and signed amounts are as recorded in Tally. Advance and
+                on-account entries may have no specific bill.
+              </p>
+              {!showLedger && allocations.scope === "voucher_ledgers" && (
+                <p>Ledger: {allocations.entries[0]?.ledgerName || "Not recorded"}</p>
+              )}
+              {allocations.entries.map((entry) => (
+                <p key={`${entry.ledgerLineNumber}:${entry.allocationNumber}`}>
+                  Ledger line {entry.ledgerLineNumber} · Allocation {entry.allocationNumber}
+                </p>
+              ))}
+            </div>
+          </details>
           {allocations.entryCount > allocations.entries.length && (
             <p>
               Showing the first {allocations.entries.length} of {allocations.entryCount}{" "}

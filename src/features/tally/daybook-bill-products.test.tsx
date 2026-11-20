@@ -91,7 +91,7 @@ async function main() {
     "Kg",
     "Nos",
     "100.25",
-    "full original bill",
+    "Item amounts are before invoice taxes",
     "Source: Daybook",
     "adjusted against this bill",
   ])
@@ -127,7 +127,7 @@ async function main() {
     />,
   );
   assert.doesNotMatch(advance, /Products in bill/);
-  assert.match(advance, /no specific sales bill is linked/);
+  assert.match(advance, /no specific bill/);
   console.log(
     "Daybook bill-product disclosures: lazy source-bound requests, original product quantities/units/amounts, escaped names, empty/cancelled/missing/ambiguous/advance cases and retry: PASS",
   );

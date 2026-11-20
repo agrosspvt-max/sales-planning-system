@@ -1,26 +1,15 @@
 "use client";
-
+import { useState } from "react";
 import Link from "next/link";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 import { DaybookDealerVouchers } from "./daybook-dealer-vouchers";
-import {
-  DaybookVoucherDetails,
-  voucherLabel,
-  voucherLedgerSummary,
-} from "./daybook-voucher-details";
+import { DaybookVoucherDetails, voucherLabel } from "./daybook-voucher-details";
+import { dealerViews, matchesDealerSearch } from "./daybook-view";
 
 const money = (amount: string | null | undefined) =>
   amount == null
     ? "—"
     : Number(amount).toLocaleString("en-IN", { style: "currency", currency: "INR" });
-const reason = (value: string) =>
-  ({
-    unsupported_type: "Other voucher type",
-    VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE: "Other voucher type",
-    cancelled: "Cancelled",
-    optional: "Optional",
-  })[value] ?? value;
-
 export function DaybookResultTables({
   dealerRows,
   excludedVouchers = [],
@@ -32,252 +21,158 @@ export function DaybookResultTables({
   coverage?: string;
   sourceJobId?: string;
 }) {
-  // Existing saved captures already retain the original Tally types. Index both
-  // confirmed dealer names and source ledgers so aliases share one type list.
-  const typesByParty = new Map<string, Set<string>>();
-  const excludedByParty = new Map<string, DaybookExcludedVoucher[]>();
-  for (const voucher of excludedVouchers) {
-    for (const key of [
-      ...(voucher.dealerName ? ["dealer:" + voucher.dealerName] : []),
-      ...(voucher.ledgerName ? ["ledger:" + voucher.ledgerName] : []),
-    ])
-      excludedByParty.set(key, [...(excludedByParty.get(key) ?? []), voucher]);
-  }
-  function otherVouchers(row: DaybookDealerRow) {
-    const keys = ["dealer:" + row.dealerName, ...row.ledgers.map((name) => "ledger:" + name)];
-    return [
-      ...new Map(
-        keys.flatMap((key) => excludedByParty.get(key) ?? []).map((v) => [v.guid, v]),
-      ).values(),
-    ];
-  }
-  const vouchersByKey = new Map(
-    excludedVouchers.map((voucher) => ["voucher:" + voucher.guid, voucher]),
+  const [search, setSearch] = useState("");
+  const view = dealerViews(dealerRows, excludedVouchers);
+  const visible = view.dealers.filter((dealer) => matchesDealerSearch(dealer, search));
+  const unassigned = view.unassigned.filter(
+    (voucher) =>
+      !search.trim() ||
+      [voucher.voucherType, voucher.voucherNumber, voucher.date].some((value) =>
+        value.toLowerCase().includes(search.trim().toLowerCase()),
+      ),
   );
-  for (const voucher of excludedVouchers) {
-    if (!["unsupported_type", "VOUCHER_TYPE_NOT_IN_DAYBOOK_RULE"].includes(voucher.reason))
-      continue;
-    const keys = [
-      ...(voucher.dealerName ? ["dealer:" + voucher.dealerName] : []),
-      ...(voucher.ledgerName ? ["ledger:" + voucher.ledgerName] : []),
-      "voucher:" + voucher.guid,
-    ];
-    for (const key of keys) {
-      const types = typesByParty.get(key) ?? new Set<string>();
-      types.add(voucher.voucherType);
-      typesByParty.set(key, types);
-    }
-  }
-  function otherTypes(row: DaybookDealerRow) {
-    const keys = [
-      "dealer:" + row.dealerName,
-      ...row.ledgers.map((name) => "ledger:" + name),
-      row.key,
-    ];
-    return [...new Set(keys.flatMap((key) => [...(typesByParty.get(key) ?? [])]))]
-      .sort((a, b) => a.localeCompare(b))
-      .join(", ");
-  }
   return (
-    <div className="space-y-5">
-      <details className="space-y-2 rounded border p-3" aria-label="Daybook dealer summary">
-        <summary className="cursor-pointer select-none font-medium">
-          Dealer summary ({dealerRows.length})
-        </summary>
-        <p className="text-sm text-muted-foreground">
-          Receipts and SR/CR update only dealers with a confirmed match. Other shows the total
-          amount of other voucher types for review; it does not update Recovery or Last Payment.{" "}
-          Open Voucher details for individual ledger amounts and stock items when no single party is
-          identified. Open Vouchers / bill adjustments under a dealer to see each payment and the
-          bill references it adjusts.
-        </p>
-        {dealerRows.some((row) => row.status === "Needs dealer link") && (
-          <p className="text-sm">
-            Needs dealer link means there is no confirmed website dealer for this Tally name. Check
-            the reason below, then confirm the name in{" "}
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="font-medium">
+          Dealers <span className="text-sm text-muted-foreground">({view.dealers.length})</span>
+        </h2>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="sr-only">Find dealer or bill</span>
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Find dealer or bill…"
+            className="w-full rounded border bg-background px-3 py-2 sm:w-64"
+          />
+        </label>
+      </div>
+      <details className="text-xs text-muted-foreground">
+        <summary className="w-fit cursor-pointer">ⓘ About these figures</summary>
+        <div className="mt-2 space-y-2 rounded border p-3">
+          <p>
+            Sales, receipts, returns/credit notes and other transactions are grouped under each
+            dealer. All records are from the selected Daybook capture.
+          </p>
+          <p>
+            Receipts and SR/CR update Recovery only for confirmed dealer matches. Other totals are
+            for review and do not update Recovery or Last Payment.
+          </p>
+          <p>
+            Cancelled and optional vouchers appear under Other. {excludedVouchers.length} vouchers
+            are outside the Recovery receipt/SRCR totals.
+          </p>
+          {coverage !== "all_vouchers" && (
+            <p>
+              This older capture covers Receipt and Credit Note families only. Refresh Daybook for
+              the full voucher list.
+            </p>
+          )}
+          <p>
+            Needs dealer link means the Tally name has no confirmed website dealer. Review its
+            matching details or open{" "}
             <Link className="text-primary underline" href="/planning/dealer-alias">
               Dealer Alias
             </Link>
             .
           </p>
-        )}
-        <div className="max-h-[32rem] overflow-auto rounded border">
-          <table className="w-full min-w-[52rem] text-sm">
-            <thead className="sticky top-0 bg-muted text-left">
-              <tr>
-                {["Dealer / voucher", "SR/CR", "Receipts", "Other", "Voucher types / match"].map(
-                  (label, i) => (
-                    <th
-                      scope="col"
-                      key={label}
-                      className={`border-b p-3 ${i > 0 && i < 4 ? "text-right" : ""}`}
-                    >
-                      {label}
-                    </th>
-                  ),
+        </div>
+      </details>
+      <div className="space-y-3" aria-label="Daybook dealer summary">
+        {visible.map((dealer) => (
+          <details className="group rounded-lg border" key={dealer.key}>
+            <summary className="cursor-pointer select-none p-4 marker:text-muted-foreground">
+              <span className="inline-flex max-w-full flex-wrap items-center gap-x-6 gap-y-2 align-middle">
+                <span className="font-medium">{dealer.name}</span>
+                {dealer.row &&
+                  ["Needs dealer link", "Prior figures kept"].includes(dealer.row.status) && (
+                    <span className="rounded bg-muted px-2 py-0.5 text-xs">
+                      {dealer.row.status}
+                    </span>
+                  )}
+                {dealer.row && (
+                  <span className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>
+                      Receipts{" "}
+                      <strong className="font-medium text-foreground">
+                        {money(dealer.row.liveRecovery)}
+                      </strong>
+                    </span>
+                    <span>
+                      SR/CR{" "}
+                      <strong className="font-medium text-foreground">
+                        {money(dealer.row.srCr)}
+                      </strong>
+                    </span>
+                    <span>
+                      Other{" "}
+                      <strong className="font-medium text-foreground">
+                        {money(dealer.row.other)}
+                      </strong>
+                    </span>
+                  </span>
                 )}
-              </tr>
-            </thead>
-            <tbody>
-              {dealerRows.map((row) => {
-                const voucher = vouchersByKey.get(row.key);
-                return (
-                  <tr key={row.key} className="border-b last:border-0">
-                    <td className="p-3 align-top">
-                      <div className="font-medium">
-                        {voucher ? voucherLabel(voucher) : row.dealerName}
-                      </div>
-                      {voucher && (
-                        <>
-                          <p className="text-xs text-muted-foreground">
-                            {voucher.date} · No single dealer/party identified
-                          </p>
-                          {voucherLedgerSummary(voucher) && (
-                            <p className="mt-1 text-xs">{voucherLedgerSummary(voucher)}</p>
-                          )}
-                          <DaybookVoucherDetails voucher={voucher} sourceJobId={sourceJobId} />
-                        </>
-                      )}
-                      {row.ledgers
-                        .filter((ledger) => ledger !== row.dealerName)
-                        .map((ledger) => (
-                          <div key={ledger} className="text-xs text-muted-foreground">
-                            Tally: {ledger}
-                          </div>
-                        ))}
-                      {!voucher &&
-                        (!!row.creditVouchers?.length || !!otherVouchers(row).length) && (
-                          <DaybookDealerVouchers
-                            credits={row.creditVouchers}
-                            excluded={otherVouchers(row)}
-                            sourceJobId={sourceJobId}
-                          />
-                        )}
-                      {!row.creditVouchers &&
-                        (Number(row.liveRecovery) > 0 || Number(row.srCr) > 0) && (
-                          <p className="mt-2 text-xs text-muted-foreground">
-                            Install connector 1.6.6-test and refresh this month for receipt/SR/CR
-                            bill adjustments.
-                          </p>
-                        )}
-                    </td>
-                    <td className="p-3 text-right align-top tabular-nums">{money(row.srCr)}</td>
-                    <td className="p-3 text-right align-top tabular-nums">
-                      {money(row.liveRecovery)}
-                    </td>
-                    <td className="p-3 text-right align-top tabular-nums">{money(row.other)}</td>
-                    <td className="p-3 align-top">
-                      <div>
-                        {row.status === "Review only"
-                          ? otherTypes(row) || "Voucher type unavailable"
-                          : row.status}
-                      </div>
-                      {row.status !== "Review only" && otherTypes(row) && (
-                        <p className="text-xs text-muted-foreground">
-                          Other voucher types: {otherTypes(row)}
-                        </p>
-                      )}
-                      {row.status !== "Review only" && row.reason && (
-                        <p className="text-xs text-muted-foreground">{row.reason}</p>
-                      )}
-                      {!!row.candidates?.length && (
-                        <p className="text-xs text-muted-foreground">
-                          Possible matches: {row.candidates.join(", ")}
-                        </p>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-              {!dealerRows.length && (
-                <tr>
-                  <td colSpan={5} className="p-4 text-center text-muted-foreground">
-                    No dealer entries in this capture.
-                  </td>
-                </tr>
+              </span>
+            </summary>
+            <div className="space-y-4 border-t p-4">
+              {dealer.row && (
+                <details className="text-xs text-muted-foreground">
+                  <summary className="w-fit cursor-pointer">
+                    ⓘ Dealer & matching details
+                    {dealer.row.status === "Needs dealer link" ? " · Needs dealer link" : ""}
+                  </summary>
+                  <div className="mt-2 space-y-1 rounded border p-3">
+                    <p>Status: {dealer.row.status}</p>
+                    {dealer.row.ledgers.map((ledger) => (
+                      <p key={ledger}>Tally: {ledger}</p>
+                    ))}
+                    {dealer.row.reason && <p>{dealer.row.reason}</p>}
+                    {!!dealer.row.candidates?.length && (
+                      <p>Possible matches: {dealer.row.candidates.join(", ")}</p>
+                    )}
+                  </div>
+                </details>
               )}
-            </tbody>
-          </table>
-        </div>
-      </details>
-      <details className="space-y-2 rounded border p-3" aria-label="Excluded vouchers">
-        <summary className="cursor-pointer select-none font-medium">
-          Excluded vouchers ({excludedVouchers.length})
-        </summary>
-        <p className="text-sm text-muted-foreground">
-          Voucher types outside Receipt, Credit Note and Sales Return appear here, along with
-          cancelled and optional vouchers. Amounts are from the party ledger; Dr/Cr shows its
-          direction.
-        </p>
-        {coverage !== "all_vouchers" && (
-          <p className="text-sm text-muted-foreground">
-            This capture covers Receipt and Credit Note families only. Install connector 1.6.6-test
-            and refresh to include all other voucher types and their dealer amounts.
+              {!!dealer.vouchers.length ? (
+                <DaybookDealerVouchers excluded={dealer.vouchers} sourceJobId={sourceJobId} />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  This older capture has totals only. Refresh Daybook for individual bills and
+                  receipts.
+                </p>
+              )}
+            </div>
+          </details>
+        ))}
+        {!visible.length && (
+          <p className="rounded border p-4 text-sm text-muted-foreground">
+            {search
+              ? "No dealers or bills match this search."
+              : "No dealer entries in this capture."}
           </p>
         )}
-        <div className="max-h-96 overflow-auto rounded border">
-          <table className="w-full min-w-[48rem] text-sm">
-            <thead className="sticky top-0 bg-muted text-left">
-              <tr>
-                {[
-                  "Dealer / Tally ledger",
-                  "Voucher type",
-                  "Amount",
-                  "Date",
-                  "Voucher no.",
-                  "Reason",
-                ].map((label, i) => (
-                  <th
-                    scope="col"
-                    key={label}
-                    className={`border-b p-3 ${i === 2 ? "text-right" : ""}`}
-                  >
-                    {label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {excludedVouchers.map((v) => (
-                <tr key={v.guid} className="border-b last:border-0">
-                  <td className="p-3 align-top">
-                    {v.dealerName ?? v.ledgerName ?? voucherLabel(v)}
-                    {v.dealerName && v.ledgerName !== v.dealerName && (
-                      <div className="text-xs text-muted-foreground">Tally: {v.ledgerName}</div>
-                    )}
-                    {!v.ledgerName && voucherLedgerSummary(v) && (
-                      <p className="mt-1 text-xs">{voucherLedgerSummary(v)}</p>
-                    )}
-                    <DaybookVoucherDetails voucher={v} sourceJobId={sourceJobId} />
-                  </td>
-                  <td className="p-3 align-top">{v.voucherType}</td>
-                  <td className="p-3 text-right align-top tabular-nums">
-                    {money(v.amount)}
-                    {v.amount !== undefined && v.direction !== "zero" && v.direction
-                      ? ` ${v.direction === "debit" ? "Dr" : "Cr"}`
-                      : ""}
-                  </td>
-                  <td className="whitespace-nowrap p-3 align-top">{v.date}</td>
-                  <td className="p-3 align-top">{v.voucherNumber || "—"}</td>
-                  <td className="p-3 align-top">{reason(v.reason)}</td>
-                </tr>
-              ))}
-              {!excludedVouchers.length && (
-                <tr>
-                  <td colSpan={6} className="p-4 text-center text-muted-foreground">
-                    No excluded vouchers in this capture.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        {excludedVouchers.some((v) => v.amount === undefined) && (
-          <p className="text-xs text-muted-foreground">
-            — means the capture did not provide one identifiable party ledger amount.
+      </div>
+      {!!unassigned.length && (
+        <details className="rounded-lg border p-4" aria-label="Unassigned vouchers">
+          <summary className="cursor-pointer font-medium">
+            Unassigned vouchers ({unassigned.length})
+          </summary>
+          <p className="my-3 text-xs text-muted-foreground">
+            No single dealer/party identified. Original ledger and stock details are available
+            inside each voucher.
           </p>
-        )}
-      </details>
+          {unassigned.map((voucher) => (
+            <DaybookVoucherDetails
+              key={voucher.guid}
+              voucher={voucher}
+              sourceJobId={sourceJobId}
+              summaryLabel={voucherLabel(voucher)}
+              compact
+            />
+          ))}
+        </details>
+      )}
     </div>
   );
 }

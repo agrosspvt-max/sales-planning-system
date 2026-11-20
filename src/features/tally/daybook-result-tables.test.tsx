@@ -65,6 +65,7 @@ const load = testLoader({
     },
   },
   "next/link": {
+    __esModule: true,
     default: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
   },
 });

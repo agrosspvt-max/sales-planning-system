@@ -168,10 +168,14 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
             {summary.matchedDealers} dealers verified · {summary.changedRows} Recovery rows changed
           </p>
           <DaybookSalesComparisonDialog jobId={published.id} />
-          <p className="text-muted-foreground">
-            Bill products below come from Daybook during this trial. Territory Plan continues using
-            the existing Sales collection.
-          </p>
+          <details className="text-xs text-muted-foreground">
+            <summary className="w-fit cursor-pointer">ⓘ Data sources</summary>
+            <p className="mt-2">
+              Bill products come from Daybook during this trial. Territory Plan continues using the
+              existing Sales collection. Compare with Sales checks the two saved sources for this
+              period.
+            </p>
+          </details>
           <DaybookResultTables
             dealerRows={
               summary.dealerRows ?? [

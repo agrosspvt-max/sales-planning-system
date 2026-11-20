@@ -1,8 +1,8 @@
 "use client";
-
 import type { DaybookCredit } from "./daybook-preview";
 import type { DaybookExcludedVoucher } from "./daybook-result-types";
-import { DaybookVoucherDetails, voucherLabel } from "./daybook-voucher-details";
+import { DaybookVoucherDetails } from "./daybook-voucher-details";
+import { creditVoucher, groupVouchers, shortVoucherLabel } from "./daybook-view";
 
 export function DaybookDealerVouchers({
   credits = [],
@@ -13,23 +13,28 @@ export function DaybookDealerVouchers({
   excluded?: DaybookExcludedVoucher[];
   sourceJobId?: string;
 }) {
-  const vouchers: DaybookExcludedVoucher[] = [
-    ...credits.map((v) => ({ ...v, amount: v.creditAmount, reason: "included" })),
-    ...excluded,
-  ].sort((a, b) => b.date.localeCompare(a.date) || a.guid.localeCompare(b.guid));
+  const groups = groupVouchers([...credits.map(creditVoucher), ...excluded]);
   return (
-    <details className="mt-2 rounded border p-2 text-xs">
-      <summary className="cursor-pointer font-medium">
-        Vouchers / bill adjustments ({vouchers.length})
-      </summary>
-      {vouchers.map((voucher) => (
-        <DaybookVoucherDetails
-          key={voucher.guid}
-          voucher={voucher}
-          sourceJobId={sourceJobId}
-          summaryLabel={`${voucherLabel(voucher)} · ${voucher.date}${voucher.amount !== undefined ? ` · ${Number(voucher.amount).toLocaleString("en-IN", { style: "currency", currency: "INR" })}` : ""}`}
-        />
+    <div className="space-y-5">
+      {groups.map((group) => (
+        <section key={group.label} aria-label={`${group.label} vouchers`} className="space-y-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            {group.label}
+            <span className="rounded bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">
+              {group.vouchers.length}
+            </span>
+          </h3>
+          {group.vouchers.map((voucher) => (
+            <DaybookVoucherDetails
+              key={voucher.guid}
+              voucher={voucher}
+              sourceJobId={sourceJobId}
+              summaryLabel={shortVoucherLabel(voucher)}
+              compact
+            />
+          ))}
+        </section>
       ))}
-    </details>
+    </div>
   );
 }

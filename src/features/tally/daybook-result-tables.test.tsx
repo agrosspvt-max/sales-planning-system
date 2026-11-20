@@ -56,7 +56,7 @@ assert.equal(capture.credits.length, 1);
 assert.equal(capture.credits[0].billAllocations?.entries[1].billReference, "INV-101<A>");
 assert.equal(capture.excludedVouchers[0].amount, undefined);
 assert.equal(capture.excludedVouchers[0].details?.voucher?.ledgerEntries[0].amount, "-250.00");
-const load = testLoader({
+const overrides = {
   "@/lib/api-client": {
     api: {
       get: () => {
@@ -68,7 +68,8 @@ const load = testLoader({
     __esModule: true,
     default: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
   },
-});
+};
+const load = testLoader(overrides);
 const { DaybookResultTables } = load<typeof import("./daybook-result-tables")>(
   "src/features/tally/daybook-result-tables.tsx",
 );
@@ -115,6 +116,29 @@ for (const text of [
   assert.ok(html.includes(text), text);
 assert.match(html, /Rent &lt;adjustment&gt;/);
 assert.doesNotMatch(html, /Not supplied by Tally|<adjustment>|<details[^>]*\sopen(?:[=>\s])/);
+assert.match(html, /aria-pressed="true"[^>]*>All \(1\)/);
+assert.match(html, /aria-pressed="false"[^>]*>Dealers only \(1\)/);
+const dealerOnlyLoad = testLoader({
+  ...overrides,
+  react: {
+    ...React,
+    useState: (initial: unknown) => [initial === "all" ? "dealers" : initial, () => {}],
+  },
+});
+const DealerOnlyTables = dealerOnlyLoad<typeof import("./daybook-result-tables")>(
+  "src/features/tally/daybook-result-tables.tsx",
+).DaybookResultTables;
+const dealerOnlyHtml = renderToStaticMarkup(
+  <DealerOnlyTables
+    dealerRows={dealerRows}
+    excludedVouchers={excludedVouchers}
+    coverage="all_vouchers"
+  />,
+);
+assert.match(dealerOnlyHtml, /aria-pressed="true"[^>]*>Dealers only \(1\)/);
+for (const text of ["Dealer A", "R-31", "INV-100", "125.50", "INV-101&lt;A&gt;"])
+  assert.ok(dealerOnlyHtml.includes(text), text);
+assert.doesNotMatch(dealerOnlyHtml, /Unassigned vouchers|J-13|SJ-5|Rent expense/);
 const oldVoucher = { ...excludedVouchers[0], details: undefined, billAllocations: undefined };
 const old = renderToStaticMarkup(
   <DaybookResultTables dealerRows={[dealerRows[0]]} excludedVouchers={[oldVoucher]} />,

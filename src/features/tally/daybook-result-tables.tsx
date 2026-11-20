@@ -4,7 +4,7 @@ import Link from "next/link";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 import { DaybookDealerVouchers } from "./daybook-dealer-vouchers";
 import { DaybookVoucherDetails, voucherLabel } from "./daybook-voucher-details";
-import { dealerViews, matchesDealerSearch } from "./daybook-view";
+import { dealerViews, isWebsiteDealer, matchesDealerSearch } from "./daybook-view";
 
 const money = (amount: string | null | undefined) =>
   amount == null
@@ -22,9 +22,12 @@ export function DaybookResultTables({
   sourceJobId?: string;
 }) {
   const [search, setSearch] = useState("");
+  const [scope, setScope] = useState<"all" | "dealers">("all");
   const view = dealerViews(dealerRows, excludedVouchers);
-  const visible = view.dealers.filter((dealer) => matchesDealerSearch(dealer, search));
-  const unassigned = view.unassigned.filter(
+  const websiteDealers = view.dealers.filter(isWebsiteDealer);
+  const scopedDealers = scope === "dealers" ? websiteDealers : view.dealers;
+  const visible = scopedDealers.filter((dealer) => matchesDealerSearch(dealer, search));
+  const unassigned = (scope === "all" ? view.unassigned : []).filter(
     (voucher) =>
       !search.trim() ||
       [voucher.voucherType, voucher.voucherNumber, voucher.date].some((value) =>
@@ -33,9 +36,31 @@ export function DaybookResultTables({
   );
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Daybook view">
+        {(
+          [
+            ["all", "All", view.dealers.length],
+            ["dealers", "Dealers only", websiteDealers.length],
+          ] as const
+        ).map(([value, label, count]) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={scope === value}
+            onClick={() => setScope(value)}
+            className={`rounded-md border px-3 py-2 text-sm ${
+              scope === value
+                ? "border-primary bg-primary text-primary-foreground"
+                : "bg-background hover:bg-muted"
+            }`}
+          >
+            {label} ({count})
+          </button>
+        ))}
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="font-medium">
-          Dealers <span className="text-sm text-muted-foreground">({view.dealers.length})</span>
+          Dealers <span className="text-sm text-muted-foreground">({scopedDealers.length})</span>
         </h2>
         <label className="flex items-center gap-2 text-sm">
           <span className="sr-only">Find dealer or bill</span>
@@ -149,7 +174,9 @@ export function DaybookResultTables({
           <p className="rounded border p-4 text-sm text-muted-foreground">
             {search
               ? "No dealers or bills match this search."
-              : "No dealer entries in this capture."}
+              : scope === "dealers"
+                ? "No confirmed website dealers in this capture."
+                : "No dealer entries in this capture."}
           </p>
         )}
       </div>

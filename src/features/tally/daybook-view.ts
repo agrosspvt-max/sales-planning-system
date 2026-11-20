@@ -42,6 +42,17 @@ export type DealerView = {
   row?: DaybookDealerRow;
   vouchers: DaybookExcludedVoucher[];
 };
+export function isWebsiteDealer(dealer: DealerView) {
+  if (dealer.row)
+    return (
+      !dealer.row.key.startsWith("ledger:") &&
+      !dealer.row.key.startsWith("voucher:") &&
+      ["Matched", "Prior figures kept", "Review only"].includes(dealer.row.status)
+    );
+  // Cancelled/optional-only parties have no totals row. The server sets dealerName
+  // only after resolving the original Tally ledger to a unique website dealer.
+  return dealer.vouchers.some((voucher) => voucher.dealerName === dealer.name);
+}
 export function dealerViews(rows: DaybookDealerRow[], excluded: DaybookExcludedVoucher[]) {
   const dealers: DealerView[] = rows
     .filter((row) => !row.key.startsWith("voucher:"))

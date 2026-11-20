@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { dealerViews, groupVouchers, matchesDealerSearch } from "./daybook-view";
+import { dealerViews, groupVouchers, isWebsiteDealer, matchesDealerSearch } from "./daybook-view";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 const credit = {
   guid: "receipt-1",
@@ -95,6 +95,61 @@ assert.equal(
 assert.equal(row.liveRecovery, "25.00");
 assert.equal(row.srCr, "7.00");
 assert.equal(row.other, "50.00");
+const scopedView = dealerViews(
+  [
+    row,
+    {
+      ...row,
+      key: "dealer-sales",
+      dealerName: "Sales only",
+      status: "Review only",
+      creditVouchers: [],
+    },
+    {
+      ...row,
+      key: "dealer-held",
+      dealerName: "Held dealer",
+      status: "Prior figures kept",
+      creditVouchers: [],
+    },
+    {
+      ...row,
+      key: "ledger:Unknown",
+      dealerName: "Unknown",
+      status: "Needs dealer link",
+      creditVouchers: [],
+    },
+    {
+      ...row,
+      key: "ledger:Bank",
+      dealerName: "Bank",
+      status: "Accounting ledger",
+      creditVouchers: [],
+    },
+    {
+      ...row,
+      key: "ledger:Supplier",
+      dealerName: "Supplier",
+      status: "Review only",
+      creditVouchers: [],
+    },
+  ],
+  [
+    base,
+    { ...cancelled, guid: "confirmed-cancelled", dealerName: "Confirmed cancelled only" },
+    cancelled,
+    { ...cancelled, guid: "unlinked-only", dealerName: undefined, ledgerName: "Unlinked only" },
+    unknown,
+  ],
+);
+assert.deepEqual(
+  scopedView.dealers.filter(isWebsiteDealer).map((entry) => entry.name),
+  ["Confirmed cancelled only", "Dealer one", "Held dealer", "Only cancelled", "Sales only"],
+  "confirmed sales-only/held/cancelled-only dealers remain; unlinked and accounting parties do not",
+);
+assert.ok(scopedView.dealers.find((entry) => entry.name === "Unlinked only"));
+assert.equal(scopedView.unassigned.length, 1, "All retains unassigned evidence");
+assert.equal(scopedView.dealers.find((entry) => entry.name === "Dealer one")?.vouchers.length, 2);
 console.log(
   "Daybook dealer-first view: ordered transaction groups, exact alias grouping, deduplication, unassigned/cancelled retention, search and unchanged totals: PASS",
 );

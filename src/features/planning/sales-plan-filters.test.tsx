@@ -241,6 +241,19 @@ async function main() {
   assert.deepEqual(monthlyOpened(html), [], "RM selecting out-of-scope officers renders nothing extra");
   html = await draw(Role.SALES_OFFICER, "arjun", "view", { ...MONTHLY, 1: "SUBMITTED", 4: { officer: ["sunil"], state: ["MP"] } });
   assert.deepEqual(monthlyOpened(html), ["mp-1"], "SO: Sales Officer/State selections have no effect, scope unchanged");
+  // Deactivated versions belong only in the Bin, regardless of their old approval status.
+  for (const status of ["DRAFT", "RETURNED", "PENDING_ADMIN", "APPROVED"]) {
+    seasonal.push({ id: `sp-bin-${status}`, officerId: "sunil", month: "", status, type: "SEASONAL", lifecycle: "DEACTIVATED" });
+    monthly.push({ id: `mp-bin-${status}`, officerId: "sunil", month: "August", status, type: "SEASONAL", lifecycle: "DEACTIVATED" });
+  }
+  for (const tab of ["SEASONAL", "MONTHLY"]) {
+    const drafts = await draw(Role.SUPER_ADMIN, "admin", "create", { 0: tab });
+    assert(!drafts.includes('href="/planning/sp-bin-') && !drafts.includes('href="/planning/monthly/mp-bin-'));
+    for (const sub of ["SUBMITTED", "APPROVED", "HISTORY"]) {
+      const normal = await draw(Role.SUPER_ADMIN, "admin", "view", { 0: tab, 1: sub });
+      assert(!normal.includes('href="/planning/sp-bin-') && !normal.includes('href="/planning/monthly/mp-bin-'), "deactivated plans never leak into ordinary lists");
+    }
+  }
   console.log("sales-plan-filters.test.tsx — all assertions passed");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

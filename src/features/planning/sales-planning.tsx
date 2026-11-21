@@ -26,6 +26,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { PlanStateBadge } from "./status-badge";
 import { PlanColumnHeader } from "./plan-column-filter-header";
 import { applyPlanFilters, planFilterKeys, planFilterOptions, type PlanFilterKey, type PlanFilters } from "./plan-column-filters";
+import { SalesPlanBin } from "./sales-plan-bin";
 import { MonthlyPlansPanel } from "./monthly-plans-panel";
 import { PLANNING_TYPE_LABELS, type PlanListItem, type PlanningType } from "./types";
 import {
@@ -124,6 +125,7 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
     const out = allPlans.filter((p) => {
       if (p.planningType !== tab) return false;
       const lifecycle = p.lifecycleState ?? "ACTIVE";
+      if (lifecycle === "DEACTIVATED") return false;
       if (isCreate) {
         if (!CREATE_STATUSES.includes(p.status)) return false;
       } else if (viewSub === "SUBMITTED") {
@@ -226,9 +228,10 @@ export function SalesPlanning({ role, userId, mode }: { role: Role; userId: stri
         title="Sales Planning"
         subtitle={isCreate ? "Create or continue editable plans (Draft, Returned, Rejected)." : "Submitted, approved and historical plans."}
         actions={
-          isAdmin && (isCreate || canExport) ? (
+          (isAdmin || isManager) ? (
             <div className="flex flex-wrap gap-2">
-              {isCreate && (
+              <SalesPlanBin role={role} />
+              {isAdmin && isCreate && (
                 <Button variant="outline" asChild>
                   <Link href="/planning/sales/import"><FileInput className="h-4 w-4" /> Import Seasonal Plan</Link>
                 </Button>

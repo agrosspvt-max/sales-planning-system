@@ -65,7 +65,9 @@
     "test:cn-processing": "node --import tsx src/features/cn-requests/cn-review.test.tsx",
     "test:approvals": "node --import tsx src/features/planning/approvals-inbox.test.tsx",
     "test:seasonal-export:db": "node --import tsx src/features/planning/seasonal-export.integration.ts",
-    "test:seasonal-export:recalc": "node --import tsx src/lib/export/seasonal-plan-workbook.recalc.ts"
+    "test:seasonal-export:recalc": "node --import tsx src/lib/export/seasonal-plan-workbook.recalc.ts",
+    "test:sales-plan-bin": "node --import tsx src/features/planning/sales-plan-bin.test.tsx && node --import tsx src/features/planning/sales-plan-filters.test.tsx",
+    "test:sales-plan-bin:db": "node --import tsx src/features/planning/sales-plan-bin.integration.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

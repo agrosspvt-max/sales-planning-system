@@ -3,7 +3,8 @@ import "server-only";
 import { isAdministrativeRole } from "@/features/accounts/permissions";
 import { assertAdminPermission } from "@/features/accounts/permissions";
 
-import { PlanStatus, Role } from "@prisma/client";
+import { PlanStatus, Role, type Prisma } from "@prisma/client";
+import type { BinPlanKind, BinRestoreMode, BinRestoreContext } from "./sales-plan-bin.types";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
@@ -426,4 +427,71 @@ export async function archiveActiveSeasonalForReplace(
     summary: `Replace: archived ${ids.length} active seasonal plan version(s) before a fresh re-import`,
   });
   return { archived: ids.length };
+}
+
+/** Bin recovery is atomic: an older version must never be restored alongside a newer active one. */
+async function salesBinRestoreState(db: Pick<Prisma.TransactionClient, "seasonPlan" | "monthlyPlan">, kind: BinPlanKind, id: string) {
+  const child = kind === "MONTHLY" ? await db.monthlyPlan.findUnique({
+    where: inOpenPlanningPeriod("monthlyPlan", { id }),
+    select: { lifecycleState: true, seasonPlanId: true },
+  }) : null;
+  if (kind === "MONTHLY" && !child) throw new ApiError(404, "Monthly plan not found");
+  const parent = await db.seasonPlan.findUnique({ where: inOpenPlanningPeriod("seasonPlan", { id: child?.seasonPlanId ?? id }) });
+  if (!parent) throw new ApiError(404, "Seasonal plan not found");
+  if ((child?.lifecycleState ?? parent.lifecycleState) !== "DEACTIVATED") throw new ApiError(409, "This plan is no longer in the bin. Refresh the list.");
+  const needsParent = kind === "SEASONAL" || parent.lifecycleState !== "ACTIVE";
+  const activeVersions = needsParent ? await db.seasonPlan.findMany({
+    where: { officerId: parent.officerId, seasonId: parent.seasonId, planningType: parent.planningType, lifecycleState: "ACTIVE", id: { not: parent.id } },
+    select: { id: true, version: true }, orderBy: { version: "desc" },
+  }) : [];
+  return { parent, needsParent, activeVersions };
+}
+
+export async function getSalesBinRestoreContext(ctx: AuthContext, kind: BinPlanKind, id: string): Promise<BinRestoreContext> {
+  assertAdmin(ctx);
+  assertAdminPermission(ctx, "salesPlanning", "read");
+  const state = await salesBinRestoreState(prisma, kind, id);
+  return { parentVersion: state.parent.version, needsParent: state.needsParent, activeVersions: state.activeVersions };
+}
+
+export async function restoreSalesBinPlan(ctx: AuthContext, kind: BinPlanKind, id: string, mode: BinRestoreMode, expectedActiveIds: string[]) {
+  assertAdmin(ctx);
+  assertAdminPermission(ctx, "salesPlanning", "lifecycle");
+  try {
+    return await prisma.$transaction(async tx => {
+      const { parent, needsParent, activeVersions } = await salesBinRestoreState(tx, kind, id);
+      const audit = (entity: string, entityId: string, action: "REACTIVATE" | "DEACTIVATE" | "CLOSE", summary: string) => writeAudit({ userId: ctx.userId, actorDesignation: ctx.designation, entity, entityId, action, summary }, tx);
+      if (mode === "HISTORICAL") {
+        if (kind !== "MONTHLY") throw new ApiError(422, "Historical recovery is only available for monthly plans");
+        await tx.monthlyPlan.update({ where: { id }, data: { ...lifecyclePatch("close"), lifecycleFromParent: false } });
+        await audit("monthlyPlan", id, "CLOSE", "Recovered from Sales Planning bin as read-only history; seasonal versions and saved values unchanged");
+        return { ok: true };
+      }
+      const current = activeVersions.map(p => p.id).sort();
+      if (JSON.stringify(current) !== JSON.stringify([...expectedActiveIds].sort())) throw new ApiError(409, "Active versions changed. Close this dialog and review recovery again.");
+      if (current.length && mode !== "REPLACE_ACTIVE") throw new ApiError(409, "An active version already exists. Choose whether to archive it before recovering this plan.");
+      if (needsParent) {
+        if (current.length) {
+          const archivePatch = lifecyclePatch("deactivate");
+          await tx.seasonPlan.updateMany({ where: { id: { in: current } }, data: { ...archivePatch, isActiveVersion: false } });
+          await cascadeToChildren(tx, { seasonPlanId: { in: current } }, archivePatch);
+          for (const active of activeVersions) await audit("seasonPlan", active.id, "DEACTIVATE", `Archived v${active.version} to recover seasonal plan v${parent.version} from Sales Planning bin (Monthly & Recovery followed)`);
+        }
+        // Keep the active-version selector consistent with the restored lifecycle.
+        await tx.seasonPlan.updateMany({ where: { officerId: parent.officerId, seasonId: parent.seasonId, planningType: parent.planningType, id: { not: parent.id } }, data: { isActiveVersion: false } });
+        const patch = lifecyclePatch("reactivate");
+        await tx.seasonPlan.update({ where: { id: parent.id }, data: { ...patch, isActiveVersion: true } });
+        await cascadeToChildren(tx, { seasonPlanId: parent.id }, patch);
+        await audit("seasonPlan", parent.id, "REACTIVATE", `Recovered seasonal plan v${parent.version} from Sales Planning bin (following Monthly & Recovery plans restored; saved values preserved)`);
+      }
+      if (kind === "MONTHLY") {
+        await tx.monthlyPlan.update({ where: { id }, data: { ...lifecyclePatch("reactivate"), lifecycleFromParent: false } });
+        await audit("monthlyPlan", id, "REACTIVATE", "Recovered monthly plan from Sales Planning bin; saved values preserved");
+      }
+      return { ok: true };
+    }, { isolationLevel: "Serializable" });
+  } catch (err) {
+    if ((err as { code?: string }).code === "P2034") throw new ApiError(409, "Another plan changed during recovery. Refresh the bin and try again.");
+    throw err;
+  }
 }

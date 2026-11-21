@@ -132,6 +132,7 @@ export function MonthlyPlansPanel({
   const rows = useMemo(() => {
     const out = (plans ?? []).filter((p) => {
       const lifecycle = p.lifecycleState ?? "ACTIVE";
+      if (lifecycle === "DEACTIVATED") return false;
       if (subView === "CREATE") { if (!CREATE_STATUSES.includes(p.status)) return false; }
       else if (subView === "SUBMITTED") { if (!SUBMITTED_STATUSES.includes(p.status)) return false; }
       else if (subView === "APPROVED") { if (!(p.status === "APPROVED" && lifecycle === "ACTIVE")) return false; }
@@ -181,6 +182,7 @@ export function MonthlyPlansPanel({
         (p) =>
           p.planningType === "SEASONAL" &&
           p.status === "APPROVED" &&
+          (p.lifecycleState ?? "ACTIVE") === "ACTIVE" &&
           p.isActiveVersion &&
           (!(isAdmin && officerFilter) || p.officerId === officerFilter),
       ),

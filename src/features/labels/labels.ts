@@ -1502,6 +1502,7 @@ export const DEFAULT_LABELS = {
   "party_planning.territory.district.no_state_short": "State not set",
   "party_planning.territory.district.none_for_state": "No districts have been added for {state} yet.",
   "party_planning.territory.district.review": "Needs review",
+  "party_planning.territory.district.auto_link_failed": "Automatic district matching could not finish. Refresh to retry, or select and save a district manually.",
   "party_planning.territory.district.legacy_title": "“{value}” is free text that is not in the district list. Select the correct district and save.",
   "party_planning.territory.district.wrong_state_title": "This district does not belong to the dealer's current state ({state}). Select a valid district and save.",
   "party_planning.territory.import.status_unknown_district": "Unknown District",

@@ -28,6 +28,7 @@ import { StatusRequestCell, StatusRequestsTab } from "./dealer-status-requests";
 import { RetailerMappingTab, RetailerRequestsTab } from "./retailer-mapping";
 import { useAdminPermission } from "@/features/accounts/permission-ui";
 import type { DealerStatusReason } from "@/lib/dealer-status-request";
+import { AutoLinkDistricts } from "./district-auto-link";
 
 /* ------------------------------------------- DTOs (mirror territory.server.ts) ------------------------------------------- */
 
@@ -156,6 +157,7 @@ function ExistingDealers({ role }: { role: Role }) {
 
   return (
     <div className="space-y-3">
+      <AutoLinkDistricts ready={!!data && !isLoading} />
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-wrap items-end gap-3">
           {isAdmin && (

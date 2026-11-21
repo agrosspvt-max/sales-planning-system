@@ -67,7 +67,10 @@
     "test:seasonal-export:db": "node --import tsx src/features/planning/seasonal-export.integration.ts",
     "test:seasonal-export:recalc": "node --import tsx src/lib/export/seasonal-plan-workbook.recalc.ts",
     "test:sales-plan-bin": "node --import tsx src/features/planning/sales-plan-bin.test.tsx && node --import tsx src/features/planning/sales-plan-filters.test.tsx",
-    "test:sales-plan-bin:db": "node --import tsx src/features/planning/sales-plan-bin.integration.ts"
+    "test:sales-plan-bin:db": "node --import tsx src/features/planning/sales-plan-bin.integration.ts",
+    "test:district-auto-link": "node --import tsx src/features/party-planning/district-auto-link.test.tsx && node --import tsx src/features/party-planning/territory.test.ts && node --import tsx src/features/party-planning/district-cell-ui.test.tsx && node --import tsx src/features/party-planning/territory-filters-ui.test.tsx",
+    "test:district-auto-link:db": "node --import tsx src/lib/district-auto-link.integration.ts",
+    "db:auto-link-districts": "node --import tsx scripts/auto-link-districts.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

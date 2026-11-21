@@ -147,6 +147,7 @@ function makeDb() {
 
 function loadService() {
   const db = makeDb();
+  const autoLinkCalls: import("@/lib/district-auto-link").DistrictAutoLinkOptions[] = [];
   const owners = new Map(DEALERS.map((d) => [d.id, d.owner]));
   const getOfficerScope = async (ctx: AuthContext) => {
     if (ctx.role === Role.SUPER_ADMIN || ctx.role === Role.CUSTOM_ADMIN) return { all: true, ids: [] as string[] };
@@ -155,6 +156,7 @@ function loadService() {
   };
   const load = testLoader({
     "@/lib/prisma": { prisma: db.prisma },
+    "@/lib/district-auto-link": { autoLinkClearDistricts: async (_db: unknown, options: import("@/lib/district-auto-link").DistrictAutoLinkOptions) => { autoLinkCalls.push(options); return []; } },
     "@/lib/http": { ApiError: TestApiError },
     "@/features/sales-upload/alias.server": { listDealersForAlias: async () => ({ counts: {}, dealers: [] }) },
     "@/lib/audit": { writeAudit: async (p: Row) => { if (db.t.failAudit) { db.t.failAudit = false; throw new Error("injected audit failure"); } db.t.audit.push({ ...p }); } },
@@ -165,7 +167,7 @@ function loadService() {
     },
   });
   const service = load("src/features/party-planning/territory.server.ts") as typeof import("./territory.server");
-  return { service, ...db };
+  return { service, autoLinkCalls, ...db };
 }
 
 const ctxOf = (userId: string): AuthContext => { const u = USERS.find((x) => x.id === userId)!; return { userId, role: u.role, username: userId, groupId: u.groupId, designation: null } as unknown as AuthContext; };
@@ -790,6 +792,20 @@ async function main() {
     assert.equal(t.requests.find((r) => r.id === collide.id)!.status, "PENDING_ADMIN");
   }
 
+  {
+    const { service, autoLinkCalls } = loadService();
+    await service.autoLinkTerritoryDistricts(SO1);
+    assert.deepEqual(plain(autoLinkCalls.at(-1)?.officerIds), [SO1.userId], "auto-linking stays inside an SO's current dealer scope");
+    await service.autoLinkTerritoryDistricts(RM1);
+    assert(autoLinkCalls.at(-1)?.officerIds?.includes(SO1.userId));
+    assert(!autoLinkCalls.at(-1)?.officerIds?.includes(SO3.userId), "an RM cannot auto-link another team's dealers");
+    await service.autoLinkTerritoryDistricts(ADMIN);
+    assert.equal(autoLinkCalls.at(-1)?.officerIds, null);
+    const calls = autoLinkCalls.length;
+    assert.equal(await status(() => service.autoLinkTerritoryDistricts({ ...ADMIN, role: Role.CUSTOM_ADMIN, permissions: { partyPlanning: ["read"] } })), 403);
+    assert.equal(autoLinkCalls.length, calls, "a read-only grant cannot trigger a write");
+    assert.equal(autoLinkCalls.at(-1)?.actorId, ADMIN.userId, "the audit actor is the authenticated user");
+  }
   console.log("territory.test.ts — all assertions passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });

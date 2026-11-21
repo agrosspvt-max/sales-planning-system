@@ -13,6 +13,7 @@ import * as XLSX from "xlsx";
 import { readWorkbook, sheetNames } from "@/lib/import/workbook";
 import { buildPage, type PageParams, type Paginated } from "@/lib/pagination";
 import { buildDistrictCatalog } from "@/lib/district-master";
+import { autoLinkClearDistricts } from "@/lib/district-auto-link";
 import { listDealersForAlias } from "@/features/sales-upload/alias.server";
 import { cleanRequestText, STATUS_REQUEST_NOTES_MAX, validateStatusRequest, type DealerStatusReason, type DealerStatusRequestState } from "@/lib/dealer-status-request";
 import {
@@ -116,6 +117,20 @@ export async function listDistrictOptions(ctx: AuthContext): Promise<Record<stri
   const out: Record<string, DistrictOption[]> = {};
   for (const d of [...rows].sort((a, b) => a.name.localeCompare(b.name))) (out[d.groupId] ??= []).push({ id: d.id, name: d.name });
   return out;
+}
+
+/** Explicit write endpoint used automatically by the Existing Dealers screen. GET stays read-only. */
+export async function autoLinkTerritoryDistricts(ctx: AuthContext): Promise<{ linked: number }> {
+  assertTerritoryWriter(ctx);
+  const scope = await getOfficerScope(ctx);
+  try {
+    const linked = await autoLinkClearDistricts(prisma, { officerIds: scope.all ? null : scope.ids, actorId: ctx.userId, actorDesignation: ctx.designation, apply: true });
+    return { linked: linked.length };
+  } catch (error) {
+    const failure = error as { code?: string; meta?: { code?: string } };
+    if (failure.code === "P2034" || ["40001", "40P01"].includes(failure.meta?.code ?? "")) throw new ApiError(409, "District mappings changed during automatic matching. Refresh the page to try again.");
+    throw error;
+  }
 }
 
 /* ------------------------------------------------ markets ------------------------------------------------ */

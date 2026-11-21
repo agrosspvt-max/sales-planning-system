@@ -127,12 +127,17 @@ function NoPlanInfo({ reason, detail }: { reason: string | null; detail: string 
   );
 }
 
-/** Dynamic column-header dates (aging cutoff / month opening): full DD/MM/YYYY like every other date. */
+/** Dynamic column-header dates (aging cutoff / previous month-end): full DD/MM/YYYY like every other date. */
 const ddmm = (d: Date | string) => formatDMY(d);
 /** DD/MM/YYYY for the Last Payment date (the "YYYY-MM-DD" string is re-ordered as text — no timezone shift). */
 const ddmmyyyy = (isoDate: string) => formatDMY(isoDate.slice(0, 10));
-/** First calendar day of the aging cutoff's month — the "Outstanding Till" opening date. */
-const monthFirstDdMm = (cutoff: Date | string) => `01/${formatDMY(cutoff).slice(3)}`;
+/** The opening balance is outstanding through the last calendar day of the previous month. */
+const previousMonthEndDdMm = (cutoff: Date | string) => {
+  const shown = formatDMY(cutoff);
+  if (shown === "—") return shown;
+  const [, month, year] = shown.split("/").map(Number);
+  return formatDMY(new Date(Date.UTC(year, month - 1, 0)));
+};
 /** Second header line showing a dynamic date under a (still label-editable) column title. */
 function DateSuffix({ date }: { date: string }) {
   return <span className="block text-[10px] font-normal normal-case text-muted-foreground">{date}</span>;
@@ -370,10 +375,10 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
     if (status === "RETURNED_FROM_LEDGER") return { label: cnLabels.returnedFromLedger, color: "text-destructive" };
     return null;
   };
-  // Dynamic column dates: Current Outstanding is as of the aging cutoff; Outstanding Till is the month's
-  // opening (first calendar day of the cutoff's month). Both derived from the plan cutoff — no calc change.
+  // Current Outstanding uses the aging cutoff; the opening balance's Outstanding Till label uses
+  // the preceding month-end. Both dates follow the plan cutoff, including historical plans.
   const cutoffDdMm = ddmm(detail.cutoffDate);
-  const tillDdMm = monthFirstDdMm(detail.cutoffDate);
+  const tillDdMm = previousMonthEndDdMm(detail.cutoffDate);
   // Admin Edit Mode: staged overlay, separate from the officer autosave path.
   const canAdminEdit = !!detail.canAdminEdit;
   const [adminMode, setAdminMode] = useState(false);
@@ -845,7 +850,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
   ];
   // Dynamic column dates (same derivation as Month View).
   const cutoffDdMm = ddmm(detail.cutoffDate);
-  const tillDdMm = monthFirstDdMm(detail.cutoffDate);
+  const tillDdMm = previousMonthEndDdMm(detail.cutoffDate);
   const totalOutstandingTillDate = detail.dealers.reduce((s, d) => s + d.outstandingTillDate, 0);
 
   return (

@@ -1970,6 +1970,8 @@ export const DEFAULT_LABELS = {
   "daily_work.visits.result_placeholder": "Select visit result…",
   "daily_work.visits.visited": "Visited",
   "daily_work.visits.not_visited": "Not Visited",
+  "daily_work.review.visits.not_reported": "Not Reported",
+  "daily_work.review.visits.counts_only": "Some visits were saved as counts only. Dealer details were not recorded for those visits.",
   "daily_work.visits.additional_actual": "Other Dealer Visits",
   "daily_work.validation.invalid_visit_result": "Choose a valid result for a dealer in this submitted visit plan.",
   "daily_work.validation.choose_visit_results": "Choose Visited or Not Visited for every dealer visit.",

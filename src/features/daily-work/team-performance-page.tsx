@@ -21,6 +21,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useLabel } from "@/features/labels/label-ui";
 import { ReviewTaskHistoryDrawer, type ReviewTaskSelection } from "./review-task-history";
+import type { DealerVisitReportRow } from "./dealer-visit-report";
 
 /* --------------------------------- DTOs (mirror the service) --------------------------------- */
 
@@ -42,6 +43,7 @@ interface SummaryDto {
   batches?: { noPlanSections: string | null }[];
   dealerVisits: number; newPartyVisits: number; others: string; visitsEntered: boolean;
   actualDealerVisits?: number | null; actualNewPartyVisits?: number | null;
+  reportVisitRows?: (DealerVisitReportRow & { dealerName: string })[];
 }
 interface ReviewDetail {
   officerId: string; officerName: string; officerRole: Role; workDate: string;
@@ -280,16 +282,29 @@ export function ConversionSection({ title, rows, noPlan = false }: { title: stri
   );
 }
 
-/** Visits: Planned (Daily Plan counts) vs Actual (Daily Report counts), one metric per row. */
+/** Visits: saved counts plus the submitted dealer plan and each dealer's recorded report result. */
 export function VisitsSection({ title, summary, noPlan = false }: { title: string; summary: SummaryDto; noPlan?: boolean }) {
   const C = useReviewColumns();
+  const V = {
+    relationship: useLabel("daily_work.visits.type.relationship"),
+    sales: useLabel("daily_work.section.sales"),
+    recovery: useLabel("daily_work.section.recovery"),
+    visited: useLabel("daily_work.visits.visited"),
+    notVisited: useLabel("daily_work.visits.not_visited"),
+    notReported: useLabel("daily_work.review.visits.not_reported"),
+    countsOnly: useLabel("daily_work.review.visits.counts_only"),
+    purpose: useLabel("daily_work.visits.col.purpose"),
+  };
+  const visits = summary.reportVisitRows ?? [];
+  const sources = { RELATIONSHIP: V.relationship, SALES: V.sales, RECOVERY: V.recovery };
+  const countsOnly = summary.reportVisitRows !== undefined && (summary.dealerVisits > visits.length || (summary.actualDealerVisits ?? 0) > visits.filter(visit => visit.result === "VISITED").length);
   const count = (v: number | null | undefined) => (v == null ? dash : v);
   const metrics = [
     { label: C.dealerVisits, planned: summary.dealerVisits, actual: summary.actualDealerVisits },
     { label: C.newPartyVisits, planned: summary.newPartyVisits, actual: summary.actualNewPartyVisits },
   ];
   return (
-    <ReadSection title={title} section="visits" empty={!summary.visitsEntered} noPlan={noPlan}>
+    <ReadSection title={title} section="visits" empty={!summary.visitsEntered && visits.length === 0} noPlan={noPlan}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.metric}</TableHead><TableHead className="text-right">{C.planned}</TableHead><TableHead className="text-right">{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
@@ -302,6 +317,25 @@ export function VisitsSection({ title, summary, noPlan = false }: { title: strin
           ))}
         </TableBody>
       </Table>
+      {visits.length > 0 && <div className="border-t" data-testid="review-dealer-visits">
+        <h4 className="px-3 py-2 text-sm font-semibold">{C.dealerVisits}</h4>
+        <Table>
+          <TableHeader><TableRow><TableHead>{C.dealer}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
+          <TableBody>
+            {visits.map(visit => <TableRow key={visit.dealerId} data-dealer-id={visit.dealerId}>
+              <TableCell className="font-medium"><DealerName id={visit.dealerId} name={visit.dealerName} /></TableCell>
+              <TableCell>
+                <div>{visit.sources.map(source => sources[source]).join(", ")}</div>
+                {visit.purpose && <div className="mt-0.5 text-xs text-muted-foreground">{V.purpose}: {visit.purpose}</div>}
+              </TableCell>
+              <TableCell className={visit.result === "VISITED" ? "text-success" : "text-muted-foreground"}>
+                {visit.result === "VISITED" ? V.visited : visit.result === "NOT_VISITED" ? V.notVisited : V.notReported}
+              </TableCell>
+            </TableRow>)}
+          </TableBody>
+        </Table>
+      </div>}
+      {countsOnly && <p className="border-t px-3 py-2 text-xs text-muted-foreground">{V.countsOnly}</p>}
     </ReadSection>
   );
 }

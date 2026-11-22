@@ -1,11 +1,16 @@
 "use client";
 
+import { useState } from "react";
+import { Download } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
 import type { DealerAuditStatus } from "./dealer-audit";
+import { exportMissingDealers } from "./dealer-audit-export";
 
 export function TallyDealerAudit() {
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const audit = useQuery({
     queryKey: ["tally-dealer-audit"],
     queryFn: () => api.get<DealerAuditStatus>("/api/tally/dealer-audit"),
@@ -18,18 +23,42 @@ export function TallyDealerAudit() {
     },
   });
   const { configured, completedAt, failed, summary, refreshState } = audit.data ?? {};
+  async function exportDealers() {
+    if (!summary?.unmatched.length || exporting) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      await exportMissingDealers(summary, completedAt ?? null);
+    } catch {
+      setExportError("Could not export missing dealers. Please try again.");
+    } finally {
+      setExporting(false);
+    }
+  }
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
         Refreshes daily from 2:00 pm IST while Tally and the office connector are running.
       </p>
-      <Button
-        variant="outline"
-        disabled={!configured || audit.isLoading || refresh.isPending || Boolean(refreshState)}
-        onClick={() => refresh.mutate()}
-      >
-        {refresh.isPending || refreshState ? "Refresh requested" : "Refresh dealers from Tally"}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          disabled={!configured || audit.isLoading || refresh.isPending || Boolean(refreshState)}
+          onClick={() => refresh.mutate()}
+        >
+          {refresh.isPending || refreshState ? "Refresh requested" : "Refresh dealers from Tally"}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={audit.isLoading || !summary?.unmatched.length || exporting}
+          onClick={() => void exportDealers()}
+        >
+          <Download className="h-4 w-4" aria-hidden="true" />
+          {exporting ? "Exporting…" : "Export missing dealers"}
+        </Button>
+      </div>
+      {exportError && <p role="alert">{exportError}</p>}
       {refreshState && (
         <p role="status" className="text-sm">
           {refreshState === "running"

@@ -3,10 +3,10 @@
 import { DealerTableBody } from "@/features/dealers/dealer-table-ui";
 import { formatDateTimeDMY } from "@/lib/date-format";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
-import { useState } from "react";
+import { Fragment, useId, useState } from "react";
 import { Role } from "@prisma/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, Lock } from "lucide-react";
+import { Send, Lock, ChevronRight } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { RecoveryPaymentModeField } from "./recovery-payment-mode";
 import { type DailyWorkType, type RecoveryPaymentMode, rowTaskType, sectionSavedAsNoPlan } from "@/lib/daily-work";
@@ -284,6 +284,8 @@ export function ConversionSection({ title, rows, noPlan = false }: { title: stri
 
 /** Visits: saved counts plus the submitted dealer plan and each dealer's recorded report result. */
 export function VisitsSection({ title, summary, noPlan = false }: { title: string; summary: SummaryDto; noPlan?: boolean }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
   const C = useReviewColumns();
   const V = {
     relationship: useLabel("daily_work.visits.type.relationship"),
@@ -298,44 +300,54 @@ export function VisitsSection({ title, summary, noPlan = false }: { title: strin
   const visits = summary.reportVisitRows ?? [];
   const sources = { RELATIONSHIP: V.relationship, SALES: V.sales, RECOVERY: V.recovery };
   const countsOnly = summary.reportVisitRows !== undefined && (summary.dealerVisits > visits.length || (summary.actualDealerVisits ?? 0) > visits.filter(visit => visit.result === "VISITED").length);
+  const canExpand = visits.length > 0 || countsOnly;
   const count = (v: number | null | undefined) => (v == null ? dash : v);
   const metrics = [
-    { label: C.dealerVisits, planned: summary.dealerVisits, actual: summary.actualDealerVisits },
-    { label: C.newPartyVisits, planned: summary.newPartyVisits, actual: summary.actualNewPartyVisits },
+    { key: "dealer", label: C.dealerVisits, planned: summary.dealerVisits, actual: summary.actualDealerVisits },
+    { key: "new-party", label: C.newPartyVisits, planned: summary.newPartyVisits, actual: summary.actualNewPartyVisits },
   ];
   return (
     <ReadSection title={title} section="visits" empty={!summary.visitsEntered && visits.length === 0} noPlan={noPlan}>
       <Table>
         <TableHeader><TableRow><TableHead>{C.metric}</TableHead><TableHead className="text-right">{C.planned}</TableHead><TableHead className="text-right">{C.actual}</TableHead></TableRow></TableHeader>
         <TableBody>
-          {metrics.map((m) => (
-            <TableRow key={m.label}>
-              <TableCell className="font-medium">{m.label}</TableCell>
+          {metrics.map((m) => <Fragment key={m.key}>
+            <TableRow>
+              <TableCell className="font-medium">{m.key === "dealer" && canExpand ? (
+                <button type="button" className="flex items-center gap-1.5 rounded-sm text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-expanded={detailsOpen} aria-controls={detailsId} onClick={() => setDetailsOpen(open => !open)}>
+                  <ChevronRight aria-hidden="true" className={`h-4 w-4 shrink-0 transition-transform ${detailsOpen ? "rotate-90" : ""}`} />
+                  {m.label}
+                </button>
+              ) : m.label}</TableCell>
               <TableCell className="text-right tabular-nums">{count(m.planned)}</TableCell>
               <TableCell className="text-right tabular-nums">{count(m.actual)}</TableCell>
             </TableRow>
-          ))}
+            {m.key === "dealer" && canExpand && detailsOpen && <TableRow className="bg-muted/10 hover:bg-muted/10">
+              <TableCell colSpan={3}>
+                <div id={detailsId} data-testid="review-dealer-visits">
+                  {visits.length > 0 && <Table>
+                    <TableHeader><TableRow><TableHead>{C.dealer}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
+                    <TableBody>
+                      {visits.map(visit => <TableRow key={visit.dealerId} data-dealer-id={visit.dealerId}>
+                        <TableCell className="font-medium"><DealerName id={visit.dealerId} name={visit.dealerName} /></TableCell>
+                        <TableCell>
+                          <div>{visit.sources.map(source => sources[source]).join(", ")}</div>
+                          {visit.purpose && <div className="mt-0.5 text-xs text-muted-foreground">{V.purpose}: {visit.purpose}</div>}
+                        </TableCell>
+                        <TableCell className={visit.result === "VISITED" ? "text-success" : "text-muted-foreground"}>
+                          {visit.result === "VISITED" ? V.visited : visit.result === "NOT_VISITED" ? V.notVisited : V.notReported}
+                        </TableCell>
+                      </TableRow>)}
+                    </TableBody>
+                  </Table>}
+                  {countsOnly && <p className="border-t px-3 py-2 text-xs text-muted-foreground">{V.countsOnly}</p>}
+                </div>
+              </TableCell>
+            </TableRow>}
+          </Fragment>)}
         </TableBody>
       </Table>
-      {visits.length > 0 && <div className="border-t" data-testid="review-dealer-visits">
-        <h4 className="px-3 py-2 text-sm font-semibold">{C.dealerVisits}</h4>
-        <Table>
-          <TableHeader><TableRow><TableHead>{C.dealer}</TableHead><TableHead>{C.planned}</TableHead><TableHead>{C.actual}</TableHead></TableRow></TableHeader>
-          <TableBody>
-            {visits.map(visit => <TableRow key={visit.dealerId} data-dealer-id={visit.dealerId}>
-              <TableCell className="font-medium"><DealerName id={visit.dealerId} name={visit.dealerName} /></TableCell>
-              <TableCell>
-                <div>{visit.sources.map(source => sources[source]).join(", ")}</div>
-                {visit.purpose && <div className="mt-0.5 text-xs text-muted-foreground">{V.purpose}: {visit.purpose}</div>}
-              </TableCell>
-              <TableCell className={visit.result === "VISITED" ? "text-success" : "text-muted-foreground"}>
-                {visit.result === "VISITED" ? V.visited : visit.result === "NOT_VISITED" ? V.notVisited : V.notReported}
-              </TableCell>
-            </TableRow>)}
-          </TableBody>
-        </Table>
-      </div>}
-      {countsOnly && <p className="border-t px-3 py-2 text-xs text-muted-foreground">{V.countsOnly}</p>}
     </ReadSection>
   );
 }

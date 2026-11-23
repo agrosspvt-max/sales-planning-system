@@ -14,6 +14,8 @@ import { Ban, Save, Lock, Unlock, Info } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { cn, formatDate } from "@/lib/utils";
 import { lastPaymentDisplay } from "@/lib/last-payment-display";
+import type { ReceiptPoint } from "@/lib/last-payment";
+import { LastPaymentInfo, type PaymentHistory } from "./last-payment-info";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -51,6 +53,8 @@ interface RecoveryDealer {
   lastPaymentDate: string | null;
   lastPaymentAmount: number | null;
   lastPaymentUnavailableReason?: string | null;
+  recentPayments?: ReceiptPoint[];
+  paymentHistoryThroughDate?: string | null;
   // DERIVED: Live Recovery + SR/CR − (Due + Overdue). Auto-refreshes from Daybook or Aging changes.
   actualRunningRecovery: number;
   monthRecoveryPlan: number;
@@ -147,21 +151,24 @@ function DateSuffix({ date }: { date: string }) {
  * the Recovery detail response, so changing the selected week can never change this value. When there is no
  * eligible receipt but the dealer still owes money (Current Outstanding > 0), a display-only fallback label
  * is shown instead of the dash; a real receipt (from any later Daybook/Historical import) always replaces it. */
-function LastPaymentCell({ date, amount, outstanding, unavailableReason }: { date: string | null; amount: number | null; outstanding: number; unavailableReason?: string | null }) {
+function LastPaymentCell({ date, amount, outstanding, unavailableReason, history }: { date: string | null; amount: number | null; outstanding: number; unavailableReason?: string | null; history: PaymentHistory }) {
   const display = lastPaymentDisplay({ date, amount, outstanding });
   const fallbackLabel = useLabel("recovery.lastPaymentFallback");
   return (
     <TableCell className="text-right">
-      {display.kind === "real" ? (
-        <div className="flex flex-col items-end leading-tight">
-          <span className="tabular-nums">{ddmmyyyy(display.date)}</span>
-          <span className="text-[10px] font-medium tabular-nums text-success">{money(display.amount)}</span>
-        </div>
-      ) : display.kind === "fallback" ? (
-        <span className="tabular-nums text-yellow-600">{fallbackLabel}</span>
-      ) : (
-        <span className="text-muted-foreground" title={unavailableReason ?? undefined}>—</span>
-      )}
+      <div className="flex items-center justify-end gap-1">
+        {display.kind === "real" ? (
+          <div className="flex flex-col items-end leading-tight">
+            <span className="tabular-nums">{ddmmyyyy(display.date)}</span>
+            <span className="text-[10px] font-medium tabular-nums text-success">{money(display.amount)}</span>
+          </div>
+        ) : display.kind === "fallback" ? (
+          <span className="tabular-nums text-yellow-600">{fallbackLabel}</span>
+        ) : (
+          <span className="text-muted-foreground" title={unavailableReason ?? undefined}>—</span>
+        )}
+        <LastPaymentInfo {...history} unavailableReason={unavailableReason} />
+      </div>
     </TableCell>
   );
 }
@@ -557,7 +564,7 @@ function MonthView({ detail, role, userId }: { detail: RecoveryDetail; role: Rol
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
                   {/* Last Payment — latest Day Book Receipt: date on top, that same Receipt's Credit Amount
                       below in the existing small green delta style. "—" when the dealer has no Receipt. */}
-                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} outstanding={d.outstanding} unavailableReason={d.lastPaymentUnavailableReason} />
+                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} outstanding={d.outstanding} unavailableReason={d.lastPaymentUnavailableReason} history={{ dealerName: d.dealerName, payments: d.recentPayments ?? [], throughDate: d.paymentHistoryThroughDate ?? null }} />
                   {/* Section 2 — Recovery Planning. Delta indicators removed (kept only on Current Outstanding
                       and Actual Running Recovery). */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>
@@ -914,7 +921,7 @@ function WeekGrid({ detail, weekNo, editable, onSaved }: { detail: RecoveryDetai
                       Till Date (same calc as Month View) added beside it. */}
                   <TableCell className="text-right"><AgingCell value={d.outstanding} prev={d.prevAging?.outstanding} /></TableCell>
                   <TableCell className="text-right tabular-nums text-muted-foreground">{money(d.outstandingTillDate)}</TableCell>
-                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} outstanding={d.outstanding} unavailableReason={d.lastPaymentUnavailableReason} />
+                  <LastPaymentCell date={d.lastPaymentDate} amount={d.lastPaymentAmount} outstanding={d.outstanding} unavailableReason={d.lastPaymentUnavailableReason} history={{ dealerName: d.dealerName, payments: d.recentPayments ?? [], throughDate: d.paymentHistoryThroughDate ?? null }} />
                   {/* Section 2 — Weekly Planning. "This Week's Due" = only invoices due in the
                       SELECTED business week (not the whole month's Due). Delta removed from Overdue. */}
                   <TableCell className="text-right tabular-nums">{money(d.overdue)}</TableCell>

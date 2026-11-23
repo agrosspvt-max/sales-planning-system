@@ -84,6 +84,36 @@ export const DEFAULT_LABELS = {
   "recovery.outstandingTillDate": "Outstanding Till",
   "recovery.lastPayment": "Last Payment",
   "recovery.lastPaymentFallback": "Before 01/04/2026",
+  "recovery.paymentHistory.title": "Last 5 payments",
+  "recovery.paymentHistory.through": "Payments through",
+  "recovery.paymentHistory.date": "Date",
+  "recovery.paymentHistory.amount": "Amount",
+  "recovery.paymentHistory.total": "Total",
+  "recovery.paymentHistory.empty": "No recorded payments available.",
+  "recovery.paymentHistory.dailySummary": "Daily summary",
+  "planning.details.view": "View details",
+  "planning.details.actions": "Actions for plan",
+  "planning.details.timeline": "File timeline",
+  "planning.details.time_zone": "All times in IST",
+  "planning.details.day": "Day {days} from submission",
+  "planning.details.by": "By",
+  "planning.details.unknown": "Not recorded",
+  "planning.details.empty": "No submission or approval actions have been recorded for this file yet.",
+  "planning.details.loading": "Loading file timeline…",
+  "planning.details.error": "Unable to load the file timeline.",
+  "planning.details.retry": "Try again",
+  "planning.details.kind.SEASONAL": "Seasonal Sales Plan",
+  "planning.details.kind.YEARLY": "Yearly Sales Plan",
+  "planning.details.kind.MONTHLY": "Monthly Sales Plan",
+  "planning.details.kind.RECOVERY": "Recovery Plan",
+  "planning.details.action.SUBMIT": "Submitted",
+  "planning.details.action.RECALL": "Recalled",
+  "planning.details.action.APPROVE": "Approved",
+  "planning.details.action.APPROVE_RM": "Approved by RM",
+  "planning.details.action.RETURN": "Returned",
+  "planning.details.action.REJECT": "Rejected",
+  "planning.details.action.REQUEST_REVISION": "Revision requested",
+  "planning.details.action.AUTHORIZE_REVISION": "Revision authorized",
   "recovery.overdue": "Overdue",
   "recovery.due": "Due",
   "recovery.dueOverdue": "Due + Overdue",
@@ -2561,6 +2591,7 @@ const SCHEME_PLANNING_META: Partial<Record<LabelKey, LabelMeta>> = {} as Partial
 
 /** Classify any key into { module, group } — explicit Scheme Planning metadata first, else by prefix. */
 export function labelMeta(key: LabelKey): LabelMeta {
+  if (key.startsWith("planning.details.")) return { module: "Plan Details", group: "Form Fields" };
   if (key.startsWith("seasons.")) return { module: "Seasons", group: "Form Fields" };
   if (key.startsWith("approvals.")) return { module: "Approvals", group: /^approvals\.(category|cn)\./.test(key) ? "Navigation / Flip Buttons" : "Sections" };
   if (key.startsWith("historical_daybook.")) return { module: "Historical Daybook", group: key.endsWith(".date") || key.endsWith(".voucher") || key.endsWith(".decision") ? "Table Columns" : "View Buttons" };

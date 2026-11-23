@@ -129,6 +129,11 @@ async function service() {
 
   // 4, 5, 19 — date and amount are exactly what the Recovery helper returns (same helper, same rules).
   const recoveryValues = await recoverySource.latestReceiptAsOfByDealer(dealers.map((d) => d.id), new Date(`${TODAY}T00:00:00.000Z`));
+  const recoveryDetails = await recoverySource.recoveryPaymentDetailsByDealer(dealers.map((d) => d.id), new Date(`${TODAY}T00:00:00.000Z`));
+  for (const [id, value] of recoveryValues) {
+    assert.deepEqual(recoveryDetails.get(id)?.latest, value, "adding payment history preserves the existing last date and amount");
+    assert.ok((recoveryDetails.get(id)?.payments.length ?? 0) <= 5);
+  }
   for (const row of adminReport.items) {
     const expected = recoveryValues.get(row.dealerId);
     assert.equal(row.lastPaymentDate, expected?.date ?? null, `${row.dealerId}: date matches Recovery's source`);
@@ -1004,7 +1009,7 @@ function wiring() {
   assert.ok(route.includes("await requireAuth()") && route.includes("parseLastPaymentReportParams") && !/officer|scope/i.test(route.replace(/ctx|Scope comes from/g, "")), "scope is the session's; the route reads no officer parameter");
   // 17 — Recovery's Last Payment path is the same, untouched helper.
   const recovery = read("src/features/recovery/service.server.ts");
-  assert.ok(recovery.includes('import { latestReceiptAsOfByDealer } from "@/lib/last-payment.server"') && recovery.includes("latestReceiptAsOfByDealer(recoveryDealerIds, lastPaymentEnd)"));
+  assert.ok(recovery.includes('import { recoveryPaymentDetailsByDealer } from "@/lib/last-payment.server"') && recovery.includes("recoveryPaymentDetailsByDealer(recoveryDealerIds, lastPaymentEnd)"));
   // 18/20 — the Day Book upload and the existing Reports page are not touched by this feature.
   assert.ok(read("src/app/(dashboard)/reports/page.tsx").includes("<ReportsPage />"));
 }

@@ -22,7 +22,7 @@ import { assertLifecycleEditable, officerVisibilityWhere, isHiddenFromOfficer, i
 import { parseAgingReport, aggregateDealer, type ParsedAgingReport } from "./parser";
 import { parseDaybook, isSrCrVoucher, isReceiptVoucher } from "./daybook-parser";
 import { aggregateDaybookByDealer, type ClassifiedDaybookRow } from "@/lib/daybook-aggregate";
-import { latestReceiptAsOfByDealer } from "@/lib/last-payment.server";
+import { recoveryPaymentDetailsByDealer } from "@/lib/last-payment.server";
 import { lastPaymentMonthEnd } from "@/lib/last-payment";
 import { preserveBeforeDaybookCommit, processLastPaymentJob, processPendingLastPaymentJobs, type LastPaymentJobPayload, type PaymentReceiptInput, type RegularReceipt } from "@/features/historical-daybook/service.server";
 import { reconcileBillingExceptionsSafely } from "@/features/reports/billing-exception.server";
@@ -740,8 +740,8 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
     ? null
     : "Last Payment unavailable: recovery month/year needs review.";
   const lastPaymentByDealer = lastPaymentEnd
-    ? await latestReceiptAsOfByDealer(recoveryDealerIds, lastPaymentEnd)
-    : new Map<string, { date: string | null; amount: number | null }>();
+    ? await recoveryPaymentDetailsByDealer(recoveryDealerIds, lastPaymentEnd)
+    : new Map<string, never>();
 
   // "Missing in Latest Aging" (derived, Option C): a dealer kept in the plan but absent from the newest
   // snapshot shows its last-known aging with a stale badge — no value is zeroed, no row is removed.
@@ -814,8 +814,10 @@ export async function getRecoveryPlan(ctx: AuthContext, id: string) {
         srCr: num(d.srCr ?? 0),
         liveRecovery: num(d.liveRecovery ?? 0),
         // "Last Payment" (informational): latest Day Book Receipt date + THAT row's Credit Amount, or null → "—".
-        lastPaymentDate: lastPaymentByDealer.get(d.dealerId)?.date ?? null,
-        lastPaymentAmount: lastPaymentByDealer.get(d.dealerId)?.amount ?? null,
+        lastPaymentDate: lastPaymentByDealer.get(d.dealerId)?.latest?.date ?? null,
+        lastPaymentAmount: lastPaymentByDealer.get(d.dealerId)?.latest?.amount ?? null,
+        recentPayments: lastPaymentByDealer.get(d.dealerId)?.payments ?? [],
+        paymentHistoryThroughDate: lastPaymentEnd?.toISOString().slice(0, 10) ?? null,
         lastPaymentUnavailableReason,
         // DERIVED (Part 5): Actual Running Recovery = Live Recovery + SR/CR − (Due + Overdue). Computed
         // at read time so it auto-refreshes from EITHER a Daybook or an Aging change; never stored.

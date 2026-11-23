@@ -27,6 +27,7 @@ import { PlanStateBadge } from "./status-badge";
 import { PlanColumnHeader } from "./plan-column-filter-header";
 import { applyPlanFilters, planFilterKeys, planFilterOptions, type PlanFilterKey, type PlanFilters } from "./plan-column-filters";
 import { SalesPlanBin } from "./sales-plan-bin";
+import { PlanDetailsMenu } from "./plan-details-menu";
 import { MonthlyPlansPanel } from "./monthly-plans-panel";
 import { PLANNING_TYPE_LABELS, type PlanListItem, type PlanningType } from "./types";
 import {
@@ -423,7 +424,7 @@ function PlanSection({ title, showTitle, rows, isOfficer, loading, filterKeys, f
                   </TableCell>
                   <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
                   <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>
-                  <TableCell className="text-right"><Button asChild variant="outline" size="sm"><Link href={`/planning/${p.id}`}>Open</Link></Button></TableCell>
+                  <TableCell className="text-right"><div className="flex items-center justify-end gap-1"><Button asChild variant="outline" size="sm"><Link href={`/planning/${p.id}`}>Open</Link></Button><PlanDetailsMenu plan={{ ...p, kind: p.planningType }} /></div></TableCell>
                 </TableRow>
               ))
             )}

@@ -1,7 +1,7 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
-import { latestReceiptAsOf, type ReceiptPoint } from "./last-payment";
+import { latestReceiptAsOf, recentReceiptsAsOf, type ReceiptPoint } from "./last-payment";
 
 type ReadClient = Pick<Prisma.TransactionClient, "$queryRaw" | "lastPaymentReceipt">;
 /** Batched, informational sources only: stored per-plan pairs (tagged "snapshot") + every individual receipt of the
@@ -50,4 +50,14 @@ export async function latestReceiptAsOfByDealer(
     if (best) out.set(id, best);
   }
   return out;
+}
+
+/** One batched read for Recovery's existing latest value and its informational recent-payment popup. */
+export async function recoveryPaymentDetailsByDealer(dealerIds: string[], throughDate: Date, db: ReadClient = prisma) {
+  const points = await loadLastPaymentPoints(dealerIds, throughDate, db);
+  const cutoff = throughDate.toISOString().slice(0, 10);
+  return new Map([...points].map(([id, receipts]) => [id, {
+    latest: latestReceiptAsOf(receipts, cutoff),
+    payments: recentReceiptsAsOf(receipts, cutoff),
+  }]));
 }

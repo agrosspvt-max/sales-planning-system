@@ -49,3 +49,17 @@ export function latestReceiptAsOf(points: readonly ReceiptPoint[], cutoff: strin
   if (receipts.length) return { date: latest, amount: round2(receipts.reduce((sum, p) => sum + p.amount, 0)) };
   return { date: latest, amount: onDate[0].amount };
 }
+
+/** Latest five individual receipts, newest first. A legacy daily summary only fills dates without receipts;
+ * repeated monthly snapshots of that same day are never counted as extra payments. */
+export function recentReceiptsAsOf(points: readonly ReceiptPoint[], cutoff: string): ReceiptPoint[] {
+  const eligible = points.filter(p => p.date && p.date <= cutoff && Number.isFinite(p.amount));
+  const receiptDates = new Set(eligible.filter(p => p.kind !== "snapshot").map(p => p.date));
+  const snapshots = new Set<string>();
+  return eligible.filter(p => {
+    if (p.kind !== "snapshot") return true;
+    if (receiptDates.has(p.date) || snapshots.has(p.date)) return false;
+    snapshots.add(p.date);
+    return true;
+  }).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+}

@@ -15,6 +15,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/features/planning/status-badge";
+import { PlanDetailsMenu } from "@/features/planning/plan-details-menu";
 import { ColumnFilterHeader } from "@/components/ui/column-filter-header";
 import { applyRecoveryPlanFilters, recoveryFilterKeys, recoveryFilterOptions, type RecoveryPlanFilterKey, type RecoveryPlanFilters } from "@/features/recovery/recovery-plan-filters";
 import { Badge } from "@/components/ui/badge";
@@ -200,7 +201,7 @@ export function RecoveryPlanning({ role, userId, mode }: { role: Role; userId: s
                         <TableCell>{p.territory ?? <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell className="text-muted-foreground">{formatDate(p.cutoffDate)}</TableCell>
                         <TableCell><StatusBadge status={p.status} /></TableCell>
-                        <TableCell className="text-right"><Button asChild variant="outline" size="sm"><Link href={`/planning/recovery/${p.id}`}>Open</Link></Button></TableCell>
+                        <TableCell className="text-right"><div className="flex items-center justify-end gap-1"><Button asChild variant="outline" size="sm"><Link href={`/planning/recovery/${p.id}`}>Open</Link></Button><PlanDetailsMenu plan={{ ...p, kind: "RECOVERY" }} /></div></TableCell>
                       </TableRow>
                     ))
                   )}

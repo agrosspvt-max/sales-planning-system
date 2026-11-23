@@ -33,6 +33,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PlanStateBadge } from "./status-badge";
+import { PlanDetailsMenu } from "./plan-details-menu";
 import { PlanColumnHeader } from "./plan-column-filter-header";
 import { applyPlanFilters, planFilterOptions, type PlanFilterKey, type PlanFilters } from "./plan-column-filters";
 import type { PlanListItem, PlanStatus } from "./types";
@@ -258,7 +259,7 @@ export function MonthlyPlansPanel({
                         <TableCell><PlanStateBadge status={p.status} lifecycleState={p.lifecycleState} /></TableCell>
                         <TableCell className="text-muted-foreground">{formatDate(p.lastSavedAt)}</TableCell>
                         <TableCell className="text-right">
-                          <Button asChild variant="outline" size="sm"><Link href={`/planning/monthly/${p.id}`}>Open</Link></Button>
+                          <div className="flex items-center justify-end gap-1"><Button asChild variant="outline" size="sm"><Link href={`/planning/monthly/${p.id}`}>Open</Link></Button><PlanDetailsMenu plan={{ ...p, kind: "MONTHLY" }} /></div>
                         </TableCell>
                       </TableRow>
                     ))

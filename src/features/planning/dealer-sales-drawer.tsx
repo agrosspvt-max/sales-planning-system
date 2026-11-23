@@ -149,47 +149,82 @@ export function DealerSalesDrawer({
               )}
             </>
           ) : (
-            <Table aria-label="Product sales for this dealer">
-              <TableHeader>
-                <TableRow>
-                  <TableHead scope="col">Product</TableHead>
-                  <TableHead scope="col" className="whitespace-nowrap text-right">
-                    Qty Sold
-                  </TableHead>
-                  <TableHead scope="col" className="whitespace-nowrap text-right">
-                    Actual Sales
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sold.map((product) => (
-                  <TableRow key={product.productId}>
-                    <TableCell>{product.productName}</TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {quantityFormat.format(product.actualQty)}
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap text-right tabular-nums">
-                      {formatCurrency(product.actualAmount)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {sold.length === 0 && (
+            <>
+              <div className="space-y-2 border-b p-4 text-sm">
+                <p className="font-medium">
+                  Net sales = sales − product-linked returns and credit notes.
+                </p>
+                <details className="text-xs text-muted-foreground">
+                  <summary className="w-fit cursor-pointer">ⓘ How deductions are included</summary>
+                  <div className="mt-2 space-y-2">
+                    <p>
+                      Returns reduce quantity and value. Product-linked price or discount credit
+                      notes can reduce value without changing quantity.
+                    </p>
+                    <p>
+                      Each row is the remaining net balance. A positive row may already include
+                      returns or credit-note deductions.
+                    </p>
+                    <p>
+                      Credit notes without product lines are not allocated to these product totals.
+                      Cancelled and optional Tally vouchers are excluded.
+                    </p>
+                    <p>Bill wise shows the available original Tally vouchers for this selection.</p>
+                  </div>
+                </details>
+              </div>
+              <Table aria-label="Product sales for this dealer">
+                <TableHeader>
                   <TableRow>
-                    <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
-                      No product sales for this selection.
+                    <TableHead scope="col">Product</TableHead>
+                    <TableHead scope="col" className="whitespace-nowrap text-right">
+                      Net Qty
+                    </TableHead>
+                    <TableHead scope="col" className="whitespace-nowrap text-right">
+                      Net Sales
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sold.map((product) => (
+                    <TableRow key={product.productId}>
+                      <TableCell>{product.productName}</TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right tabular-nums",
+                          product.actualQty < 0 && "text-destructive",
+                        )}
+                      >
+                        {quantityFormat.format(product.actualQty)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "whitespace-nowrap text-right tabular-nums",
+                          product.actualAmount < 0 && "text-destructive",
+                        )}
+                      >
+                        {formatCurrency(product.actualAmount)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {sold.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
+                        No product sales for this selection.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+                <tfoot>
+                  <TableRow className="bg-muted/40 font-semibold">
+                    <TableCell colSpan={2}>Net Sales Total</TableCell>
+                    <TableCell className="whitespace-nowrap text-right tabular-nums">
+                      {formatCurrency(dealer.actualAmount)}
                     </TableCell>
                   </TableRow>
-                )}
-              </TableBody>
-              <tfoot>
-                <TableRow className="bg-muted/40 font-semibold">
-                  <TableCell colSpan={2}>Total Sales</TableCell>
-                  <TableCell className="whitespace-nowrap text-right tabular-nums">
-                    {formatCurrency(dealer.actualAmount)}
-                  </TableCell>
-                </TableRow>
-              </tfoot>
-            </Table>
+                </tfoot>
+              </Table>
+            </>
           )}
         </div>
       </DialogContent>

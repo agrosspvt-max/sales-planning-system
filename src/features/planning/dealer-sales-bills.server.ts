@@ -7,6 +7,7 @@ import { salesPartyNames } from "@/features/tally/sales-party-names";
 import { cleanProductName } from "@/features/sales-upload/parser";
 import { getGroupProductPlan, type GroupPlanFilter } from "./group-plan.server";
 import type { DealerSalesBills } from "./dealer-sales-bills";
+import { dealerSalesBreakdown } from "./dealer-sales-breakdown";
 
 const reviewSummary = z.object({ held: z.array(z.object({ dealerId: z.string() })).optional() });
 
@@ -27,7 +28,14 @@ export async function getDealerSalesBills(
     dealerId,
   );
   const scope = report.dealerBillScope ?? [];
-  if (!scope.length) return { bills: [], heldMonths: [] };
+  const expected = (report.dealerProducts ?? []).filter((row) => row.dealerId === dealerId);
+  if (!scope.length)
+    return {
+      bills: [],
+      heldMonths: [],
+      productBreakdown: dealerSalesBreakdown([], expected, [], false),
+      breakdownAvailable: false,
+    };
   const snapshots = await prisma.tallySalesSnapshot.findMany({
     where: { id: { in: scope.map((s) => s.snapshotId) } },
     select: { id: true, monthKey: true, summary: true },
@@ -59,6 +67,8 @@ export async function getDealerSalesBills(
           family: true,
           cancelled: true,
           optional: true,
+          partyName: true,
+          ledgerEntries: true,
           items: {
             orderBy: { lineNo: "asc" },
             select: { lineNo: true, stockItemName: true, quantity: true, amount: true, unit: true },
@@ -66,28 +76,53 @@ export async function getDealerSalesBills(
         },
       })
     : [];
+  const bills = vouchers.map((v) => ({
+    id: v.id,
+    guid: v.guid,
+    date: v.billDate,
+    number: v.billNumber,
+    type: v.typeName,
+    family: v.family,
+    cancelled: v.cancelled,
+    optional: v.optional,
+    unallocatedAmount:
+      v.family === "Credit Note" && !v.items.length
+        ? unallocatedAmount(v.partyName, v.ledgerEntries)
+        : undefined,
+    items: v.items.map((item) => {
+      const original = resolver.resolveProductUnique(cleanProductName(item.stockItemName));
+      return {
+        lineNo: item.lineNo,
+        productName: item.stockItemName,
+        productId: original?.id ?? null,
+        quantity: Number(item.quantity),
+        amount: Number(item.amount),
+        unit: item.unit,
+      };
+    }),
+  }));
   return {
     heldMonths,
-    bills: vouchers.map((v) => ({
-      id: v.id,
-      guid: v.guid,
-      date: v.billDate,
-      number: v.billNumber,
-      type: v.typeName,
-      family: v.family,
-      cancelled: v.cancelled,
-      optional: v.optional,
-      items: v.items.map((item) => {
-        const original = resolver.resolveProductUnique(cleanProductName(item.stockItemName));
-        return {
-          lineNo: item.lineNo,
-          productName: item.stockItemName,
-          productId: original?.id ?? null,
-          quantity: Number(item.quantity),
-          amount: Number(item.amount),
-          unit: item.unit,
-        };
-      }),
-    })),
+    bills,
+    breakdownAvailable: !heldMonths.length && !report.dealerBillHistoryIncomplete,
+    productBreakdown: dealerSalesBreakdown(
+      bills,
+      expected,
+      heldMonths,
+      !report.dealerBillHistoryIncomplete,
+    ),
   };
+}
+
+function unallocatedAmount(partyName: string, raw: unknown): number | null {
+  const ledgers = z
+    .array(z.object({ name: z.string(), amount: z.string().regex(/^-?\d+\.\d{2}$/) }))
+    .safeParse(raw);
+  if (!ledgers.success || !partyName) return null;
+  const lines = ledgers.data.filter(
+    (line) => line.name.trim().toLowerCase() === partyName.trim().toLowerCase(),
+  );
+  return lines.length
+    ? -Number(lines.reduce((sum, line) => sum + BigInt(line.amount.replace(".", "")), 0n)) / 100
+    : null;
 }

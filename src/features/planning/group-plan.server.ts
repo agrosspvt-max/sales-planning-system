@@ -154,6 +154,7 @@ export interface GroupProductPlan {
   products: GroupProductRow[];
   dealerProducts?: DealerProductFinancialRow[];
   dealerBillScope?: { snapshotId: string; monthKey: string }[];
+  dealerBillHistoryIncomplete?: boolean;
 }
 
 const emptyBucketTotals = (): Record<StatusBucket, BucketTotal> => ({
@@ -554,6 +555,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   }
   const unplannedOfficers = new Set<string>();
   const dealerBillScope: NonNullable<GroupProductPlan["dealerBillScope"]> = [];
+  let dealerBillHistoryIncomplete = !companyActuals;
   if (companyActuals) {
     type DealerPlan = (typeof monthlyDealers)[number];
     const dealerPlans = new Map<string, DealerPlan>();
@@ -604,6 +606,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       qty: number,
       amount: number,
       nbvPercent: number,
+      uploadedWithoutBills = false,
     ) {
       if (!qty && !amount) return;
       const pd = dealerPlans.get(dealer.id);
@@ -628,6 +631,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         drawer.seasonSales.nbv += nbv;
       }
       if (inPeriod) {
+        if (uploadedWithoutBills && dealer.id === billDealerId) dealerBillHistoryIncomplete = true;
         row.actual.qty += qty;
         row.actual.amount += amount;
         row.actual.nbv += nbv;
@@ -676,7 +680,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
           if (!monthNameById.has(entry.seasonMonthId) || coverageByMonth.get(entry.seasonMonthId)?.has(pd.dealer.id))
             continue;
           addActual(pd.dealer, entry.seasonMonthId, line, num(entry.saleQty), num(entry.saleValue ?? 0),
-            num(line.nbvPercentSnapshot ?? line.product.nbvPercent));
+            num(line.nbvPercentSnapshot ?? line.product.nbvPercent), true);
         }
       }
     }
@@ -718,7 +722,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     const rows = [...dealerProducts.values()];
     const names = await loadDealerAliasNameMap([...new Set(rows.map((dealer) => dealer.dealerId))]);
     for (const row of rows) row.name = names.get(row.dealerId) ?? row.name;
-    return { ...base, officers: officerBreakdown, products: [], dealerProducts: rows, ...(billDealerId ? { dealerBillScope } : {}) };
+    return { ...base, officers: officerBreakdown, products: [], dealerProducts: rows, ...(billDealerId ? { dealerBillScope, dealerBillHistoryIncomplete } : {}) };
   }
 
   // Annotate clearance (group-specific, by groupId + productId) — display-only.

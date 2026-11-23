@@ -1,0 +1,157 @@
+import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { testLoader } from "../dealer-tags/test-loader";
+import { dealerSalesBreakdown, sameSalesMeasure, sumSalesMeasures } from "./dealer-sales-breakdown";
+import type { DealerSalesBill } from "./dealer-sales-bills";
+import type { TerritoryDealerSummary } from "./group-dealer-summary";
+
+const bill = (
+  id: string,
+  family: string,
+  type: string,
+  productId: string,
+  quantity: number,
+  amount: number,
+): DealerSalesBill => ({
+  id,
+  guid: id,
+  date: "2026-06-01",
+  number: id,
+  type,
+  family,
+  cancelled: false,
+  optional: false,
+  items: [{ lineNo: 0, productName: productId, productId, quantity, amount, unit: "Kg" }],
+});
+const bills = [
+  bill("S1", "Sales", "CASH SALE", "Product <one>", 10, 1000),
+  bill("R1", "Credit Note", "SALES RETURN-CG", "Product <one>", -2, -200),
+  bill("C1", "Credit Note", "CREDIT NOTE", "Product <one>", 0, -50),
+  bill("C2", "Credit Note", "CREDIT NOTE", "Credit only", 0, -927),
+  bill("R2", "Credit Note", "SALE RETURN-MP", "Return only", -1, -75),
+  bill("S2", "Sales", "Credit Sale", "Fully adjusted", 1, 100),
+  bill("R3", "Credit Note", "SALESRETURN", "Fully adjusted", -1, -100),
+  { ...bill("X1", "Credit Note", "SALES RETURN", "Product <one>", -99, -999), cancelled: true },
+  { ...bill("X2", "Sales", "Sales", "Product <one>", 99, 999), optional: true },
+  { ...bill("C3", "Credit Note", "Credit Note", "", 0, 0), items: [], unallocatedAmount: -123 },
+];
+const expected = [
+  { productId: "Product <one>", productName: "Product <one>", actualQty: 8, actualAmount: 750 },
+  { productId: "Credit only", productName: "Credit only", actualQty: 0, actualAmount: -927 },
+  { productId: "Return only", productName: "Return only", actualQty: -1, actualAmount: -75 },
+];
+const original = JSON.stringify({ bills, expected });
+const split = dealerSalesBreakdown(bills, expected);
+const product = split.find((row) => row.productId === "Product <one>")!;
+assert.deepEqual(product.sales, { quantity: 10, amount: 1000 });
+assert.deepEqual(product.returns, { quantity: -2, amount: -200 });
+assert.deepEqual(product.creditNotes, { quantity: 0, amount: -50 });
+assert.deepEqual(product.net, { quantity: 8, amount: 750 });
+assert.equal(product.reconciled, true);
+assert.ok(split.every((row) => row.reconciled));
+assert.equal(split.find((row) => row.productId === "Fully adjusted")!.net.amount, 0);
+assert.ok(dealerSalesBreakdown(bills, expected, ["2026-06"]).every((row) => !row.reconciled));
+assert.ok(
+  dealerSalesBreakdown(bills, expected, [], false).every((row) => !row.reconciled),
+  "mixed uploaded history cannot be declared complete merely because its net happens to match",
+);
+assert.equal(
+  dealerSalesBreakdown([], [expected[0]])[0].reconciled,
+  false,
+  "no bill history must not become invented gross sales",
+);
+assert.equal(
+  dealerSalesBreakdown(bills, [{ ...expected[0], actualAmount: 751 }]).find(
+    (row) => row.productId === "Product <one>",
+  )!.reconciled,
+  false,
+);
+assert.equal(
+  sumSalesMeasures([
+    { quantity: 0.1, amount: 0.1 },
+    { quantity: 0.2, amount: 0.2 },
+  ]).amount,
+  0.3,
+);
+assert.ok(
+  sameSalesMeasure({ quantity: 0.3, amount: 0.3 }, { quantity: 0.1 + 0.2, amount: 0.1 + 0.2 }),
+);
+assert.equal(JSON.stringify({ bills, expected }), original);
+
+const dealer: TerritoryDealerSummary = {
+  dealerId: "dealer",
+  name: "Dealer",
+  planAmount: 0,
+  planNbv: 0,
+  actualAmount: -252,
+  actualNbv: 0,
+  products: expected.map((row) => ({
+    ...row,
+    dealerId: "dealer",
+    name: "Dealer",
+    planAmount: 0,
+    planNbv: 0,
+    actualNbv: 0,
+    nbvPercent: 0,
+  })),
+};
+const load = testLoader({});
+const { DealerProductSalesTable } = load<typeof import("./dealer-product-sales-table")>(
+  "src/features/planning/dealer-product-sales-table.tsx",
+);
+const render = (changes: Partial<React.ComponentProps<typeof DealerProductSalesTable>> = {}) =>
+  renderToStaticMarkup(
+    <DealerProductSalesTable
+      dealer={dealer}
+      data={{ bills, heldMonths: [], productBreakdown: split, breakdownAvailable: true }}
+      pending={false}
+      error={false}
+      retry={() => {}}
+      categoryFiltered={false}
+      {...changes}
+    />,
+  );
+const html = render();
+for (const text of [
+  "Sales",
+  "Returns",
+  "Credit notes",
+  "Net sales",
+  "Product &lt;one&gt;",
+  "Credit only",
+  "Return only",
+  "Fully adjusted",
+  "1,000",
+  "-₹200",
+  "-₹50",
+  "₹750",
+  "-₹927",
+  "-₹252",
+  "Credit notes without products (1)",
+  "-₹123",
+])
+  assert.ok(html.includes(text), text);
+assert.ok(!html.includes("999"), "cancelled and optional movements do not leak into the split");
+assert.ok(
+  !render({ categoryFiltered: true }).includes("Fully adjusted"),
+  "category-filtered detail cannot add a product outside that selected scope",
+);
+const waiting = render({ data: undefined, pending: true });
+assert.ok(
+  waiting.includes("Credit only") && waiting.includes("-₹927") && waiting.includes("-₹252"),
+  "loading never hides negative rows or changes the net total",
+);
+assert.ok(waiting.includes("—"));
+const held = render({
+  data: {
+    bills,
+    heldMonths: ["2026-06"],
+    productBreakdown: dealerSalesBreakdown(bills, expected, ["2026-06"]),
+  },
+});
+assert.ok(held.includes("do not reconcile") && held.includes("-₹252"));
+assert.ok(!held.includes("₹1,000"));
+console.log(
+  "Sales / Returns / Credit notes split: signed source movements, zero-quantity and zero-net credits, status/category/held guards, exact reconciliation, preserved original net and unavailable-history rendering: PASS",
+);

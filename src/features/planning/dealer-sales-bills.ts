@@ -7,6 +7,7 @@ export interface DealerSalesBill {
   family: string;
   cancelled: boolean;
   optional: boolean;
+  unallocatedAmount?: number | null;
   items: {
     lineNo: number;
     productName: string;
@@ -19,4 +20,17 @@ export interface DealerSalesBill {
 export interface DealerSalesBills {
   bills: DealerSalesBill[];
   heldMonths: string[];
+  productBreakdown?: DealerProductSalesBreakdown[];
+  breakdownAvailable?: boolean;
+}
+
+export type SalesMeasure = { quantity: number; amount: number };
+export interface DealerProductSalesBreakdown {
+  productId: string;
+  productName: string;
+  sales: SalesMeasure;
+  returns: SalesMeasure;
+  creditNotes: SalesMeasure;
+  net: SalesMeasure;
+  reconciled: boolean;
 }

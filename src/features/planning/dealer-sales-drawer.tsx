@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { DealerBillList } from "./dealer-bill-list";
+import { DealerProductSalesTable } from "./dealer-product-sales-table";
 import type { DealerSalesBills } from "./dealer-sales-bills";
 import { DealerName } from "@/features/dealers/dealer-name-ui";
 import {
@@ -14,18 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { formatCurrency } from "@/lib/utils";
 import type { TerritoryDealerSummary } from "./group-dealer-summary";
-
-const quantityFormat = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 });
 
 export function DealerSalesDrawer({
   dealer,
@@ -47,15 +37,16 @@ export function DealerSalesDrawer({
   const [mode, setMode] = useState<"bill" | "product">("product");
   const params = new URLSearchParams(queryParams);
   params.set("dealerId", dealer.dealerId);
+  const unplanned = params.get("unplanned") === "true";
+  const selectedBuckets = (params.get("buckets") ?? "approved")
+    .split(",")
+    .filter((value) => ["approved", "submitted", "draft"].includes(value));
+  const shownBuckets = selectedBuckets.length || unplanned ? selectedBuckets : ["approved"];
   const bills = useQuery<DealerSalesBills>({
     queryKey: ["dealer-sales-bills", groupId, params.toString()],
     queryFn: () => api.get(`/api/planning/groups/${groupId}/dealer-sales-bills?${params}`),
-    enabled: mode === "bill",
-    refetchInterval: mode === "bill" ? 60000 : false,
+    refetchInterval: 60000,
   });
-  const sold = dealer.products
-    .filter((product) => product.actualQty !== 0 || product.actualAmount !== 0)
-    .sort((a, b) => b.actualAmount - a.actualAmount || a.productName.localeCompare(b.productName));
 
   return (
     <Dialog
@@ -65,7 +56,7 @@ export function DealerSalesDrawer({
       }}
     >
       <DialogContent
-        className="bottom-0 left-auto right-0 top-0 flex w-full max-w-2xl translate-x-0 translate-y-0 flex-col gap-0 rounded-none p-0 sm:rounded-none"
+        className="bottom-0 left-auto right-0 top-0 flex w-full max-w-5xl translate-x-0 translate-y-0 flex-col gap-0 rounded-none p-0 sm:rounded-none"
         onCloseAutoFocus={(event) => {
           if (trigger?.isConnected) {
             event.preventDefault();
@@ -78,6 +69,10 @@ export function DealerSalesDrawer({
             <DealerName id={dealer.dealerId} name={dealer.name} />
           </DialogTitle>
           <DialogDescription>{periodLabel}</DialogDescription>
+          <p className="text-xs text-muted-foreground">
+            Included plans: {shownBuckets.join(", ") || "none"} · Unplanned{" "}
+            {unplanned ? "included" : "excluded"}
+          </p>
         </DialogHeader>
 
         <div role="tablist" aria-label="Dealer sales view" className="flex gap-1 border-b px-4">
@@ -149,82 +144,14 @@ export function DealerSalesDrawer({
               )}
             </>
           ) : (
-            <>
-              <div className="space-y-2 border-b p-4 text-sm">
-                <p className="font-medium">
-                  Net sales = sales − product-linked returns and credit notes.
-                </p>
-                <details className="text-xs text-muted-foreground">
-                  <summary className="w-fit cursor-pointer">ⓘ How deductions are included</summary>
-                  <div className="mt-2 space-y-2">
-                    <p>
-                      Returns reduce quantity and value. Product-linked price or discount credit
-                      notes can reduce value without changing quantity.
-                    </p>
-                    <p>
-                      Each row is the remaining net balance. A positive row may already include
-                      returns or credit-note deductions.
-                    </p>
-                    <p>
-                      Credit notes without product lines are not allocated to these product totals.
-                      Cancelled and optional Tally vouchers are excluded.
-                    </p>
-                    <p>Bill wise shows the available original Tally vouchers for this selection.</p>
-                  </div>
-                </details>
-              </div>
-              <Table aria-label="Product sales for this dealer">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead scope="col">Product</TableHead>
-                    <TableHead scope="col" className="whitespace-nowrap text-right">
-                      Net Qty
-                    </TableHead>
-                    <TableHead scope="col" className="whitespace-nowrap text-right">
-                      Net Sales
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {sold.map((product) => (
-                    <TableRow key={product.productId}>
-                      <TableCell>{product.productName}</TableCell>
-                      <TableCell
-                        className={cn(
-                          "text-right tabular-nums",
-                          product.actualQty < 0 && "text-destructive",
-                        )}
-                      >
-                        {quantityFormat.format(product.actualQty)}
-                      </TableCell>
-                      <TableCell
-                        className={cn(
-                          "whitespace-nowrap text-right tabular-nums",
-                          product.actualAmount < 0 && "text-destructive",
-                        )}
-                      >
-                        {formatCurrency(product.actualAmount)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {sold.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
-                        No product sales for this selection.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-                <tfoot>
-                  <TableRow className="bg-muted/40 font-semibold">
-                    <TableCell colSpan={2}>Net Sales Total</TableCell>
-                    <TableCell className="whitespace-nowrap text-right tabular-nums">
-                      {formatCurrency(dealer.actualAmount)}
-                    </TableCell>
-                  </TableRow>
-                </tfoot>
-              </Table>
-            </>
+            <DealerProductSalesTable
+              dealer={dealer}
+              data={bills.data}
+              pending={bills.isPending}
+              error={!!bills.error}
+              retry={() => void bills.refetch()}
+              categoryFiltered={categoryFiltered}
+            />
           )}
         </div>
       </DialogContent>

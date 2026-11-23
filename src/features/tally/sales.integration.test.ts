@@ -1061,6 +1061,7 @@ async function main() {
   console.log("Territory approval filters, missing-plan capture, returns and deduplication: PASS");
 
   modules["./group-plan.server"] = territory;
+  modules["./dealer-sales-breakdown"] = load("src/features/planning/dealer-sales-breakdown.ts");
   const billService = load<typeof import("@/features/planning/dealer-sales-bills.server")>(
     "src/features/planning/dealer-sales-bills.server.ts",
   );
@@ -1088,6 +1089,100 @@ async function main() {
   assert.equal(billA.bills[0].items[0].productId, "sales-product");
   assert.equal(billA.bills[0].items[0].quantity, 14.4);
   assert.equal(billA.bills[0].items[0].amount, dealerA!.actualAmount);
+  assert.equal(
+    billA.productBreakdown!.find((row) => row.productId === "sales-product")!.reconciled,
+    true,
+  );
+  // The source split explains the saved net; reading it must never republish actuals.
+  const sourceBill = await prisma.tallySalesVoucher.findUniqueOrThrow({
+    where: { id: billA.bills[0].id },
+    include: { items: true },
+  });
+  const splitActualKey = {
+    snapshotId: sourceBill.snapshotId,
+    dealerId: "a",
+    productId: "sales-product",
+  };
+  const beforeSplitActual = await prisma.tallySalesActual.findUniqueOrThrow({
+    where: { snapshotId_dealerId_productId: splitActualKey },
+  });
+  const splitFixtureIds: string[] = [];
+  try {
+    for (const [index, row] of [
+      { family: "Sales", typeName: "CREDIT SALE-CG", qty: "10", amount: "100" },
+      { family: "Credit Note", typeName: "SALES RETURN-CG", qty: "-2", amount: "-20" },
+      { family: "Credit Note", typeName: "Credit Note", qty: "0", amount: "-5" },
+      { family: "Credit Note", typeName: "Credit Note", qty: null, amount: null },
+    ].entries()) {
+      const fixture = await prisma.tallySalesVoucher.create({
+        data: {
+          snapshotId: sourceBill.snapshotId,
+          guid: prefix + "-0000888" + index,
+          masterId: String(8880 + index),
+          alterId: "1",
+          billDate: oldKey + "-04",
+          billNumber: "SPLIT-" + index,
+          typeName: row.typeName,
+          family: row.family,
+          partyName: sourceBill.partyName,
+          cancelled: false,
+          optional: false,
+          ledgerEntries: row.qty === null ? [{ name: sourceBill.partyName, amount: "12.00" }] : [],
+          ...(row.qty !== null
+            ? {
+                items: {
+                  create: {
+                    lineNo: 0,
+                    stockItemName: sourceBill.items[0].stockItemName,
+                    quantity: row.qty,
+                    amount: row.amount!,
+                    unit: sourceBill.items[0].unit,
+                    actualQty: "",
+                    billedQty: "",
+                    rate: "",
+                  },
+                },
+              }
+            : {}),
+        },
+      });
+      splitFixtureIds.push(fixture.id);
+    }
+    await prisma.tallySalesActual.update({
+      where: { snapshotId_dealerId_productId: splitActualKey },
+      data: {
+        quantity: beforeSplitActual.quantity.add(8),
+        amount: beforeSplitActual.amount.add(75),
+      },
+    });
+    const splitRead = await readBills("a");
+    assert.equal(splitRead.breakdownAvailable, true);
+    const splitProduct = splitRead.productBreakdown!.find(
+      (row) => row.productId === "sales-product",
+    )!;
+    assert.equal(splitProduct.reconciled, true);
+    assert.equal(splitProduct.sales.amount, billA.bills[0].items[0].amount + 100);
+    assert.equal(splitProduct.returns.amount, -20);
+    assert.equal(splitProduct.creditNotes.amount, -5);
+    assert.equal(splitProduct.creditNotes.quantity, 0);
+    assert.equal(splitProduct.net.amount, Number(beforeSplitActual.amount.add(75)));
+    assert.equal(splitRead.bills.find((row) => row.number === "SPLIT-3")!.unallocatedAmount, -12);
+    const afterSplitRead = await prisma.tallySalesActual.findUniqueOrThrow({
+      where: { snapshotId_dealerId_productId: splitActualKey },
+    });
+    assert.equal(
+      afterSplitRead.amount.toString(),
+      beforeSplitActual.amount.add(75).toString(),
+      "breakdown read leaves the existing net amount unchanged",
+    );
+    assert.equal(afterSplitRead.quantity.toString(), beforeSplitActual.quantity.add(8).toString());
+  } finally {
+    await prisma.tallySalesVoucher.deleteMany({ where: { id: { in: splitFixtureIds } } });
+    await prisma.tallySalesActual.update({
+      where: { snapshotId_dealerId_productId: splitActualKey },
+      data: { quantity: beforeSplitActual.quantity, amount: beforeSplitActual.amount },
+    });
+  }
   assert.equal((await readBills("territory-draft")).bills.length, 0);
   assert.equal((await readBills("territory-draft", { buckets: ["draft"] })).bills.length, 1);
   assert.equal((await readBills("territory-missing-seasonal")).bills.length, 0);
@@ -1096,6 +1191,8 @@ async function main() {
   assert.equal(returnBills.bills[0].family, "Credit Note");
   assert.equal(returnBills.bills[0].items[0].quantity, -0.75);
   assert.equal(returnBills.bills[0].items[0].amount, -75);
+  assert.equal(returnBills.breakdownAvailable, true);
+  assert.equal(returnBills.productBreakdown!.find((row) => row.productId === "sales-product")!.net.amount, -75, "unplanned negative-only activity remains visible when that same report filter is included");
   assert.equal((await readBills("a", { officerId: "territory-missing-seasonal" })).bills.length, 0);
   assert.equal((await readBills("not-a-dealer")).bills.length, 0);
   await assert.rejects(

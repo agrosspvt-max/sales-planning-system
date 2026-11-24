@@ -15,6 +15,8 @@ export type DaybookDealerRow = {
   creditVouchers?: DaybookCredit[];
 };
 export type DaybookExcludedVoucher = {
+  sourceJobId?: string;
+  sourceMonth?: string;
   guid: string;
   date: string;
   voucherType: string;

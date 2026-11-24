@@ -52,6 +52,8 @@ export type DealerView = {
   name: string;
   row?: DaybookDealerRow;
   vouchers: DaybookExcludedVoucher[];
+  incompleteVouchers?: boolean;
+  monthlyDetails?: { month: string; row: DaybookDealerRow }[];
 };
 export function dealerDisplayAmounts(dealer: DealerView, headers: DaybookBillHeaders = {}) {
   return groupVouchers(dealer.vouchers, headers).flatMap((group) => {
@@ -65,13 +67,15 @@ export function dealerDisplayAmounts(dealer: DealerView, headers: DaybookBillHea
     return [
       {
         label: group.label + (productAmount ? " (excl. GST)" : ""),
-        amount: sumDisplayAmounts(
-          vouchers.map((voucher) =>
-            productAmount
-              ? (headers[voucher.guid.toLowerCase()]?.subtotal ?? null)
-              : (voucher.amount ?? null),
-          ),
-        ),
+        amount: dealer.incompleteVouchers
+          ? null
+          : sumDisplayAmounts(
+              vouchers.map((voucher) =>
+                productAmount
+                  ? (headers[voucher.guid.toLowerCase()]?.subtotal ?? null)
+                  : (voucher.amount ?? null),
+              ),
+            ),
       },
     ];
   });

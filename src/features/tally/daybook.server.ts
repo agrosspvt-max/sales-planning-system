@@ -8,6 +8,7 @@ import { cents, decimal, indiaDay } from "./billwise";
 import { creditTotals, validateDaybookCapture, type DaybookCredit } from "./daybook-preview";
 import { resolveDaybookCapture } from "./daybook-preview.server";
 import { hashSales, salesPeriod } from "./sales";
+import { salesMonths } from "./sales-range";
 import { daybookDiagnosticsSchema } from "./daybook-diagnostics";
 import { approvedTestPreview } from "./sales-rollout";
 import { savedDaybookProducts } from "./daybook-products";
@@ -95,7 +96,11 @@ export async function daybookStatus(ctx: AuthContext, month: string) {
     where: { enabled: true },
     select: { id: true },
   });
-  const where = { connectionId: connection?.id, monthKey: period.monthKey };
+  return readDaybookMonth(connection, period.monthKey);
+}
+
+async function readDaybookMonth(connection: { id: string } | null, monthKey: string) {
+  const where = { connectionId: connection?.id, monthKey };
   const [job, published] = connection
     ? await Promise.all([
         prisma.tallyDaybookJob.findFirst({
@@ -129,6 +134,70 @@ export async function daybookStatus(ctx: AuthContext, month: string) {
       : null,
     published: published ? { ...published, summary: publishedSummary(published.summary) } : null,
   };
+}
+
+function checkedDaybookRange(fromMonth: string, toMonth: string) {
+  try {
+    return salesMonths(fromMonth, toMonth, indiaDay());
+  } catch {
+    throw new ApiError(
+      422,
+      "Choose a From/To month range within April 2026 and the current approved month.",
+    );
+  }
+}
+
+export async function daybookRangeStatus(ctx: AuthContext, fromMonth: string, toMonth: string) {
+  assertDaybookEnabled();
+  assertSuper(ctx);
+  const months = checkedDaybookRange(fromMonth, toMonth);
+  const connection = await prisma.tallyConnection.findFirst({
+    where: { enabled: true },
+    select: { id: true },
+  });
+  const statuses = [];
+  // Bound memory while stripping each month's potentially large product capture.
+  for (const month of months)
+    statuses.push({ month, ...(await readDaybookMonth(connection, month)) });
+  return { configured: Boolean(connection), fromMonth, toMonth, months: statuses };
+}
+
+export async function requestDaybookRangeRefresh(
+  ctx: AuthContext,
+  fromMonth: string,
+  toMonth: string,
+) {
+  assertDaybookEnabled();
+  assertSuper(ctx);
+  const months = checkedDaybookRange(fromMonth, toMonth);
+  const periods = months.map((month) => checkedPeriod(month));
+  return prisma.$transaction(
+    async (db) => {
+      const connection = await db.tallyConnection.findFirst({
+        where: { enabled: true },
+        select: { id: true },
+      });
+      if (!connection) throw new ApiError(409, "Configure the office connector first.");
+      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${connection.id}))`;
+      await expireUploads(db, connection.id, new Date());
+      const existing = await db.tallyDaybookJob.findMany({
+        where: {
+          connectionId: connection.id,
+          monthKey: { in: months },
+          status: { in: ["QUEUED", "RUNNING"] },
+        },
+        select: { monthKey: true },
+      });
+      const active = new Set(existing.map((job) => job.monthKey));
+      const pending = periods.filter((period) => !active.has(period.monthKey));
+      if (pending.length)
+        await db.tallyDaybookJob.createMany({
+          data: pending.map((period) => ({ connectionId: connection.id, ...period })),
+        });
+      return { queued: true, months };
+    },
+    { timeout: 15000 },
+  );
 }
 
 export async function requestDaybookRefresh(ctx: AuthContext, month: string) {

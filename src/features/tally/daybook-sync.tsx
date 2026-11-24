@@ -6,42 +6,14 @@ import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
 
 import { DaybookErrorDetails } from "./daybook-error-details";
-import type { DaybookDiagnostics } from "./daybook-diagnostics";
 import { DaybookResultTables } from "./daybook-result-tables";
 import { DaybookSalesComparisonDialog } from "./daybook-sales-comparison-dialog";
-import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
-import type { DaybookBillHeaders } from "./daybook-bill-amounts";
-
-type LedgerAmounts = { ledgerName: string; liveRecovery: string; srCr: string };
-type Summary = {
-  billHeaders?: DaybookBillHeaders;
-  diagnostics?: DaybookDiagnostics;
-  changedRows?: number;
-  matchedDealers?: number;
-  receiptCount?: number;
-  srCrCount?: number;
-  excluded?: number;
-  excludedVouchers?: DaybookExcludedVoucher[];
-  dealerRows?: DaybookDealerRow[];
-  coverage?: string;
-  unmatched?: (LedgerAmounts & { candidates: string[]; reason?: string })[];
-  excludedAccounts?: LedgerAmounts[];
-  recoveryIssues?: { dealerName: string; issue: string }[];
-  heldPrevious?: string[];
-  review?: {
-    guid: string;
-    date: string;
-    voucherType: string;
-    voucherNumber: string;
-    reason: string;
-    details?: DaybookDiagnostics;
-  }[];
-};
-type Status = {
-  configured: boolean;
-  job: { status: string; error: string | null; summary: Summary | null } | null;
-  published: { id: string; completedAt: string; throughDate: string; summary: Summary } | null;
-};
+import { combineDaybookMonths } from "./daybook-range";
+import {
+  summaryDealerRows,
+  type DaybookMonthStatus,
+  type DaybookRangeStatus,
+} from "./daybook-status";
 
 const statusText: Record<string, string> = {
   QUEUED: "Waiting for the office connector.",
@@ -76,66 +48,47 @@ const errors: Record<string, string> = {
   DAYBOOK_ISDEEMEDPOSITIVE_INVALID: "Tally did not return the ledger entry direction.",
 };
 
-export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
-  const lastMonth = currentMonth < "2027-03" ? currentMonth : "2027-03";
-  const [month, setMonth] = useState(lastMonth);
-  const valid = /^\d{4}-(0[1-9]|1[0-2])$/.test(month) && month >= "2026-04" && month <= lastMonth;
-  const status = useQuery({
-    queryKey: ["tally-daybook-sync", month],
-    queryFn: () => api.get<Status>(`/api/tally/daybook-sync?month=${encodeURIComponent(month)}`),
-    enabled: valid,
-    refetchInterval: 5000,
-  });
-  const refresh = useMutation({
-    mutationFn: (requested: string) => api.post("/api/tally/daybook-sync", { month: requested }),
-    onSuccess: () => void status.refetch(),
-  });
-  const { configured, job, published } = status.data ?? {};
+function MonthStatus({ entry, onView }: { entry: DaybookMonthStatus; onView?: () => void }) {
+  const { job, published } = entry;
   const summary = published?.summary;
-  const busy = job?.status === "QUEUED" || job?.status === "RUNNING";
   return (
-    <section className="space-y-3 rounded border p-4">
-      <h2 className="font-medium">Daybook sync</h2>
-      <p className="text-sm text-muted-foreground">
-        Current-month receipts, returns and credit notes refresh every 15 minutes while the office
-        connector is running. Select an older month to refresh it on request.
+    <div className="space-y-2 text-sm">
+      <p className="font-medium">
+        {entry.month} · {job ? statusText[job.status] : "No refresh requested yet."}
       </p>
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-2">
-          Daybook month
-          <input
-            type="month"
-            className="rounded border bg-background p-2"
-            min="2026-04"
-            max={lastMonth}
-            value={month}
-            onChange={(event) => setMonth(event.target.value)}
-          />
-        </label>
-        <Button
-          variant="outline"
-          disabled={!valid || !configured || busy || refresh.isPending}
-          onClick={() => refresh.mutate(month)}
-        >
-          Refresh Daybook from Tally
-        </Button>
-      </div>
-      {status.error && <p role="alert">{status.error.message}</p>}
-      {refresh.error && <p role="alert">{refresh.error.message}</p>}
-      <p role="status" className="text-sm">
-        {configured === false
-          ? "Configure the office connector below."
-          : job
-            ? statusText[job.status]
-            : status.isSuccess
-              ? "No Daybook refresh for this month yet."
-              : ""}
-      </p>
+      {published && (
+        <p>
+          Last published{" "}
+          {new Date(published.completedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} ·
+          vouchers through {published.throughDate}
+        </p>
+      )}
+      {summary && (
+        <>
+          {!summary.dealerRows && (
+            <p>
+              Refresh this Daybook month to load the full dealer summary, including matched dealers.
+            </p>
+          )}
+          <p>
+            {summary.receiptCount} receipts · {summary.srCrCount} SR/CR vouchers ·{" "}
+            {summary.matchedDealers} dealers verified · {summary.changedRows} Recovery rows changed
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <DaybookSalesComparisonDialog jobId={published!.id} />
+            {onView && (
+              <Button variant="outline" size="sm" onClick={onView}>
+                View month
+              </Button>
+            )}
+          </div>
+        </>
+      )}
       {job?.error && (
         <div className="flex items-center gap-3">
-          <p className="text-sm">{errors[job.error] ?? job.error}</p>
+          <p>{errors[job.error] ?? job.error}</p>
           <DaybookErrorDetails
-            month={month}
+            month={entry.month}
             code={job.error}
             diagnostics={job.summary?.diagnostics}
             review={job.summary?.review}
@@ -143,7 +96,7 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
         </div>
       )}
       {!!job?.summary?.review?.length && (
-        <details className="text-sm">
+        <details>
           <summary className="cursor-pointer">
             Vouchers to review ({job.summary.review.length})
           </summary>
@@ -156,92 +109,177 @@ export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
           </ul>
         </details>
       )}
-      {published && summary && (
-        <div className="space-y-2 text-sm">
-          <p>
-            Last published{" "}
-            {new Date(published.completedAt).toLocaleString("en-IN", {
-              timeZone: "Asia/Kolkata",
-            })}{" "}
-            · vouchers through {published.throughDate}
-          </p>
-          <p>
-            {summary.receiptCount} receipts · {summary.srCrCount} SR/CR vouchers ·{" "}
-            {summary.matchedDealers} dealers verified · {summary.changedRows} Recovery rows changed
-          </p>
-          <DaybookSalesComparisonDialog jobId={published.id} />
+      {!summary?.dealerRows && !!summary?.recoveryIssues?.length && (
+        <details>
+          <summary className="cursor-pointer">
+            Dealers without a unique Recovery plan ({summary.recoveryIssues.length})
+          </summary>
+          <ul className="ml-5 max-h-64 list-disc overflow-auto">
+            {summary.recoveryIssues.map((row) => (
+              <li key={row.dealerName}>
+                {row.dealerName} · {row.issue}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {!!summary?.heldPrevious?.length && (
+        <details>
+          <summary className="cursor-pointer">Prior figures kept pending alias review</summary>
+          <ul className="ml-5 max-h-64 list-disc overflow-auto">
+            {summary.heldPrevious.map((name) => (
+              <li key={name}>{name}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+export function TallyDaybookSync({ currentMonth }: { currentMonth: string }) {
+  const lastMonth = currentMonth < "2027-03" ? currentMonth : "2027-03";
+  const [fromMonth, setFromMonth] = useState(lastMonth);
+  const [toMonth, setToMonth] = useState(lastMonth);
+  const validMonth = (value: string) =>
+    /^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= "2026-04" && value <= lastMonth;
+  const valid = validMonth(fromMonth) && validMonth(toMonth) && fromMonth <= toMonth;
+  const single = fromMonth === toMonth;
+  const status = useQuery({
+    queryKey: ["tally-daybook-sync", fromMonth, toMonth],
+    queryFn: () =>
+      api.get<DaybookRangeStatus>(
+        `/api/tally/daybook-sync?${new URLSearchParams({ fromMonth, toMonth })}`,
+      ),
+    enabled: valid,
+    refetchInterval: single ? 5000 : 15000,
+  });
+  const refresh = useMutation({
+    mutationFn: () => api.post("/api/tally/daybook-sync", { fromMonth, toMonth }),
+    onSuccess: () => void status.refetch(),
+  });
+  const entries = status.data?.months ?? [];
+  const combined = combineDaybookMonths(entries);
+  const busy = entries.some((entry) => ["QUEUED", "RUNNING"].includes(entry.job?.status ?? ""));
+  const publication = single ? entries[0]?.published : null;
+  return (
+    <section className="space-y-3 rounded border p-4">
+      <h2 className="font-medium">Daybook sync</h2>
+      <p className="text-sm text-muted-foreground">
+        Select one month or a month range. Current-month data refreshes every 15 minutes while the
+        office connector is running; selected months are refreshed one at a time on request.
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2">
+          From month
+          <input
+            type="month"
+            className="rounded border bg-background p-2"
+            min="2026-04"
+            max={lastMonth}
+            value={fromMonth}
+            onChange={(event) => setFromMonth(event.target.value)}
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          To month
+          <input
+            type="month"
+            className="rounded border bg-background p-2"
+            min={fromMonth || "2026-04"}
+            max={lastMonth}
+            value={toMonth}
+            onChange={(event) => setToMonth(event.target.value)}
+          />
+        </label>
+        <Button
+          variant="outline"
+          disabled={!valid || !status.data?.configured || refresh.isPending || (single && busy)}
+          onClick={() => refresh.mutate()}
+        >
+          {refresh.isPending
+            ? "Requesting refresh…"
+            : single
+              ? "Refresh Daybook from Tally"
+              : "Refresh selected months"}
+        </Button>
+      </div>
+      {!valid && (
+        <p role="alert" className="text-sm">
+          Choose a valid From/To month range from April 2026 to the current approved month.
+        </p>
+      )}
+      {status.error && <p role="alert">{status.error.message}</p>}
+      {refresh.error && <p role="alert">{refresh.error.message}</p>}
+      <p role="status" className="text-sm">
+        {status.data?.configured === false
+          ? "Configure the office connector below."
+          : valid && status.isPending
+            ? "Loading saved Daybook data…"
+            : busy
+              ? "The office connector will process the queued months one at a time. Saved data remains visible."
+              : status.isSuccess && !combined.savedMonths
+                ? "No saved Daybook data for the selected period."
+                : ""}
+      </p>
+      {valid && status.data?.configured && combined.missingMonths.length > 0 && (
+        <p className="text-sm">
+          No saved data for {combined.missingMonths.join(", ")}. Refresh the selected months to
+          capture them; period totals remain unavailable until the missing data is present.
+        </p>
+      )}
+      {single && entries[0] && <MonthStatus entry={entries[0]} />}
+      {!single && !!entries.length && (
+        <details className="rounded border p-3 text-sm">
+          <summary className="cursor-pointer font-medium">
+            Month status and comparisons ({entries.length})
+          </summary>
+          <div className="mt-3 space-y-3">
+            {entries.map((entry) => (
+              <div key={entry.month} className="rounded border p-3">
+                <MonthStatus
+                  entry={entry}
+                  onView={() => {
+                    setFromMonth(entry.month);
+                    setToMonth(entry.month);
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      {!!combined.savedMonths && (
+        <div className="space-y-3 text-sm">
+          {!single && (
+            <p>
+              {fromMonth} to {toMonth} · {combined.savedMonths} of {entries.length} months have
+              saved data · {combined.voucherCount} voucher records
+            </p>
+          )}
+          {combined.repeatedVouchers > 0 && (
+            <p>
+              {combined.repeatedVouchers} voucher IDs appeared in multiple months. Each is shown
+              once using its latest published capture. Use View month to inspect earlier monthly
+              captures.
+            </p>
+          )}
           <details className="text-xs text-muted-foreground">
             <summary className="w-fit cursor-pointer">ⓘ Data sources</summary>
             <p className="mt-2">
-              Bill products come from Daybook during this trial. Territory Plan continues using the
-              existing Sales collection. Compare with Sales checks the two saved sources for this
-              period.
+              Bill products come from the original Daybook month for each voucher. Territory Plan
+              continues using the existing Sales collection. Comparisons remain available separately
+              for each captured month.
             </p>
           </details>
           <DaybookResultTables
-            dealerRows={
-              summary.dealerRows ?? [
-                ...(summary.unmatched ?? []).map((row) => ({
-                  key: row.ledgerName,
-                  dealerName: row.ledgerName,
-                  ledgers: [row.ledgerName],
-                  liveRecovery: row.liveRecovery,
-                  srCr: row.srCr,
-                  other: null,
-                  status: "Needs dealer link",
-                  reason:
-                    row.reason ??
-                    (row.candidates.length
-                      ? "Possible name matches only; confirm a Dealer Alias."
-                      : "No exact website name or Dealer Alias matches."),
-                  candidates: row.candidates,
-                })),
-                ...(summary.excludedAccounts ?? []).map((row) => ({
-                  key: row.ledgerName,
-                  dealerName: row.ledgerName,
-                  ledgers: [row.ledgerName],
-                  liveRecovery: row.liveRecovery,
-                  srCr: row.srCr,
-                  other: null,
-                  status: "Accounting ledger",
-                  reason: "Excluded from dealer Recovery figures.",
-                })),
-              ]
-            }
-            excludedVouchers={summary.excludedVouchers}
-            coverage={summary.coverage}
-            sourceJobId={published.id}
-            billHeaders={summary.billHeaders}
+            dealerRows={publication ? summaryDealerRows(publication.summary) : []}
+            excludedVouchers={publication?.summary.excludedVouchers}
+            coverage={publication?.summary.coverage ?? combined.coverage}
+            sourceJobId={publication?.id}
+            billHeaders={publication?.summary.billHeaders ?? combined.billHeaders}
+            preparedView={single ? undefined : combined.view}
           />
-          {!summary.dealerRows && (
-            <p className="text-sm text-muted-foreground">
-              Refresh Daybook to load the full dealer summary, including matched dealers.
-            </p>
-          )}
-          {!summary.dealerRows && !!summary.recoveryIssues?.length && (
-            <details>
-              <summary className="cursor-pointer">
-                Dealers without a unique Recovery plan ({summary.recoveryIssues.length})
-              </summary>
-              <ul className="ml-5 max-h-64 list-disc overflow-auto">
-                {summary.recoveryIssues.map((row) => (
-                  <li key={row.dealerName}>
-                    {row.dealerName} · {row.issue}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
-          {!!summary.heldPrevious?.length && (
-            <details>
-              <summary className="cursor-pointer">Prior figures kept pending alias review</summary>
-              <ul className="ml-5 max-h-64 list-disc overflow-auto">
-                {summary.heldPrevious.map((name) => (
-                  <li key={name}>{name}</li>
-                ))}
-              </ul>
-            </details>
-          )}
         </div>
       )}
     </section>

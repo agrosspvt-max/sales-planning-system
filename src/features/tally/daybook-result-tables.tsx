@@ -9,6 +9,7 @@ import {
   dealerViews,
   isWebsiteDealer,
   matchesDealerSearch,
+  type DealerView,
 } from "./daybook-view";
 import type { DaybookBillHeaders } from "./daybook-bill-amounts";
 
@@ -22,16 +23,18 @@ export function DaybookResultTables({
   coverage,
   sourceJobId,
   billHeaders = {},
+  preparedView,
 }: {
   dealerRows: DaybookDealerRow[];
   excludedVouchers?: DaybookExcludedVoucher[];
   coverage?: string;
   sourceJobId?: string;
   billHeaders?: DaybookBillHeaders;
+  preparedView?: { dealers: DealerView[]; unassigned: DaybookExcludedVoucher[] };
 }) {
   const [search, setSearch] = useState("");
   const [scope, setScope] = useState<"all" | "dealers">("all");
-  const view = dealerViews(dealerRows, excludedVouchers);
+  const view = preparedView ?? dealerViews(dealerRows, excludedVouchers);
   const websiteDealers = view.dealers.filter(isWebsiteDealer);
   const scopedDealers = scope === "dealers" ? websiteDealers : view.dealers;
   const visible = scopedDealers.filter((dealer) => matchesDealerSearch(dealer, search));
@@ -88,7 +91,7 @@ export function DaybookResultTables({
             <div className="mt-2 space-y-2 rounded border p-3">
               <p>
                 Sales, receipts, returns/credit notes and other transactions are grouped under each
-                dealer. All records are from the selected Daybook capture.
+                dealer. All records are from the selected Daybook captures.
               </p>
               <p>
                 Sales and returns/credit notes show product amounts excluding GST. A dash means the
@@ -100,7 +103,16 @@ export function DaybookResultTables({
                 are for review and do not update Recovery or Last Payment.
               </p>
               <p>
-                Cancelled and optional vouchers appear under Other. {excludedVouchers.length}{" "}
+                Cancelled and optional vouchers appear under Other.{" "}
+                {
+                  (preparedView
+                    ? [
+                        ...view.dealers.flatMap((dealer) => dealer.vouchers),
+                        ...view.unassigned,
+                      ].filter((voucher) => voucher.reason !== "included")
+                    : excludedVouchers
+                  ).length
+                }{" "}
                 vouchers are outside the Recovery receipt/SRCR totals.
               </p>
               {coverage !== "all_vouchers" && (
@@ -125,6 +137,11 @@ export function DaybookResultTables({
                 <summary className="cursor-pointer select-none p-4 marker:text-muted-foreground">
                   <span className="inline-flex max-w-full flex-wrap items-center gap-x-6 gap-y-2 align-middle">
                     <span className="font-medium">{dealer.name}</span>
+                    {dealer.incompleteVouchers && (
+                      <span className="text-xs text-muted-foreground">
+                        Incomplete period details
+                      </span>
+                    )}
                     {dealer.row &&
                       ["Needs dealer link", "Prior figures kept"].includes(dealer.row.status) && (
                         <span className="rounded bg-muted px-2 py-0.5 text-xs">
@@ -148,19 +165,19 @@ export function DaybookResultTables({
                           <span>
                             Receipts{" "}
                             <strong className="font-medium text-foreground">
-                              {money(dealer.row.liveRecovery)}
+                              {money(dealer.incompleteVouchers ? null : dealer.row.liveRecovery)}
                             </strong>
                           </span>
                           <span>
                             SR/CR (bill total){" "}
                             <strong className="font-medium text-foreground">
-                              {money(dealer.row.srCr)}
+                              {money(dealer.incompleteVouchers ? null : dealer.row.srCr)}
                             </strong>
                           </span>
                           <span>
                             Other (bill totals){" "}
                             <strong className="font-medium text-foreground">
-                              {money(dealer.row.other)}
+                              {money(dealer.incompleteVouchers ? null : dealer.row.other)}
                             </strong>
                           </span>
                         </span>
@@ -181,9 +198,27 @@ export function DaybookResultTables({
                           <p key={ledger}>Tally: {ledger}</p>
                         ))}
                         {dealer.row.reason && <p>{dealer.row.reason}</p>}
+                        {!!dealer.monthlyDetails?.length && (
+                          <details>
+                            <summary className="cursor-pointer">
+                              Original monthly captures ({dealer.monthlyDetails.length})
+                            </summary>
+                            {dealer.monthlyDetails.map(({ month, row }) => (
+                              <p key={month}>
+                                {month} · {row.dealerName} · {row.status} · Receipts{" "}
+                                {money(row.liveRecovery)} · SR/CR {money(row.srCr)} · Other{" "}
+                                {money(row.other)}
+                                {row.reason ? ` · ${row.reason}` : ""}
+                              </p>
+                            ))}
+                          </details>
+                        )}
                         <p>
-                          Original captured totals: Receipts {money(dealer.row.liveRecovery)} ·
-                          SR/CR {money(dealer.row.srCr)} · Other {money(dealer.row.other)}
+                          {preparedView
+                            ? "Sum of original monthly totals"
+                            : "Original captured totals"}
+                          : Receipts {money(dealer.row.liveRecovery)} · SR/CR{" "}
+                          {money(dealer.row.srCr)} · Other {money(dealer.row.other)}
                         </p>
                         {!!dealer.row.candidates?.length && (
                           <p>Possible matches: {dealer.row.candidates.join(", ")}</p>
@@ -199,8 +234,9 @@ export function DaybookResultTables({
                     />
                   ) : (
                     <p className="text-sm text-muted-foreground">
-                      This older capture has totals only. Refresh Daybook for individual bills and
-                      receipts.
+                      {preparedView
+                        ? "No retained voucher details for this dealer. See the original monthly captures for recorded totals."
+                        : "This older capture has totals only. Refresh Daybook for individual bills and receipts."}
                     </p>
                   )}
                 </div>

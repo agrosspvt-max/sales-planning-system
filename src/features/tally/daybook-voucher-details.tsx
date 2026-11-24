@@ -48,13 +48,14 @@ export function DaybookVoucherDetails({
 }) {
   const evidence = voucher.details?.voucher;
   const [open, setOpen] = useState(false);
+  const jobId = voucher.sourceJobId ?? sourceJobId;
   const isSale = billHeader
     ? billHeader.family === "Sales"
     : /SALE/i.test(voucher.voucherType) && !/RETURN|CREDIT NOTE/i.test(voucher.voucherType);
   const isProductBill =
     !!billHeader ||
     (/SALE|CREDIT NOTE/i.test(voucher.voucherType) && !/ORDER/i.test(voucher.voucherType));
-  const hasOwnProducts = !!sourceJobId && isProductBill;
+  const hasOwnProducts = !!jobId && isProductBill;
   const mainReferences =
     !isSale ||
     voucher.billAllocations?.entries.some(
@@ -64,7 +65,7 @@ export function DaybookVoucherDetails({
     <DaybookBillAllocationTable
       allocations={voucher.billAllocations}
       layoutConflict={evidence?.layoutResolution === "conflicting"}
-      source={sourceJobId ? { jobId: sourceJobId, voucherGuid: voucher.guid } : undefined}
+      source={jobId ? { jobId, voucherGuid: voucher.guid } : undefined}
     />
   );
   return (
@@ -108,7 +109,7 @@ export function DaybookVoucherDetails({
       <div className="space-y-4 border-t px-3 py-3">
         {hasOwnProducts && (
           <DaybookOwnProducts
-            source={{ jobId: sourceJobId!, voucherGuid: voucher.guid }}
+            source={{ jobId: jobId!, voucherGuid: voucher.guid }}
             compact
             expanded={open}
           />
@@ -120,6 +121,7 @@ export function DaybookVoucherDetails({
             <p>
               {voucherLabel(voucher)} · {voucher.date}
             </p>
+            {voucher.sourceMonth && <p>Source month: {voucher.sourceMonth}</p>}
             {voucher.amount !== undefined && (
               <p>
                 Amount: {sourceAmount(voucher.amount)}

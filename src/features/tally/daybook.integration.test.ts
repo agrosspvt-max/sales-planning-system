@@ -1865,8 +1865,128 @@ print(json.dumps(messages,separators=(',',':')))
   assert.equal((await values()).srCr.toFixed(2), "0.00");
   await testIgnoredComparison();
   await testDealerAudit();
+  // Range is a read-only union of independently authorized monthly publications.
+  {
+    const months = ["2026-04", "2026-05", "2026-06"];
+    await prisma.tallyDaybookJob.deleteMany({
+      where: { connectionId: id, monthKey: { in: months } },
+    });
+    const finance = async () =>
+      JSON.stringify({
+        recovery: await values(),
+        monthly: await prisma.monthlyEntry.findMany({ orderBy: { id: "asc" } }),
+        lastPayment: [...(await report.loadEffectiveLastPayments([dealerId], today)).entries()],
+      });
+    const financialBefore = await finance();
+    await assert.rejects(
+      svc.daybookRangeStatus({ ...auth, role: Role.SALES_OFFICER }, months[0], months[1]),
+      /Super Admin/,
+    );
+    await assert.rejects(
+      svc.requestDaybookRangeRefresh({ ...auth, role: Role.SALES_OFFICER }, months[0], months[1]),
+      /Super Admin/,
+    );
+    const job = async (key: string, status: "SUCCEEDED" | "FAILED", order: number) =>
+      prisma.tallyDaybookJob.create({
+        data: {
+          connectionId: id,
+          ...salesPeriod(key, today),
+          status,
+          createdAt: new Date(Date.UTC(2026, 10, 1, 0, order)),
+          completedAt: new Date(Date.UTC(2026, 10, 1, 0, order)),
+          error: status === "FAILED" ? "TEST_RANGE_FAILED" : null,
+          summary: {
+            coverage: "all_vouchers",
+            marker: order,
+            dealerRows: [],
+            _daybookProducts: { privateEvidence: "not included in polling" },
+          },
+        },
+      });
+    await job(months[0], "SUCCEEDED", 1);
+    const latestApril = await job(months[0], "SUCCEEDED", 2);
+    await job(months[0], "FAILED", 3);
+    const latestMay = await job(months[1], "SUCCEEDED", 1);
+    const disabledConnection = await prisma.tallyConnection.create({
+      data: {
+        companyName: "Range other company",
+        anchorName: "Other",
+        anchorGuid: prefix + "-0000fffe",
+        credentialHash: hashSales("disabled-range"),
+        authorizedById: auth.userId,
+        enabled: false,
+      },
+    });
+    await prisma.tallyDaybookJob.create({
+      data: {
+        connectionId: disabledConnection.id,
+        ...salesPeriod(months[2], today),
+        status: "SUCCEEDED",
+        completedAt: new Date(),
+        summary: { marker: "wrong company" },
+      },
+    });
+    const range = await svc.daybookRangeStatus(auth, months[0], months[2]);
+    assert.deepEqual(
+      Array.from(range.months, (entry) => entry.month),
+      months,
+    );
+    assert.equal(range.months[0].published!.id, latestApril.id);
+    assert.equal(range.months[0].job!.error, "TEST_RANGE_FAILED");
+    assert.equal(range.months[1].published!.id, latestMay.id);
+    assert.equal(range.months[2].published, null, "other company cannot fill a missing month");
+    assert.ok(!("_daybookProducts" in (range.months[0].published!.summary as object)));
+    assert.ok(!("_daybookProducts" in (range.months[0].job!.summary as object)));
+    assert.equal((await svc.daybookStatus(auth, months[0])).published!.id, latestApril.id);
+    for (const [from, to] of [
+      ["2026-05", "2026-04"],
+      ["2026-03", "2026-04"],
+      ["bad", "2026-05"],
+      ["2026-04", "2027-04"],
+    ]) {
+      await assert.rejects(svc.daybookRangeStatus(auth, from, to), /From\/To month/);
+      await assert.rejects(svc.requestDaybookRangeRefresh(auth, from, to), /From\/To month/);
+    }
+    await prisma.tallyConnection.update({ where: { id }, data: { enabled: false } });
+    const disconnected = await svc.daybookRangeStatus(auth, months[0], months[2]);
+    assert.equal(disconnected.configured, false);
+    assert.ok(disconnected.months.every((entry) => entry.published === null));
+    await assert.rejects(svc.requestDaybookRangeRefresh(auth, months[0], months[2]), /Configure/);
+    await prisma.tallyConnection.update({ where: { id }, data: { enabled: true } });
+    // Overlapping range and legacy single-month requests share the same queue lock.
+    await Promise.all([
+      svc.requestDaybookRangeRefresh(auth, months[0], months[2]),
+      svc.requestDaybookRangeRefresh(auth, months[1], months[2]),
+      svc.requestDaybookRefresh(auth, months[1]),
+    ]);
+    const queued = await prisma.tallyDaybookJob.findMany({
+      where: { connectionId: id, monthKey: { in: months }, status: "QUEUED" },
+      orderBy: { monthKey: "asc" },
+    });
+    assert.deepEqual(
+      queued.map((entry) => entry.monthKey),
+      months,
+    );
+    assert.equal(queued[0].fromDate, "2026-04-01");
+    assert.equal(queued[0].throughDate, "2026-04-30");
+    assert.equal(queued[2].throughDate, "2026-06-30");
+    assert.equal(
+      (await svc.daybookRangeStatus(auth, months[0], months[2])).months[0].published!.id,
+      latestApril.id,
+    );
+    assert.equal(
+      await finance(),
+      financialBefore,
+      "range reads/queue requests cannot change financial figures",
+    );
+    console.log(
+      "Daybook month range: latest success, missing/company isolation, validation, overlapping queue idempotence and financial preservation passed.",
+    );
+  }
   approved = false;
   await assert.rejects(svc.requestDaybookRefresh(auth, month), /approved test Preview/);
+  await assert.rejects(svc.daybookRangeStatus(auth, "2026-04", "2026-05"), /approved test Preview/);
+  await assert.rejects(svc.requestDaybookRangeRefresh(auth, "2026-04", "2026-05"), /approved test Preview/);
   assert.equal(
     (await recovery.latestReceiptAsOfByDealer([dealerId], new Date(last))).get(dealerId)?.amount,
     999,

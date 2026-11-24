@@ -688,6 +688,9 @@ async function main() {
       subtotal: "-10.00",
       family: "Credit Note",
       active: true,
+      hasProducts: true,
+      hasQuantity: true,
+      isSalesReturn: true,
     },
     "status exposes only the small pre-tax bill header, not full comparison evidence",
   );

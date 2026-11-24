@@ -4,6 +4,9 @@ export type DaybookBillHeader = {
   subtotal: string | null;
   family: "Sales" | "Credit Note";
   active: boolean;
+  hasProducts?: boolean;
+  hasQuantity?: boolean | null;
+  isSalesReturn?: boolean;
 };
 export type DaybookBillHeaders = Record<string, DaybookBillHeader>;
 export type DaybookBillAmounts = {
@@ -74,7 +77,34 @@ export function daybookBillHeaders(vouchers: DaybookProductVoucher[]): DaybookBi
           : null,
         family: bill.family,
         active: !bill.cancelled && !bill.optional,
+        ...(bill.family === "Credit Note"
+          ? {
+              hasProducts: bill.items.length > 0,
+              hasQuantity: billQuantityPresence(bill),
+              isSalesReturn: /\bSALES[\s_-]*RETURN\b/i.test(bill.typeName),
+            }
+          : {}),
       },
     ]),
   );
+}
+
+// Any non-zero stock line counts, including actual quantity on a zero-billed line.
+// Inspect lines independently: opposite quantities must never cancel into "without qty".
+function billQuantityPresence(bill: DaybookProductVoucher): boolean | null {
+  const rawQuantity = (value: string): boolean | null => {
+    if (!value.trim()) return false;
+    const match = value
+      .trim()
+      .match(
+        /^([+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+))\s+[^\s=\x00-\x1f]{1,40}(?:\s*=\s*[+-]?[0-9]+(?:\.[0-9]+)?\s+[^\x00-\x1f]{1,40})?$/,
+      );
+    return match && Number.isFinite(Number(match[1])) ? Number(match[1]) !== 0 : null;
+  };
+  const presence = bill.items.flatMap((item) => [
+    Number(item.quantity) !== 0,
+    rawQuantity(item.actualQty),
+    rawQuantity(item.billedQty),
+  ]);
+  return presence.includes(true) ? true : presence.includes(null) ? null : false;
 }

@@ -7,11 +7,16 @@ import { DaybookVoucherDetails, voucherLabel } from "./daybook-voucher-details";
 import {
   dealerDisplayAmounts,
   dealerViews,
-  isWebsiteDealer,
   matchesDealerSearch,
   type DealerView,
 } from "./daybook-view";
 import type { DaybookBillHeaders } from "./daybook-bill-amounts";
+import {
+  daybookScopes,
+  filterDaybookView,
+  unclassifiedDaybookCredits,
+  type DaybookScope,
+} from "./daybook-filters";
 
 const money = (amount: string | null | undefined) =>
   amount == null
@@ -33,27 +38,27 @@ export function DaybookResultTables({
   preparedView?: { dealers: DealerView[]; unassigned: DaybookExcludedVoucher[] };
 }) {
   const [search, setSearch] = useState("");
-  const [scope, setScope] = useState<"all" | "dealers">("all");
+  const [scope, setScope] = useState<DaybookScope>("all");
   const view = preparedView ?? dealerViews(dealerRows, excludedVouchers);
-  const websiteDealers = view.dealers.filter(isWebsiteDealer);
-  const scopedDealers = scope === "dealers" ? websiteDealers : view.dealers;
+  const scopes = daybookScopes.map((entry) => ({
+    ...entry,
+    view: filterDaybookView(view, entry.value, billHeaders),
+  }));
+  const selected = scopes.find((entry) => entry.value === scope)!;
+  const scopedDealers = selected.view.dealers;
   const visible = scopedDealers.filter((dealer) => matchesDealerSearch(dealer, search));
-  const unassigned = (scope === "all" ? view.unassigned : []).filter(
+  const unassigned = selected.view.unassigned.filter(
     (voucher) =>
       !search.trim() ||
       [voucher.voucherType, voucher.voucherNumber, voucher.date].some((value) =>
         value.toLowerCase().includes(search.trim().toLowerCase()),
       ),
   );
+  const unclassified = unclassifiedDaybookCredits(view, billHeaders);
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2" role="group" aria-label="Daybook view">
-        {(
-          [
-            ["all", "All", view.dealers.length],
-            ["dealers", "Dealers only", websiteDealers.length],
-          ] as const
-        ).map(([value, label, count]) => (
+        {scopes.map(({ value, label, view: filtered }) => (
           <button
             key={value}
             type="button"
@@ -65,10 +70,27 @@ export function DaybookResultTables({
                 : "bg-background hover:bg-muted"
             }`}
           >
-            {label} ({count})
+            {label} ({filtered.dealers.length})
           </button>
         ))}
       </div>
+      {selected.description && (
+        <div className="space-y-1 text-xs text-muted-foreground">
+          <p>{selected.description}</p>
+          <p>
+            Only matching vouchers and their totals are shown. Dealer & matching details retain the
+            original full-period totals. Counts show dealers; unassigned vouchers are listed
+            separately.
+          </p>
+          {unclassified > 0 && (
+            <p>
+              {unclassified} return/credit-note vouchers have incomplete product or quantity
+              details. They appear only in filters supported by the saved evidence. Refresh their
+              Daybook months for complete details.
+            </p>
+          )}
+        </div>
+      )}
       <details aria-label="Daybook dealers" className="rounded-lg border p-4">
         <summary className="cursor-pointer select-none font-medium marker:text-muted-foreground">
           Dealers <span className="text-sm text-muted-foreground">({scopedDealers.length})</span>
@@ -248,7 +270,9 @@ export function DaybookResultTables({
                   ? "No dealers or bills match this search."
                   : scope === "dealers"
                     ? "No confirmed website dealers in this capture."
-                    : "No dealer entries in this capture."}
+                    : scope !== "all"
+                      ? "No dealers have matching vouchers in the selected period."
+                      : "No dealer entries in this capture."}
               </p>
             )}
           </div>

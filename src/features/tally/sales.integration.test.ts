@@ -36,9 +36,12 @@ const prisma = new db.PrismaClient({
 });
 let planLineInsertQueries = 0,
   monthlyWriteQueries = 0;
+let monthlyReadParameters: number[] | null = null;
 prisma.$on("query", (event) => {
   if (/INSERT INTO ["\w.]*"PlanLine"/.test(event.query)) planLineInsertQueries++;
   if (/INSERT INTO "MonthlyEntry"/.test(event.query)) monthlyWriteQueries++;
+  if (monthlyReadParameters && /SELECT .*FROM "public"\."MonthlyEntry"/.test(event.query))
+    monthlyReadParameters.push(JSON.parse(event.params).length);
 });
 class ApiError extends Error {
   constructor(
@@ -1411,6 +1414,141 @@ async function main() {
     "Missing products reports captured dealer/month, deduplicates lines, excludes cancelled and optional vouchers, and follows product mappings: PASS",
   );
   console.log("Matched sales publish alongside unmatched stock items and reconverge after mapping: PASS");
+
+  // Exercise publication above the 32,767-parameter failure threshold with a
+  // realistic number of dealers, including unchanged zero actuals on all lines.
+  const scaleDealers = Array.from({ length: 110 }, (_, i) => ({
+    id: "scale-dealer-" + i,
+    name: "Scale Dealer " + i,
+    isActive: true,
+    status: "ACTIVE",
+  }));
+  await prisma.dealer.createMany({ data: scaleDealers });
+  await prisma.dealerAlias.createMany({
+    data: scaleDealers.map((dealer) => ({
+      tallyName: dealer.name,
+      tallyKey: "scaledealer" + dealer.id,
+      systemDealerId: dealer.id,
+    })),
+  });
+  await prisma.planDealer.createMany({
+    data: scaleDealers.map((dealer) => ({
+      id: "pd-" + dealer.id,
+      dealerId: dealer.id,
+      seasonPlanId: "sales-plan",
+    })),
+  });
+  const scaleLines = scaleDealers.flatMap((dealer) =>
+    bulkProducts.map((product) => ({
+      id: dealer.id + "-" + product.id,
+      planDealerId: "pd-" + dealer.id,
+      productId: product.id,
+      rateSnapshot: 123,
+      nbvPercentSnapshot: "0.45",
+    })),
+  );
+  assert.equal(scaleLines.length, 33000);
+  for (let offset = 0; offset < scaleLines.length; offset += 500) {
+    const batch = scaleLines.slice(offset, offset + 500);
+    await prisma.planLine.createMany({ data: batch });
+    await prisma.monthlyEntry.createMany({
+      data: batch.map((line) => ({
+        planLineId: line.id,
+        seasonMonthId: "sales-month",
+        planQty: 9,
+        planValue: 111,
+        saleQty: "0",
+        saleValue: "0",
+      })),
+    });
+  }
+  // A stale non-zero actual in the final batch must be read and cleared;
+  // silently omitting that batch must not look like an unchanged zero.
+  await prisma.monthlyEntry.update({
+    where: {
+      planLineId_seasonMonthId: {
+        planLineId: scaleLines[scaleLines.length - 1].id,
+        seasonMonthId: "sales-month",
+      },
+    },
+    data: { saleQty: "1.5", saleValue: "2.75" },
+  });
+  const scaleLine = scaleLines[0];
+  await prisma.monthlyEntry.create({
+    data: {
+      planLineId: scaleLine.id,
+      seasonMonthId: "sales-old",
+      planQty: 13,
+      saleQty: "7.5",
+      saleValue: "-123.45",
+    },
+  });
+  const scaleResult = (job: any) => {
+    const r = result(job);
+    r.ledgers.push(
+      ...scaleDealers.map((dealer, i) => ({
+        name: dealer.name,
+        guid: prefix + "-" + String(3000 + i).padStart(8, "0"),
+      })),
+    );
+    r.vouchers[0].partyName = scaleDealers[0].name;
+    r.vouchers[0].family = "Credit Note";
+    r.vouchers[0].typeName = "Sales Return";
+    r.vouchers[0].items[0] = {
+      ...r.vouchers[0].items[0],
+      stockItemName: bulkProducts[0].name,
+      quantity: "-1.234567",
+      actualQty: "-1.234567 L",
+      billedQty: "-1.234567 L",
+      amount: "-12.34",
+    };
+    return r;
+  };
+  monthlyReadParameters = [];
+  await refresh(scaleResult);
+  const readParameters = monthlyReadParameters;
+  monthlyReadParameters = null;
+  assert.ok(readParameters.length > 1, "large scope reads existing actuals in bounded queries");
+  assert.ok(Math.max(...readParameters) <= 4096, "all monthly reads stay below the bind limit");
+  assert.equal((await actual(scaleLine.id)).saleQty.toString(), "-1.234567");
+  assert.equal((await actual(scaleLine.id)).saleValue?.toString(), "-12.34");
+  assert.equal(
+    await prisma.monthlyEntry.count({
+      where: {
+        planLine: { planDealerId: { startsWith: "pd-scale-dealer-" } },
+        seasonMonthId: "sales-month",
+        planQty: 9,
+        planValue: 111,
+      },
+    }),
+    33000,
+    "batch reads preserve every line's planning figures",
+  );
+  assert.equal(
+    await prisma.monthlyEntry.count({
+      where: {
+        planLine: { planDealerId: { startsWith: "pd-scale-dealer-" } },
+        seasonMonthId: "sales-month",
+        saleQty: 0,
+        saleValue: 0,
+      },
+    }),
+    32999,
+    "unchanged zero rows are retained, including the final batch",
+  );
+  const otherMonth = await actual(scaleLine.id, "sales-old");
+  assert.equal(otherMonth.saleQty.toString(), "7.5");
+  assert.equal(otherMonth.saleValue?.toString(), "-123.45");
+  assert.equal(otherMonth.planQty, 13);
+  const preservedLine = await prisma.planLine.findUniqueOrThrow({ where: { id: scaleLine.id } });
+  assert.equal(preservedLine.rateSnapshot?.toString(), "123");
+  assert.equal(preservedLine.nbvPercentSnapshot?.toString(), "0.45");
+  const writesAfterScale = monthlyWriteQueries;
+  await refresh(scaleResult);
+  assert.equal(monthlyWriteQueries, writesAfterScale, "large identical refresh is idempotent");
+  console.log(
+    "Sales publication above 32,767 parameters: signed decimals, all planning rows, other month and unchanged refresh preserved: PASS",
+  );
 
   await svc.requestSalesRefresh(actor, month);
   const revokeJob = await claim();

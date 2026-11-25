@@ -344,14 +344,27 @@ async function publish(
       ),
     ),
   );
-  const previous = await db.monthlyEntry.findMany({
-    where: {
-      planLineId: { in: writes.map((w) => w.planLineId) },
-      seasonMonthId: { in: [...new Set(writes.map((w) => w.monthId))] },
-    },
-    select: { planLineId: true, seasonMonthId: true, saleQty: true, saleValue: true },
-  });
-  const old = new Map(previous.map((p) => [p.planLineId + ":" + p.seasonMonthId, p]));
+  // One calendar month can cover more than PostgreSQL/Prisma's 32,767 bind
+  // parameters across all plans. Keep each read bounded and scoped to its
+  // exact season month, inside the same publication transaction.
+  const linesByMonth = new Map<string, Set<string>>();
+  for (const w of writes) {
+    const lines = linesByMonth.get(w.monthId) ?? new Set<string>();
+    lines.add(w.planLineId);
+    linesByMonth.set(w.monthId, lines);
+  }
+  const old = new Map<string, { saleQty: Prisma.Decimal; saleValue: Prisma.Decimal | null }>();
+  for (const [seasonMonthId, ids] of linesByMonth) {
+    const lines = [...ids];
+    for (let offset = 0; offset < lines.length; offset += 1000) {
+      const previous = await db.monthlyEntry.findMany({
+        where: { planLineId: { in: lines.slice(offset, offset + 1000) }, seasonMonthId },
+        select: { planLineId: true, seasonMonthId: true, saleQty: true, saleValue: true },
+      });
+      for (const p of previous) old.set(p.planLineId + ":" + p.seasonMonthId, p);
+    }
+  }
+  progress("previous_actuals_read", old.size);
   const changedWrites: typeof writes = [];
   for (const w of writes) {
     const p = old.get(w.planLineId + ":" + w.monthId);

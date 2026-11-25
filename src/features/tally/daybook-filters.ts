@@ -2,7 +2,13 @@ import type { DaybookBillHeader, DaybookBillHeaders } from "./daybook-bill-amoun
 import type { DaybookExcludedVoucher } from "./daybook-result-types";
 import { isWebsiteDealer, type DealerView } from "./daybook-view";
 
-export type DaybookScope = "all" | "dealers" | "credit-qty" | "return-no-qty" | "credit-product";
+export type DaybookScope =
+  | "all"
+  | "dealers"
+  | "credit-qty"
+  | "return-no-qty"
+  | "credit-product"
+  | "credit-no-product";
 export const daybookScopes: { value: DaybookScope; label: string; description?: string }[] = [
   { value: "all", label: "All" },
   { value: "dealers", label: "Dealers only" },
@@ -24,6 +30,12 @@ export const daybookScopes: { value: DaybookScope; label: string; description?: 
     description:
       "Credit Notes with at least one product line, including zero-quantity value adjustments. Sales Returns are kept separate.",
   },
+  {
+    value: "credit-no-product",
+    label: "Credit note without product",
+    description:
+      "Credit Notes with a saved empty product list. Sales Returns are kept separate. Missing product details are not treated as no products.",
+  },
 ];
 function active(voucher: DaybookExcludedVoucher, header?: DaybookBillHeader) {
   return !["cancelled", "optional"].includes(voucher.reason) && header?.active !== false;
@@ -38,6 +50,7 @@ export function matchesDaybookScope(
     return header.isSalesReturn === true && header.hasQuantity === false;
   // No type/family guess when compact product evidence is missing or from an older response.
   if (header.isSalesReturn !== false) return false;
+  if (scope === "credit-no-product") return header.hasProducts === false;
   return scope === "credit-qty"
     ? header.hasQuantity === true
     : scope === "credit-product" && header.hasProducts === true;

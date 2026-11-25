@@ -59,6 +59,9 @@ const bills = [
   { ...bill("CN-OPTIONAL"), optional: true },
   { ...bill("SALE"), family: "Sales" as const, typeName: "Sales" },
   bill("CN-CUSTOM", "Discount Adjustment"),
+  bill("CN-EMPTY-CUSTOM", "Discount Adjustment", []),
+  { ...bill("CN-CANCELLED-EMPTY", "Credit Note", []), cancelled: true },
+  { ...bill("CN-OPTIONAL-EMPTY", "Credit Note", []), optional: true },
 ];
 const headers = daybookBillHeaders(bills);
 assert.equal(
@@ -110,6 +113,13 @@ view.unassigned.push({
   ledgerName: undefined,
 });
 headers["cn-unassigned"] = { ...headers["cn-qty"] };
+view.unassigned.push({
+  ...vouchers[2],
+  guid: "CN-EMPTY-UNASSIGNED",
+  voucherNumber: "CN-EMPTY-UNASSIGNED",
+  ledgerName: undefined,
+});
+headers["cn-empty-unassigned"] = { ...headers["cn-empty"] };
 const before = JSON.stringify({ view, headers });
 const ids = (scope: DaybookScope) =>
   filterDaybookView(view, scope, headers).dealers.flatMap((dealer) =>
@@ -118,6 +128,14 @@ const ids = (scope: DaybookScope) =>
 assert.deepEqual(ids("credit-qty"), ["CN-QTY", "CN-ACTUAL", "CN-CUSTOM"]);
 assert.deepEqual(ids("return-no-qty"), ["SR-ZERO", "SR-EMPTY"]);
 assert.deepEqual(ids("credit-product"), ["CN-QTY", "CN-VALUE", "CN-ACTUAL", "CN-CUSTOM"]);
+assert.deepEqual(ids("credit-no-product"), ["CN-EMPTY", "CN-EMPTY-CUSTOM"]);
+assert.equal(filterDaybookView(view, "credit-no-product", headers).unassigned.length, 1);
+assert.equal(
+  dealerDisplayAmounts(filterDaybookView(view, "credit-no-product", headers).dealers[0], headers)[0]
+    .amount,
+  null,
+  "no product subtotal remains unavailable rather than becoming zero or a voucher total",
+);
 assert.equal(filterDaybookView(view, "credit-qty", headers).unassigned.length, 1);
 assert.equal(filterDaybookView(view, "all", headers), view);
 assert.equal(
@@ -152,7 +170,7 @@ const range = combineDaybookMonths([
       summary: {
         coverage: "all_vouchers",
         dealerRows: rows,
-        excludedVouchers: [vouchers[0]],
+        excludedVouchers: [vouchers[0], vouchers[2]],
         billHeaders: headers,
       },
     },
@@ -168,8 +186,11 @@ const range = combineDaybookMonths([
       summary: {
         coverage: "all_vouchers",
         dealerRows: rows,
-        excludedVouchers: [vouchers[0]],
-        billHeaders: { "cn-qty": { ...headers["cn-qty"], hasQuantity: false } },
+        excludedVouchers: [vouchers[0], vouchers[2]],
+        billHeaders: {
+          "cn-qty": { ...headers["cn-qty"], hasQuantity: false },
+          "cn-empty": headers["cn-empty"],
+        },
       },
     },
   },
@@ -180,6 +201,16 @@ assert.equal(
     .sourceJobId,
   "new-source",
 );
+assert.equal(
+  filterDaybookView(range.view, "credit-no-product", range.billHeaders).dealers[0].vouchers[0]
+    .sourceJobId,
+  "new-source",
+);
+assert.equal(
+  filterDaybookView(view, "credit-no-product", {}).dealers.length,
+  0,
+  "missing evidence is not classified as an empty product list",
+);
 
 for (const scope of [
   "all",
@@ -187,6 +218,7 @@ for (const scope of [
   "credit-qty",
   "return-no-qty",
   "credit-product",
+  "credit-no-product",
 ] as DaybookScope[]) {
   const productSources: string[] = [];
   const load = testLoader({
@@ -224,6 +256,7 @@ for (const scope of [
     "Credit Note with qty (1)",
     "Sales Return W/O qty (1)",
     "Credit Note with product (1)",
+    "Credit note without product (1)",
   ])
     assert.ok(html.includes(label), label);
   if (scope === "all" || scope === "dealers") {

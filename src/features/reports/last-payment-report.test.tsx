@@ -67,7 +67,8 @@ let queries = { legacy: 0, history: 0, dealers: 0 };
 let lookedUp: string[] = []; // the dealer ids the (single) Last Payment lookup was asked about
 const prisma = {
   dealer: {
-    findMany: async ({ where }: { where: { isActive?: boolean; assignments?: { some: { officerId: { in: string[] } } } } }) => {
+    findMany: async ({ where, select }: { where: { id?: { in: string[] }; isActive?: boolean; assignments?: { some: { officerId: { in: string[] } } } }; select?: { paymentReceipts?: unknown } }) => {
+      if (select?.paymentReceipts) return dealers.filter(d => where.id?.in.includes(d.id)).map(d => ({ id: d.id, paymentReceipts: [] }));
       queries.dealers++;
       const ids = where.assignments?.some.officerId.in;
       return dealers.filter((d) => (where.isActive === undefined || d.isActive === where.isActive) && (!ids || (openAssignments[d.id] ?? []).some((o) => ids.includes(o))));

@@ -22,14 +22,13 @@ export function PaymentHistoryContent({ payments, unavailableReason }: Pick<Paym
   const amountLabel = useLabel("recovery.paymentHistory.amount");
   const totalLabel = useLabel("recovery.paymentHistory.total");
   const emptyLabel = useLabel("recovery.paymentHistory.empty");
-  const summaryLabel = useLabel("recovery.paymentHistory.dailySummary");
-  const shown = payments.slice(0, 5);
+  const shown = payments.filter(payment => payment.kind !== "snapshot").slice(0, 5);
   const total = shown.reduce((sum, payment) => sum + Math.round(payment.amount * 100), 0) / 100;
   if (!shown.length) return <p className="py-2 text-sm text-muted-foreground">{unavailableReason ?? emptyLabel}</p>;
   return <table className="w-full text-sm" data-testid="recent-payments">
     <thead><tr className="border-b text-muted-foreground"><th scope="col" className="py-2 text-left font-medium">{dateLabel}</th><th scope="col" className="py-2 text-right font-medium">{amountLabel}</th></tr></thead>
     <tbody>{shown.map((payment, index) => <tr key={`${payment.date}-${index}`} className="border-b">
-      <td className="py-2 pr-4 tabular-nums">{formatDMY(payment.date)}{payment.kind === "snapshot" && <span className="block text-xs text-muted-foreground">{summaryLabel}</span>}</td>
+      <td className="py-2 pr-4 tabular-nums">{formatDMY(payment.date)}</td>
       <td className="py-2 text-right tabular-nums">{currency(payment.amount)}</td>
     </tr>)}</tbody>
     <tfoot><tr><th scope="row" className="pt-3 text-left font-semibold">{totalLabel} ({shown.length})</th><td className="pt-3 text-right font-semibold tabular-nums">{currency(total)}</td></tr></tfoot>

@@ -14,7 +14,7 @@ import { testLoader, TestApiError } from "@/features/dealer-tags/test-loader";
 import type { AuthContext } from "@/lib/http";
 import { currentBusinessDate } from "@/lib/daily-work";
 import { parseLastPaymentReportParams } from "@/lib/last-payment-report";
-import { backfillDealerLastPayments, preserveSupersededReceipts } from "@/lib/dealer-last-payment";
+import { acceptReceipts, backfillDealerLastPayments, preserveSupersededReceipts } from "@/lib/dealer-last-payment";
 
 process.env.LAST_PAYMENT_JOB_KICK = "off"; // the background retry is exercised explicitly (scenario 11); elsewhere tests drive processing themselves
 const url = process.env.DEALER_LAST_PAYMENT_TEST_URL;
@@ -426,6 +426,32 @@ async function main() {
   await upload("m1", [rcpt(9, "Recov Calc", 300, "RC1"), rcpt(7, "Recov Calc", 200, "RC2")], "rc.xlsx");
   const rc = (await rpd("m1", "RC"))!;
   eq([Number(rc.liveRecovery), Number(rc.srCr), rc.lastReceiptDate?.toISOString().slice(0, 10), Number(rc.lastReceiptAmount)], [500, 0, day(7), 200], "Live Recovery / SR-CR / month Last Payment column unchanged by Last Payment's own processing");
+
+  // Recovery's popup reads the permanent individual ledger, including receipts whose imports were replaced.
+  for (const id of ["HGA", "HGB", "HGS"]) await prisma.dealer.create({ data: { id, name: `History ${id}` } });
+  const oldFile = await prisma.lastPaymentImport.create({ data: { kind: "REGULAR", scopeKey: "history", fileHash: "history-inactive", workbookName: "old-receipts.xlsx", uploadedById: "admin", summary: "{}", isActive: false } });
+  await acceptReceipts(prisma, [
+    ...[1, 2, 3, 3, 4, 5, 6].map((n, index) => ({ dealerId: "HGA", date: day(n), amount: n * 100, sourceOrder: index })),
+    { dealerId: "HGA", date: day(-1), amount: 10000 },
+    { dealerId: "HGB", date: day(1), amount: 77 }, { dealerId: "HGB", date: day(2), amount: 88 },
+  ], { sourceKind: "REGULAR", importId: oldFile.id }, today);
+  for (const id of ["HGA", "HGS"]) await prisma.dealerPaymentReceipt.create({ data: { dealerId: id, receiptDate: new Date(`${today}T00:00:00Z`), amount: 999999, occurrence: 1, sourceKind: "LEGACY_SNAPSHOT" } });
+  const cutoff = new Date(`${today}T00:00:00Z`);
+  const ledgerBefore = await prisma.dealerPaymentReceipt.count();
+  const receiptHistory = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+    return read.loadIndividualReceiptHistory(["HGA", "HGB", "HGS"], cutoff, tx);
+  });
+  eq(receiptHistory.get("HGA")?.map(r => r.amount), [100, 200, 300, 300, 400], "last five individual receipts: same-day distinct receipts kept, future receipts and snapshots excluded");
+  eq(receiptHistory.get("HGB")?.map(r => r.amount), [77, 88], "limit applies to each dealer independently; fewer than five is valid");
+  eq(receiptHistory.get("HGS"), [], "a saved summary is never presented as an individual receipt");
+  eq(await prisma.dealerPaymentReceipt.count(), ledgerBefore, "history is strictly read-only");
+  await prisma.lastPaymentImport.delete({ where: { id: oldFile.id } });
+  eq((await read.loadIndividualReceiptHistory(["HGA"], cutoff)).get("HGA"), receiptHistory.get("HGA"), "accepted receipts remain available independently of the source upload");
+  eq([...(await read.loadIndividualReceiptHistory(["HGA"], cutoff)).keys()], ["HGA"], "lookup stays restricted to the requested dealer IDs");
+  const oldLastPayment = await read.latestReceiptAsOfByDealer(["RC"], cutoff);
+  const detailed = await read.recoveryPaymentDetailsByDealer(["RC"], cutoff);
+  eq(detailed.get("RC")?.latest, oldLastPayment.get("RC") ?? null, "the existing Last Payment column and recovery calculations remain unchanged");
 
   console.log("dealer-last-payment.integration.ts — all assertions passed");
 }

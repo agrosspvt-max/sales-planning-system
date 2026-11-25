@@ -13,9 +13,9 @@ const five = render(Array.from({ length: 6 }, (_, index) => ({ date: `2026-11-${
 assert.ok(five.includes("Total (5)") && five.includes("₹500.05"), "total includes only the five displayed receipts, with cents preserved");
 assert.ok(five.includes("20/11/2026") && !five.includes("15/11/2026"));
 const fewer = render([{ date: "2026-10-31", amount: 12000 }, { date: "2026-10-15", amount: 5000, kind: "snapshot" }]);
-assert.ok(fewer.includes("Total (2)") && fewer.includes("₹17,000") && fewer.includes("Daily summary"));
-assert.ok(render([]).includes("No recorded payments available."));
+assert.ok(fewer.includes("Total (1)") && fewer.includes("₹12,000") && !fewer.includes("Daily summary") && !fewer.includes("₹17,000"), "saved summaries are excluded from both the receipt list and its total");
+assert.ok(render([]).includes("No individual receipts available for this period."));
 const icon = renderToStaticMarkup(<LastPaymentInfo dealerName="Alpha Traders" payments={[]} throughDate="2026-11-30" />);
-assert.ok(icon.includes('aria-label="Last 5 payments: Alpha Traders"') && icon.includes('aria-haspopup="dialog"'));
+assert.ok(icon.includes('aria-label="Last 5 receipts: Alpha Traders"') && icon.includes('aria-haspopup="dialog"'));
 assert.ok(!icon.includes('data-testid="recent-payments"'), "history is initially hidden");
 console.log("last-payment-info.test.tsx — all assertions passed");

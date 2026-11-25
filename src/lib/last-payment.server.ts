@@ -1,7 +1,7 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
-import { latestReceiptAsOf, recentReceiptsAsOf, type ReceiptPoint } from "./last-payment";
+import { latestReceiptAsOf, type ReceiptPoint } from "./last-payment";
 
 type ReadClient = Pick<Prisma.TransactionClient, "$queryRaw" | "lastPaymentReceipt">;
 /** Batched, informational sources only: stored per-plan pairs (tagged "snapshot") + every individual receipt of the
@@ -52,12 +52,39 @@ export async function latestReceiptAsOfByDealer(
   return out;
 }
 
-/** One batched read for Recovery's existing latest value and its informational recent-payment popup. */
-export async function recoveryPaymentDetailsByDealer(dealerIds: string[], throughDate: Date, db: ReadClient = prisma) {
-  const points = await loadLastPaymentPoints(dealerIds, throughDate, db);
+type HistoryClient = ReadClient & Pick<Prisma.TransactionClient, "dealer">;
+
+/** Individual, accepted receipts survive import replacement in the permanent ledger. Limit per dealer,
+ * never per plan, and never present a saved daily/monthly summary as an individual receipt. */
+export async function loadIndividualReceiptHistory(dealerIds: string[], throughDate: Date, db: Pick<Prisma.TransactionClient, "dealer"> = prisma) {
+  if (!dealerIds.length) return new Map<string, ReceiptPoint[]>();
+  const dealers = await db.dealer.findMany({
+    where: { id: { in: dealerIds } },
+    select: {
+      id: true,
+      paymentReceipts: {
+        where: { receiptDate: { lte: throughDate }, amount: { gt: 0 }, sourceKind: { in: ["REGULAR", "HISTORICAL"] } },
+        orderBy: [{ receiptDate: "desc" }, { createdAt: "desc" }, { sourceOrder: "desc" }, { id: "desc" }],
+        take: 5,
+        select: { receiptDate: true, amount: true },
+      },
+    },
+  });
+  return new Map(dealers.map(dealer => [dealer.id, dealer.paymentReceipts.map(receipt => ({
+    date: receipt.receiptDate.toISOString().slice(0, 10), amount: Number(receipt.amount),
+  }))]));
+}
+
+/** Keep the existing Last Payment column unchanged; the popup reads individual receipts from the
+ * permanent ledger, independently of active/inactive upload batches and legacy plan snapshots. */
+export async function recoveryPaymentDetailsByDealer(dealerIds: string[], throughDate: Date, db: HistoryClient = prisma) {
+  const [points, history] = await Promise.all([
+    loadLastPaymentPoints(dealerIds, throughDate, db),
+    loadIndividualReceiptHistory(dealerIds, throughDate, db),
+  ]);
   const cutoff = throughDate.toISOString().slice(0, 10);
-  return new Map([...points].map(([id, receipts]) => [id, {
-    latest: latestReceiptAsOf(receipts, cutoff),
-    payments: recentReceiptsAsOf(receipts, cutoff),
+  return new Map(dealerIds.map(id => [id, {
+    latest: latestReceiptAsOf(points.get(id) ?? [], cutoff),
+    payments: history.get(id) ?? [],
   }]));
 }

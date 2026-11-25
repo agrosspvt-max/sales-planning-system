@@ -6,7 +6,7 @@
  * shows the latest receipt on or before its explicit month-end, carried forward until a newer receipt supersedes it.
  */
 import assert from "node:assert/strict";
-import { lastPaymentMonthEnd, latestReceiptAsOf, recentReceiptsAsOf, type ReceiptPoint } from "./last-payment";
+import { lastPaymentMonthEnd, latestReceiptAsOf, type ReceiptPoint } from "./last-payment";
 
 let passed = 0;
 function test(name: string, fn: () => void) { fn(); passed += 1; console.log(`  ok  ${name}`); }
@@ -178,27 +178,6 @@ test("S11) with no individual receipts on the date, the snapshot is used as befo
 test("S12) a newer snapshot date beats older individual receipts (date selection is unchanged)", () => {
   const pts = [{ date: "2026-10-01", amount: 500 }, { date: "2026-10-01", amount: 500 }, { date: "2026-10-04", amount: 70, kind: "snapshot" as const }];
   assert.deepEqual(latestReceiptAsOf(pts, AS_OF), { date: "2026-10-04", amount: 70 });
-});
-
-test("history returns at most five newest eligible payments, keeping distinct same-day receipts", () => {
-  const points = [
-    { date: "2026-09-30", amount: 1 }, { date: "2026-10-01", amount: 2 },
-    { date: "2026-10-02", amount: 3 }, { date: "2026-10-03", amount: 4 },
-    { date: "2026-10-04", amount: 5 }, { date: "2026-10-04", amount: 5 },
-    { date: "2026-11-01", amount: 999 },
-  ];
-  const before = JSON.stringify(points);
-  assert.deepEqual(recentReceiptsAsOf(points, "2026-10-31").map(p => p.amount), [5, 5, 4, 3, 2]);
-  assert.equal(JSON.stringify(points), before, "read-only: input and latest-payment selection unchanged");
-});
-test("history uses available receipts and never adds their daily snapshots a second time", () => {
-  const snapshot: ReceiptPoint = { date: "2026-10-04", amount: 10, kind: "snapshot" };
-  const older: ReceiptPoint = { date: "2026-09-30", amount: 70, kind: "snapshot" };
-  assert.deepEqual(recentReceiptsAsOf([snapshot, snapshot, { date: snapshot.date, amount: 5 }, { date: snapshot.date, amount: 5 }, older, older], "2026-10-31"), [
-    { date: snapshot.date, amount: 5 }, { date: snapshot.date, amount: 5 }, older,
-  ]);
-  assert.deepEqual(recentReceiptsAsOf([], "2026-10-31"), []);
-  assert.deepEqual(recentReceiptsAsOf([{ date: "2026-11-01", amount: 5 }], "2026-10-31"), []);
 });
 
 console.log(`\n${passed} last-payment tests passed`);

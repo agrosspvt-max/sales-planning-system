@@ -85,14 +85,14 @@ const dealer: TerritoryDealerSummary = {
   planAmount: 0,
   planNbv: 0,
   actualAmount: -252,
-  actualNbv: 0,
-  products: expected.map((row) => ({
+  actualNbv: 105.88,
+  products: expected.map((row, index) => ({
     ...row,
     dealerId: "dealer",
     name: "Dealer",
     planAmount: 0,
     planNbv: 0,
-    actualNbv: 0,
+    actualNbv: [375.13, -231.75, -37.5][index],
     nbvPercent: 0,
   })),
 };
@@ -112,7 +112,13 @@ const render = (changes: Partial<React.ComponentProps<typeof DealerProductSalesT
       {...changes}
     />,
   );
+const dealerBeforeRender = JSON.stringify(dealer);
 const html = render();
+const headings = [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]);
+assert.deepEqual(headings, ["Product", "Sales", "Returns", "NBV Sales", "Credit notes", "Net sales"]);
+assert.ok(html.includes("₹375.13") && html.includes("-₹231.75") && html.includes("-₹37.50"));
+assert.match(html, /aria-label="NBV Sales Total"[^>]*>₹105\.88/);
+assert.match(html, /text-destructive[^>]*>-₹231\.75/);
 for (const text of [
   "Sales",
   "Returns",
@@ -143,6 +149,7 @@ assert.ok(
   "loading never hides negative rows or changes the net total",
 );
 assert.ok(waiting.includes("—"));
+assert.ok(waiting.includes("₹375.13") && waiting.includes("₹105.88"), "NBV remains available while bill details load");
 const held = render({
   data: {
     bills,
@@ -152,6 +159,18 @@ const held = render({
 });
 assert.ok(held.includes("do not reconcile") && held.includes("-₹252"));
 assert.ok(!held.includes("₹1,000"));
+assert.ok(held.includes("₹375.13") && held.includes("₹105.88"), "held bill breakdowns retain existing NBV figures");
+const empty = render({ dealer: { ...dealer, actualAmount: 0, actualNbv: 0, products: [] }, data: undefined });
+assert.match(empty, /colSpan="6"|colspan="6"/);
+const nbvOnly = render({
+  dealer: {
+    ...dealer, actualAmount: 0, actualNbv: 12.34,
+    products: [{ ...dealer.products[0], productName: "NBV balance", actualAmount: 0, actualQty: 0, actualNbv: 12.34 }],
+  },
+  data: undefined,
+});
+assert.ok(nbvOnly.includes("NBV balance") && nbvOnly.includes("₹12.34"), "a non-zero existing NBV remains visible even when product net is zero");
+assert.equal(JSON.stringify(dealer), dealerBeforeRender, "displaying NBV cannot change source figures");
 console.log(
   "Sales / Returns / Credit notes split: signed source movements, zero-quantity and zero-net credits, status/category/held guards, exact reconciliation, preserved original net and unavailable-history rendering: PASS",
 );

@@ -22,6 +22,7 @@ const money = (value: number) =>
   });
 const qty = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 });
 const measures = ["sales", "returns", "creditNotes"] as const;
+const columns = ["sales", "returns", "nbv", "creditNotes"] as const;
 function Measure({ value }: { value: SalesMeasure | null }) {
   if (!value) return <span className="text-muted-foreground">—</span>;
   return (
@@ -63,6 +64,7 @@ export function DealerProductSalesTable({
       productId: product.productId,
       productName: product.productName,
       net,
+      actualNbv: product.actualNbv,
       split: source?.reconciled && sameSalesMeasure(source.net, net) ? source : null,
     };
   });
@@ -79,6 +81,7 @@ export function DealerProductSalesTable({
           productId: source.productId,
           productName: source.productName,
           net: source.net,
+          actualNbv: 0,
           split: source,
         });
     }
@@ -87,6 +90,7 @@ export function DealerProductSalesTable({
       (row) =>
         row.net.quantity !== 0 ||
         row.net.amount !== 0 ||
+        row.actualNbv !== 0 ||
         (row.split &&
           measures.some((key) => row.split![key].quantity !== 0 || row.split![key].amount !== 0)),
     )
@@ -148,18 +152,20 @@ export function DealerProductSalesTable({
               Uploaded sales without bill details, changed product matches and months awaiting
               review may have no reliable split. The original net amount remains shown.
             </p>
+            <p>NBV Sales shows the existing actual NBV of net product sales for this selection.</p>
             {!!data?.heldMonths.length && (
               <p>Months awaiting review: {data.heldMonths.join(", ")}.</p>
             )}
           </div>
         </details>
       </div>
-      <Table aria-label="Product sales, returns and credit notes" className="min-w-[42rem]">
+      <Table aria-label="Product sales, returns and credit notes" className="min-w-[50rem]">
         <TableHeader>
           <TableRow>
             <TableHead>Product</TableHead>
             <TableHead className="text-right">Sales</TableHead>
             <TableHead className="text-right">Returns</TableHead>
+            <TableHead className="text-right">NBV Sales</TableHead>
             <TableHead className="text-right">Credit notes</TableHead>
             <TableHead className="text-right">Net sales</TableHead>
           </TableRow>
@@ -168,9 +174,20 @@ export function DealerProductSalesTable({
           {visible.map((row) => (
             <TableRow key={row.productId}>
               <TableCell>{row.productName}</TableCell>
-              {measures.map((key) => (
-                <TableCell key={key} className="text-right">
-                  <Measure value={row.split?.[key] ?? null} />
+              {columns.map((key) => (
+                <TableCell
+                  key={key}
+                  className={cn(
+                    "text-right",
+                    key === "nbv" && "whitespace-nowrap tabular-nums",
+                    key === "nbv" && row.actualNbv < 0 && "text-destructive",
+                  )}
+                >
+                  {key === "nbv" ? (
+                    money(row.actualNbv)
+                  ) : (
+                    <Measure value={row.split?.[key] ?? null} />
+                  )}
                 </TableCell>
               ))}
               <TableCell className="text-right">
@@ -180,7 +197,7 @@ export function DealerProductSalesTable({
           ))}
           {!visible.length && (
             <TableRow>
-              <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+              <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
                 No product sales for this selection.
               </TableCell>
             </TableRow>
@@ -189,11 +206,20 @@ export function DealerProductSalesTable({
         <tfoot>
           <TableRow className="bg-muted/40 font-semibold">
             <TableCell>Total</TableCell>
-            {measures.map((key) => (
-              <TableCell key={key} className="whitespace-nowrap text-right tabular-nums">
-                {complete
-                  ? money(sumSalesMeasures(visible.map((row) => row.split![key])).amount)
-                  : "—"}
+            {columns.map((key) => (
+              <TableCell
+                key={key}
+                className={cn(
+                  "whitespace-nowrap text-right tabular-nums",
+                  key === "nbv" && dealer.actualNbv < 0 && "text-destructive",
+                )}
+                aria-label={key === "nbv" ? "NBV Sales Total" : undefined}
+              >
+                {key === "nbv"
+                  ? money(dealer.actualNbv)
+                  : complete
+                    ? money(sumSalesMeasures(visible.map((row) => row.split![key])).amount)
+                    : "—"}
               </TableCell>
             ))}
             <TableCell

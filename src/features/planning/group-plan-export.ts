@@ -3,6 +3,8 @@ import { achievement } from "@/lib/calc";
 import type { DealerFinancialRow } from "./dealer-financial-summary-table";
 import type { GroupProductRow } from "./group-plan.server";
 import type { ProductCreditSummary } from "./product-credit-summary";
+import { proportionalCreditTotals, type DealerCreditAdjustment } from "./dealer-credit-adjustments";
+import { sumSalesMeasures } from "./dealer-sales-breakdown";
 
 type Format = "quantity" | "currency" | "percent";
 interface PlanColumn<Row> {
@@ -62,7 +64,13 @@ export const dealerPlanColumns: (PlanColumn<DealerFigures> & { available?: (row:
   { key: "nbvAchievement", label: "NBV Achv %", format: "percent", value: (r) => achievement(r.actualNbv, r.planNbv), available: (r) => r.actualNbvAvailable !== false },
 ];
 
-export function dealerFinancialTotals(rows: readonly DealerFinancialRow[]) {
+type DealerTotalRow = DealerFinancialRow & {
+  salesBeforeCredits?: number;
+  nbvBeforeCredits?: number;
+  creditAdjustment?: DealerCreditAdjustment;
+};
+
+export function dealerFinancialTotals(rows: readonly DealerTotalRow[]) {
   const totals: DealerFigures = rows.reduce(
     (total, row) => ({
       planAmount: total.planAmount + row.planAmount,
@@ -74,6 +82,23 @@ export function dealerFinancialTotals(rows: readonly DealerFinancialRow[]) {
   );
   if (rows.some((row) => row.actualSalesAvailable === false)) totals.actualSalesAvailable = false;
   if (rows.some((row) => row.actualNbvAvailable === false)) totals.actualNbvAvailable = false;
+  // The total has its own sales/NBV base, including credits from zero-sales dealers.
+  // Individual dealer rows continue to use each dealer's own proportion.
+  if (rows.length && rows.every((row) => row.creditAdjustment && row.salesBeforeCredits !== undefined && row.nbvBeforeCredits !== undefined)) {
+    const sum = (values: number[]) => sumSalesMeasures(values.map((value) => ({ quantity: 0, amount: value }))).amount;
+    const creditAmount = rows.some((row) => row.creditAdjustment!.creditAmount === null)
+      ? null
+      : sum(rows.map((row) => row.creditAdjustment!.creditAmount!));
+    const adjustment = proportionalCreditTotals(
+      rows.reduce((total, row) => total + row.salesBeforeCredits!, 0),
+      rows.reduce((total, row) => total + row.nbvBeforeCredits!, 0),
+      creditAmount,
+    );
+    totals.actualSalesAvailable = adjustment.netSales !== null;
+    totals.actualNbvAvailable = adjustment.netNbv !== null;
+    if (adjustment.netSales !== null) totals.actualAmount = adjustment.netSales;
+    if (adjustment.netNbv !== null) totals.actualNbv = adjustment.netNbv;
+  }
   return totals;
 }
 

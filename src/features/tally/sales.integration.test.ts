@@ -20,6 +20,7 @@ import { salesMonths } from "./sales-range";
 import { figuresForMode, nbv, isQuantityMode } from "@/lib/calc";
 import { summarizeTerritoryDealers } from "@/features/planning/group-dealer-summary";
 import { productCreditSummary } from "@/features/planning/product-credit-summary";
+import { dealerFinancialTotals } from "@/features/planning/group-plan-export";
 const url = process.env.TALLY_DISPOSABLE_TEST_URL;
 if (
   !url ||
@@ -1191,7 +1192,12 @@ async function main() {
     assert.equal(productReport.dealerCredits!.find((row) => row.dealerId === "a")!.notes[0].amount, -12);
     const productCredit = productCreditSummary(productReport.products.reduce((sum, row) => sum + row.actual.amount, 0), productReport.products.reduce((sum, row) => sum + row.actual.nbv, 0), productReport.creditDealerProducts!, productReport.dealerCredits!, "", []);
     assert.equal(productCredit.creditAmount, -12);
-    assert.equal(productCredit.nbvAdjustment, -6);
+    const territoryCreditTotals = dealerFinancialTotals(summarizeTerritoryDealers(scopedCreditReport.dealerProducts!, "", [], scopedCreditReport.dealerCredits));
+    assert.equal(productCredit.netNbv, territoryCreditTotals.actualNbv, "Product and Territory totals use the same total-level NBV proportion");
+    assert.equal(territoryCreditTotals.actualNbvAvailable, true);
+    const totalBaseSales = productReport.products.reduce((sum, row) => sum + row.actual.amount, 0);
+    const totalBaseNbv = productReport.products.reduce((sum, row) => sum + row.actual.nbv, 0);
+    assert.equal(productCredit.nbvAdjustment, Math.round((-12 * totalBaseNbv / totalBaseSales) * 100) / 100);
     assert.equal(productCredit.netSales, productReport.products.reduce((sum, row) => sum + row.actual.amount, 0) - 12);
     const creditFixture = await prisma.tallySalesVoucher.findUniqueOrThrow({ where: { id: creditRecord.notes[0].id } });
     for (const [index, flag] of ["cancelled", "optional"].entries()) {

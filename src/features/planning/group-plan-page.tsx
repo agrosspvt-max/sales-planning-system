@@ -361,11 +361,11 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
         {exportError && <p role="alert" className="w-full text-sm text-destructive">{exportError}</p>}
       </div>
 
-      {!dealerView && productCredits && <p className="text-xs text-muted-foreground">Product rows retain their figures. Credit Notes and Net Sales below show the dealer-level financial adjustment.{productCredits.reason && ` ${productCredits.reason}`}</p>}
+      {!dealerView && productCredits && <p className="text-xs text-muted-foreground">Product rows retain their figures. Net Sales NBV uses the NBV proportion of the original totals after credit-note deductions.{productCredits.reason && ` ${productCredits.reason}`}</p>}
       {dealerView && data.dealerCredits && (
         <p className="text-xs text-muted-foreground">
           {categoryFilter ? "Category views show product figures. Select All Categories to include credit notes without products."
-            : "Actual Sales includes additional credit notes. Actual NBV uses the same dealer-level proportional adjustment."}
+            : "Actual Sales includes additional credit notes. Dealer NBV uses each dealer's proportion; Total NBV uses the proportion of total sales and NBV before these credits."}
           {dealers.some((dealer) => dealer.actualSalesAvailable === false || dealer.actualNbvAvailable === false)
             && " A dash marks an unavailable net figure; open the dealer details for the reason."}
         </p>

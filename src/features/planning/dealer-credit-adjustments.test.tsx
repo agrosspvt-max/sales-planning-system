@@ -93,6 +93,15 @@ assert.equal(creditOnly.actualNbvAvailable, false);
 const [unknown] = summarizeTerritoryDealers([product], "", [], [{ ...record, unavailable: true }]);
 assert.equal(unknown.actualSalesAvailable, false);
 assert.equal(dealerFinancialTotals([dealer, unknown]).actualSalesAvailable, false);
+const totalWithCreditOnly = dealerFinancialTotals([dealer, creditOnly]);
+assert.equal(totalWithCreditOnly.actualAmount, 80);
+assert.equal(totalWithCreditOnly.actualNbv, 12);
+assert.equal(totalWithCreditOnly.actualNbvAvailable, true);
+assert.equal(dealerPlanColumns.find((c) => c.key === "nbvAchievement")!.value(totalWithCreditOnly), 0.4);
+assert.equal(dealerFinancialTotals([creditOnly]).actualNbvAvailable, false);
+assert.equal(dealerFinancialTotals([dealer, unknown]).actualNbvAvailable, false);
+assert.equal(dealerFinancialTotals([category]).actualNbv, 15);
+assert.equal(dealerFinancialTotals([{ ...product, actualNbv: 15.123456 }]).actualNbv, 15.123456);
 const workbook = (rows: (typeof dealer)[]) =>
   buildGroupPlanWorkbook(XLSX, {
     view: "dealer",
@@ -111,6 +120,18 @@ const exported = cells.find((row) => row[0] === "Dealer" && row[1] === 200)!;
 assert.equal(exported[3], 90);
 assert.equal(exported[4], 13.5);
 assert.equal(exported[5], 0.45);
+const totalCells = XLSX.utils.sheet_to_json<unknown[]>(workbook([dealer, creditOnly]).Sheets["Territory Plan"], { header: 1 });
+const exportedTotal = totalCells.find((row) => row[0] === "Total")!;
+assert.deepEqual(exportedTotal.slice(1), [200, 30, 80, 12, 0.4, 0.4]);
+const tableLoad = testLoader({
+  "@/features/dealers/dealer-name-ui": { DealerName: ({ name }: { name: string }) => <span>{name}</span> },
+  "@/features/dealers/dealer-table-ui": { DealerTableBody: ({ children }: { children: React.ReactNode }) => <tbody>{children}</tbody> },
+});
+const { DealerFinancialSummaryTable } = tableLoad<typeof import("./dealer-financial-summary-table")>("src/features/planning/dealer-financial-summary-table.tsx");
+const tableHtml = renderToStaticMarkup(<DealerFinancialSummaryTable rows={[dealer, creditOnly]} />);
+const footer = tableHtml.match(/<tfoot>(.*?)<\/tfoot>/)![1];
+assert.ok(footer.includes("₹12") && footer.includes("40%"));
+assert.equal(footer.includes("—"), false, "a zero-sales dealer does not hide the valid total NBV");
 const unknownCells = XLSX.utils.sheet_to_json<unknown[]>(
   workbook([unknown]).Sheets["Territory Plan"],
   { header: 1 },

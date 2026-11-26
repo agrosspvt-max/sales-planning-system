@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 import { productCreditSummary } from "./product-credit-summary";
 import {
   buildGroupPlanWorkbook,
+  dealerFinancialTotals,
   getProductPlanColumns,
   productColumnTotals,
 } from "./group-plan-export";
@@ -54,9 +55,10 @@ const credits = products.map((product, i) => ({
 const original = JSON.stringify({ products, credits });
 const summary = productCreditSummary(200, 45, products, credits, "", []);
 assert.equal(summary.creditAmount, -30);
-assert.equal(summary.nbvAdjustment, -7.5, "sum dealer adjustments, not a new group-wide rate");
+assert.equal(summary.nbvAdjustment, -6.75, "total uses 45 / 200, independent of dealer rates");
 assert.equal(summary.netSales, 170);
-assert.equal(summary.netNbv, 37.5);
+assert.equal(summary.netNbv, 38.25);
+assert.equal(dealerFinancialTotals(summary.dealers).actualNbv, summary.netNbv);
 assert.equal(summary.dealers[0].actualAmount, 90);
 assert.equal(summary.dealers[1].actualNbv, 24);
 const category = productCreditSummary(100, 15, products, credits, "cat", [
@@ -86,7 +88,17 @@ const creditOnly = productCreditSummary(
   [],
 );
 assert.equal(creditOnly.netSales, 190);
-assert.equal(creditOnly.netNbv, null);
+assert.equal(creditOnly.netNbv, 42.75, "credit-only dealer uses the total base for the total NBV");
+assert.equal(creditOnly.dealers.find((dealer) => dealer.dealerId === "only")!.actualNbvAvailable, false);
+assert.equal(dealerFinancialTotals(creditOnly.dealers).actualNbv, creditOnly.netNbv);
+assert.equal(dealerFinancialTotals(creditOnly.dealers).actualNbvAvailable, true);
+const example = productCreditSummary(100, 15, [products[0]], [credits[0]], "", []);
+assert.equal(example.netNbv, 13.5);
+const noBase = productCreditSummary(0, 0, [], [credits[0]], "", []);
+assert.equal(noBase.netSales, -10);
+assert.equal(noBase.netNbv, null, "zero total sales still has no NBV rate");
+const negativeNet = productCreditSummary(100, 15, [products[0]], [{ ...credits[0], notes: [{ ...credits[0].notes[0], amount: -120 }] }], "", []);
+assert.equal(negativeNet.netNbv, -3, "do not clamp negative totals");
 const zero = productCreditSummary(200, 45, products, [], "", []);
 assert.equal(zero.netSales, 200);
 assert.equal(zero.netNbv, 45);
@@ -129,8 +141,8 @@ for (const showAmounts of [false, true]) {
     assert.ok(html.includes("bg-destructive/5") && html.includes("font-semibold"));
     assert.match(html, /aria-label="Credit Notes Amount"[^>]*>-₹30/);
     assert.match(html, /aria-label="Net Sales Amount"[^>]*>₹170/);
-    assert.match(html, /aria-label="Credit Notes NBV"[^>]*>-₹7\.50/);
-    assert.match(html, /aria-label="Net Sales NBV"[^>]*>₹37\.50/);
+    assert.match(html, /aria-label="Credit Notes NBV"[^>]*>-₹6\.75/);
+    assert.match(html, /aria-label="Net Sales NBV"[^>]*>₹38\.25/);
     const firstRow = html.match(/<tr\b[^>]*>(.*?)<\/tr>/)![1];
     assert.equal(firstRow.includes("₹"), expanded, "original totals are hidden until expanded");
   }
@@ -153,11 +165,11 @@ for (const showAmounts of [false, true]) {
   columns.forEach((column, i) => {
     assert.equal(
       credit[i + 1],
-      column.key === "actualAmount" ? -30 : column.key === "actualNbv" ? -7.5 : "",
+      column.key === "actualAmount" ? -30 : column.key === "actualNbv" ? -6.75 : "",
     );
     assert.equal(
       net[i + 1],
-      column.key === "actualAmount" ? 170 : column.key === "actualNbv" ? 37.5 : "",
+      column.key === "actualAmount" ? 170 : column.key === "actualNbv" ? 38.25 : "",
     );
   });
   const sheet = workbook.Sheets["Product Plan"];
@@ -200,5 +212,5 @@ for (const selected of [null, "a"]) {
   else assert.ok(html.includes("guid0") && html.includes("15%") && html.includes("All dealers"));
 }
 console.log(
-  "Product Plan credits: per-dealer net/NBV, immutable product rows, category/unknown/zero guards, collapsed original totals, styled two-value footer, dealer-to-bill drawer and Excel parity: PASS",
+  "Product Plan credits: total proportional NBV, credit-only dealer totals, preserved dealer calculations, category/unknown/zero guards, collapsed footer, drawer and Excel parity: PASS",
 );

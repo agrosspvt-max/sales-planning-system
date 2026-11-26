@@ -34,6 +34,27 @@ function roundedRatio(numerator: bigint, denominator: bigint) {
   return negative ? -rounded : rounded;
 }
 
+/** Preserve the NBV proportion of this sales base, using signed paise throughout. */
+export function proportionalCreditTotals(
+  salesBeforeCredits: number,
+  nbvBeforeCredits: number,
+  creditAmount: number | null,
+) {
+  if (creditAmount === null)
+    return { nbvAdjustment: null, netSales: null, netNbv: null };
+  if (creditAmount === 0)
+    return { nbvAdjustment: 0, netSales: salesBeforeCredits, netNbv: nbvBeforeCredits };
+  const sales = cents(salesBeforeCredits);
+  const nbv = cents(nbvBeforeCredits);
+  const credit = cents(creditAmount);
+  const reduction = sales === 0n ? null : roundedRatio(credit * nbv, sales);
+  return {
+    nbvAdjustment: reduction === null ? null : amount(reduction),
+    netSales: amount(sales + credit),
+    netNbv: reduction === null ? null : amount(nbv + reduction),
+  };
+}
+
 /** Original signed party-ledger total. No assumed tax rate or absolute-value conversion. */
 export function recordedCreditAmount(partyName: string, raw: unknown): number | null {
   if (!partyName.trim() || !Array.isArray(raw)) return null;
@@ -86,16 +107,14 @@ export function dealerCreditAdjustment(
   const sales = cents(salesBeforeCredits),
     nbv = cents(nbvBeforeCredits);
   const credit = notes.reduce((sum, note) => sum + cents(note.amount!), 0n);
-  const reduction = credit === 0n ? 0n : sales === 0n ? null : roundedRatio(credit * nbv, sales);
+  const totals = proportionalCreditTotals(salesBeforeCredits, nbvBeforeCredits, amount(credit));
   return {
     notes,
     applied: true,
     creditAmount: amount(credit),
-    nbvAdjustment: reduction === null ? null : amount(reduction),
+    ...totals,
     effectiveNbvRate: sales === 0n ? null : Number(nbv) / Number(sales),
-    netSales: credit === 0n ? salesBeforeCredits : amount(sales + credit),
-    netNbv: credit === 0n ? nbvBeforeCredits : reduction === null ? null : amount(nbv + reduction),
-    ...(reduction === null
+    ...(totals.netNbv === null
       ? { reason: "NBV cannot be adjusted because sales before other credits are zero." }
       : {}),
   };

@@ -91,6 +91,10 @@ export function ProductCreditDrawer({
             in the product figures and are not deducted again. Recorded voucher totals include any
             recorded taxes.
           </p>
+          <p className="text-xs text-muted-foreground">
+            The total NBV adjustment uses the NBV proportion of the original sales totals.
+            Dealer adjustments below use each dealer&apos;s own proportion and may not sum to that total.
+          </p>
           {summary.reason && (
             <p className="rounded border p-3 text-sm text-muted-foreground">{summary.reason}</p>
           )}

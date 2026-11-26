@@ -1,4 +1,4 @@
-import type { DealerCreditRecord } from "./dealer-credit-adjustments";
+import { proportionalCreditTotals, type DealerCreditRecord } from "./dealer-credit-adjustments";
 import {
   summarizeTerritoryDealers,
   type DealerProductFinancialRow,
@@ -61,30 +61,18 @@ export function productCreditSummary(
         "Dealer credit details do not reconcile with these product totals. Refresh this view.",
     };
   const creditAmount = sum(dealers.map((dealer) => dealer.creditAdjustment?.creditAmount ?? null));
-  const nbvAdjustment = sum(
-    dealers.map((dealer) => dealer.creditAdjustment?.nbvAdjustment ?? null),
-  );
+  const totals = proportionalCreditTotals(beforeSales, beforeNbv, creditAmount);
   return {
     dealers,
     creditAmount,
-    nbvAdjustment,
+    ...totals,
     applied: true,
-    netSales:
-      creditAmount === null
-        ? null
-        : creditAmount === 0
-          ? beforeSales
-          : sum([beforeSales, creditAmount]),
-    netNbv:
-      nbvAdjustment === null
-        ? null
-        : nbvAdjustment === 0
-          ? beforeNbv
-          : sum([beforeNbv, nbvAdjustment]),
-    ...(creditAmount === null || nbvAdjustment === null
+    ...(creditAmount === null || totals.netNbv === null
       ? {
           reason:
-            "Some net figures are unavailable. Open Credit Notes to review dealer amounts or missing Sales history.",
+            creditAmount === null
+              ? "Complete credit-note amounts are unavailable. Open Credit Notes to review dealer amounts or missing Sales history."
+              : "Total NBV cannot be adjusted because total sales before these credits are zero.",
         }
       : {}),
   };

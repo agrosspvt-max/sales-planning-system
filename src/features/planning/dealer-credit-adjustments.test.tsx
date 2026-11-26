@@ -28,6 +28,27 @@ assert.equal(recordedCreditAmount("Dealer", [{ name: "Dealer", amount: "10.00" }
 assert.equal(recordedCreditAmount("Dealer", [{ name: "Dealer", amount: "-10.00" }]), 10);
 assert.equal(recordedCreditAmount("Dealer", []), null);
 assert.equal(recordedCreditAmount("Dealer", [{ name: "Dealer", amount: "?" }]), null);
+const taxableCredit = [
+  { name: "Dealer", amount: "60600.00" },
+  { name: "Discount", amount: "-51355.93" },
+  { name: "CGST", amount: "-4622.03" },
+  { name: "SGST", amount: "-4622.03" },
+  { name: "Round off", amount: "-0.01" },
+];
+const originalTaxableCredit = JSON.stringify(taxableCredit);
+assert.equal(recordedCreditAmount(" Dealer ", taxableCredit), -51355.94);
+assert.equal(recordedCreditAmount("Dealer", [
+  { name: "Dealer", amount: "118.00" }, { name: "Output I.G.S.T. @ 18%", amount: "-18.00" },
+]), -100);
+assert.equal(recordedCreditAmount("Dealer", [
+  { name: "Dealer", amount: "-118.00" }, { name: "UTGST", amount: "9.00" }, { name: "CGST", amount: "9.00" },
+]), 100, "keep original signs rather than absolute values");
+assert.equal(recordedCreditAmount("Dealer", [
+  { name: "Dealer", amount: "120.00" }, { name: "IGST", amount: "-18.00" }, { name: "GST Cess", amount: "-2.00" },
+]), -100);
+assert.equal(recordedCreditAmount("Dealer", [{ name: "CGST", amount: "-9.00" }]), null);
+assert.equal(recordedCreditAmount("Dealer", [{ name: "Dealer", amount: "118.00" }, { name: "CGST", amount: "?" }]), null);
+assert.equal(JSON.stringify(taxableCredit), originalTaxableCredit);
 const net = dealerCreditAdjustment(100, 15, record);
 assert.equal(net.netSales, 90);
 assert.equal(net.netNbv, 13.5);

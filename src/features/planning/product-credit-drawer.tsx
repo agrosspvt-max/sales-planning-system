@@ -88,8 +88,7 @@ export function ProductCreditDrawer({
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
           <p className="text-xs text-muted-foreground">
             Additional credit notes without product lines. Product-linked returns and credits remain
-            in the product figures and are not deducted again. Recorded voucher totals include any
-            recorded taxes.
+            in the product figures and are not deducted again. Credit deductions exclude recorded GST.
           </p>
           <p className="text-xs text-muted-foreground">
             The total NBV adjustment uses the NBV proportion of the original sales totals.
@@ -145,8 +144,14 @@ export function ProductCreditDrawer({
                     <dd>{note.type}</dd>
                     <dt className="text-muted-foreground">Month</dt>
                     <dd>{note.monthKey}</dd>
-                    <dt className="text-muted-foreground">Recorded amount</dt>
+                    <dt className="text-muted-foreground">Credit amount (excl. GST)</dt>
                     <dd>{money(note.amount)}</dd>
+                    {note.taxes?.map((tax, index) => <div key={index} className="contents">
+                      <dt className="text-muted-foreground">{tax.name}</dt><dd>{money(Number(tax.amount))}</dd>
+                    </div>)}
+                    {note.grossAmount !== undefined && <>
+                      <dt className="text-muted-foreground">Original bill total</dt><dd>{money(note.grossAmount)}</dd>
+                    </>}
                     <dt className="text-muted-foreground">Source reference</dt>
                     <dd className="break-all">{note.guid}</dd>
                   </dl>

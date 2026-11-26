@@ -1,4 +1,5 @@
 import type { DaybookProductVoucher } from "./daybook-products";
+import { recordedLedgerAmounts } from "@/lib/tally-ledger-amounts";
 
 export type DaybookBillHeader = {
   subtotal: string | null;
@@ -7,6 +8,7 @@ export type DaybookBillHeader = {
   hasProducts?: boolean;
   hasQuantity?: boolean | null;
   isSalesReturn?: boolean;
+  amountExcludingGst?: string | null;
 };
 export type DaybookBillHeaders = Record<string, DaybookBillHeader>;
 export type DaybookBillAmounts = {
@@ -14,6 +16,7 @@ export type DaybookBillAmounts = {
   taxes: { name: string; kind: string; amount: string }[];
   adjustments: string | null;
   total: string | null;
+  amountExcludingGst?: string | null;
 };
 
 const cents = (value: string) => {
@@ -30,32 +33,13 @@ export function sumDisplayAmounts(values: (string | null | undefined)[]) {
     : decimal(values.reduce<bigint>((sum, value) => sum + cents(value!), 0n));
 }
 
-function taxKind(name: string) {
-  for (const kind of ["CGST", "SGST", "IGST", "UTGST"])
-    if (new RegExp(`(^|[^a-z])${kind.split("").join("[\\s._-]*")}([^a-z]|$)`, "i").test(name))
-      return kind;
-  if (/\bcess\b/i.test(name)) return "Cess";
-  return null;
-}
-
 // Presentation only. Product and party amounts retain Sales/Credit Note signs.
 // Tax is identified from ledger names, never guessed from an effective rate.
 export function daybookBillAmounts(bill: DaybookProductVoucher): DaybookBillAmounts {
   const subtotal = bill.items.length
     ? sumDisplayAmounts(bill.items.map((item) => item.amount))
     : null;
-  const party = bill.partyName.trim().toLowerCase();
-  const partyLines = party
-    ? bill.ledgerEntries.filter((entry) => entry.name.trim().toLowerCase() === party)
-    : [];
-  const total = partyLines.length
-    ? decimal(-partyLines.reduce((sum, entry) => sum + cents(entry.amount), 0n))
-    : null;
-  const taxes = bill.ledgerEntries.flatMap((entry) => {
-    if (entry.name.trim().toLowerCase() === party) return [];
-    const kind = taxKind(entry.name);
-    return kind && cents(entry.amount) !== 0n ? [{ ...entry, kind }] : [];
-  });
+  const { total, taxes, excludingGst } = recordedLedgerAmounts(bill.partyName, bill.ledgerEntries);
   const adjustments =
     subtotal !== null && total !== null
       ? decimal(
@@ -64,7 +48,12 @@ export function daybookBillAmounts(bill: DaybookProductVoucher): DaybookBillAmou
             taxes.reduce((sum, entry) => sum + cents(entry.amount), 0n),
         )
       : null;
-  return { subtotal, taxes, adjustments, total };
+  return { subtotal, taxes, adjustments, total,
+    ...(bill.family === "Credit Note" && !bill.items.length ? { amountExcludingGst: excludingGst } : {}) };
+}
+
+export function daybookHeaderAmount(header?: DaybookBillHeader): string | null {
+  return header?.subtotal ?? header?.amountExcludingGst ?? null;
 }
 
 export function daybookBillHeaders(vouchers: DaybookProductVoucher[]): DaybookBillHeaders {
@@ -82,6 +71,7 @@ export function daybookBillHeaders(vouchers: DaybookProductVoucher[]): DaybookBi
               hasProducts: bill.items.length > 0,
               hasQuantity: billQuantityPresence(bill),
               isSalesReturn: /\bSALES[\s_-]*RETURN\b/i.test(bill.typeName),
+              ...(!bill.items.length ? { amountExcludingGst: recordedLedgerAmounts(bill.partyName, bill.ledgerEntries).excludingGst } : {}),
             }
           : {}),
       },

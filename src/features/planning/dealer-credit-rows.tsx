@@ -52,7 +52,7 @@ export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjus
           <TableCell colSpan={6} className="bg-muted/20 p-4">
             <p className="mb-2 text-xs text-muted-foreground">
               These credits have no product lines and have not been deducted in the product rows.
-              Recorded voucher totals, including any recorded taxes, are used once at dealer level.
+              Credit amounts excluding recorded GST are used once at dealer level.
               {adjustment.effectiveNbvRate !== null && (
                 <>
                   {" "}
@@ -72,7 +72,7 @@ export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjus
                 {adjustment.notes.map((note) => (
                   <div key={note.id} className="flex justify-between gap-4">
                     <dt>
-                      {note.number || "Unnumbered credit note"} · {note.date} · {note.type}
+                      {note.number || "Unnumbered credit note"} · {note.date} · {note.type} · excl. GST
                     </dt>
                     <dd className={cell(note.amount)}>{money(note.amount)}</dd>
                   </div>

@@ -1,7 +1,7 @@
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
 import type { DaybookCredit } from "./daybook-preview";
 import type { DaybookBillHeader, DaybookBillHeaders } from "./daybook-bill-amounts";
-import { sumDisplayAmounts } from "./daybook-bill-amounts";
+import { daybookHeaderAmount, sumDisplayAmounts } from "./daybook-bill-amounts";
 export type VoucherGroup = "Sales" | "Receipts" | "Returns & credit notes" | "Other";
 export const voucherGroupOrder: VoucherGroup[] = [
   "Sales",
@@ -72,7 +72,7 @@ export function dealerDisplayAmounts(dealer: DealerView, headers: DaybookBillHea
           : sumDisplayAmounts(
               vouchers.map((voucher) =>
                 productAmount
-                  ? (headers[voucher.guid.toLowerCase()]?.subtotal ?? null)
+                  ? daybookHeaderAmount(headers[voucher.guid.toLowerCase()])
                   : (voucher.amount ?? null),
               ),
             ),

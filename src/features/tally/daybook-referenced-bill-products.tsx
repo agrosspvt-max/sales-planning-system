@@ -36,6 +36,8 @@ export function DaybookBillProductResult({
         )}
       </div>
     );
+  const displaySubtotal = bill.amounts?.amountExcludingGst !== undefined
+    ? bill.amounts.amountExcludingGst : bill.amounts?.subtotal;
   return (
     <div className="space-y-2">
       {!compact && (
@@ -98,9 +100,9 @@ export function DaybookBillProductResult({
           aria-label="Bill amount breakdown"
         >
           <div className="flex justify-between gap-4">
-            <dt>Product amount (excl. GST)</dt>
+            <dt>{bill.amounts.amountExcludingGst !== undefined ? "Credit amount (excl. GST)" : "Product amount (excl. GST)"}</dt>
             <dd className="whitespace-nowrap tabular-nums">
-              {bill.amounts.subtotal === null ? "Not recorded" : money(bill.amounts.subtotal)}
+              {displaySubtotal == null ? "Not recorded" : money(displaySubtotal)}
             </dd>
           </div>
           {bill.amounts.taxes.map((tax, index) => (

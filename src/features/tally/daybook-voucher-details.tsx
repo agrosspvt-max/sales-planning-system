@@ -6,6 +6,7 @@ import { DaybookBillAllocationTable } from "./daybook-bill-allocation-table";
 import { DaybookLedgerLayoutDetails } from "./daybook-ledger-layout-details";
 import { DaybookOwnProducts } from "./daybook-referenced-bill-products";
 import type { DaybookBillHeader } from "./daybook-bill-amounts";
+import { daybookHeaderAmount } from "./daybook-bill-amounts";
 
 export function voucherLabel(voucher: DaybookExcludedVoucher) {
   return `${voucher.voucherType} · ${voucher.voucherNumber ? `No. ${voucher.voucherNumber}` : "Unnumbered voucher"}`;
@@ -48,6 +49,7 @@ export function DaybookVoucherDetails({
 }) {
   const evidence = voucher.details?.voucher;
   const [open, setOpen] = useState(false);
+  const preTaxAmount = daybookHeaderAmount(billHeader);
   const jobId = voucher.sourceJobId ?? sourceJobId;
   const isSale = billHeader
     ? billHeader.family === "Sales"
@@ -89,7 +91,7 @@ export function DaybookVoucherDetails({
               </span>
               {isProductBill ? (
                 <span className="font-medium tabular-nums">
-                  {billHeader?.subtotal != null ? sourceAmount(billHeader.subtotal) : "—"}{" "}
+                  {preTaxAmount !== null ? sourceAmount(preTaxAmount) : "—"}{" "}
                   <span className="text-xs font-normal text-muted-foreground">excl. GST</span>
                 </span>
               ) : (

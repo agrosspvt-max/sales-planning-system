@@ -230,6 +230,38 @@ assert.ok(summaries.includes("3,300.00"));
 assert.ok(summaries.includes("excl. GST"));
 assert.ok(!summaries.includes("3,465.00"), "both dealer and bill headers use the product subtotal");
 assert.ok(rendered.includes("3,465.00"), "original gross amount stays in the details");
+const financialCredit = {
+  ...returned,
+  typeName: "CREDIT NOTE-OTHER",
+  items: [],
+  ledgerEntries: [
+    { name: bill.partyName, amount: "60600.00" },
+    { name: "Scheme discount", amount: "-51355.93" },
+    { name: "CGST", amount: "-4622.03" },
+    { name: "SGST", amount: "-4622.03" },
+    { name: "Round off", amount: "-0.01" },
+  ],
+};
+const creditAmounts = daybookBillAmounts(financialCredit);
+assert.equal(creditAmounts.subtotal, null, "no fake product subtotal");
+assert.equal(creditAmounts.amountExcludingGst, "-51355.94");
+assert.equal(creditAmounts.total, "-60600.00");
+const creditHeaders = daybookBillHeaders([financialCredit]);
+assert.equal(creditHeaders[bill.guid].amountExcludingGst, "-51355.94");
+const creditVoucher = { ...voucher, voucherType: financialCredit.typeName, amount: "60600.00" };
+const creditView = dealerViews([row], [creditVoucher]);
+assert.deepEqual(dealerDisplayAmounts(creditView.dealers[0], creditHeaders), [
+  { label: "Returns & credit notes (excl. GST)", amount: "-51355.94" },
+]);
+const creditRendered = renderToStaticMarkup(<DaybookResultTables dealerRows={[row]} excludedVouchers={[creditVoucher]} billHeaders={creditHeaders} coverage="all_vouchers" />);
+const creditSummaries = [...creditRendered.matchAll(/<summary[^>]*>(.*?)<\/summary>/g)].map((match) => match[1]).join(" ");
+assert.ok(creditSummaries.includes("51,355.94"));
+assert.equal(creditSummaries.includes("60,600.00"), false);
+const creditDetails = renderToStaticMarkup(<DaybookBillProductResult result={{ status: "matched", source: "daybook", ownVoucher: true,
+  bill: { number: "CN", date: bill.billDate, type: financialCredit.typeName, partyName: bill.partyName, cancelled: false, optional: false,
+    amounts: creditAmounts, ledgerEntries: financialCredit.ledgerEntries, items: [] } }} />);
+assert.ok(creditDetails.includes("Credit amount (excl. GST)") && creditDetails.includes("51,355.94"));
+assert.ok(creditDetails.includes("60,600.00") && creditDetails.includes("4,622.03"), "original gross and tax entries remain visible");
 console.log(
   "Daybook pre-tax headers, source tax ledgers, signed returns, exact decimals, unavailable evidence, breakdown rendering and preserved original totals: PASS",
 );

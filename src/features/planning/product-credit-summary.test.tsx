@@ -49,6 +49,8 @@ const credits = products.map((product, i) => ({
       number: "CN" + i,
       type: "Credit Note",
       amount: i ? -20 : -10,
+      grossAmount: i ? -23.6 : -11.8,
+      taxes: [{ name: "IGST", kind: "IGST", amount: i ? "-3.60" : "-1.80" }],
     },
   ],
 }));
@@ -218,7 +220,11 @@ for (const selected of [null, "a"]) {
   );
   assert.equal(html.includes("CN1"), false, "another dealer's bill is not shown in dealer details");
   if (selected === null) assert.ok(html.includes("Dealer B"));
-  else assert.ok(html.includes("guid0") && html.includes("15%") && html.includes("All dealers"));
+  else {
+    assert.ok(html.includes("guid0") && html.includes("15%") && html.includes("All dealers"));
+    assert.ok(html.includes("Credit amount (excl. GST)") && html.includes("Original bill total"));
+    assert.ok(html.includes("11.80") && html.includes("1.80"), "gross and GST retained only in labelled original details");
+  }
 }
 console.log(
   "Product Plan credits: total proportional NBV, credit-only dealer totals, preserved dealer calculations, category/unknown/zero guards, collapsed footer, drawer and Excel parity: PASS",

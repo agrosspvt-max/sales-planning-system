@@ -16,7 +16,8 @@ import { compareSalesPlans, includesTerritorySale } from "./territory-sales";
 import { deriveTerritoryPlanMetrics } from "./group-plan-metrics";
 import type { DealerProductFinancialRow } from "./group-dealer-summary";
 import { salesPartyNames } from "@/features/tally/sales-party-names";
-import { recordedCreditAmount, type DealerCreditRecord } from "./dealer-credit-adjustments";
+import type { DealerCreditRecord } from "./dealer-credit-adjustments";
+import { recordedLedgerAmounts } from "@/lib/tally-ledger-amounts";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -773,10 +774,13 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         if (!dealerId || !included(dealerId, monthId)) continue;
         const record = recordFor(dealerId);
         if (!snapshot.actualDealerIds.includes(dealerId)) record.unavailable = true;
+        const amounts = recordedLedgerAmounts(note.partyName, note.ledgerEntries);
         record.notes.push({
           id: note.id, guid: note.guid, monthKey: snapshot.monthKey, date: note.billDate,
           number: note.billNumber, type: note.typeName,
-          amount: recordedCreditAmount(note.partyName, note.ledgerEntries),
+          amount: amounts.excludingGst === null ? null : Number(amounts.excludingGst),
+          grossAmount: amounts.total === null ? null : Number(amounts.total),
+          taxes: amounts.taxes,
         });
         const owner = ownership(dealerId)!;
         const bucket = monthlyBucket(dealerId, monthId);

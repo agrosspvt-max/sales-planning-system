@@ -1135,7 +1135,12 @@ async function main() {
           partyName: sourceBill.partyName,
           cancelled: false,
           optional: false,
-          ledgerEntries: row.qty === null ? [{ name: sourceBill.partyName, amount: "12.00" }] : [],
+          ledgerEntries: row.qty === null ? [
+            { name: sourceBill.partyName, amount: "14.16" },
+            { name: "Credit adjustment", amount: "-12.00" },
+            { name: "CGST", amount: "-1.08" },
+            { name: "SGST", amount: "-1.08" },
+          ] : [],
           ...(row.qty !== null
             ? {
                 items: {
@@ -1181,6 +1186,8 @@ async function main() {
     assert.equal(creditRecord.unavailable, false);
     assert.equal(creditRecord.notes.length, 1, "product-linked return and credit are not deducted again");
     assert.equal(creditRecord.notes[0].amount, -12);
+    assert.equal(creditRecord.notes[0].grossAmount, -14.16);
+    assert.deepEqual(creditRecord.notes[0].taxes?.map((tax) => tax.amount), ["-1.08", "-1.08"]);
     const adjustedDealer = summarizeTerritoryDealers(scopedCreditReport.dealerProducts ?? [], "", [], scopedCreditReport.dealerCredits).find((row) => row.dealerId === "a")!;
     assert.equal(adjustedDealer.salesBeforeCredits, Number(beforeSplitActual.amount.add(75)));
     assert.equal(adjustedDealer.actualAmount, Number(beforeSplitActual.amount.add(75)) - 12);

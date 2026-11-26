@@ -1,3 +1,4 @@
+import { recordedLedgerAmounts } from "@/lib/tally-ledger-amounts";
 /** Dealer-level credits that have no stock lines. Product-linked deductions stay in product actuals. */
 export interface DealerCreditNote {
   id: string;
@@ -7,6 +8,8 @@ export interface DealerCreditNote {
   number: string;
   type: string;
   amount: number | null;
+  grossAmount?: number | null;
+  taxes?: { name: string; kind: string; amount: string }[];
 }
 export interface DealerCreditRecord {
   dealerId: string;
@@ -55,23 +58,10 @@ export function proportionalCreditTotals(
   };
 }
 
-/** Original signed party-ledger total. No assumed tax rate or absolute-value conversion. */
+/** Signed credit excluding the recorded GST/cess. No assumed rate or absolute-value conversion. */
 export function recordedCreditAmount(partyName: string, raw: unknown): number | null {
-  if (!partyName.trim() || !Array.isArray(raw)) return null;
-  const party = partyName.trim().toLowerCase();
-  const lines: bigint[] = [];
-  for (const value of raw) {
-    if (!value || typeof value !== "object") return null;
-    const line = value as { name?: unknown; amount?: unknown };
-    if (
-      typeof line.name !== "string" ||
-      typeof line.amount !== "string" ||
-      !/^-?\d+\.\d{2}$/.test(line.amount)
-    )
-      return null;
-    if (line.name.trim().toLowerCase() === party) lines.push(BigInt(line.amount.replace(".", "")));
-  }
-  return lines.length ? amount(-lines.reduce((sum, line) => sum + line, 0n)) : null;
+  const value = recordedLedgerAmounts(partyName, raw).excludingGst;
+  return value === null ? null : Number(value);
 }
 
 export function dealerCreditAdjustment(

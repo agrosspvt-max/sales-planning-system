@@ -1267,6 +1267,15 @@ except d.DaybookRejected as e:
   assert.equal(taxBill.bill!.amounts!.taxes[0].kind, "CGST");
   assert.equal(taxBill.bill!.amounts!.taxes[1].kind, "SGST");
   assert.equal(taxBill.bill!.ledgerEntries![0].amount, "-152.51");
+  capturedBills = [{ ...firstBill, family: "Credit Note", typeName: "Credit Note", items: [],
+    ledgerEntries: [{ name: firstBill.partyName, amount: "60600.00" },
+      { name: "CGST", amount: "-4622.03" }, { name: "SGST", amount: "-4622.03" },
+      { name: "Scheme discount", amount: "-51355.94" }] }, secondBill];
+  await saveEvidence();
+  const financialCreditBill = await billLookup.getDaybookBillProducts(auth, { jobId: historicalJob.id, voucherGuid: firstBill.guid, view: "voucher" });
+  assert.equal(financialCreditBill.bill!.items.length, 0);
+  assert.equal(financialCreditBill.bill!.amounts!.amountExcludingGst, "-51355.94");
+  assert.equal(financialCreditBill.bill!.amounts!.total, "-60600.00");
   capturedBills = [firstBill, secondBill];
   await saveEvidence();
   // Mutating the independent Sales fixture must affect only the comparison, never displayed Daybook products.

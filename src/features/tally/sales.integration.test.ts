@@ -19,6 +19,7 @@ import * as sales from "./sales";
 import { salesMonths } from "./sales-range";
 import { figuresForMode, nbv, isQuantityMode } from "@/lib/calc";
 import { summarizeTerritoryDealers } from "@/features/planning/group-dealer-summary";
+import { productCreditSummary } from "@/features/planning/product-credit-summary";
 const url = process.env.TALLY_DISPOSABLE_TEST_URL;
 if (
   !url ||
@@ -1186,7 +1187,12 @@ async function main() {
     const wrongOfficer = await territory.getGroupProductPlan(actor, group.id, "sales-season", { ...netReportFilter, officerId: "territory-missing-seasonal" });
     assert.equal(wrongOfficer.dealerCredits?.some((row) => row.dealerId === "a"), false);
     const productReport = await territory.getGroupProductPlan(actor, group.id, "sales-season", { ...netReportFilter, groupBy: undefined });
-    assert.equal(productReport.dealerCredits, undefined, "Product Plan is not adjusted by dealer-level credits");
+    assert.equal(productReport.products.reduce((sum, row) => sum + row.actual.amount, 0), scopedCreditReport.dealerProducts!.reduce((sum, row) => sum + row.actualAmount, 0), "Product Plan product figures remain before dealer credits");
+    assert.equal(productReport.dealerCredits!.find((row) => row.dealerId === "a")!.notes[0].amount, -12);
+    const productCredit = productCreditSummary(productReport.products.reduce((sum, row) => sum + row.actual.amount, 0), productReport.products.reduce((sum, row) => sum + row.actual.nbv, 0), productReport.creditDealerProducts!, productReport.dealerCredits!, "", []);
+    assert.equal(productCredit.creditAmount, -12);
+    assert.equal(productCredit.nbvAdjustment, -6);
+    assert.equal(productCredit.netSales, productReport.products.reduce((sum, row) => sum + row.actual.amount, 0) - 12);
     const creditFixture = await prisma.tallySalesVoucher.findUniqueOrThrow({ where: { id: creditRecord.notes[0].id } });
     for (const [index, flag] of ["cancelled", "optional"].entries()) {
       const ignored = await prisma.tallySalesVoucher.create({ data: {

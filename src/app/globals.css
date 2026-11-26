@@ -129,6 +129,15 @@
  * sticky header as well, so both can be enabled together without the corner cell dropping behind.
  */
 @layer components {
+  .sticky-first-col tr[data-financial-adjustment="credit-notes"] > td:first-child {
+    background-color: color-mix(in srgb, hsl(var(--destructive)) 5%, hsl(var(--background)));
+  }
+  .sticky-first-col tr[data-financial-adjustment="credit-notes"]:hover > td:first-child {
+    background-color: color-mix(in srgb, hsl(var(--destructive)) 10%, hsl(var(--background)));
+  }
+  .sticky-first-col tr[data-financial-adjustment="net-sales"] > td:first-child {
+    background-color: color-mix(in srgb, hsl(var(--primary)) 10%, hsl(var(--background)));
+  }
   .sticky-first-col th:first-child,
   .sticky-first-col td:first-child {
     position: sticky;

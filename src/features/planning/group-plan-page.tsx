@@ -25,6 +25,9 @@ import { DealerSalesDrawer } from "./dealer-sales-drawer";
 import { DealerFinancialSummaryTable } from "./dealer-financial-summary-table";
 import { summarizeTerritoryDealers, type DealerProductFinancialRow } from "./group-dealer-summary";
 import type { DealerCreditRecord } from "./dealer-credit-adjustments";
+import { productCreditSummary } from "./product-credit-summary";
+import { ProductCreditFooter } from "./product-credit-footer";
+import { ProductCreditDrawer } from "./product-credit-drawer";
 
 /* ------------------------------- Shared types ----------------------------- */
 
@@ -78,6 +81,7 @@ interface GroupProductPlan {
   products: GroupProductRow[];
   dealerProducts?: DealerProductFinancialRow[];
   dealerCredits?: DealerCreditRecord[];
+  creditDealerProducts?: DealerProductFinancialRow[];
 }
 
 type Tab = "territory" | "product" | "recovery";
@@ -174,7 +178,10 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
   const [drawerProductId, setDrawerProductId] = useState<string | null>(null);
   const [drawerDealerId, setDrawerDealerId] = useState<string | null>(null);
   const dealerTrigger = useRef<HTMLButtonElement>(null);
+  const creditTrigger = useRef<HTMLButtonElement>(null);
+  const [creditDrawerOpen, setCreditDrawerOpen] = useState(false);
   useEffect(() => {
+    setCreditDrawerOpen(false);
     if (dealerView) setDrawerProductId(null);
     else setDrawerDealerId(null);
   }, [dealerView]);
@@ -214,8 +221,14 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
   const endMonth = months.find((month) => month.id === monthB)?.id ?? months.at(-1)?.id;
   const visibleProducts = data?.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)) ?? [];
   const drawerProduct = visibleProducts.find((r) => r.productId === drawerProductId);
-  const dealers = useMemo(() => summarizeTerritoryDealers(data?.dealerProducts ?? [], categoryFilter, categories, data?.dealerCredits),
-    [data?.dealerProducts, data?.dealerCredits, categoryFilter, categories]);
+  const dealers = useMemo(() => dealerView ? summarizeTerritoryDealers(data?.dealerProducts ?? [], categoryFilter, categories, data?.dealerCredits) : [],
+    [dealerView, data?.dealerProducts, data?.dealerCredits, categoryFilter, categories]);
+  const productCredits = !dealerView && data?.creditDealerProducts && data.dealerCredits
+    ? productCreditSummary(visibleProducts.reduce((sum, row) => sum + row.actual.amount, 0),
+        visibleProducts.reduce((sum, row) => sum + row.actual.nbv, 0),
+        data.creditDealerProducts, data.dealerCredits, categoryFilter, categories)
+    : undefined;
+  const hasCreditOnlyData = productCredits?.dealers.some((dealer) => dealer.creditAdjustment?.notes.length || dealer.actualSalesAvailable === false);
   const drawerDealer = dealers.find((dealer) => dealer.dealerId === drawerDealerId);
 
   const toggleBucket = (b: StatusBucket) =>
@@ -268,7 +281,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
           .map((row) => ({ ...row, name: dealerName(row.dealerId, row.name) }));
         await downloadGroupPlan({ ...context, view: "dealer", rows });
       } else {
-        await downloadGroupPlan({ ...context, view: "product", rows: visibleProducts, showAmounts, baseline: baselineLabel });
+        await downloadGroupPlan({ ...context, view: "product", rows: visibleProducts, showAmounts, baseline: baselineLabel, creditSummary: productCredits });
       }
     } catch {
       setExportError("Couldn’t export the plan. Try again.");
@@ -340,7 +353,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
           variant="outline"
           className="ml-auto"
           onClick={() => void exportPlan()}
-          disabled={exporting || isPlaceholderData || (dealerView ? dealers.length === 0 : visibleProducts.length === 0)}
+          disabled={exporting || isPlaceholderData || (dealerView ? dealers.length === 0 : visibleProducts.length === 0 && !hasCreditOnlyData)}
         >
           <Download className="h-4 w-4" aria-hidden="true" />
           {exporting ? "Exporting…" : "Export Excel"}
@@ -348,6 +361,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
         {exportError && <p role="alert" className="w-full text-sm text-destructive">{exportError}</p>}
       </div>
 
+      {!dealerView && productCredits && <p className="text-xs text-muted-foreground">Product rows retain their figures. Credit Notes and Net Sales below show the dealer-level financial adjustment.{productCredits.reason && ` ${productCredits.reason}`}</p>}
       {dealerView && data.dealerCredits && (
         <p className="text-xs text-muted-foreground">
           {categoryFilter ? "Category views show product figures. Select All Categories to include credit notes without products."
@@ -367,7 +381,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
             setDrawerDealerId(dealerId);
           }}
         />
-      ) : visibleProducts.length === 0 ? (
+      ) : visibleProducts.length === 0 && !hasCreditOnlyData ? (
         <div className="rounded-lg border bg-background p-10 text-center text-sm text-muted-foreground">No sales or plan data for this selection.</div>
       ) : (
         <div className="overflow-auto rounded-lg border bg-background">
@@ -411,24 +425,17 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
                 </TableRow>
               ))}
             </TableBody>
-            <tfoot>
-              <TableRow className="bg-muted/40 font-semibold">
-                <TableCell>Total</TableCell>
-                {productColumns.map((column, index) => {
-                  const value = totals[index];
-                  return (
-                    <TableCell key={column.key} className={cn("text-right tabular-nums", column.sectionStart && "border-l",
-                      column.comparison && isNegativeTerritoryPlanMetric(value) && "text-destructive")}>
-                      {column.format === "currency" ? formatCurrency(value) : qtyFmt(value)}
-                    </TableCell>
-                  );
-                })}
-              </TableRow>
-            </tfoot>
+            <ProductCreditFooter columns={productColumns} totals={totals} summary={productCredits}
+              onOpenCredits={(trigger) => { creditTrigger.current = trigger; setDrawerProductId(null); setCreditDrawerOpen(true); }} />
           </Table>
         </div>
       )}
 
+      {!dealerView && !isPlaceholderData && creditDrawerOpen && productCredits && (
+        <ProductCreditDrawer key={params.toString() + categoryFilter} summary={productCredits}
+          periodLabel={`${selectedPeriodLabel} · ${data.seasonName} · ${officerLabel} · ${plansLabel} · ${categoryFilter ? categories.find((category) => category.id === categoryFilter)?.name ?? "Uncategorized" : "All Categories"}`}
+          onClose={() => setCreditDrawerOpen(false)} trigger={creditTrigger.current} />
+      )}
       {dealerView && !isPlaceholderData && drawerDealer && (
         <DealerSalesDrawer
           key={drawerDealer.dealerId}

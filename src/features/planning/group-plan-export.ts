@@ -2,6 +2,7 @@ import type * as XLSX from "xlsx";
 import { achievement } from "@/lib/calc";
 import type { DealerFinancialRow } from "./dealer-financial-summary-table";
 import type { GroupProductRow } from "./group-plan.server";
+import type { ProductCreditSummary } from "./product-credit-summary";
 
 type Format = "quantity" | "currency" | "percent";
 interface PlanColumn<Row> {
@@ -93,7 +94,7 @@ interface ExportContext {
 
 type PlanExport = ExportContext & (
   | { view: "dealer"; rows: DealerFinancialRow[] }
-  | { view: "product"; rows: (ProductFigures & { productName: string })[]; showAmounts: boolean; baseline: string }
+  | { view: "product"; rows: (ProductFigures & { productName: string })[]; showAmounts: boolean; baseline: string; creditSummary?: ProductCreditSummary }
 );
 
 export function buildGroupPlanWorkbook(xlsx: typeof XLSX, options: PlanExport) {
@@ -113,9 +114,10 @@ export function buildGroupPlanWorkbook(xlsx: typeof XLSX, options: PlanExport) {
     columns: readonly { label: string; format: Format }[],
     rows: (string | number)[][],
     totals: (number | string)[],
+    financialRows: { label: string; values: (number | string)[] }[] = [],
   ) {
     const headerIndex = context.length + 1;
-    const cells = [...context, [], [firstColumn, ...columns.map((column) => column.label)], ...rows, ["Total", ...totals]];
+    const cells = [...context, [], [firstColumn, ...columns.map((column) => column.label)], ...rows, ["Total", ...totals], ...financialRows.map((row) => [row.label, ...row.values])];
     const sheet = xlsx.utils.aoa_to_sheet(cells);
     for (let rowIndex = headerIndex + 1; rowIndex < cells.length; rowIndex++) {
       columns.forEach((column, index) => {
@@ -145,9 +147,14 @@ export function buildGroupPlanWorkbook(xlsx: typeof XLSX, options: PlanExport) {
   }
 
   const columns = getProductPlanColumns(options.showAmounts);
+  const summary = options.creditSummary;
+  const financialRows = summary ? [
+    { label: "Credit Notes", sales: summary.applied ? summary.creditAmount : null, nbv: summary.applied ? summary.nbvAdjustment : null },
+    { label: "Net Sales", sales: summary.netSales, nbv: summary.netNbv },
+  ].map((row) => ({ label: row.label, values: columns.map((column) => column.key === "actualAmount" ? row.sales ?? "—" : column.key === "actualNbv" ? row.nbv ?? "—" : "") })) : [];
   return writeWorkbook(columns,
     options.rows.map((row) => [row.productName, ...columns.map((column) => column.value(row))]),
-    productColumnTotals(options.rows, columns));
+    productColumnTotals(options.rows, columns), financialRows);
 }
 
 export async function downloadGroupPlan(options: PlanExport) {

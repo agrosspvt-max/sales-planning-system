@@ -156,6 +156,7 @@ export interface GroupProductPlan {
   products: GroupProductRow[];
   dealerProducts?: DealerProductFinancialRow[];
   dealerCredits?: DealerCreditRecord[];
+  creditDealerProducts?: DealerProductFinancialRow[];
   dealerBillScope?: { snapshotId: string; monthKey: string }[];
   dealerBillHistoryIncomplete?: boolean;
 }
@@ -644,12 +645,12 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         drawer.periodSales.qty += qty;
         drawer.periodSales.amount += amount;
         drawer.periodSales.nbv += nbv;
-        if (dealerView) {
+        {
           const financials = dealerFinancials(dealer, row);
           financials.actualQty += qty;
           financials.actualAmount += amount;
           financials.actualNbv += nbv;
-          if (drawerBucket && drawerBucket !== "unplanned")
+          if (dealerView && drawerBucket && drawerBucket !== "unplanned")
             officersByBucket[drawerBucket].add(officerId);
         }
         if (includeUnplanned && bucket !== "approved") unplannedOfficers.add(officerId);
@@ -691,7 +692,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       }
     }
 
-    if (dealerView) {
+    {
       // Dealer-level financial notes have no stock lines and therefore cannot be
       // deducted again through product actuals. Read them once for this report,
       // using the same exact names, current owner and monthly approval policy.
@@ -779,7 +780,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         });
         const owner = ownership(dealerId)!;
         const bucket = monthlyBucket(dealerId, monthId);
-        if (bucket) officersByBucket[bucket].add(owner);
+        if (dealerView && bucket) officersByBucket[bucket].add(owner);
         if (includeUnplanned && bucket !== "approved") unplannedOfficers.add(owner);
       }
       // Publication replaces a snapshot atomically. If it changed between the
@@ -858,15 +859,19 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     for (const d of row.drawer) drawerDealerIds.add(d.dealerId);
     for (const c of row.contributions) drawerDealerIds.add(c.dealerId);
   }
+  for (const record of dealerCredits ?? []) drawerDealerIds.add(record.dealerId);
   const drawerAliasNames = await loadDealerAliasNameMap([...drawerDealerIds]);
   if (drawerAliasNames.size > 0) {
     for (const row of productRows.values()) {
       for (const d of row.drawer) { const a = drawerAliasNames.get(d.dealerId); if (a) d.dealerName = a; }
       for (const c of row.contributions) { const a = drawerAliasNames.get(c.dealerId); if (a) c.dealerName = a; }
     }
+    for (const record of dealerCredits ?? []) record.name = drawerAliasNames.get(record.dealerId) ?? record.name;
+    for (const row of dealerProducts.values()) row.name = drawerAliasNames.get(row.dealerId) ?? row.name;
   }
 
   // Season-stable ordering so products don't disappear/reorder when only the period selection changes.
   const products = [...productRows.values()].sort((a, b) => b.seasonQty - a.seasonQty || b.total.amount - a.total.amount);
-  return { ...base, officers: officerBreakdown, products };
+  return { ...base, officers: officerBreakdown, products,
+    ...(dealerCredits ? { dealerCredits, creditDealerProducts: [...dealerProducts.values()] } : {}) };
 }

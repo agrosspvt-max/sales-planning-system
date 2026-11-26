@@ -143,6 +143,15 @@ for (const showAmounts of [false, true]) {
     assert.match(html, /aria-label="Net Sales Amount"[^>]*>₹170/);
     assert.match(html, /aria-label="Credit Notes NBV"[^>]*>-₹6\.75/);
     assert.match(html, /aria-label="Net Sales NBV"[^>]*>₹38\.25/);
+    const netRow = html.match(/<tr\b[^>]*data-financial-adjustment="net-sales"[^>]*>(.*?)<\/tr>/)![1];
+    const netCells = [...netRow.matchAll(/<td\b[^>]*>(.*?)<\/td>/g)].map((cell) => cell[1]);
+    columns.forEach((column, index) => {
+      if (column.key === "actualAmount" || column.key === "actualNbv") return;
+      const expected = column.format === "currency"
+        ? totals[index].toLocaleString("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 })
+        : totals[index].toLocaleString("en-IN", { maximumFractionDigits: 6 });
+      assert.equal(netCells[index + 1], expected, `Net Sales retains the ${column.label} total`);
+    });
     const firstRow = html.match(/<tr\b[^>]*>(.*?)<\/tr>/)![1];
     assert.equal(firstRow.includes("₹"), expanded, "original totals are hidden until expanded");
   }
@@ -169,7 +178,7 @@ for (const showAmounts of [false, true]) {
     );
     assert.equal(
       net[i + 1],
-      column.key === "actualAmount" ? 170 : column.key === "actualNbv" ? 38.25 : "",
+      column.key === "actualAmount" ? 170 : column.key === "actualNbv" ? 38.25 : totals[i],
     );
   });
   const sheet = workbook.Sheets["Product Plan"];

@@ -172,14 +172,15 @@ export function buildGroupPlanWorkbook(xlsx: typeof XLSX, options: PlanExport) {
   }
 
   const columns = getProductPlanColumns(options.showAmounts);
+  const totals = productColumnTotals(options.rows, columns);
   const summary = options.creditSummary;
   const financialRows = summary ? [
     { label: "Credit Notes", sales: summary.applied ? summary.creditAmount : null, nbv: summary.applied ? summary.nbvAdjustment : null },
     { label: "Net Sales", sales: summary.netSales, nbv: summary.netNbv },
-  ].map((row) => ({ label: row.label, values: columns.map((column) => column.key === "actualAmount" ? row.sales ?? "—" : column.key === "actualNbv" ? row.nbv ?? "—" : "") })) : [];
+  ].map((row) => ({ label: row.label, values: columns.map((column, index) => column.key === "actualAmount" ? row.sales ?? "—" : column.key === "actualNbv" ? row.nbv ?? "—" : row.label === "Net Sales" ? totals[index] : "") })) : [];
   return writeWorkbook(columns,
     options.rows.map((row) => [row.productName, ...columns.map((column) => column.value(row))]),
-    productColumnTotals(options.rows, columns), financialRows);
+    totals, financialRows);
 }
 
 export async function downloadGroupPlan(options: PlanExport) {

@@ -101,10 +101,11 @@ export function ProductCreditFooter({
               row.label
             )}
           </TableCell>
-          {columns.map((column) => (
+          {columns.map((column, index) => (
             <TableCell
               key={column.key}
-              className={cn("py-3 text-right tabular-nums", column.sectionStart && "border-l")}
+              className={cn("py-3 text-right tabular-nums", column.sectionStart && "border-l",
+                !row.adjustment && column.comparison && totals[index] < 0 && "text-destructive")}
               aria-label={
                 column.key === "actualAmount"
                   ? `${row.label} Amount`
@@ -121,7 +122,11 @@ export function ProductCreditFooter({
                   ? row.nbv === null
                     ? "—"
                     : money(row.nbv)
-                  : null}
+                  : row.adjustment
+                    ? null
+                    : column.format === "currency"
+                      ? formatCurrency(totals[index])
+                      : quantity.format(totals[index])}
             </TableCell>
           ))}
         </TableRow>

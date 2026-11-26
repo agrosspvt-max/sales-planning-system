@@ -182,7 +182,7 @@ export function DealerProductSalesTable({
             </p>
             <p>
               Product NBV is preserved. Additional credits reduce total NBV using Total NBV divided
-              by Sales before other credits.
+              by Adjusted Sales, before the additional credit notes below.
             </p>
             {!!data?.heldMonths.length && (
               <p>Months awaiting review: {data.heldMonths.join(", ")}.</p>
@@ -190,21 +190,22 @@ export function DealerProductSalesTable({
           </div>
         </details>
       </div>
-      <Table aria-label="Product sales, returns and credit notes" className="min-w-[56rem]">
+      <Table aria-label="Product sales, returns and credit notes" className="min-w-[56rem] table-fixed">
+        <colgroup><col span={6} className="w-1/6" /></colgroup>
         <TableHeader>
           <TableRow>
             <TableHead>Product</TableHead>
             <TableHead className="text-right">Sales</TableHead>
             <TableHead className="text-right">Returns</TableHead>
             <TableHead className="text-right">Credit notes</TableHead>
-            <TableHead className="text-right">Sales before other credits</TableHead>
+            <TableHead className="text-right" title="Sales after returns and product-linked credits, before additional credit notes">Adjusted Sales</TableHead>
             <TableHead className="text-right">NBV Sales</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {visible.map((row) => (
             <TableRow key={row.productId}>
-              <TableCell>{row.productName}</TableCell>
+              <TableCell className="break-words">{row.productName}</TableCell>
               {measures.map((key) => (
                 <TableCell key={key} className="text-right">
                   <Measure value={row.split?.[key] ?? null} />
@@ -248,7 +249,7 @@ export function DealerProductSalesTable({
                 "whitespace-nowrap py-1.5 text-right tabular-nums",
                 salesBeforeCredits < 0 && "text-destructive",
               )}
-              aria-label="Sales Before Other Credits Total"
+              aria-label="Adjusted Sales Total"
             >
               {totalsExpanded ? money(salesBeforeCredits) : null}
             </TableCell>

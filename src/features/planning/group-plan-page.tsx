@@ -24,6 +24,7 @@ import { downloadGroupPlan, getProductPlanColumns, productColumnTotals } from ".
 import { DealerSalesDrawer } from "./dealer-sales-drawer";
 import { DealerFinancialSummaryTable } from "./dealer-financial-summary-table";
 import { summarizeTerritoryDealers, type DealerProductFinancialRow } from "./group-dealer-summary";
+import type { DealerCreditRecord } from "./dealer-credit-adjustments";
 
 /* ------------------------------- Shared types ----------------------------- */
 
@@ -76,6 +77,7 @@ interface GroupProductPlan {
   packSizes: { id: string; name: string }[];
   products: GroupProductRow[];
   dealerProducts?: DealerProductFinancialRow[];
+  dealerCredits?: DealerCreditRecord[];
 }
 
 type Tab = "territory" | "product" | "recovery";
@@ -212,8 +214,8 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
   const endMonth = months.find((month) => month.id === monthB)?.id ?? months.at(-1)?.id;
   const visibleProducts = data?.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)) ?? [];
   const drawerProduct = visibleProducts.find((r) => r.productId === drawerProductId);
-  const dealers = useMemo(() => summarizeTerritoryDealers(data?.dealerProducts ?? [], categoryFilter, categories),
-    [data?.dealerProducts, categoryFilter, categories]);
+  const dealers = useMemo(() => summarizeTerritoryDealers(data?.dealerProducts ?? [], categoryFilter, categories, data?.dealerCredits),
+    [data?.dealerProducts, data?.dealerCredits, categoryFilter, categories]);
   const drawerDealer = dealers.find((dealer) => dealer.dealerId === drawerDealerId);
 
   const toggleBucket = (b: StatusBucket) =>
@@ -346,6 +348,14 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
         {exportError && <p role="alert" className="w-full text-sm text-destructive">{exportError}</p>}
       </div>
 
+      {dealerView && data.dealerCredits && (
+        <p className="text-xs text-muted-foreground">
+          {categoryFilter ? "Category views show product figures. Select All Categories to include credit notes without products."
+            : "Actual Sales includes additional credit notes. Actual NBV uses the same dealer-level proportional adjustment."}
+          {dealers.some((dealer) => dealer.actualSalesAvailable === false || dealer.actualNbvAvailable === false)
+            && " A dash marks an unavailable net figure; open the dealer details for the reason."}
+        </p>
+      )}
       {isPlaceholderData ? (
         <Skeleton className="h-64 w-full" />
       ) : dealerView ? (

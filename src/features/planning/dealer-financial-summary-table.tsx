@@ -14,6 +14,8 @@ export interface DealerFinancialRow {
   planNbv: number;
   actualAmount: number;
   actualNbv: number;
+  actualSalesAvailable?: boolean;
+  actualNbvAvailable?: boolean;
 }
 
 export function DealerFinancialSummaryTable({
@@ -64,7 +66,7 @@ export function DealerFinancialSummaryTable({
                 {dealerPlanColumns.map((column) => (
                   <TableCell key={column.key} className={cn("text-right tabular-nums",
                     (column.key === "actualAmount" || column.key === "actualNbv") && "text-muted-foreground")}>
-                    {column.format === "percent" ? formatPercent(column.value(r)) : formatCurrency(column.value(r))}
+                    {column.available?.(r) === false ? "—" : column.format === "percent" ? formatPercent(column.value(r)) : formatCurrency(column.value(r))}
                   </TableCell>
                 ))}
               </TableRow>
@@ -76,7 +78,7 @@ export function DealerFinancialSummaryTable({
             <TableCell>Total</TableCell>
             {dealerPlanColumns.map((column) => (
               <TableCell key={column.key} className="text-right tabular-nums">
-                {column.format === "percent" ? formatPercent(column.value(totals)) : formatCurrency(column.value(totals))}
+                {column.available?.(totals) === false ? "—" : column.format === "percent" ? formatPercent(column.value(totals)) : formatCurrency(column.value(totals))}
               </TableCell>
             ))}
           </TableRow>

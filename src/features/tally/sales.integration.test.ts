@@ -956,6 +956,7 @@ async function main() {
     "-0.75",
   );
 
+  modules["./dealer-credit-adjustments"] = load("src/features/planning/dealer-credit-adjustments.ts");
   modules["./territory-sales"] = load("src/features/planning/territory-sales.ts");
   modules["./group-plan-metrics"] = load("src/features/planning/group-plan-metrics.ts");
   modules["@/features/tally/sales-rollout"] = modules["./sales-rollout"];
@@ -1015,7 +1016,7 @@ async function main() {
       ...filter,
       groupBy: "dealer",
     });
-    return summarizeTerritoryDealers(result.dealerProducts ?? [], "", []);
+    return summarizeTerritoryDealers(result.dealerProducts ?? [], "", [], result.dealerCredits);
   };
   const dealerApril = await dealerReport({
     buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: [], fromMonthId: "sales-old",
@@ -1110,6 +1111,8 @@ async function main() {
     where: { snapshotId_dealerId_productId: splitActualKey },
   });
   const splitFixtureIds: string[] = [];
+  let creditRangeSnapshotId: string | undefined;
+  let creditRangeMonthId: string | undefined;
   try {
     for (const [index, row] of [
       { family: "Sales", typeName: "CREDIT SALE-CG", qty: "10", amount: "100" },
@@ -1170,6 +1173,64 @@ async function main() {
     assert.equal(splitProduct.creditNotes.quantity, 0);
     assert.equal(splitProduct.net.amount, Number(beforeSplitActual.amount.add(75)));
     assert.equal(splitRead.bills.find((row) => row.number === "SPLIT-3")!.unallocatedAmount, -12);
+    const netReportFilter = { ...billFilter, buckets: [...billFilter.buckets], groupBy: "dealer" as const };
+    const scopedCreditReport = await territory.getGroupProductPlan(actor, group.id, "sales-season", netReportFilter);
+    const creditRecord = scopedCreditReport.dealerCredits!.find((row) => row.dealerId === "a")!;
+    assert.equal(creditRecord.unavailable, false);
+    assert.equal(creditRecord.notes.length, 1, "product-linked return and credit are not deducted again");
+    assert.equal(creditRecord.notes[0].amount, -12);
+    const adjustedDealer = summarizeTerritoryDealers(scopedCreditReport.dealerProducts ?? [], "", [], scopedCreditReport.dealerCredits).find((row) => row.dealerId === "a")!;
+    assert.equal(adjustedDealer.salesBeforeCredits, Number(beforeSplitActual.amount.add(75)));
+    assert.equal(adjustedDealer.actualAmount, Number(beforeSplitActual.amount.add(75)) - 12);
+    assert.equal(adjustedDealer.creditAdjustment!.nbvAdjustment, -6);
+    const wrongOfficer = await territory.getGroupProductPlan(actor, group.id, "sales-season", { ...netReportFilter, officerId: "territory-missing-seasonal" });
+    assert.equal(wrongOfficer.dealerCredits?.some((row) => row.dealerId === "a"), false);
+    const productReport = await territory.getGroupProductPlan(actor, group.id, "sales-season", { ...netReportFilter, groupBy: undefined });
+    assert.equal(productReport.dealerCredits, undefined, "Product Plan is not adjusted by dealer-level credits");
+    const creditFixture = await prisma.tallySalesVoucher.findUniqueOrThrow({ where: { id: creditRecord.notes[0].id } });
+    for (const [index, flag] of ["cancelled", "optional"].entries()) {
+      const ignored = await prisma.tallySalesVoucher.create({ data: {
+        ...creditFixture, id: randomUUID(), guid: prefix + "-0000877" + index,
+        ledgerEntries: creditFixture.ledgerEntries as db.Prisma.InputJsonValue,
+        [flag]: true, billNumber: "IGNORED-CREDIT-" + flag,
+      } });
+      splitFixtureIds.push(ignored.id);
+    }
+    const noIgnoredCredits = await territory.getGroupProductPlan(actor, group.id, "sales-season", netReportFilter);
+    assert.equal(noIgnoredCredits.dealerCredits!.find((row) => row.dealerId === "a")!.notes.length, 1);
+    await prisma.tallySalesVoucher.update({ where: { id: creditFixture.id }, data: { ledgerEntries: [] } });
+    const missingCredit = await territory.getGroupProductPlan(actor, group.id, "sales-season", netReportFilter);
+    assert.equal(summarizeTerritoryDealers(missingCredit.dealerProducts ?? [], "", [], missingCredit.dealerCredits).find((row) => row.dealerId === "a")!.actualSalesAvailable, false, "missing credit amount cannot become zero");
+    await prisma.tallySalesVoucher.update({ where: { id: creditFixture.id }, data: { ledgerEntries: creditFixture.ledgerEntries as db.Prisma.InputJsonValue } });
+    creditRangeMonthId = "credit-range-month";
+    await prisma.seasonMonth.create({ data: {
+      id: creditRangeMonthId, seasonId: "sales-season", name: "Credit range", order: 3,
+      calendarYear: 2026, calendarMonth: 5,
+    } });
+    const newCreditSnapshot = await prisma.tallySalesSnapshot.create({ data: {
+      connectionId, monthKey: "2026-05", fromDate: "2026-05-01", throughDate: "2026-05-31",
+      observedAt: new Date(Date.now() + 1000), sourceHash: "b".repeat(64), jobId: randomUUID(),
+      actualDealerIds: ["a"], summary: { held: [] },
+    } });
+    creditRangeSnapshotId = newCreditSnapshot.id;
+    const movedCredit = await prisma.tallySalesVoucher.create({ data: {
+      ...creditFixture, id: randomUUID(), snapshotId: newCreditSnapshot.id, billDate: "2026-05-01",
+      ledgerEntries: [{ name: creditFixture.partyName, amount: "8.00" }],
+    } });
+    const creditRangeFilter = { ...netReportFilter, includeUnplanned: true, view: "range" as const,
+      fromMonthId: undefined, monthIds: ["sales-old", creditRangeMonthId] };
+    const repeatedCredit = await territory.getGroupProductPlan(actor, group.id, "sales-season", creditRangeFilter);
+    const repeatedRecord = repeatedCredit.dealerCredits!.find((row) => row.dealerId === "a")!;
+    assert.equal(repeatedRecord.unavailable, false);
+    assert.equal(repeatedRecord.notes.length, 1, "the same GUID is deducted once across the selected months");
+    assert.equal(repeatedRecord.notes[0].amount, -8);
+    assert.equal(repeatedRecord.notes[0].monthKey, "2026-05");
+    await prisma.tallySalesVoucher.update({ where: { id: movedCredit.id }, data: { cancelled: true } });
+    const cancelledLatest = await territory.getGroupProductPlan(actor, group.id, "sales-season", creditRangeFilter);
+    assert.equal(cancelledLatest.dealerCredits!.find((row) => row.dealerId === "a")!.notes.length, 0, "cancelled latest source never falls back to an older active credit");
+    const singleOldMonth = await territory.getGroupProductPlan(actor, group.id, "sales-season", netReportFilter);
+    assert.equal(singleOldMonth.dealerCredits!.find((row) => row.dealerId === "a")!.notes[0].amount, -12, "one month retains its original source scope");
+    console.log("Territory net credit report: exact signed credit, product deductions counted once, proportional NBV, status/officer isolation, Product Plan preservation and unknown amounts: PASS");
     const afterSplitRead = await prisma.tallySalesActual.findUniqueOrThrow({
       where: { snapshotId_dealerId_productId: splitActualKey },
     });
@@ -1180,6 +1241,8 @@ async function main() {
     );
     assert.equal(afterSplitRead.quantity.toString(), beforeSplitActual.quantity.add(8).toString());
   } finally {
+    if (creditRangeSnapshotId) await prisma.tallySalesSnapshot.delete({ where: { id: creditRangeSnapshotId } });
+    if (creditRangeMonthId) await prisma.seasonMonth.delete({ where: { id: creditRangeMonthId } });
     await prisma.tallySalesVoucher.deleteMany({ where: { id: { in: splitFixtureIds } } });
     await prisma.tallySalesActual.update({
       where: { snapshotId_dealerId_productId: splitActualKey },
@@ -1224,6 +1287,10 @@ async function main() {
     data: { tallyName: "Alias after publication" },
   });
   assert.equal((await readBills("a")).bills.length, 0);
+  const renamedCreditReport = await territory.getGroupProductPlan(actor, group.id, "sales-season", {
+    ...billFilter, buckets: [...billFilter.buckets], groupBy: "dealer",
+  });
+  assert.equal(renamedCreditReport.dealerCredits!.find((row) => row.dealerId === "a")!.unavailable, true, "changed names cannot silently declare missing credits as zero");
   await prisma.dealerAlias.updateMany({
     where: { systemDealerId: "a" },
     data: { tallyName: "New Dealer Name" },

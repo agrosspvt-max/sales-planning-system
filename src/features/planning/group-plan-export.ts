@@ -51,17 +51,18 @@ export function productColumnTotals(rows: readonly ProductFigures[], columns: re
   return columns.map((column) => rows.reduce((total, row) => total + column.value(row), 0));
 }
 
-export const dealerPlanColumns: PlanColumn<Pick<DealerFinancialRow, "planAmount" | "planNbv" | "actualAmount" | "actualNbv">>[] = [
+type DealerFigures = Pick<DealerFinancialRow, "planAmount" | "planNbv" | "actualAmount" | "actualNbv" | "actualSalesAvailable" | "actualNbvAvailable">;
+export const dealerPlanColumns: (PlanColumn<DealerFigures> & { available?: (row: DealerFigures) => boolean })[] = [
   { key: "planAmount", label: "Monthly Plan", format: "currency", value: (r) => r.planAmount },
   { key: "planNbv", label: "Planned NBV", format: "currency", value: (r) => r.planNbv },
-  { key: "actualAmount", label: "Actual Sales", format: "currency", value: (r) => r.actualAmount },
-  { key: "actualNbv", label: "Actual NBV", format: "currency", value: (r) => r.actualNbv },
-  { key: "salesAchievement", label: "Sales Achv %", format: "percent", value: (r) => achievement(r.actualAmount, r.planAmount) },
-  { key: "nbvAchievement", label: "NBV Achv %", format: "percent", value: (r) => achievement(r.actualNbv, r.planNbv) },
+  { key: "actualAmount", label: "Actual Sales", format: "currency", value: (r) => r.actualAmount, available: (r) => r.actualSalesAvailable !== false },
+  { key: "actualNbv", label: "Actual NBV", format: "currency", value: (r) => r.actualNbv, available: (r) => r.actualNbvAvailable !== false },
+  { key: "salesAchievement", label: "Sales Achv %", format: "percent", value: (r) => achievement(r.actualAmount, r.planAmount), available: (r) => r.actualSalesAvailable !== false },
+  { key: "nbvAchievement", label: "NBV Achv %", format: "percent", value: (r) => achievement(r.actualNbv, r.planNbv), available: (r) => r.actualNbvAvailable !== false },
 ];
 
 export function dealerFinancialTotals(rows: readonly DealerFinancialRow[]) {
-  return rows.reduce(
+  const totals: DealerFigures = rows.reduce(
     (total, row) => ({
       planAmount: total.planAmount + row.planAmount,
       planNbv: total.planNbv + row.planNbv,
@@ -70,6 +71,9 @@ export function dealerFinancialTotals(rows: readonly DealerFinancialRow[]) {
     }),
     { planAmount: 0, planNbv: 0, actualAmount: 0, actualNbv: 0 },
   );
+  if (rows.some((row) => row.actualSalesAvailable === false)) totals.actualSalesAvailable = false;
+  if (rows.some((row) => row.actualNbvAvailable === false)) totals.actualNbvAvailable = false;
+  return totals;
 }
 
 const formats: Record<Format, string> = {
@@ -108,7 +112,7 @@ export function buildGroupPlanWorkbook(xlsx: typeof XLSX, options: PlanExport) {
   function writeWorkbook(
     columns: readonly { label: string; format: Format }[],
     rows: (string | number)[][],
-    totals: number[],
+    totals: (number | string)[],
   ) {
     const headerIndex = context.length + 1;
     const cells = [...context, [], [firstColumn, ...columns.map((column) => column.label)], ...rows, ["Total", ...totals]];
@@ -136,8 +140,8 @@ export function buildGroupPlanWorkbook(xlsx: typeof XLSX, options: PlanExport) {
   if (options.view === "dealer") {
     const totals = dealerFinancialTotals(options.rows);
     return writeWorkbook(dealerPlanColumns,
-      options.rows.map((row) => [row.name, ...dealerPlanColumns.map((column) => column.value(row))]),
-      dealerPlanColumns.map((column) => column.value(totals)));
+      options.rows.map((row) => [row.name, ...dealerPlanColumns.map((column) => column.available?.(row) === false ? "—" : column.value(row))]),
+      dealerPlanColumns.map((column) => column.available?.(totals) === false ? "—" : column.value(totals)));
   }
 
   const columns = getProductPlanColumns(options.showAmounts);

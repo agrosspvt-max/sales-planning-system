@@ -12,6 +12,8 @@ import {
 import type { TerritoryDealerSummary } from "./group-dealer-summary";
 import type { DealerSalesBills, SalesMeasure } from "./dealer-sales-bills";
 import { sameSalesMeasure, sumSalesMeasures } from "./dealer-sales-breakdown";
+import { dealerCreditAdjustment } from "./dealer-credit-adjustments";
+import { DealerCreditRows } from "./dealer-credit-rows";
 
 const money = (value: number) =>
   value.toLocaleString("en-IN", {
@@ -56,6 +58,8 @@ export function DealerProductSalesTable({
   retry: () => void;
   categoryFiltered: boolean;
 }) {
+  const salesBeforeCredits = dealer.salesBeforeCredits ?? dealer.actualAmount;
+  const nbvBeforeCredits = dealer.nbvBeforeCredits ?? dealer.actualNbv;
   const splits = new Map((data?.productBreakdown ?? []).map((row) => [row.productId, row]));
   const rows = dealer.products.map((product) => {
     const net = { quantity: product.actualQty, amount: product.actualAmount };
@@ -102,21 +106,39 @@ export function DealerProductSalesTable({
     visible.every((row) => row.split) &&
     sameSalesMeasure(
       { quantity: 0, amount: sumSalesMeasures(visible.map((row) => row.net)).amount },
-      { quantity: 0, amount: dealer.actualAmount },
+      { quantity: 0, amount: salesBeforeCredits },
     );
   const unallocated = (data?.bills ?? []).filter(
     (bill) =>
       !bill.cancelled && !bill.optional && bill.family === "Credit Note" && !bill.items.length,
   );
-  const unallocatedTotal = unallocated.every((bill) => bill.unallocatedAmount != null)
-    ? sumSalesMeasures(
-        unallocated.map((bill) => ({ quantity: 0, amount: bill.unallocatedAmount! })),
-      ).amount
-    : null;
+  const adjustment =
+    dealer.creditAdjustment ??
+    dealerCreditAdjustment(
+      salesBeforeCredits,
+      nbvBeforeCredits,
+      {
+        unavailable: !data || pending || error || data.breakdownAvailable !== true,
+        notes: unallocated.map((bill) => ({
+          id: bill.id,
+          guid: bill.guid,
+          monthKey: bill.date.slice(0, 7),
+          date: bill.date,
+          number: bill.number,
+          type: bill.type,
+          amount: bill.unallocatedAmount ?? null,
+        })),
+      },
+      categoryFiltered,
+    );
   return (
     <>
       <div className="space-y-2 border-b p-4 text-sm">
-        <p>Sales + Returns + Credit notes = Net sales. Deductions retain their negative signs.</p>
+        <p>
+          Product totals include returns and product-linked credits. Additional credit notes are
+          deducted below to show Net Sales.
+        </p>
+        {adjustment.reason && <p className="text-sm text-muted-foreground">{adjustment.reason}</p>}
         {pending && (
           <p role="status" className="text-muted-foreground">
             Loading sales, returns and credit notes…
@@ -141,7 +163,8 @@ export function DealerProductSalesTable({
           <div className="mt-2 space-y-2">
             <p>
               The split uses the existing Sales collection and the same dealer, period and
-              included-plan filters. No sales figures are recalculated or replaced.
+              included-plan filters. Product figures are preserved. Dealer Net Sales deducts the
+              additional credit notes below once.
             </p>
             <p>
               Sales Return voucher types appear under Returns. Other Credit Note-family vouchers
@@ -152,14 +175,17 @@ export function DealerProductSalesTable({
               Uploaded sales without bill details, changed product matches and months awaiting
               review may have no reliable split. The original net amount remains shown.
             </p>
-            <p>NBV Sales shows the existing actual NBV of net product sales for this selection.</p>
+            <p>
+              Product NBV is preserved. Additional credits reduce total NBV using Total NBV divided
+              by Sales before other credits.
+            </p>
             {!!data?.heldMonths.length && (
               <p>Months awaiting review: {data.heldMonths.join(", ")}.</p>
             )}
           </div>
         </details>
       </div>
-      <Table aria-label="Product sales, returns and credit notes" className="min-w-[50rem]">
+      <Table aria-label="Product sales, returns and credit notes" className="min-w-[56rem]">
         <TableHeader>
           <TableRow>
             <TableHead>Product</TableHead>
@@ -167,7 +193,7 @@ export function DealerProductSalesTable({
             <TableHead className="text-right">Returns</TableHead>
             <TableHead className="text-right">NBV Sales</TableHead>
             <TableHead className="text-right">Credit notes</TableHead>
-            <TableHead className="text-right">Net sales</TableHead>
+            <TableHead className="text-right">Sales before other credits</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -211,12 +237,12 @@ export function DealerProductSalesTable({
                 key={key}
                 className={cn(
                   "whitespace-nowrap text-right tabular-nums",
-                  key === "nbv" && dealer.actualNbv < 0 && "text-destructive",
+                  key === "nbv" && nbvBeforeCredits < 0 && "text-destructive",
                 )}
                 aria-label={key === "nbv" ? "NBV Sales Total" : undefined}
               >
                 {key === "nbv"
-                  ? money(dealer.actualNbv)
+                  ? money(nbvBeforeCredits)
                   : complete
                     ? money(sumSalesMeasures(visible.map((row) => row.split![key])).amount)
                     : "—"}
@@ -225,39 +251,16 @@ export function DealerProductSalesTable({
             <TableCell
               className={cn(
                 "whitespace-nowrap text-right tabular-nums",
-                dealer.actualAmount < 0 && "text-destructive",
+                salesBeforeCredits < 0 && "text-destructive",
               )}
-              aria-label="Net Sales Total"
+              aria-label="Sales Before Other Credits Total"
             >
-              {money(dealer.actualAmount)}
+              {money(salesBeforeCredits)}
             </TableCell>
           </TableRow>
+          <DealerCreditRows adjustment={adjustment} />
         </tfoot>
       </Table>
-      {!!unallocated.length && (
-        <details className="m-4 rounded border p-3 text-sm">
-          <summary className="cursor-pointer font-medium">
-            Credit notes without products ({unallocated.length}) ·{" "}
-            {unallocatedTotal === null ? "Amount not captured" : money(unallocatedTotal)}
-          </summary>
-          <p className="my-2 text-xs text-muted-foreground">
-            Not assigned to a product and not deducted from the product net above. These are voucher
-            totals and may include taxes; category filters cannot allocate them.
-          </p>
-          <dl className="space-y-2">
-            {unallocated.map((bill) => (
-              <div key={bill.id} className="flex justify-between gap-4">
-                <dt>
-                  {bill.number || "Unnumbered credit note"} · {bill.date}
-                </dt>
-                <dd className="whitespace-nowrap tabular-nums">
-                  {bill.unallocatedAmount == null ? "Not captured" : money(bill.unallocatedAmount)}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      )}
     </>
   );
 }

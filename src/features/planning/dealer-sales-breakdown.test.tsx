@@ -115,7 +115,7 @@ const render = (changes: Partial<React.ComponentProps<typeof DealerProductSalesT
 const dealerBeforeRender = JSON.stringify(dealer);
 const html = render();
 const headings = [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]);
-assert.deepEqual(headings, ["Product", "Sales", "Returns", "NBV Sales", "Credit notes", "Net sales"]);
+assert.deepEqual(headings, ["Product", "Sales", "Returns", "NBV Sales", "Credit notes", "Sales before other credits"]);
 assert.ok(html.includes("₹375.13") && html.includes("-₹231.75") && html.includes("-₹37.50"));
 assert.match(html, /aria-label="NBV Sales Total"[^>]*>₹105\.88/);
 assert.match(html, /text-destructive[^>]*>-₹231\.75/);
@@ -123,7 +123,8 @@ for (const text of [
   "Sales",
   "Returns",
   "Credit notes",
-  "Net sales",
+  "Sales before other credits",
+  "Net Sales",
   "Product &lt;one&gt;",
   "Credit only",
   "Return only",
@@ -134,8 +135,7 @@ for (const text of [
   "₹750",
   "-₹927",
   "-₹252",
-  "Credit notes without products (1)",
-  "-₹123",
+  "Credit Notes (1)",
 ])
   assert.ok(html.includes(text), text);
 assert.ok(!html.includes("999"), "cancelled and optional movements do not leak into the split");

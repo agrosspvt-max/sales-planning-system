@@ -15,6 +15,8 @@ import { approvedTestPreview } from "@/features/tally/sales-rollout";
 import { compareSalesPlans, includesTerritorySale } from "./territory-sales";
 import { deriveTerritoryPlanMetrics } from "./group-plan-metrics";
 import type { DealerProductFinancialRow } from "./group-dealer-summary";
+import { salesPartyNames } from "@/features/tally/sales-party-names";
+import { recordedCreditAmount, type DealerCreditRecord } from "./dealer-credit-adjustments";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -153,6 +155,7 @@ export interface GroupProductPlan {
   packSizes: { id: string; name: string }[];
   products: GroupProductRow[];
   dealerProducts?: DealerProductFinancialRow[];
+  dealerCredits?: DealerCreditRecord[];
   dealerBillScope?: { snapshotId: string; monthKey: string }[];
   dealerBillHistoryIncomplete?: boolean;
 }
@@ -555,6 +558,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
   }
   const unplannedOfficers = new Set<string>();
   const dealerBillScope: NonNullable<GroupProductPlan["dealerBillScope"]> = [];
+  let dealerCredits: DealerCreditRecord[] | undefined;
   let dealerBillHistoryIncomplete = !companyActuals;
   if (companyActuals) {
     type DealerPlan = (typeof monthlyDealers)[number];
@@ -577,6 +581,8 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         id: true,
         monthKey: true,
         actualDealerIds: true,
+        summary: true,
+        jobId: true,
         actuals: {
           where: {
             dealer: {
@@ -684,6 +690,118 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         }
       }
     }
+
+    if (dealerView) {
+      // Dealer-level financial notes have no stock lines and therefore cannot be
+      // deducted again through product actuals. Read them once for this report,
+      // using the same exact names, current owner and monthly approval policy.
+      const [allDealers, aliases] = await Promise.all([
+        prisma.dealer.findMany({ where: { deletedAt: null }, select: { id: true, name: true } }),
+        prisma.dealerAlias.findMany({ select: { tallyName: true, systemDealerId: true } }),
+      ]);
+      const names = new Map(salesPartyNames(allDealers, aliases, true)
+        .filter((entry) => entry.dealerIds.length === 1)
+        .map((entry) => [entry.name, entry.dealerIds[0]]));
+      const dealersById = new Map(allDealers.map((dealer) => [dealer.id, dealer]));
+      const owners = await getCurrentOwnerByDealer(allDealers.map((dealer) => dealer.id));
+      const records = new Map<string, DealerCreditRecord>();
+      const recordFor = (dealerId: string) => {
+        let record = records.get(dealerId);
+        if (!record) {
+          record = { dealerId, name: dealersById.get(dealerId)?.name ?? "Dealer", notes: [], unavailable: false };
+          records.set(dealerId, record);
+        }
+        return record;
+      };
+      const ownership = (dealerId: string) => owners.get(dealerId) ?? monthlyOwnerByDealer.get(dealerId)
+        ?? (dealerPlans.has(dealerId) ? planById.get(dealerPlans.get(dealerId)!.seasonPlanId)?.officerId : undefined);
+      const monthlyBucket = (dealerId: string, monthId: string) => {
+        const pd = dealerPlans.get(dealerId);
+        const status = pd ? monthlyStatus.get(`${pd.seasonPlanId}:${monthId}`) : undefined;
+        return status ? bucketOfStatus(status) : null;
+      };
+      const included = (dealerId: string, monthId: string) => {
+        const owner = ownership(dealerId);
+        return !!owner && officerName.has(owner) && (isTotal || selectedMonthSet.has(monthId))
+          && includesTerritorySale(monthlyBucket(dealerId, monthId), selected, includeUnplanned);
+      };
+      const scopedSnapshots = snapshots.filter((snapshot) => isTotal || selectedMonthSet.has(monthByKey.get(snapshot.monthKey)!));
+      const snapshotById = new Map(scopedSnapshots.map((snapshot) => [snapshot.id, snapshot]));
+      const sourceParties = scopedSnapshots.length ? await prisma.tallySalesVoucher.groupBy({
+        by: ["snapshotId", "partyName"],
+        where: { snapshotId: { in: scopedSnapshots.map((snapshot) => snapshot.id) }, cancelled: false, optional: false },
+      }) : [];
+      const attributedSources = new Set(sourceParties.flatMap((party) => {
+        const dealerId = names.get(party.partyName);
+        return dealerId ? [party.snapshotId + ":" + dealerId] : [];
+      }));
+      for (const snapshot of scopedSnapshots) {
+        const summary = snapshot.summary as { held?: { dealerId: string }[] } | null;
+        const held = Array.isArray(summary?.held) ? summary.held : [];
+        const monthId = monthByKey.get(snapshot.monthKey)!;
+        if (!Array.isArray(summary?.held))
+          for (const dealerId of snapshot.actualDealerIds)
+            if (included(dealerId, monthId)) recordFor(dealerId).unavailable = true;
+        for (const row of held)
+          if (typeof row?.dealerId === "string" && included(row.dealerId, monthId)) recordFor(row.dealerId).unavailable = true;
+        for (const actual of snapshot.actuals)
+          if ((num(actual.quantity) || num(actual.amount)) && included(actual.dealerId, monthId)
+            && !attributedSources.has(snapshot.id + ":" + actual.dealerId)) recordFor(actual.dealerId).unavailable = true;
+      }
+      const notes = scopedSnapshots.length ? await prisma.tallySalesVoucher.findMany({
+        where: {
+          snapshotId: { in: scopedSnapshots.map((snapshot) => snapshot.id) },
+          family: "Credit Note",
+        },
+        select: { id: true, guid: true, snapshotId: true, partyName: true, billDate: true, billNumber: true, typeName: true, ledgerEntries: true, cancelled: true, optional: true, _count: { select: { items: true } } },
+        orderBy: [{ billDate: "desc" }, { billNumber: "asc" }, { id: "asc" }],
+      }) : [];
+      // A repeated GUID in selected monthly captures uses the most recently read
+      // source, rather than deducting the same credit twice in a season/range.
+      const rank = new Map(scopedSnapshots.map((snapshot, index) => [snapshot.id, index]));
+      notes.sort((a, b) => rank.get(a.snapshotId)! - rank.get(b.snapshotId)!);
+      const seen = new Set<string>();
+      for (const note of notes) {
+        const identity = note.guid.toLowerCase();
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        if (note.cancelled || note.optional || note._count.items > 0) continue;
+        const dealerId = names.get(note.partyName);
+        const snapshot = snapshotById.get(note.snapshotId)!;
+        const monthId = monthByKey.get(snapshot.monthKey)!;
+        if (!dealerId || !included(dealerId, monthId)) continue;
+        const record = recordFor(dealerId);
+        if (!snapshot.actualDealerIds.includes(dealerId)) record.unavailable = true;
+        record.notes.push({
+          id: note.id, guid: note.guid, monthKey: snapshot.monthKey, date: note.billDate,
+          number: note.billNumber, type: note.typeName,
+          amount: recordedCreditAmount(note.partyName, note.ledgerEntries),
+        });
+        const owner = ownership(dealerId)!;
+        const bucket = monthlyBucket(dealerId, monthId);
+        if (bucket) officersByBucket[bucket].add(owner);
+        if (includeUnplanned && bucket !== "approved") unplannedOfficers.add(owner);
+      }
+      // Publication replaces a snapshot atomically. If it changed between the
+      // product read and note read, don't combine two versions into a net figure.
+      const versions = scopedSnapshots.length ? await prisma.tallySalesSnapshot.findMany({
+        where: { id: { in: scopedSnapshots.map((snapshot) => snapshot.id) } },
+        select: { id: true, jobId: true },
+      }) : [];
+      const currentVersions = new Map(versions.map((snapshot) => [snapshot.id, snapshot.jobId]));
+      for (const snapshot of scopedSnapshots)
+        if (currentVersions.get(snapshot.id) !== snapshot.jobId)
+          for (const dealerId of snapshot.actualDealerIds)
+            if (included(dealerId, monthByKey.get(snapshot.monthKey)!)) recordFor(dealerId).unavailable = true;
+      const visibleDealerIds = new Set([...dealerProducts.values()].map((row) => row.dealerId));
+      for (const record of records.values()) if (record.notes.length) visibleDealerIds.add(record.dealerId);
+      for (const dealerId of visibleDealerIds) {
+        const record = recordFor(dealerId);
+        for (const monthId of monthByKey.values())
+          if (included(dealerId, monthId) && !coverageByMonth.get(monthId)?.has(dealerId)) record.unavailable = true;
+      }
+      dealerCredits = [...records.values()].filter((record) => visibleDealerIds.has(record.dealerId));
+    }
   }
 
   // Derived Territory Plan comparison columns. Source aggregates above remain unchanged; only the
@@ -720,9 +838,10 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
 
   if (dealerView) {
     const rows = [...dealerProducts.values()];
-    const names = await loadDealerAliasNameMap([...new Set(rows.map((dealer) => dealer.dealerId))]);
+    const names = await loadDealerAliasNameMap([...new Set([...rows.map((dealer) => dealer.dealerId), ...(dealerCredits ?? []).map((dealer) => dealer.dealerId)])]);
     for (const row of rows) row.name = names.get(row.dealerId) ?? row.name;
-    return { ...base, officers: officerBreakdown, products: [], dealerProducts: rows, ...(billDealerId ? { dealerBillScope, dealerBillHistoryIncomplete } : {}) };
+    for (const record of dealerCredits ?? []) record.name = names.get(record.dealerId) ?? record.name;
+    return { ...base, officers: officerBreakdown, products: [], dealerProducts: rows, ...(dealerCredits ? { dealerCredits } : {}), ...(billDealerId ? { dealerBillScope, dealerBillHistoryIncomplete } : {}) };
   }
 
   // Annotate clearance (group-specific, by groupId + productId) — display-only.

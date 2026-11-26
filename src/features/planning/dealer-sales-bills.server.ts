@@ -8,6 +8,7 @@ import { cleanProductName } from "@/features/sales-upload/parser";
 import { getGroupProductPlan, type GroupPlanFilter } from "./group-plan.server";
 import type { DealerSalesBills } from "./dealer-sales-bills";
 import { dealerSalesBreakdown } from "./dealer-sales-breakdown";
+import { recordedCreditAmount } from "./dealer-credit-adjustments";
 
 const reviewSummary = z.object({ held: z.array(z.object({ dealerId: z.string() })).optional() });
 
@@ -87,7 +88,7 @@ export async function getDealerSalesBills(
     optional: v.optional,
     unallocatedAmount:
       v.family === "Credit Note" && !v.items.length
-        ? unallocatedAmount(v.partyName, v.ledgerEntries)
+        ? recordedCreditAmount(v.partyName, v.ledgerEntries)
         : undefined,
     items: v.items.map((item) => {
       const original = resolver.resolveProductUnique(cleanProductName(item.stockItemName));
@@ -112,17 +113,4 @@ export async function getDealerSalesBills(
       !report.dealerBillHistoryIncomplete,
     ),
   };
-}
-
-function unallocatedAmount(partyName: string, raw: unknown): number | null {
-  const ledgers = z
-    .array(z.object({ name: z.string(), amount: z.string().regex(/^-?\d+\.\d{2}$/) }))
-    .safeParse(raw);
-  if (!ledgers.success || !partyName) return null;
-  const lines = ledgers.data.filter(
-    (line) => line.name.trim().toLowerCase() === partyName.trim().toLowerCase(),
-  );
-  return lines.length
-    ? -Number(lines.reduce((sum, line) => sum + BigInt(line.amount.replace(".", "")), 0n)) / 100
-    : null;
 }

@@ -12,6 +12,7 @@ export interface DealerSalesBill {
     lineNo: number;
     productName: string;
     productId: string | null;
+    reviewNotice?: string;
     quantity: number;
     unit: string;
     amount: number;
@@ -24,7 +25,7 @@ export interface DealerSalesBills {
   breakdownAvailable?: boolean;
 }
 
-export type SalesMeasure = { quantity: number; amount: number };
+export type SalesMeasure = { quantity: number; amount: number; units?: { unit: string; quantity: number }[] };
 export interface DealerProductSalesBreakdown {
   productId: string;
   productName: string;

@@ -14,6 +14,9 @@ type Summary = {
   productLines: number;
   unallocatedCredits: number;
   unmatchedProductLines?: number;
+  productReviewVersion?: number;
+  pendingProducts?: { dealerId: string; productId: string; name: string; notice: string }[];
+  productUnits?: { dealerId: string; productId: string; units: { unit: string; quantity: string }[] }[];
   unmatchedProducts?: { dealerId: string; name: string; stockItems: string[] }[];
   noEligiblePlans?: boolean;
   changes?: {
@@ -141,7 +144,15 @@ function SalesMonthRefresh({
           names.
         </p>
       )}
-      {!!summary?.unmatchedProductLines && (
+      {summary?.productReviewVersion === 1 && !!summary.pendingProducts?.length && (
+        <div role="status" className="text-sm text-warning">
+          {summary.pendingProducts.length} product matches need review. Sales included; NBV pending. See ⓘ for details.
+        </div>
+      )}
+      {summary?.productUnits?.some(row => row.units.length > 1) && (
+        <p role="status" className="text-sm text-warning">Some products have different units. Original bill units are retained; sales amounts and known NBV are included.</p>
+      )}
+      {summary?.productReviewVersion !== 1 && !!summary?.unmatchedProductLines && (
         <p className="text-sm">
           {summary.unmatchedProductLines} Tally product {summary.unmatchedProductLines === 1 ? "line was" : "lines were"} excluded
           because the product name needs mapping. See ⓘ for details.
@@ -220,7 +231,10 @@ function SalesMonthRefresh({
               </ul>
             </div>
           ))}
-          {summary.unmatchedProducts?.map(({ dealerId, name, stockItems }) => (
+          {summary.pendingProducts?.map(row => (
+            <p key={`${row.dealerId}:${row.productId}`} className="text-warning">{row.notice}</p>
+          ))}
+          {summary.productReviewVersion !== 1 && summary.unmatchedProducts?.map(({ dealerId, name, stockItems }) => (
             <div key={dealerId}>
               <strong>{name}</strong>: Product lines excluded pending mapping.
               <ul>

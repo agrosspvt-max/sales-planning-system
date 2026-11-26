@@ -1,3 +1,4 @@
+import { salesUnit } from "@/features/tally/sales-units";
 import type {
   DealerProductSalesBreakdown,
   DealerSalesBill,
@@ -10,11 +11,12 @@ type ExpectedProduct = {
   actualQty: number;
   actualAmount: number;
 };
-type IntegerMeasure = { quantity: bigint; amount: bigint };
+type IntegerMeasure = { quantity: bigint; amount: bigint; units?: Map<string, bigint> };
 const scaled = (value: number, places: number) => BigInt(value.toFixed(places).replace(".", ""));
 const empty = (): IntegerMeasure => ({ quantity: 0n, amount: 0n });
 const numbers = (value: IntegerMeasure): SalesMeasure => ({
-  quantity: Number(value.quantity) / 1_000_000,
+  quantity: (value.units?.size ?? 0) > 1 ? 0 : Number(value.quantity) / 1_000_000,
+  ...(value.units ? { units: [...value.units].map(([unit, quantity]) => ({ unit, quantity: Number(quantity) / 1_000_000 })) } : {}),
   amount: Number(value.amount) / 100,
 });
 export function sameSalesMeasure(left: SalesMeasure, right: SalesMeasure) {
@@ -24,15 +26,19 @@ export function sameSalesMeasure(left: SalesMeasure, right: SalesMeasure) {
   );
 }
 export function sumSalesMeasures(values: SalesMeasure[]): SalesMeasure {
-  return numbers(
-    values.reduce(
+  const units = new Map<string, bigint>();
+  for (const value of values) for (const entry of value.units ?? [])
+    units.set(entry.unit, (units.get(entry.unit) ?? 0n) + scaled(entry.quantity, 6));
+  return numbers({
+    ...values.reduce(
       (sum, value) => ({
         quantity: sum.quantity + scaled(value.quantity, 6),
         amount: sum.amount + scaled(value.amount, 2),
       }),
       empty(),
     ),
-  );
+    ...(units.size ? { units } : {}),
+  });
 }
 
 // The source voucher family/type defines the split. Never classify an already
@@ -72,6 +78,12 @@ export function dealerSalesBreakdown(
       };
       row[kind].quantity += scaled(item.quantity, 6);
       row[kind].amount += scaled(item.amount, 2);
+      if (item.quantity) {
+        const units = row[kind].units ?? new Map<string, bigint>();
+        const unit = salesUnit(item.unit);
+        units.set(unit, (units.get(unit) ?? 0n) + scaled(item.quantity, 6));
+        row[kind].units = units;
+      }
       rows.set(item.productId, row);
     }
   }

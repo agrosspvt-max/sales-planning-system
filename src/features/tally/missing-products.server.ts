@@ -42,7 +42,7 @@ export async function missingProductsStatus(ctx: AuthContext): Promise<MissingPr
     if (!known.has(line.stockItemName))
       known.set(
         line.stockItemName,
-        Boolean(resolver.resolveProductUnique(cleanProductName(line.stockItemName))),
+        Boolean(resolver.resolveProductUnique(cleanProductName(line.stockItemName), { fuzzy: false })),
       );
     if (known.get(line.stockItemName)) continue;
     const identity = JSON.stringify([key(line.dealerName), key(line.stockItemName)]);

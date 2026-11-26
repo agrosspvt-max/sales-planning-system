@@ -20,7 +20,7 @@ import { useCategories } from "@/lib/use-categories";
 import { categoryForNbv, matchesCategoryFilter, UNCATEGORIZED } from "@/lib/product-category";
 import { GroupRecovery } from "./group-recovery-page";
 import { isNegativeTerritoryPlanMetric } from "./group-plan-metrics";
-import { downloadGroupPlan, getProductPlanColumns, productColumnTotals } from "./group-plan-export";
+import { downloadGroupPlan, getProductPlanColumns, productColumnTotals, productColumnReview } from "./group-plan-export";
 import { DealerSalesDrawer } from "./dealer-sales-drawer";
 import { DealerFinancialSummaryTable } from "./dealer-financial-summary-table";
 import { summarizeTerritoryDealers, type DealerProductFinancialRow } from "./group-dealer-summary";
@@ -52,6 +52,10 @@ interface DrawerContribution {
 }
 type MetricMode = "seasonPlan" | "seasonSales" | "periodSales";
 interface GroupProductRow {
+  nbvPending?: boolean;
+  reviewNotice?: string;
+  seasonSalesUnits?: { unit: string; quantity: number }[];
+  periodSalesUnits?: { unit: string; quantity: number }[];
   productId: string; productName: string; technicalName: string | null; rate: number; nbvPercent: number;
   isClearance?: boolean; clearanceQty?: number | null;
   // Season Baseline (always the complete season; APPROVED by default). Qty + amount (Show Amounts).
@@ -219,7 +223,7 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
   const monthOpts = months.map((m) => ({ value: m.id, label: m.name }));
   const startMonth = months.find((month) => month.id === monthA)?.id ?? months[0]?.id;
   const endMonth = months.find((month) => month.id === monthB)?.id ?? months.at(-1)?.id;
-  const visibleProducts = data?.products.filter((r) => matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)) ?? [];
+  const visibleProducts = data?.products.filter((r) => !(r.nbvPending && categoryFilter) && matchesCategoryFilter(r.nbvPercent, categoryFilter, categories)) ?? [];
   const drawerProduct = visibleProducts.find((r) => r.productId === drawerProductId);
   const dealers = useMemo(() => dealerView ? summarizeTerritoryDealers(data?.dealerProducts ?? [], categoryFilter, categories, data?.dealerCredits) : [],
     [dealerView, data?.dealerProducts, data?.dealerCredits, categoryFilter, categories]);
@@ -248,6 +252,10 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
 
   const productColumns = getProductPlanColumns(showAmounts);
   const totals = productColumnTotals(visibleProducts, productColumns);
+  const unavailableColumns = Object.fromEntries(productColumns.flatMap(column => {
+    const review = visibleProducts.map(row => productColumnReview(row, column.key)).find(Boolean);
+    return review ? [[column.key, review]] : [];
+  }));
   const periodLabel = view === "total" ? "Seasonal Total" : view === "month" ? "Specific Month" : "Month Range";
   const selectedMonths = months.filter((month) => data.filter.monthIds.includes(month.id));
   let selectedPeriodLabel = periodLabel;
@@ -409,8 +417,9 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
                   <TableCell className="font-medium">
                     <button className="inline-flex flex-wrap items-center gap-1 text-left hover:underline" onClick={() => setDrawerProductId(r.productId)}>
                       <span className={r.isClearance ? "text-warning" : "text-primary"}>{r.productName}</span>{r.isClearance && <ClearanceTag qty={r.clearanceQty} />}
-                      <CategoryBadge category={categoryForNbv(r.nbvPercent, categories)} /> <ChevronRight className="h-3.5 w-3.5 text-primary" />
+                      {!r.nbvPending && <CategoryBadge category={categoryForNbv(r.nbvPercent, categories)} />} <ChevronRight className="h-3.5 w-3.5 text-primary" />
                     </button>
+                    {r.reviewNotice && <p role="status" className="mt-1 text-xs text-warning">{r.reviewNotice}</p>}
                   </TableCell>
                   {productColumns.map((column) => {
                     const value = column.value(r);
@@ -418,14 +427,14 @@ function GroupSalesPlan({ groupId, seasonId, officerId = "", officerLabel, showU
                       <TableCell key={column.key} className={cn("text-right tabular-nums",
                         column.sectionStart && "border-l", column.muted && "text-muted-foreground",
                         column.comparison && isNegativeTerritoryPlanMetric(value) && "text-destructive")}>
-                        {column.format === "currency" ? formatCurrency(value) : qtyFmt(value)}
+                        {productColumnReview(r, column.key) ?? (column.format === "currency" ? formatCurrency(value) : qtyFmt(value))}
                       </TableCell>
                     );
                   })}
                 </TableRow>
               ))}
             </TableBody>
-            <ProductCreditFooter columns={productColumns} totals={totals} summary={productCredits}
+            <ProductCreditFooter columns={productColumns} totals={totals} summary={productCredits} unavailableColumns={unavailableColumns}
               onOpenCredits={(trigger) => { creditTrigger.current = trigger; setDrawerProductId(null); setCreditDrawerOpen(true); }} />
           </Table>
         </div>
@@ -595,6 +604,10 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
     return { byBucket: out, bucketTotals: totals, grand: g };
   }, [product, metricMode]);
 
+  const nbvPending = metricMode !== "seasonPlan" && (product.nbvPending || product.productId.startsWith("tally-pending:"));
+  const mixedUnits = metricMode !== "seasonPlan" && ((metricMode === "seasonSales" ? product.seasonSalesUnits : product.periodSalesUnits)?.length ?? 0) > 1;
+  const drawerNbv = (value: number) => nbvPending ? "Pending" : formatCurrency(value);
+  const drawerQty = (value: number) => mixedUnits ? "Mixed units" : qtyFmt(value);
   return (
     <div className="fixed inset-0 z-40" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
@@ -607,6 +620,7 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
           <button onClick={onClose} className="rounded p-1 hover:bg-accent"><X className="h-4 w-4" /></button>
         </div>
 
+        {product.reviewNotice && <p role="status" className="border-b p-4 text-xs text-warning">{product.reviewNotice}</p>}
         {/* Metric switcher — controls BOTH the grand totals AND the officer/dealer breakdown below. */}
         <div className="flex gap-1 border-b bg-muted/30 px-4 pt-3">
           {METRIC_MODES.map((mm) => (
@@ -617,9 +631,9 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
           ))}
         </div>
         <div className="grid grid-cols-3 gap-2 border-b bg-muted/30 p-4 text-center text-sm">
-          <div><div className="text-xs text-muted-foreground">Grand Qty</div><div className="font-semibold tabular-nums">{qtyFmt(grand.qty)}</div></div>
+          <div><div className="text-xs text-muted-foreground">Grand Qty</div><div className="font-semibold tabular-nums">{drawerQty(grand.qty)}</div></div>
           <div><div className="text-xs text-muted-foreground">Grand Amount</div><div className="font-semibold tabular-nums">{formatCurrency(grand.amount)}</div></div>
-          <div><div className="text-xs text-muted-foreground">Grand NBV</div><div className="font-semibold tabular-nums">{formatCurrency(grand.nbv)}</div></div>
+          <div><div className="text-xs text-muted-foreground">Grand NBV</div><div className="font-semibold tabular-nums">{drawerNbv(grand.nbv)}</div></div>
         </div>
 
         <div className="flex-1 overflow-auto p-3 text-sm">
@@ -632,7 +646,7 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
                     <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", openBucket === b && "rotate-90")} />
                     {b === "unplanned" ? "Unplanned" : BUCKET_LABEL[b]} <span className="text-xs font-normal text-muted-foreground">({bt.officerCount} officer{bt.officerCount === 1 ? "" : "s"})</span>
                   </span>
-                  <span className="text-xs tabular-nums text-muted-foreground">{qtyFmt(bt.qty)} · {formatCurrency(bt.amount)} · {formatCurrency(bt.nbv)}</span>
+                  <span className="text-xs tabular-nums text-muted-foreground">{drawerQty(bt.qty)} · {formatCurrency(bt.amount)} · {drawerNbv(bt.nbv)}</span>
                 </button>
 
                 {openBucket === b && (
@@ -646,14 +660,14 @@ function ProductDrawer({ product, seasonName, filterLabel, onClose }: { product:
                               <ChevronRight className={cn("h-3 w-3 transition-transform", openOfficer === key && "rotate-90")} />
                               <span className="font-medium">{og.officerName}</span>
                             </span>
-                            <span className="text-xs tabular-nums text-muted-foreground">{qtyFmt(og.qty)} · {formatCurrency(og.amount)} · {formatCurrency(og.nbv)}</span>
+                            <span className="text-xs tabular-nums text-muted-foreground">{drawerQty(og.qty)} · {formatCurrency(og.amount)} · {drawerNbv(og.nbv)}</span>
                           </button>
                           {openOfficer === key && (
                             <ul className="space-y-1 bg-muted/20 px-3 pb-2 pt-1 text-xs">
                               <DealerOrder>{[...og.dealers.values()].sort((a, z) => z.amount - a.amount).map((d) => (
                                 <li key={d.dealerId} data-dealer-id={d.dealerId} className="flex items-center justify-between gap-2">
                                   <span className="truncate text-foreground"><DealerName id={d.dealerId} name={d.name} /></span>
-                                  <span className="tabular-nums text-muted-foreground">{qtyFmt(d.qty)} · {formatCurrency(d.amount)} · {formatCurrency(d.nbv)}</span>
+                                  <span className="tabular-nums text-muted-foreground">{drawerQty(d.qty)} · {formatCurrency(d.amount)} · {drawerNbv(d.nbv)}</span>
                                 </li>
                               ))}</DealerOrder>
                             </ul>

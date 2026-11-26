@@ -22,9 +22,11 @@ export function ProductCreditFooter({
   totals,
   summary,
   onOpenCredits,
+  unavailableColumns = {},
 }: {
   columns: ProductFooterColumn[];
   totals: number[];
+  unavailableColumns?: Record<string, string>;
   summary?: ProductCreditSummary;
   onOpenCredits: (trigger: HTMLButtonElement) => void;
 }) {
@@ -69,9 +71,9 @@ export function ProductCreditFooter({
             )}
           >
             {expanded
-              ? column.format === "currency"
+              ? unavailableColumns[column.key] ?? (column.format === "currency"
                 ? formatCurrency(totals[index])
-                : quantity.format(totals[index])
+                : quantity.format(totals[index]))
               : null}
           </TableCell>
         ))}
@@ -120,13 +122,13 @@ export function ProductCreditFooter({
                   : money(row.sales)
                 : column.key === "actualNbv"
                   ? row.nbv === null
-                    ? "—"
+                    ? summary?.nbvPending ? "Pending" : "—"
                     : money(row.nbv)
                   : row.adjustment
                     ? null
-                    : column.format === "currency"
+                    : unavailableColumns[column.key] ?? (column.format === "currency"
                       ? formatCurrency(totals[index])
-                      : quantity.format(totals[index])}
+                      : quantity.format(totals[index]))}
             </TableCell>
           ))}
         </TableRow>

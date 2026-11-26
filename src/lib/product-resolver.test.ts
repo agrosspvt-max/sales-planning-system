@@ -77,6 +77,8 @@ for (const [raw, expected] of [
   );
 }
 assert.equal(resolver.resolveProductUnique("UNREGISTERED ZETA"), null);
+assert.equal(resolver.resolveProductUnique(cleanProductName("JONSON PLUS 20X500ML"), { fuzzy: false }), null, "unattended suggestions are not confirmed identities");
+assert.equal(resolver.resolveProductUnique("JONSON", { fuzzy: false })?.id, "JONSON");
 const ambiguous = buildProductResolver([row("OPEN RED"), row("OPEN BLUE")]);
 assert.equal(
   ambiguous.resolveProductUnique("OPEN"),
@@ -93,7 +95,7 @@ const canonical = buildProductResolver([
   row("MAXX OPEN", "alias", "OPEN"),
   row("LEGACY OPEN", "legacy", null, "survivor"),
 ]);
-assert.equal(canonical.resolveProductUnique("MAXX OPEN")?.id, "survivor");
+assert.equal(canonical.resolveProductUnique("MAXX OPEN", { fuzzy: false })?.id, "survivor");
 assert.equal(canonical.resolveProductUnique("LEGACY OPEN")?.id, "survivor");
 const duplicate = buildProductResolver([row("OPEN", "one", "OPEN"), row("OPEN", "two", "OPEN")]);
 assert.equal(duplicate.resolveProductUnique("OPEN"), null);

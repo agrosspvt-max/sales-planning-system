@@ -11,6 +11,9 @@ export interface DealerProductFinancialRow extends DealerFinancialRow {
   productName: string;
   nbvPercent: number;
   actualQty: number;
+  nbvPending?: boolean;
+  reviewNotice?: string;
+  actualUnits?: { unit: string; quantity: number }[];
 }
 
 export type TerritoryDealerSummary = DealerFinancialRow & {
@@ -28,7 +31,7 @@ export function summarizeTerritoryDealers(
 ): TerritoryDealerSummary[] {
   const dealers = new Map<string, TerritoryDealerSummary>();
   for (const product of products) {
-    if (!matchesCategoryFilter(product.nbvPercent, categoryFilter, categories)) continue;
+    if ((product.nbvPending && categoryFilter) || !matchesCategoryFilter(product.nbvPercent, categoryFilter, categories)) continue;
     const row = dealers.get(product.dealerId);
     if (!row) {
       dealers.set(product.dealerId, {
@@ -38,6 +41,8 @@ export function summarizeTerritoryDealers(
         planNbv: product.planNbv,
         actualAmount: product.actualAmount,
         actualNbv: product.actualNbv,
+        actualNbvAvailable: !product.nbvPending,
+        nbvPending: product.nbvPending,
         products: [product],
       });
       continue;
@@ -46,6 +51,7 @@ export function summarizeTerritoryDealers(
     row.planNbv += product.planNbv;
     row.actualAmount += product.actualAmount;
     row.actualNbv += product.actualNbv;
+    if (product.nbvPending) { row.actualNbvAvailable = false; row.nbvPending = true; }
     row.products.push(product);
   }
   if (credits) {
@@ -71,6 +77,13 @@ export function summarizeTerritoryDealers(
         byDealer.get(row.dealerId) ?? { notes: [], unavailable: false },
         !!categoryFilter,
       );
+      if (row.actualNbvAvailable === false) {
+        adjustment.nbvPending = !!row.nbvPending;
+        adjustment.netNbv = null;
+        adjustment.nbvAdjustment = null;
+        adjustment.effectiveNbvRate = null;
+        adjustment.reason = "Some product matches need review. Sales are included; NBV is pending until those products are confirmed and Sales is refreshed.";
+      }
       row.creditAdjustment = adjustment;
       if (adjustment.netSales === null) row.actualSalesAvailable = false;
       else row.actualAmount = adjustment.netSales;

@@ -100,6 +100,7 @@ export function DealerBillList({
                       <tr key={item.lineNo} className="border-t">
                         <td className="p-3">
                           {item.productName}
+                          {item.reviewNotice && <p role="status" className="mt-1 text-xs text-warning">{item.reviewNotice}</p>}
                           {!item.productId && (
                             <div className="text-xs text-muted-foreground">
                               Product match pending

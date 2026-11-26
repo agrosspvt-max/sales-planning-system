@@ -49,7 +49,7 @@ export function DealerCreditRows({ adjustment, productTotals }: {
           className={cn(cell(adjustment.nbvAdjustment), "py-3")}
           aria-label="Credit Note NBV Adjustment"
         >
-          {adjustment.applied ? money(adjustment.nbvAdjustment) : "—"}
+          {adjustment.nbvPending ? "Pending" : adjustment.applied ? money(adjustment.nbvAdjustment) : "—"}
         </TableCell>
       </TableRow>
       {open && (
@@ -101,7 +101,7 @@ export function DealerCreditRows({ adjustment, productTotals }: {
           {money(adjustment.netSales)}
         </TableCell>
         <TableCell className={cn(cell(adjustment.netNbv), "py-3")} aria-label="Net Sales NBV Total">
-          {money(adjustment.netNbv)}
+          {adjustment.nbvPending ? "Pending" : money(adjustment.netNbv)}
         </TableCell>
       </TableRow>
     </>

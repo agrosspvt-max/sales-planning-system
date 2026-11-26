@@ -13,6 +13,7 @@ export interface ProductCreditSummary {
   netSales: number | null;
   netNbv: number | null;
   applied: boolean;
+  nbvPending?: boolean;
   reason?: string;
 }
 const sum = (values: (number | null)[]) =>
@@ -62,12 +63,15 @@ export function productCreditSummary(
     };
   const creditAmount = sum(dealers.map((dealer) => dealer.creditAdjustment?.creditAmount ?? null));
   const totals = proportionalCreditTotals(beforeSales, beforeNbv, creditAmount);
+  const nbvPending = dealers.some(dealer => dealer.actualNbvAvailable === false && dealer.products.some(product => product.nbvPending));
+  if (nbvPending) { totals.netNbv = null; totals.nbvAdjustment = null; }
   return {
     dealers,
     creditAmount,
+    nbvPending,
     ...totals,
     applied: true,
-    ...(creditAmount === null || totals.netNbv === null
+    ...(nbvPending ? { reason: "Some product matches need review. Sales are included; NBV is pending until the products are confirmed and Sales is refreshed." } : creditAmount === null || totals.netNbv === null
       ? {
           reason:
             creditAmount === null

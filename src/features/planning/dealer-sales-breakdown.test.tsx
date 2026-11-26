@@ -44,10 +44,10 @@ const expected = [
 const original = JSON.stringify({ bills, expected });
 const split = dealerSalesBreakdown(bills, expected);
 const product = split.find((row) => row.productId === "Product <one>")!;
-assert.deepEqual(product.sales, { quantity: 10, amount: 1000 });
-assert.deepEqual(product.returns, { quantity: -2, amount: -200 });
+assert.deepEqual(product.sales, { quantity: 10, amount: 1000, units: [{ unit: "kg", quantity: 10 }] });
+assert.deepEqual(product.returns, { quantity: -2, amount: -200, units: [{ unit: "kg", quantity: -2 }] });
 assert.deepEqual(product.creditNotes, { quantity: 0, amount: -50 });
-assert.deepEqual(product.net, { quantity: 8, amount: 750 });
+assert.deepEqual(product.net, { quantity: 8, amount: 750, units: [{ unit: "kg", quantity: 8 }] });
 assert.equal(product.reconciled, true);
 assert.ok(split.every((row) => row.reconciled));
 assert.equal(split.find((row) => row.productId === "Fully adjusted")!.net.amount, 0);
@@ -187,6 +187,26 @@ const nbvOnly = render({
 });
 assert.ok(nbvOnly.includes("NBV balance") && nbvOnly.includes("₹12.34"), "a non-zero existing NBV remains visible even when product net is zero");
 assert.equal(JSON.stringify(dealer), dealerBeforeRender, "displaying NBV cannot change source figures");
+const notice = "Are JONSON PLUS and JONSON the same product? Sales included; NBV pending.";
+const pendingDealer: TerritoryDealerSummary = {
+  ...dealer, actualAmount: 750, actualNbv: 0, actualNbvAvailable: false, nbvPending: true,
+  products: [{ ...dealer.products[0], actualNbv: 0, nbvPending: true, reviewNotice: notice, actualUnits: [{ unit: "kg", quantity: 8 }] }],
+  creditAdjustment: { notes: [], applied: true, creditAmount: 0, nbvAdjustment: null, effectiveNbvRate: null, netSales: 750, netNbv: null, nbvPending: true },
+};
+const pendingHtml = render({ dealer: pendingDealer });
+assert.match(pendingHtml, /Are JONSON PLUS and JONSON the same product/);
+assert.match(pendingHtml, /8 kg/);
+assert.match(pendingHtml, /aria-label="Net Sales NBV Total"[^>]*>Pending/);
+assert.match(pendingHtml, /aria-label="Net Sales Total"[^>]*>₹750/);
+const { DealerBillList } = load<typeof import("./dealer-bill-list")>("src/features/planning/dealer-bill-list.tsx");
+const mixedBills = [bill("K", "Sales", "Sales", "Same", 10, 100), bill("L", "Sales", "Sales", "Same", 20, 200)];
+mixedBills[1].items[0].unit = "LITRE";
+const mixedSplit = dealerSalesBreakdown(mixedBills, [{ productId: "Same", productName: "Same", actualQty: 0, actualAmount: 300 }])[0];
+assert.equal(mixedSplit.reconciled, true);
+assert.equal(mixedSplit.net.quantity, 0);
+assert.deepEqual(mixedSplit.net.units, [{ unit: "kg", quantity: 10 }, { unit: "litre", quantity: 20 }]);
+const mixedBillsHtml = renderToStaticMarkup(<DealerBillList bills={mixedBills} productIds={["Same"]} categoryFiltered={false} />);
+assert.ok(mixedBillsHtml.includes(">Kg<") && mixedBillsHtml.includes(">LITRE<"), "bill view keeps the exact recorded units");
 console.log(
   "Sales / Returns / Credit notes split: signed source movements, zero-quantity and zero-net credits, status/category/held guards, exact reconciliation, preserved original net and unavailable-history rendering: PASS",
 );

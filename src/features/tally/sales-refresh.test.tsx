@@ -17,6 +17,7 @@ for (const [from, to] of [
   ["", "2026-04"],
 ])
   assert.throws(() => salesMonths(from, to, "2026-10-31"));
+let reviewed = false;
 let fail = false,
   cached = false;
 const load = testLoader({
@@ -42,6 +43,7 @@ const load = testLoader({
                   throughDate: "2026-10-31",
                   summary: {
                     changedRows: 4,
+                    ...(reviewed ? { productReviewVersion: 1, pendingProducts: [{ dealerId: "a", productId: "pending", name: "JONSON PLUS", notice: "Are JONSON PLUS and JONSON the same product? Sales included; NBV pending." }] } : {}),
                     unmatchedProductLines: 1,
                     unmatchedProducts: [
                       {
@@ -87,4 +89,8 @@ assert.match(html, /Tally product line was excluded/);
 assert.match(html, /Product lines excluded pending mapping/);
 assert.match(html, /MAXX CELODI \(50X160\)GM/);
 assert.doesNotMatch(html, /Previous actuals kept/);
+reviewed = true;
+assert.match(render(), /Are JONSON PLUS and JONSON the same product/);
+assert.match(render(), /Sales included; NBV pending/);
+assert.doesNotMatch(render(), /Product lines excluded pending mapping/);
 console.log("Sales range validation and rendered controls/saved data during status errors: PASS");

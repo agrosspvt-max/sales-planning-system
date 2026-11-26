@@ -39,7 +39,7 @@ function Measure({ value }: { value: SalesMeasure | null }) {
           value.quantity < 0 && "text-destructive",
         )}
       >
-        Qty {qty.format(value.quantity)}
+        {value.units?.length ? value.units.map(row => `${qty.format(row.quantity)} ${row.unit}`).join(" · ") : `Qty ${qty.format(value.quantity)}`}
       </div>
     </>
   );
@@ -64,13 +64,15 @@ export function DealerProductSalesTable({
   const nbvBeforeCredits = dealer.nbvBeforeCredits ?? dealer.actualNbv;
   const splits = new Map((data?.productBreakdown ?? []).map((row) => [row.productId, row]));
   const rows = dealer.products.map((product) => {
-    const net = { quantity: product.actualQty, amount: product.actualAmount };
+    const net: SalesMeasure = { quantity: product.actualQty, amount: product.actualAmount, units: product.actualUnits };
     const source = splits.get(product.productId);
     return {
       productId: product.productId,
       productName: product.productName,
       net,
       actualNbv: product.actualNbv,
+      nbvPending: !!product.nbvPending,
+      reviewNotice: product.reviewNotice,
       split: source?.reconciled && sameSalesMeasure(source.net, net) ? source : null,
     };
   });
@@ -88,6 +90,8 @@ export function DealerProductSalesTable({
           productName: source.productName,
           net: source.net,
           actualNbv: 0,
+          nbvPending: false,
+          reviewNotice: undefined,
           split: source,
         });
     }
@@ -143,6 +147,7 @@ export function DealerProductSalesTable({
           Product totals include returns and product-linked credits. Additional credit notes are
           deducted below to show Net Sales.
         </p>
+        {rows.filter(row => row.reviewNotice).map(row => <p key={row.productId} role="status" className="text-warning">{row.reviewNotice}</p>)}
         {adjustment.reason && <p className="text-sm text-muted-foreground">{adjustment.reason}</p>}
         {pending && (
           <p role="status" className="text-muted-foreground">
@@ -206,7 +211,7 @@ export function DealerProductSalesTable({
         <TableBody>
           {visible.map((row) => (
             <TableRow key={row.productId}>
-              <TableCell className="break-words">{row.productName}</TableCell>
+              <TableCell className="break-words">{row.productName}{row.reviewNotice && <p className="mt-1 text-xs text-warning" title={row.reviewNotice}>Match review</p>}</TableCell>
               {measures.map((key) => (
                 <TableCell key={key} className="text-right">
                   <Measure value={row.split?.[key] ?? null} />
@@ -216,7 +221,7 @@ export function DealerProductSalesTable({
                 <Measure value={row.net} />
               </TableCell>
               <TableCell className={cn("whitespace-nowrap text-right tabular-nums", row.actualNbv < 0 && "text-destructive")}>
-                {money(row.actualNbv)}
+                {row.nbvPending ? "Pending" : money(row.actualNbv)}
               </TableCell>
             </TableRow>
           ))}
@@ -258,7 +263,7 @@ export function DealerProductSalesTable({
               className={cn("whitespace-nowrap py-1.5 text-right tabular-nums", nbvBeforeCredits < 0 && "text-destructive")}
               aria-label="NBV Sales Total"
             >
-              {totalsExpanded ? money(nbvBeforeCredits) : null}
+              {totalsExpanded ? dealer.nbvPending ? "Pending" : money(nbvBeforeCredits) : null}
             </TableCell>
           </TableRow>
           <DealerCreditRows adjustment={adjustment} productTotals={movementTotals} />

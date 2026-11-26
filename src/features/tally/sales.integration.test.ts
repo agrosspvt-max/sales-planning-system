@@ -101,6 +101,10 @@ modules["@/lib/match-key"] = load("src/lib/match-key.ts");
 modules["@/lib/product-merge"] = load("src/lib/product-merge.ts");
 modules["@/features/sales-upload/parser"] = load("src/features/sales-upload/parser.ts");
 modules["@/lib/product-resolver"] = load("src/lib/product-resolver.ts");
+modules["./sales-units"] = load("src/features/tally/sales-units.ts");
+modules["@/features/tally/sales-units"] = modules["./sales-units"];
+modules["./sales-product-review"] = load("src/features/tally/sales-product-review.ts");
+modules["@/features/tally/sales-product-review"] = modules["./sales-product-review"];
 modules["./service.server"] = load("src/features/tally/service.server.ts");
 const svc = load<typeof import("./sales.server")>("src/features/tally/sales.server.ts");
 const today = billwise.indiaDay(),
@@ -660,6 +664,12 @@ async function main() {
       { id: "catalog-liner", name: "LINER (1ACER DOSE)", rate: 100, nbvPercent: "0.5" },
     ],
   });
+  // These alternate names have an explicitly confirmed master identity.
+  await prisma.product.createMany({ data: [
+    { id: "alias-tricho", name: "MAXX TRICHO", rate: 100, nbvPercent: "0.5", isActive: false, mergedIntoId: "catalog-tricho" },
+    { id: "alias-open", name: "MAXX OPEN", rate: 100, nbvPercent: "0.5", isActive: false, mergedIntoId: "catalog-open" },
+    { id: "alias-liner", name: "LINER", rate: 100, nbvPercent: "0.5", isActive: false, mergedIntoId: "catalog-liner" },
+  ] });
   await refresh((j) =>
     result(j, [
       {
@@ -1475,7 +1485,8 @@ async function main() {
   const mixedDealers = await dealerReport({
     buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"],
   });
-  assert.equal(mixedDealers.find((d) => d.dealerId === "a")?.actualAmount, 34137.5);
+  assert.equal(mixedDealers.find((d) => d.dealerId === "a")?.actualAmount, 55887.5);
+  assert.equal(mixedDealers.find((d) => d.dealerId === "a")?.actualNbvAvailable, false);
   assert.equal((await call({ action: "complete", ...mixed.ids })).duplicate, true);
 
   await prisma.product.create({
@@ -1500,6 +1511,64 @@ async function main() {
     "Missing products reports captured dealer/month, deduplicates lines, excludes cancelled and optional vouchers, and follows product mappings: PASS",
   );
   console.log("Matched sales publish alongside unmatched stock items and reconverge after mapping: PASS");
+
+  // Reproduce MP: a similar name must not borrow another product's identity or NBV.
+  await prisma.product.create({ data: { id: "jonson", name: "JONSON", rate: 100, nbvPercent: "0.15" } });
+  const unitVoucher = (job: Parameters<typeof result>[0], exactOnly = false) => {
+    const out = result(job, [
+      { lineNo: 0, stockItemName: "JONSON 10X500GM", quantity: "10.000000", unit: "Kg", amount: "100.00", actualQty: "10 Kg", billedQty: "10 Kg", rate: "" },
+      { lineNo: 1, stockItemName: exactOnly ? "JONSON 20X500ML" : "JONSON PLUS 20X500ML", quantity: "20.000000", unit: "LITRE", amount: "200.00", actualQty: "20 LITRE", billedQty: "20 LITRE", rate: "" },
+    ]);
+    out.ledgers[1].name = "New Dealer Name";
+    out.vouchers[0].partyName = "New Dealer Name";
+    return out;
+  };
+  await refresh(unitVoucher, oldKey);
+  const pendingReport = await report(["approved"], true);
+  assert.equal(amount(pendingReport), 300, "similar-name sales included exactly once");
+  const pendingRow = pendingReport.products.find(row => row.productId.startsWith("tally-pending:"))!;
+  assert.equal(pendingRow.actual.amount, 200);
+  assert.equal(pendingRow.nbvPending, true);
+  assert.match(pendingRow.reviewNotice!, /Are JONSON PLUS and JONSON the same product/);
+  assert.equal(pendingReport.products.find(row => row.productId === "jonson")?.actual.nbv, 15);
+  const pendingDealers = await dealerReport({ buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"] });
+  const pendingDealer = pendingDealers.find(row => row.dealerId === "a")!;
+  assert.equal(pendingDealer.actualAmount, 300);
+  assert.equal(pendingDealer.actualNbvAvailable, false);
+  assert.equal(pendingDealer.creditAdjustment?.netNbv, null);
+  assert.equal(dealerFinancialTotals(pendingDealers).actualNbvAvailable, false);
+  const pendingCredits = productCreditSummary(300, 15, pendingReport.creditDealerProducts!, pendingReport.dealerCredits!, "", []);
+  assert.equal(pendingCredits.netSales, 300);
+  assert.equal(pendingCredits.netNbv, null);
+  const pendingBills = await billService.getDealerSalesBills(actor, group.id, "sales-season", "a", { buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"] });
+  assert.deepEqual(pendingBills.bills[0].items.map(item => item.unit), ["Kg", "LITRE"]);
+  assert.match(pendingBills.bills[0].items[1].reviewNotice!, /NBV pending/);
+  assert.ok(pendingBills.productBreakdown!.every(row => row.reconciled));
+  assert.equal(await prisma.planLine.count({ where: { planDealerId: "pd-a", productId: "jonson" } }), 1);
+  await prisma.product.create({ data: { id: "jonson-plus", name: "JONSON PLUS", rate: 100, nbvPercent: "0.5" } });
+  await refresh(unitVoucher, oldKey);
+  const confirmed = await dealerReport({ buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"] });
+  assert.equal(confirmed.find(row => row.dealerId === "a")?.actualAmount, 300);
+  assert.equal(confirmed.find(row => row.dealerId === "a")?.actualNbv, 115);
+  assert.notEqual(confirmed.find(row => row.dealerId === "a")?.actualNbvAvailable, false);
+  // Even genuinely exact products with two source units don't hold the dealer.
+  await refresh(job => unitVoucher(job, true), oldKey);
+  const unitReport = await report(["approved"], true);
+  assert.equal(amount(unitReport), 300);
+  const unitsRow = unitReport.products.find(row => row.productId === "jonson")!;
+  assert.equal(unitsRow.actual.nbv, 45);
+  assert.equal(unitsRow.actual.qty, 0, "never invent a kg + litre scalar");
+  assert.deepEqual(JSON.parse(JSON.stringify(unitsRow.periodSalesUnits)), [{ unit: "kg", quantity: 10 }, { unit: "litre", quantity: 20 }]);
+  const unitsSnapshot = await prisma.tallySalesSnapshot.findUniqueOrThrow({ where: { connectionId_monthKey: { connectionId, monthKey: oldKey } } });
+  assert.equal((unitsSnapshot.summary as { held: { dealerId: string }[] }).held.some(row => row.dealerId === "a"), false);
+  assert.ok(unitsSnapshot.actualDealerIds.includes("a"));
+  const unitBills = await billService.getDealerSalesBills(actor, group.id, "sales-season", "a", { buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"] });
+  assert.equal(unitBills.heldMonths.length, 0);
+  assert.ok(unitBills.productBreakdown!.every(row => row.reconciled));
+  await refresh(job => unitVoucher(job, true), oldKey);
+  assert.equal(amount(await report(["approved"], true)), 300, "repeat capture replaces, never doubles sales");
+  assert.equal((await actual("line-a", "sales-old")).planQty, 55);
+  console.log("Approximate product review includes money with pending NBV; confirmed names and mixed original units never hold dealer totals: PASS");
 
   // Exercise publication above the 32,767-parameter failure threshold with a
   // realistic number of dealers, including unchanged zero actuals on all lines.

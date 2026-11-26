@@ -17,6 +17,7 @@ import { deriveTerritoryPlanMetrics } from "./group-plan-metrics";
 import type { DealerProductFinancialRow } from "./group-dealer-summary";
 import { salesPartyNames } from "@/features/tally/sales-party-names";
 import type { DealerCreditRecord } from "./dealer-credit-adjustments";
+import { salesProductReview } from "@/features/tally/sales-product-review";
 import { recordedLedgerAmounts } from "@/lib/tally-ledger-amounts";
 
 function num(d: unknown): number {
@@ -97,6 +98,10 @@ export interface BucketTotal {
 export interface GroupProductRow {
   productId: string;
   productName: string;
+  nbvPending?: boolean;
+  reviewNotice?: string;
+  seasonSalesUnits?: { unit: string; quantity: number }[];
+  periodSalesUnits?: { unit: string; quantity: number }[];
   technicalName: string | null;
   rate: number;
   nbvPercent: number;
@@ -606,7 +611,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     const coverageByMonth = new Map(snapshots.map((snapshot) =>
       [monthByKey.get(snapshot.monthKey)!, new Set(snapshot.actualDealerIds)]));
     const actualOwners = await getCurrentOwnerByDealer(snapshots.flatMap((snap) =>
-      snap.actuals.map((actual) => actual.dealerId)));
+      [...snap.actuals.map((actual) => actual.dealerId), ...(salesProductReview(snap.summary)?.pendingProducts.map(row => row.dealerId) ?? [])]));
     function addActual(
       dealer: { id: string; name: string },
       monthId: string,
@@ -615,6 +620,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       amount: number,
       nbvPercent: number,
       uploadedWithoutBills = false,
+      review?: { notice?: string; nbvPending?: boolean; units: { unit: string; quantity: string }[] },
     ) {
       if (!qty && !amount) return;
       const pd = dealerPlans.get(dealer.id);
@@ -628,10 +634,16 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         && includesTerritorySale(bucket, selected, includeUnplanned);
       if (!inSeason && !inPeriod) return;
       const row = ensureRow(line);
-      const nbv = calcNbv(amount, nbvPercent);
+      const nbv = review?.nbvPending ? 0 : calcNbv(amount, nbvPercent);
+      const addUnits = (current: { unit: string; quantity: number }[] = []) => {
+        const units = new Map(current.map(row => [row.unit, row.quantity]));
+        for (const entry of review?.units ?? []) units.set(entry.unit, (units.get(entry.unit) ?? 0) + Number(entry.quantity));
+        return [...units].map(([unit, quantity]) => ({ unit, quantity }));
+      };
       const drawerBucket = includeUnplanned && bucket !== "approved" ? "unplanned" : bucket;
       const drawer = ensureDrawer(row.productId, drawerBucket ?? "unplanned", officerId, dealer.id, dealer.name);
       if (inSeason) {
+        row.seasonSalesUnits = addUnits(row.seasonSalesUnits);
         row.seasonSales += qty;
         row.seasonSalesAmount += amount;
         drawer.seasonSales.qty += qty;
@@ -640,6 +652,9 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       }
       if (inPeriod) {
         if (uploadedWithoutBills && dealer.id === billDealerId) dealerBillHistoryIncomplete = true;
+        if (review?.nbvPending) row.nbvPending = true;
+        if (review?.notice) row.reviewNotice = review.notice;
+        row.periodSalesUnits = addUnits(row.periodSalesUnits);
         row.actual.qty += qty;
         row.actual.amount += amount;
         row.actual.nbv += nbv;
@@ -648,6 +663,9 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         drawer.periodSales.nbv += nbv;
         {
           const financials = dealerFinancials(dealer, row);
+          if (review?.nbvPending) financials.nbvPending = true;
+          if (review?.notice) financials.reviewNotice = review.notice;
+          financials.actualUnits = addUnits(financials.actualUnits);
           financials.actualQty += qty;
           financials.actualAmount += amount;
           financials.actualNbv += nbv;
@@ -658,6 +676,10 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       }
     }
 
+    const pendingDealers = new Map((await prisma.dealer.findMany({
+      where: { id: { in: [...new Set(snapshots.flatMap(snap => salesProductReview(snap.summary)?.pendingProducts.map(row => row.dealerId) ?? []))] }, deletedAt: null },
+      select: { id: true, name: true },
+    })).map(dealer => [dealer.id, dealer]));
     // Bill reads reuse the same ownership, month and monthly-status policy as the
     // actuals below. This internal scope is only requested by the dealer bill API.
     const billPlan = billDealerId ? dealerPlans.get(billDealerId) : undefined;
@@ -673,12 +695,24 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         if ((isTotal || selectedMonthSet.has(monthId)) && includesTerritorySale(bucket, selected, includeUnplanned))
           dealerBillScope.push({ snapshotId: snapshot.id, monthKey: snapshot.monthKey });
       }
+      const review = salesProductReview(snapshot.summary);
+      for (const pending of review?.pendingProducts ?? []) {
+        const dealer = pendingDealers.get(pending.dealerId);
+        if (!dealer || !snapshot.actualDealerIds.includes(dealer.id)) continue;
+        addActual(dealer, monthId, {
+          productId: pending.productId,
+          product: { name: pending.name, technicalName: null, rate: 0, nbvPercent: 0 },
+        }, Number(pending.quantity), Number(pending.amount), 0, false,
+          { notice: pending.notice, nbvPending: true, units: pending.units });
+      }
+      const unitsByProduct = new Map(review?.productUnits.map(row => [`${row.dealerId}:${row.productId}`, row.units]) ?? []);
       for (const actual of snapshot.actuals) {
         const pd = dealerPlans.get(actual.dealerId);
         const survivor = eff.effId(actual.productId);
         const line = pd?.lines.find((line) => line.productId === survivor);
         addActual(actual.dealer, monthId, actual, num(actual.quantity), num(actual.amount),
-          num(line?.nbvPercentSnapshot ?? eff.meta(survivor)?.nbvPercent ?? actual.product.nbvPercent));
+          num(line?.nbvPercentSnapshot ?? eff.meta(survivor)?.nbvPercent ?? actual.product.nbvPercent), false,
+          { units: unitsByProduct.get(`${actual.dealerId}:${actual.productId}`) ?? [] });
       }
     }
     // Keep existing Sales Upload actuals for dealer/months that have no verified Tally replacement.
@@ -808,6 +842,15 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       dealerCredits = [...records.values()].filter((record) => visibleDealerIds.has(record.dealerId));
     }
   }
+
+  // Quantities in different units have no single scalar total. The original unit
+  // balances stay available for display; amounts and known NBV remain complete.
+  for (const row of productRows.values()) {
+    if ((row.seasonSalesUnits?.length ?? 0) > 1) row.seasonSales = 0;
+    if ((row.periodSalesUnits?.length ?? 0) > 1) row.actual.qty = 0;
+  }
+  for (const row of dealerProducts.values())
+    if ((row.actualUnits?.length ?? 0) > 1) row.actualQty = 0;
 
   // Derived Territory Plan comparison columns. Source aggregates above remain unchanged; only the
   // signed Territory Plan direction is applied here (operational monthly/sales position minus season baseline).

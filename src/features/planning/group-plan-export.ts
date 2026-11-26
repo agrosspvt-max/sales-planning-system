@@ -17,7 +17,7 @@ interface PlanColumn<Row> {
 type ProductFigures = Pick<GroupProductRow,
   "seasonQty" | "plannedAllMonths" | "remaining" | "seasonSales" | "pendingSales" |
   "seasonAmount" | "plannedAllMonthsAmount" | "remainingAmount" | "seasonSalesAmount" |
-  "pendingAmount" | "total" | "actual">;
+  "pendingAmount" | "total" | "actual" | "nbvPending" | "seasonSalesUnits" | "periodSalesUnits">;
 
 interface ProductColumn extends PlanColumn<ProductFigures> {
   title: string;
@@ -50,11 +50,17 @@ export function getProductPlanColumns(showAmounts: boolean) {
   return productPlanColumns.filter((column) => showAmounts || !column.optionalAmount);
 }
 
+export function productColumnReview(row: ProductFigures, key: string): string | undefined {
+  if (key === "actualNbv" && row.nbvPending) return "Pending";
+  const units = key === "periodSold" ? row.periodSalesUnits : ["seasonSales", "pendingSales"].includes(key) ? row.seasonSalesUnits : undefined;
+  if ((units?.length ?? 0) > 1) return "Mixed units";
+}
+
 export function productColumnTotals(rows: readonly ProductFigures[], columns: readonly ProductColumn[]) {
   return columns.map((column) => rows.reduce((total, row) => total + column.value(row), 0));
 }
 
-type DealerFigures = Pick<DealerFinancialRow, "planAmount" | "planNbv" | "actualAmount" | "actualNbv" | "actualSalesAvailable" | "actualNbvAvailable">;
+type DealerFigures = Pick<DealerFinancialRow, "planAmount" | "planNbv" | "actualAmount" | "actualNbv" | "actualSalesAvailable" | "actualNbvAvailable" | "nbvPending">;
 export const dealerPlanColumns: (PlanColumn<DealerFigures> & { available?: (row: DealerFigures) => boolean })[] = [
   { key: "planAmount", label: "Monthly Plan", format: "currency", value: (r) => r.planAmount },
   { key: "planNbv", label: "Planned NBV", format: "currency", value: (r) => r.planNbv },
@@ -82,6 +88,7 @@ export function dealerFinancialTotals(rows: readonly DealerTotalRow[]) {
   );
   if (rows.some((row) => row.actualSalesAvailable === false)) totals.actualSalesAvailable = false;
   if (rows.some((row) => row.actualNbvAvailable === false)) totals.actualNbvAvailable = false;
+  if (rows.some(row => row.nbvPending)) totals.nbvPending = true;
   // The total has its own sales/NBV base, including credits from zero-sales dealers.
   // Individual dealer rows continue to use each dealer's own proportion.
   if (rows.length && rows.every((row) => row.creditAdjustment && row.salesBeforeCredits !== undefined && row.nbvBeforeCredits !== undefined)) {
@@ -95,7 +102,7 @@ export function dealerFinancialTotals(rows: readonly DealerTotalRow[]) {
       creditAmount,
     );
     totals.actualSalesAvailable = adjustment.netSales !== null;
-    totals.actualNbvAvailable = adjustment.netNbv !== null;
+    totals.actualNbvAvailable = adjustment.netNbv !== null && !rows.some(row => row.nbvPending);
     if (adjustment.netSales !== null) totals.actualAmount = adjustment.netSales;
     if (adjustment.netNbv !== null) totals.actualNbv = adjustment.netNbv;
   }
@@ -167,19 +174,20 @@ export function buildGroupPlanWorkbook(xlsx: typeof XLSX, options: PlanExport) {
   if (options.view === "dealer") {
     const totals = dealerFinancialTotals(options.rows);
     return writeWorkbook(dealerPlanColumns,
-      options.rows.map((row) => [row.name, ...dealerPlanColumns.map((column) => column.available?.(row) === false ? "—" : column.value(row))]),
-      dealerPlanColumns.map((column) => column.available?.(totals) === false ? "—" : column.value(totals)));
+      options.rows.map((row) => [row.name, ...dealerPlanColumns.map((column) => column.available?.(row) === false ? row.nbvPending && ["actualNbv", "nbvAchievement"].includes(column.key) ? "Pending" : "—" : column.value(row))]),
+      dealerPlanColumns.map((column) => column.available?.(totals) === false ? totals.nbvPending && ["actualNbv", "nbvAchievement"].includes(column.key) ? "Pending" : "—" : column.value(totals)));
   }
 
   const columns = getProductPlanColumns(options.showAmounts);
-  const totals = productColumnTotals(options.rows, columns);
+  const numericTotals = productColumnTotals(options.rows, columns);
+  const totals = numericTotals.map((value, index) => options.rows.some(row => productColumnReview(row, columns[index].key)) ? columns[index].key === "actualNbv" ? "Pending" : "Mixed units" : value);
   const summary = options.creditSummary;
   const financialRows = summary ? [
     { label: "Credit Notes", sales: summary.applied ? summary.creditAmount : null, nbv: summary.applied ? summary.nbvAdjustment : null },
     { label: "Net Sales", sales: summary.netSales, nbv: summary.netNbv },
-  ].map((row) => ({ label: row.label, values: columns.map((column, index) => column.key === "actualAmount" ? row.sales ?? "—" : column.key === "actualNbv" ? row.nbv ?? "—" : row.label === "Net Sales" ? totals[index] : "") })) : [];
+  ].map((row) => ({ label: row.label, values: columns.map((column, index) => column.key === "actualAmount" ? row.sales ?? "—" : column.key === "actualNbv" ? row.nbv ?? (summary.nbvPending ? "Pending" : "—") : row.label === "Net Sales" ? totals[index] : "") })) : [];
   return writeWorkbook(columns,
-    options.rows.map((row) => [row.productName, ...columns.map((column) => column.value(row))]),
+    options.rows.map((row) => [row.productName, ...columns.map((column) => productColumnReview(row, column.key) ?? column.value(row))]),
     totals, financialRows);
 }
 

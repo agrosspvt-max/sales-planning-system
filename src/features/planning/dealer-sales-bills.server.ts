@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { loadProductResolver } from "@/lib/product-resolver";
 import { salesPartyNames } from "@/features/tally/sales-party-names";
+import { salesProductReview, pendingSalesProductId } from "@/features/tally/sales-product-review";
 import { cleanProductName } from "@/features/sales-upload/parser";
 import { getGroupProductPlan, type GroupPlanFilter } from "./group-plan.server";
 import type { DealerSalesBills } from "./dealer-sales-bills";
@@ -61,6 +62,7 @@ export async function getDealerSalesBills(
         orderBy: [{ billDate: "desc" }, { billNumber: "asc" }, { guid: "asc" }],
         select: {
           id: true,
+          snapshotId: true,
           guid: true,
           billDate: true,
           billNumber: true,
@@ -77,6 +79,7 @@ export async function getDealerSalesBills(
         },
       })
     : [];
+  const reviews = new Map(snapshots.map(snapshot => [snapshot.id, salesProductReview(snapshot.summary)]));
   const bills = vouchers.map((v) => ({
     id: v.id,
     guid: v.guid,
@@ -91,11 +94,14 @@ export async function getDealerSalesBills(
         ? recordedCreditAmount(v.partyName, v.ledgerEntries)
         : undefined,
     items: v.items.map((item) => {
-      const original = resolver.resolveProductUnique(cleanProductName(item.stockItemName));
+      const review = reviews.get(v.snapshotId);
+      const pending = review?.pendingProducts.find(row => row.dealerId === dealerId && row.productId === pendingSalesProductId(item.stockItemName));
+      const original = resolver.resolveProductUnique(cleanProductName(item.stockItemName), { fuzzy: !review });
       return {
         lineNo: item.lineNo,
         productName: item.stockItemName,
-        productId: original?.id ?? null,
+        productId: pending?.productId ?? original?.id ?? null,
+        reviewNotice: pending?.notice,
         quantity: Number(item.quantity),
         amount: Number(item.amount),
         unit: item.unit,

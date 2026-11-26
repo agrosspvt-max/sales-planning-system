@@ -226,6 +226,19 @@ for (const selected of [null, "a"]) {
     assert.ok(html.includes("11.80") && html.includes("1.80"), "gross and GST retained only in labelled original details");
   }
 }
+const withPending = productCreditSummary(200, 15, [products[0], { ...products[1], nbvPending: true, actualNbv: 0 }], credits, "", []);
+assert.equal(withPending.netSales, 170);
+assert.equal(withPending.netNbv, null);
+assert.equal(withPending.nbvPending, true);
+assert.equal(withPending.dealers.find(dealer => dealer.dealerId === "a")?.actualNbv, 13.5, "another dealer's known NBV stays available");
+assert.equal(dealerFinancialTotals(withPending.dealers).actualNbvAvailable, false);
+const { workbook: pendingWorkbook } = buildGroupPlanWorkbook(XLSX, {
+  view: "product", rows: [{ ...exportRows[0], nbvPending: true, periodSalesUnits: [{ unit: "kg", quantity: 10 }, { unit: "litre", quantity: 20 }] }],
+  showAmounts: false, baseline: "Approved", group: "State", season: "Season", period: "Month", officer: "All", plans: "Approved", category: "All", creditSummary: withPending,
+});
+const pendingCells = XLSX.utils.sheet_to_json<unknown[]>(pendingWorkbook.Sheets["Product Plan"], { header: 1 });
+assert.ok(pendingCells.some(row => row.includes("Mixed units")));
+assert.equal(pendingCells.find(row => row[0] === "Net Sales")?.at(-1), "Pending");
 console.log(
   "Product Plan credits: total proportional NBV, credit-only dealer totals, preserved dealer calculations, category/unknown/zero guards, collapsed footer, drawer and Excel parity: PASS",
 );

@@ -9,8 +9,9 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
-import { cleanProductName } from "@/features/sales-upload/parser";
 import { buildProductResolver } from "@/lib/product-resolver";
+import { salesProductMatch } from "./sales-product-review";
+import { salesUnit } from "./sales-units";
 import { terminalSurvivor } from "@/lib/product-merge";
 import { indiaDay } from "./billwise";
 import { assertEnabled, assertSuper, authenticateConnector, lockConnector } from "./service.server";
@@ -125,7 +126,7 @@ async function scope(db: Tx, monthKey: string) {
 type Scope = Awaited<ReturnType<typeof scope>>;
 function productMap(s: Scope) {
   const resolver = buildProductResolver(s.products);
-  return (name: string) => resolver.resolveProductUnique(cleanProductName(name))?.id ?? null;
+  return (name: string) => salesProductMatch(resolver, name);
 }
 
 export function projectSales(result: SalesResult, s: Scope) {
@@ -164,8 +165,9 @@ export function projectSales(result: SalesResult, s: Scope) {
   const resolve = productMap(s),
     totals = new Map<
       string,
-      Map<string, { qty: Prisma.Decimal; amount: Prisma.Decimal; units: Set<string> }>
+      Map<string, { qty: Prisma.Decimal; amount: Prisma.Decimal; units: Map<string, Prisma.Decimal> }>
     >();
+  const pending = new Map<string, { dealerId: string; productId: string; name: string; notice: string; qty: Prisma.Decimal; amount: Prisma.Decimal; units: Map<string, Prisma.Decimal> }>();
   let unallocated = 0,
     unmappedVouchers = 0;
   for (const v of result.vouchers) {
@@ -181,25 +183,38 @@ export function projectSales(result: SalesResult, s: Scope) {
     const rows = totals.get(id) ?? new Map();
     totals.set(id, rows);
     for (const line of v.items) {
-      const productId = resolve(line.stockItemName);
-      if (!productId) {
+      const match = resolve(line.stockItemName);
+      const productId = match.productId;
+      if (!match.product) {
         const stockItems = unmatchedProducts.get(id) ?? new Set<string>();
         if (stockItems.size < 50) stockItems.add(line.stockItemName);
         unmatchedProducts.set(id, stockItems);
         unmatchedProductLines++;
+        const key = `${id}:${productId}`;
+        const review = pending.get(key) ?? { dealerId: id, productId, name: match.name, notice: match.notice!, qty: new D(0), amount: new D(0), units: new Map<string, Prisma.Decimal>() };
+        review.qty = review.qty.add(line.quantity);
+        review.amount = review.amount.add(line.amount);
+        if (+line.quantity !== 0) {
+          const unit = salesUnit(line.unit);
+          review.units.set(unit, (review.units.get(unit) ?? new D(0)).add(line.quantity));
+        }
+        pending.set(key, review);
+        if (review.qty.abs().gte("1000000000000") || review.amount.abs().gte("10000000000"))
+          hold(id, "PRODUCT_TOTAL_TOO_LARGE", line.stockItemName);
         continue;
       }
       const row = rows.get(productId) ?? {
         qty: new D(0),
         amount: new D(0),
-        units: new Set<string>(),
+        units: new Map<string, Prisma.Decimal>(),
       };
       row.qty = row.qty.add(line.quantity);
       row.amount = row.amount.add(line.amount);
-      if (line.unit && +line.quantity !== 0) row.units.add(line.unit.toLowerCase());
+      if (+line.quantity !== 0) {
+        const unit = salesUnit(line.unit);
+        row.units.set(unit, (row.units.get(unit) ?? new D(0)).add(line.quantity));
+      }
       rows.set(productId, row);
-      if (row.units.size > 1)
-        hold(id, "PRODUCT_UNIT_CONFLICT", line.stockItemName + ": " + [...row.units].join(", "));
       if (row.qty.abs().gte("1000000000000") || row.amount.abs().gte("10000000000"))
         hold(id, "PRODUCT_TOTAL_TOO_LARGE", line.stockItemName);
     }
@@ -212,7 +227,19 @@ export function projectSales(result: SalesResult, s: Scope) {
       reason: "LEDGER_NOT_FOUND_ZEROED",
       details,
     }));
+  const serializeUnits = (units: Map<string, Prisma.Decimal>) => [...units].map(([unit, quantity]) => ({ unit, quantity: quantity.toString() }));
+  const productUnits = [...totals].flatMap(([dealerId, rows]) => [...rows].map(([productId, row]) => {
+    // A single numeric planning field cannot represent kg + litre. Money still publishes;
+    // reports use the per-unit quantities and never present this placeholder as a total.
+    if (row.units.size > 1) row.qty = new D(0);
+    return { dealerId, productId, units: serializeUnits(row.units) };
+  }));
   return {
+    productReviewVersion: 1 as const,
+    pendingProducts: [...pending.values()].filter(row => !held.has(row.dealerId)).map(({ qty, units, amount, ...row }) => ({
+      ...row, quantity: units.size > 1 ? "0" : qty.toString(), amount: amount.toFixed(2), units: serializeUnits(units),
+    })),
+    productUnits: productUnits.filter(row => !held.has(row.dealerId)),
     held: [...held.values()],
     zeroed,
     totals,
@@ -402,6 +429,9 @@ async function publish(
     unmappedVouchers: projection.unmappedVouchers,
     unmatchedProductLines: projection.unmatchedProductLines,
     unmatchedProducts: projection.unmatchedProducts,
+    productReviewVersion: projection.productReviewVersion,
+    pendingProducts: projection.pendingProducts,
+    productUnits: projection.productUnits,
     controlMarkerCount: result.controlMarkerCount,
   };
   const snap = await db.tallySalesSnapshot.upsert({

@@ -27,7 +27,7 @@ export interface ProductResolver {
   /** Resolve an uploaded name to the operational SURVIVING product (a merged source name → its survivor). */
   resolveProduct: (rawName: string) => ProductMasterItem | null;
   /** Same matching tiers/scores, but hold tied distinct surviving products for unattended sync. */
-  resolveProductUnique: (rawName: string) => ProductMasterItem | null;
+  resolveProductUnique: (rawName: string, options?: { fuzzy?: boolean }) => ProductMasterItem | null;
   /** The operational product id for any (possibly merged) product id (terminal survivor). */
   effectiveProductId: (productId: string) => string;
   /** id → its terminal-survivor id, for every loaded product (merged source → survivor; else itself). */
@@ -90,7 +90,7 @@ export function buildProductResolver(allRows: ProductResolverRow[]): ProductReso
     const meta = metaById.get(only.id);
     return meta?.isActive && meta.mergedIntoId == null ? only : null;
   };
-  const resolveProductUnique = (rawName: string): ProductMasterItem | null => {
+  const resolveProductUnique = (rawName: string, options: { fuzzy?: boolean } = {}): ProductMasterItem | null => {
     const key = tightKey(rawName);
     if (!key) return null;
     // Canonical mappings win, exactly as in Sales Upload, without arbitrary duplicate masters.
@@ -104,6 +104,7 @@ export function buildProductResolver(allRows: ProductResolverRow[]): ProductReso
     if (exact.length) return unique(exact);
     const loose = decoratedAll.filter(p => p.loose === looseKey(rawName));
     if (loose.length) return unique(loose);
+    if (options.fuzzy === false) return null;
     // Use the shared upload threshold and score, including its existing substring-name rule.
     const scored = decoratedAll.map(p => ({p,score:similarity(rawName,p.name)})).filter(x => x.score >= 0.9);
     if (!scored.length) return null;

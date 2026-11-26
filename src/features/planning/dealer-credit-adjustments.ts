@@ -26,6 +26,7 @@ export interface DealerCreditAdjustment {
   netSales: number | null;
   netNbv: number | null;
   reason?: string;
+  nbvPending?: boolean;
 }
 const cents = (value: number) => BigInt(value.toFixed(2).replace(".", ""));
 const amount = (value: bigint) => Number(value) / 100;

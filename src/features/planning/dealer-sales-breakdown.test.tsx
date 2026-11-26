@@ -115,7 +115,7 @@ const render = (changes: Partial<React.ComponentProps<typeof DealerProductSalesT
 const dealerBeforeRender = JSON.stringify(dealer);
 const html = render();
 const headings = [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]);
-assert.deepEqual(headings, ["Product", "Sales", "Returns", "NBV Sales", "Credit notes", "Sales before other credits"]);
+assert.deepEqual(headings, ["Product", "Sales", "Returns", "Credit notes", "Sales before other credits", "NBV Sales"]);
 assert.ok(html.includes("₹375.13") && html.includes("-₹231.75") && html.includes("-₹37.50"));
 assert.match(html, /aria-label="NBV Sales Total"[^>]*>₹105\.88/);
 assert.match(html, /text-destructive[^>]*>-₹231\.75/);

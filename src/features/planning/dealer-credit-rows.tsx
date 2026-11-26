@@ -22,7 +22,7 @@ export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjus
   return (
     <>
       <TableRow>
-        <TableCell colSpan={3}>
+        <TableCell colSpan={4}>
           <button
             type="button"
             aria-expanded={open}
@@ -34,17 +34,16 @@ export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjus
           </button>
         </TableCell>
         <TableCell
-          className={cell(adjustment.nbvAdjustment)}
-          aria-label="Credit Note NBV Adjustment"
-        >
-          {adjustment.applied ? money(adjustment.nbvAdjustment) : "—"}
-        </TableCell>
-        <TableCell />
-        <TableCell
           className={cell(adjustment.creditAmount)}
           aria-label="Additional Credit Notes Total"
         >
           {adjustment.applied ? money(adjustment.creditAmount) : "—"}
+        </TableCell>
+        <TableCell
+          className={cell(adjustment.nbvAdjustment)}
+          aria-label="Credit Note NBV Adjustment"
+        >
+          {adjustment.applied ? money(adjustment.nbvAdjustment) : "—"}
         </TableCell>
       </TableRow>
       {open && (
@@ -85,13 +84,12 @@ export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjus
         </TableRow>
       )}
       <TableRow className="bg-muted/40 font-semibold">
-        <TableCell colSpan={3}>Net Sales</TableCell>
-        <TableCell className={cell(adjustment.netNbv)} aria-label="Net Sales NBV Total">
-          {money(adjustment.netNbv)}
-        </TableCell>
-        <TableCell />
+        <TableCell colSpan={4}>Net Sales</TableCell>
         <TableCell className={cell(adjustment.netSales)} aria-label="Net Sales Total">
           {money(adjustment.netSales)}
+        </TableCell>
+        <TableCell className={cell(adjustment.netNbv)} aria-label="Net Sales NBV Total">
+          {money(adjustment.netNbv)}
         </TableCell>
       </TableRow>
     </>

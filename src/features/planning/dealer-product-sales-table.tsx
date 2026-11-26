@@ -190,8 +190,9 @@ export function DealerProductSalesTable({
           </div>
         </details>
       </div>
-      <Table aria-label="Product sales, returns and credit notes" className="min-w-[56rem] table-fixed">
-        <colgroup><col span={6} className="w-1/6" /></colgroup>
+      <Table aria-label="Product sales, returns and credit notes"
+        className="min-w-[56rem] table-fixed [&_tr>th:last-child]:pr-8 [&_tr>td:last-child]:pr-8">
+        <colgroup><col className="w-28" /><col span={5} /></colgroup>
         <TableHeader>
           <TableRow>
             <TableHead>Product</TableHead>

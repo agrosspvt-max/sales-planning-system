@@ -521,3 +521,7 @@ Verification covers the user's exact tax example, interstate/UTGST/cess, signs/p
 ### 26 November: Dealer Product wise NBV Sales column last
 
 Moved NBV Sales to the last column in Territory Plan dealer Product wise details. Order is Product, Sales, Returns, Credit notes, Sales before other credits, NBV Sales. Product values, Total, Credit Notes deductions and Net Sales all align to this order; existing signed amounts, GST exclusions and NBV calculations are unchanged. Existing rendered heading/footer regressions verify the new order, amounts and expand/collapse behavior. No report-source, export, schema or connector change.
+
+### 26 November: Dealer footer matches Product Plan styling
+
+Dealer Product wise original Total values now start collapsed behind the same small down-arrow toggle. Net Sales always shows the Sales, Returns and product Credit notes totals, followed by existing adjusted sales and NBV in the last two columns. Unavailable source splits retain dashes; original values remain available through the toggle. The additional Credit Notes row uses Product Plan's semibold red text, minus-circle icon, subtle red tint and separating border, with a chevron to expand the existing credit details. Net Sales uses the same bold highlighted final-row treatment. Existing rendered regressions cover collapsed/expanded originals, visible movement totals, credit disclosure, NBV-last alignment, exact amounts, styling and held/loading/empty/category states. Financial calculations, GST policy, sources and filters are unchanged.

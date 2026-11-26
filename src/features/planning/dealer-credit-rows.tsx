@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { ChevronRight, MinusCircle } from "lucide-react";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type { DealerCreditAdjustment } from "./dealer-credit-adjustments";
@@ -12,7 +13,10 @@ const money = (value: number | null) =>
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
-export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjustment }) {
+export function DealerCreditRows({ adjustment, productTotals }: {
+  adjustment: DealerCreditAdjustment;
+  productTotals?: { sales: number | null; returns: number | null; creditNotes: number | null };
+}) {
   const [open, setOpen] = useState(false);
   const cell = (value: number | null) =>
     cn(
@@ -21,26 +25,28 @@ export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjus
     );
   return (
     <>
-      <TableRow>
-        <TableCell colSpan={4}>
+      <TableRow data-financial-adjustment="credit-notes"
+        className="border-t-2 border-destructive/30 bg-destructive/5 font-semibold text-destructive hover:bg-destructive/10">
+        <TableCell colSpan={4} className="whitespace-nowrap py-3">
           <button
             type="button"
             aria-expanded={open}
             onClick={() => setOpen(!open)}
-            className="inline-flex items-center gap-2 text-left font-medium"
+            className="inline-flex items-center gap-1.5 rounded-sm text-left focus-visible:outline focus-visible:outline-2"
           >
-            <span aria-hidden="true">{open ? "▼" : "▶"}</span> Credit Notes (
+            <MinusCircle aria-hidden="true" className="h-4 w-4" /> Credit Notes (
             {adjustment.notes.length})
+            <ChevronRight aria-hidden="true" className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
           </button>
         </TableCell>
         <TableCell
-          className={cell(adjustment.creditAmount)}
+          className={cn(cell(adjustment.creditAmount), "py-3")}
           aria-label="Additional Credit Notes Total"
         >
           {adjustment.applied ? money(adjustment.creditAmount) : "—"}
         </TableCell>
         <TableCell
-          className={cell(adjustment.nbvAdjustment)}
+          className={cn(cell(adjustment.nbvAdjustment), "py-3")}
           aria-label="Credit Note NBV Adjustment"
         >
           {adjustment.applied ? money(adjustment.nbvAdjustment) : "—"}
@@ -83,12 +89,18 @@ export function DealerCreditRows({ adjustment }: { adjustment: DealerCreditAdjus
           </TableCell>
         </TableRow>
       )}
-      <TableRow className="bg-muted/40 font-semibold">
-        <TableCell colSpan={4}>Net Sales</TableCell>
-        <TableCell className={cell(adjustment.netSales)} aria-label="Net Sales Total">
+      <TableRow data-financial-adjustment="net-sales" className="border-t-2 bg-primary/10 font-bold hover:bg-primary/10">
+        <TableCell className="whitespace-nowrap py-3">Net Sales</TableCell>
+        {(["sales", "returns", "creditNotes"] as const).map((key) => (
+          <TableCell key={key} className={cn(cell(productTotals?.[key] ?? null), "py-3")}
+            aria-label={`Net Sales ${key === "creditNotes" ? "Credit Notes" : key === "returns" ? "Returns" : "Sales"} Total`}>
+            {money(productTotals?.[key] ?? null)}
+          </TableCell>
+        ))}
+        <TableCell className={cn(cell(adjustment.netSales), "py-3")} aria-label="Net Sales Total">
           {money(adjustment.netSales)}
         </TableCell>
-        <TableCell className={cell(adjustment.netNbv)} aria-label="Net Sales NBV Total">
+        <TableCell className={cn(cell(adjustment.netNbv), "py-3")} aria-label="Net Sales NBV Total">
           {money(adjustment.netNbv)}
         </TableCell>
       </TableRow>

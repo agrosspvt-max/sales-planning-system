@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Table,
@@ -57,6 +59,7 @@ export function DealerProductSalesTable({
   retry: () => void;
   categoryFiltered: boolean;
 }) {
+  const [totalsExpanded, setTotalsExpanded] = useState(false);
   const salesBeforeCredits = dealer.salesBeforeCredits ?? dealer.actualAmount;
   const nbvBeforeCredits = dealer.nbvBeforeCredits ?? dealer.actualNbv;
   const splits = new Map((data?.productBreakdown ?? []).map((row) => [row.productId, row]));
@@ -107,6 +110,9 @@ export function DealerProductSalesTable({
       { quantity: 0, amount: sumSalesMeasures(visible.map((row) => row.net)).amount },
       { quantity: 0, amount: salesBeforeCredits },
     );
+  const movementTotals = Object.fromEntries(measures.map((key) => [key,
+    complete ? sumSalesMeasures(visible.map((row) => row.split![key])).amount : null,
+  ])) as Record<(typeof measures)[number], number | null>;
   const unallocated = (data?.bills ?? []).filter(
     (bill) =>
       !bill.cancelled && !bill.optional && bill.family === "Credit Note" && !bill.items.length,
@@ -221,35 +227,39 @@ export function DealerProductSalesTable({
           )}
         </TableBody>
         <tfoot>
-          <TableRow className="bg-muted/40 font-semibold">
-            <TableCell>Total</TableCell>
+          <TableRow className="bg-muted/20 text-xs text-muted-foreground">
+            <TableCell className="py-1.5">
+              <button type="button" aria-label={totalsExpanded ? "Hide original totals" : "Show original totals"}
+                aria-expanded={totalsExpanded} onClick={() => setTotalsExpanded(!totalsExpanded)}
+                className="inline-flex items-center gap-1.5 rounded-sm p-0.5">
+                <ChevronDown aria-hidden="true" className={cn("h-3 w-3 transition-transform", totalsExpanded && "rotate-180")} /> Total
+              </button>
+            </TableCell>
             {measures.map((key) => (
               <TableCell
                 key={key}
-                className="whitespace-nowrap text-right tabular-nums"
+                className="whitespace-nowrap py-1.5 text-right tabular-nums"
               >
-                {complete
-                  ? money(sumSalesMeasures(visible.map((row) => row.split![key])).amount)
-                  : "—"}
+                {totalsExpanded ? movementTotals[key] === null ? "—" : money(movementTotals[key]) : null}
               </TableCell>
             ))}
             <TableCell
               className={cn(
-                "whitespace-nowrap text-right tabular-nums",
+                "whitespace-nowrap py-1.5 text-right tabular-nums",
                 salesBeforeCredits < 0 && "text-destructive",
               )}
               aria-label="Sales Before Other Credits Total"
             >
-              {money(salesBeforeCredits)}
+              {totalsExpanded ? money(salesBeforeCredits) : null}
             </TableCell>
             <TableCell
-              className={cn("whitespace-nowrap text-right tabular-nums", nbvBeforeCredits < 0 && "text-destructive")}
+              className={cn("whitespace-nowrap py-1.5 text-right tabular-nums", nbvBeforeCredits < 0 && "text-destructive")}
               aria-label="NBV Sales Total"
             >
-              {money(nbvBeforeCredits)}
+              {totalsExpanded ? money(nbvBeforeCredits) : null}
             </TableCell>
           </TableRow>
-          <DealerCreditRows adjustment={adjustment} />
+          <DealerCreditRows adjustment={adjustment} productTotals={movementTotals} />
         </tfoot>
       </Table>
     </>

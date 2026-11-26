@@ -100,9 +100,12 @@ const load = testLoader({});
 const { DealerProductSalesTable } = load<typeof import("./dealer-product-sales-table")>(
   "src/features/planning/dealer-product-sales-table.tsx",
 );
-const render = (changes: Partial<React.ComponentProps<typeof DealerProductSalesTable>> = {}) =>
-  renderToStaticMarkup(
-    <DealerProductSalesTable
+const expandedLoad = testLoader({ react: { ...React, useState: () => [true, () => {}] } });
+const { DealerProductSalesTable: ExpandedDealerProductSalesTable } = expandedLoad<typeof import("./dealer-product-sales-table")>("src/features/planning/dealer-product-sales-table.tsx");
+const render = (changes: Partial<React.ComponentProps<typeof DealerProductSalesTable>> = {}, expanded = false) => {
+  const Component = expanded ? ExpandedDealerProductSalesTable : DealerProductSalesTable;
+  return renderToStaticMarkup(
+    <Component
       dealer={dealer}
       data={{ bills, heldMonths: [], productBreakdown: split, breakdownAvailable: true }}
       pending={false}
@@ -112,12 +115,22 @@ const render = (changes: Partial<React.ComponentProps<typeof DealerProductSalesT
       {...changes}
     />,
   );
+};
 const dealerBeforeRender = JSON.stringify(dealer);
 const html = render();
 const headings = [...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]);
 assert.deepEqual(headings, ["Product", "Sales", "Returns", "Credit notes", "Sales before other credits", "NBV Sales"]);
 assert.ok(html.includes("₹375.13") && html.includes("-₹231.75") && html.includes("-₹37.50"));
-assert.match(html, /aria-label="NBV Sales Total"[^>]*>₹105\.88/);
+assert.ok(html.includes('aria-label="Show original totals" aria-expanded="false"'));
+assert.equal(html.match(/<tfoot><tr\b[^>]*>(.*?)<\/tr>/)![1].includes("₹"), false);
+const expandedHtml = render({}, true);
+assert.ok(expandedHtml.includes('aria-label="Hide original totals" aria-expanded="true"'));
+assert.match(expandedHtml, /aria-label="NBV Sales Total"[^>]*>₹105\.88/);
+assert.match(html, /aria-label="Net Sales Sales Total"[^>]*>₹1,100\.00/);
+assert.match(html, /aria-label="Net Sales Returns Total"[^>]*>-₹375\.00/);
+assert.match(html, /aria-label="Net Sales Credit Notes Total"[^>]*>-₹977\.00/);
+assert.ok(html.includes('data-financial-adjustment="credit-notes"') && html.includes("border-destructive/30 bg-destructive/5 font-semibold text-destructive"));
+assert.ok(html.includes('data-financial-adjustment="net-sales"') && html.includes("bg-primary/10 font-bold"));
 assert.match(html, /text-destructive[^>]*>-₹231\.75/);
 for (const text of [
   "Sales",
@@ -134,7 +147,6 @@ for (const text of [
   "-₹50",
   "₹750",
   "-₹927",
-  "-₹252",
   "Credit Notes (1)",
 ])
   assert.ok(html.includes(text), text);
@@ -145,21 +157,25 @@ assert.ok(
 );
 const waiting = render({ data: undefined, pending: true });
 assert.ok(
-  waiting.includes("Credit only") && waiting.includes("-₹927") && waiting.includes("-₹252"),
+  waiting.includes("Credit only") && waiting.includes("-₹927"),
   "loading never hides negative rows or changes the net total",
 );
 assert.ok(waiting.includes("—"));
-assert.ok(waiting.includes("₹375.13") && waiting.includes("₹105.88"), "NBV remains available while bill details load");
-const held = render({
+assert.ok(waiting.includes("₹375.13"), "product NBV remains available while bill details load");
+const expandedWaiting = render({ data: undefined, pending: true }, true);
+assert.ok(expandedWaiting.includes("₹105.88") && expandedWaiting.includes("-₹252"), "original amount and NBV remain accessible with the totals toggle while loading");
+const heldProps = {
   data: {
     bills,
     heldMonths: ["2026-06"],
     productBreakdown: dealerSalesBreakdown(bills, expected, ["2026-06"]),
   },
-});
-assert.ok(held.includes("do not reconcile") && held.includes("-₹252"));
+};
+const held = render(heldProps);
+assert.ok(held.includes("do not reconcile"));
+assert.ok(render(heldProps, true).includes("-₹252"), "held original total remains accessible with the toggle");
 assert.ok(!held.includes("₹1,000"));
-assert.ok(held.includes("₹375.13") && held.includes("₹105.88"), "held bill breakdowns retain existing NBV figures");
+assert.ok(held.includes("₹375.13"), "held bill breakdowns retain existing product NBV figures");
 const empty = render({ dealer: { ...dealer, actualAmount: 0, actualNbv: 0, products: [] }, data: undefined });
 assert.match(empty, /colSpan="6"|colspan="6"/);
 const nbvOnly = render({

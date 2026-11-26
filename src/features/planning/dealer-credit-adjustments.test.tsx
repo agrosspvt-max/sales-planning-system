@@ -166,7 +166,7 @@ for (const open of [false, true]) {
   const html = renderToStaticMarkup(
     <table>
       <tfoot>
-        <DealerCreditRows adjustment={net} />
+        <DealerCreditRows adjustment={net} productTotals={{ sales: 100, returns: 0, creditNotes: 0 }} />
       </tfoot>
     </table>,
   );
@@ -176,6 +176,9 @@ for (const open of [false, true]) {
   assert.match(html, /aria-label="Additional Credit Notes Total"[^>]*>-₹10\.00/);
   assert.match(html, /aria-label="Net Sales NBV Total"[^>]*>₹13\.50/);
   assert.match(html, /aria-label="Net Sales Total"[^>]*>₹90\.00/);
+  assert.match(html, /aria-label="Net Sales Sales Total"[^>]*>₹100\.00/);
+  assert.match(html, /aria-label="Net Sales Returns Total"[^>]*>₹0\.00/);
+  assert.match(html, /aria-label="Net Sales Credit Notes Total"[^>]*>₹0\.00/);
   assert.ok(html.indexOf('aria-label="Additional Credit Notes Total"') < html.indexOf('aria-label="Credit Note NBV Adjustment"'));
   assert.ok(html.indexOf('aria-label="Net Sales Total"') < html.indexOf('aria-label="Net Sales NBV Total"'));
 }

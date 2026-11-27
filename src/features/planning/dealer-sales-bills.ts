@@ -8,6 +8,7 @@ export interface DealerSalesBill {
   cancelled: boolean;
   optional: boolean;
   unallocatedAmount?: number | null;
+  ledgerEntries?: { name: string; amount: string }[];
   items: {
     lineNo: number;
     productName: string;

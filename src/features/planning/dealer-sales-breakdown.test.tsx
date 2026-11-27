@@ -225,7 +225,7 @@ const bagBillHtml = renderToStaticMarkup(<DealerBillList bills={bagOnly.map(row 
 assert.match(bagBillHtml, /BAG/);
 assert.match(bagBillHtml, /₹70/);
 assert.match(bagBillHtml, /Nos/);
-assert.doesNotMatch(bagBillHtml, /awaiting a website product match|NBV pending|needs review/);
+assert.doesNotMatch(bagBillHtml, /awaiting a website product match|Product match pending|NBV pending|needs review/);
 const mixedBills = [bill("K", "Sales", "Sales", "Same", 10, 100), bill("L", "Sales", "Sales", "Same", 20, 200)];
 mixedBills[1].items[0].unit = "LITRE";
 const mixedSplit = dealerSalesBreakdown(mixedBills, [{ productId: "Same", productName: "Same", actualQty: 0, actualAmount: 300 }])[0];
@@ -250,6 +250,23 @@ assert.match(unknownCredit, /Amount not recorded/);
 assert.doesNotMatch(unknownCredit, /₹0.00/);
 const filteredCredit = renderToStaticMarkup(<DealerBillList bills={[financialCredit]} productIds={[]} categoryFiltered />);
 assert.doesNotMatch(filteredCredit, /CN-NO-PRODUCT|-₹51,355.94/);
+for (const name of ["Freight Discount-5%-(CG)", "PRICE DIFFERENCE CREDIT NOTE MP", "FINANCIAL CREDIT NOTE-MP"]) {
+  const creditWithLedgers = { ...financialCredit, ledgerEntries: [
+    { name: "Dealer <original>", amount: "60600.00" },
+    { name, amount: "-51355.93" }, { name: "CGST", amount: "-4622.03" },
+    { name: "SGST", amount: "-4622.03" }, { name: "Round off", amount: "-0.01" },
+  ] };
+  const originalLedgerBill = JSON.stringify(creditWithLedgers);
+  const ledgerHtml = renderToStaticMarkup(<DealerBillList bills={[creditWithLedgers]} productIds={[]} categoryFiltered={false} />);
+  assert.ok(ledgerHtml.includes(name), "the adjustment ledger name is exposed in Bill wise");
+  assert.match(ledgerHtml, /-₹51,355\.93/);
+  assert.match(ledgerHtml, /-₹0\.01/);
+  assert.match(ledgerHtml, /Dealer &lt;original&gt;/);
+  assert.doesNotMatch(ledgerHtml, /<original>/);
+  assert.equal((ledgerHtml.match(/<details\b/g) ?? []).length, 1, "ledgers need no extra disclosure after opening the bill");
+  assert.equal(JSON.stringify(creditWithLedgers), originalLedgerBill);
+}
+assert.match(creditHtml, /Ledger entries were not recorded in this saved bill/);
 console.log(
   "Sales / Returns / Credit notes split: signed source movements, zero-quantity and zero-net credits, status/category/held guards, exact reconciliation, preserved original net and unavailable-history rendering: PASS",
 );

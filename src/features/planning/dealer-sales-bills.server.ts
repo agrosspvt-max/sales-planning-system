@@ -13,6 +13,11 @@ import { recordedCreditAmount } from "./dealer-credit-adjustments";
 import { isExcludedSalesProduct } from "@/features/tally/sales-reporting-products";
 
 const reviewSummary = z.object({ held: z.array(z.object({ dealerId: z.string() })).optional() });
+const ledgerEntriesSchema = z.array(z.object({ name: z.string(), amount: z.string().regex(/^-?\d+\.\d{2}$/) }));
+function savedLedgerEntries(raw: unknown) {
+  const parsed = ledgerEntriesSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
 
 export async function getDealerSalesBills(
   ctx: AuthContext,
@@ -90,6 +95,7 @@ export async function getDealerSalesBills(
     family: v.family,
     cancelled: v.cancelled,
     optional: v.optional,
+    ledgerEntries: savedLedgerEntries(v.ledgerEntries),
     unallocatedAmount:
       v.family === "Credit Note" && !v.items.length
         ? recordedCreditAmount(v.partyName, v.ledgerEntries)

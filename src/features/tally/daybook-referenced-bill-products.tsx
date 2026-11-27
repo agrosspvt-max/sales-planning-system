@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { DaybookBillAllocations } from "./daybook-bill-allocations";
 import type { DaybookBillProducts, DaybookVoucherSource } from "./daybook-bill-products";
+import { BillLedgerEntries } from "./bill-ledger-entries";
 
 const money = (value: string) =>
   Number(value).toLocaleString("en-IN", { style: "currency", currency: "INR" });
@@ -125,6 +126,7 @@ export function DaybookBillProductResult({
           </div>
         </dl>
       )}
+      <BillLedgerEntries entries={bill.ledgerEntries} billNumber={bill.number} />
       <details className="text-xs text-muted-foreground">
         <summary className="w-fit cursor-pointer">ⓘ Product details</summary>
         <div className="mt-2 space-y-2 rounded border p-3">
@@ -150,19 +152,6 @@ export function DaybookBillProductResult({
               Taxes use the named Tally ledgers. Other adjustments are the remaining difference,
               including any charges, discounts or round-off; they are not assumed to be GST.
             </p>
-          )}
-          {!!bill.ledgerEntries?.length && (
-            <details>
-              <summary className="w-fit cursor-pointer">Original bill ledger amounts</summary>
-              <dl className="mt-2 space-y-1">
-                {bill.ledgerEntries.map((entry, index) => (
-                  <div key={index} className="flex justify-between gap-4">
-                    <dt>{entry.name}</dt>
-                    <dd className="whitespace-nowrap tabular-nums">{money(entry.amount)}</dd>
-                  </div>
-                ))}
-              </dl>
-            </details>
           )}
           <p>
             Returns use negative quantities for comparison with Sales. Blank quantities remain

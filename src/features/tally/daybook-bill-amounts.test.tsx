@@ -208,7 +208,7 @@ for (const text of [
   "3,300.00",
   "3,465.00",
   "Bill total",
-  "Original bill ledger amounts",
+  "Ledger entries",
 ])
   assert.ok(html.includes(text), text);
 assert.doesNotMatch(html, /<dt>Other adjustments<\/dt>/);
@@ -262,6 +262,18 @@ const creditDetails = renderToStaticMarkup(<DaybookBillProductResult result={{ s
     amounts: creditAmounts, ledgerEntries: financialCredit.ledgerEntries, items: [] } }} />);
 assert.ok(creditDetails.includes("Credit amount (excl. GST)") && creditDetails.includes("51,355.94"));
 assert.ok(creditDetails.includes("60,600.00") && creditDetails.includes("4,622.03"), "original gross and tax entries remain visible");
+assert.ok(creditDetails.indexOf('aria-label="Ledger entries in bill CN"') < creditDetails.indexOf("<details"), "ledger entries appear before the collapsed Product details");
+for (const name of ["Freight Discount-5%-(CG)", "PRICE DIFFERENCE CREDIT NOTE MP", "FINANCIAL CREDIT NOTE-MP"]) {
+  const source = { ...financialCredit, ledgerEntries: financialCredit.ledgerEntries.map(entry => entry.name === "Scheme discount" ? { ...entry, name } : entry) };
+  const before = JSON.stringify(source);
+  const html = renderToStaticMarkup(<DaybookBillProductResult result={{ status: "matched", source: "daybook", ownVoucher: true,
+    bill: { number: "CN", date: source.billDate, type: source.typeName, partyName: source.partyName, cancelled: false, optional: false,
+      amounts: creditAmounts, ledgerEntries: source.ledgerEntries, items: [] } }} />);
+  assert.ok(html.includes(name), "Daybook exposes each adjustment ledger even without products");
+  assert.ok(html.includes("-₹51,355.93"), "show the actual ledger line, retaining its separate round-off");
+  assert.ok(html.includes("-₹0.01"));
+  assert.equal(JSON.stringify(source), before);
+}
 console.log(
   "Daybook pre-tax headers, source tax ledgers, signed returns, exact decimals, unavailable evidence, breakdown rendering and preserved original totals: PASS",
 );

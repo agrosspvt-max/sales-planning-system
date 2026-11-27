@@ -1193,6 +1193,10 @@ async function main() {
     assert.equal(splitProduct.creditNotes.quantity, 0);
     assert.equal(splitProduct.net.amount, Number(beforeSplitActual.amount.add(75)));
     assert.equal(splitRead.bills.find((row) => row.number === "SPLIT-3")!.unallocatedAmount, -12);
+    const ledgerBill = splitRead.bills.find(row => row.number === "SPLIT-3")!;
+    assert.deepEqual(ledgerBill.ledgerEntries?.map(entry => [entry.name, entry.amount]), [
+      [sourceBill.partyName, "14.16"], ["Credit adjustment", "-12.00"], ["CGST", "-1.08"], ["SGST", "-1.08"],
+    ], "Bill wise API forwards original ledger names, signs and paise without recalculating them");
     const netReportFilter = { ...billFilter, buckets: [...billFilter.buckets], groupBy: "dealer" as const };
     const scopedCreditReport = await territory.getGroupProductPlan(actor, group.id, "sales-season", netReportFilter);
     const creditRecord = scopedCreditReport.dealerCredits!.find((row) => row.dealerId === "a")!;

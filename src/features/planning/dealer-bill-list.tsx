@@ -3,6 +3,7 @@
 import { formatCurrency } from "@/lib/utils";
 import type { DealerSalesBill } from "./dealer-sales-bills";
 import { isExcludedSalesProduct } from "@/features/tally/sales-reporting-products";
+import { BillLedgerEntries } from "@/features/tally/bill-ledger-entries";
 
 const creditMoney = (amount: number) => amount.toLocaleString("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const qty = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 });
@@ -109,7 +110,7 @@ export function DealerBillList({
                         <td className="p-3">
                           {item.productName}
                           {item.reviewNotice && <p role="status" className="mt-1 text-xs text-warning">{item.reviewNotice}</p>}
-                          {!item.productId && (
+                          {!item.productId && !item.excludedFromTotals && !isExcludedSalesProduct(item.productName) && (
                             <div className="text-xs text-muted-foreground">
                               Product match pending
                             </div>
@@ -140,6 +141,9 @@ export function DealerBillList({
                     )}
                   </tbody>
                 </table>
+              </div>
+              <div className="border-t p-3">
+                <BillLedgerEntries entries={bill.ledgerEntries} billNumber={bill.number || bill.guid} />
               </div>
             </details>
           ))}

@@ -171,6 +171,7 @@ assert.equal(
 const productSources: string[] = [],
   allocationSources: string[] = [];
 const overrides = {
+  "@/lib/api-client": { api: {} },
   "next/link": {
     __esModule: true,
     default: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,

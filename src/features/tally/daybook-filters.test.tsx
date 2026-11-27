@@ -222,6 +222,7 @@ for (const scope of [
 ] as DaybookScope[]) {
   const productSources: string[] = [];
   const load = testLoader({
+    "@/lib/api-client": { api: {} },
     react: {
       ...React,
       useState: (initial: unknown) => [initial === "all" ? scope : initial, () => {}],

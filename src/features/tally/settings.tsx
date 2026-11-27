@@ -1,4 +1,5 @@
 "use client";
+import { RecoveryDiagnosticButton } from "./recovery-diagnostic-dialog";
 import { TallySalesRefresh } from "./sales-refresh";
 import { TallyDaybookSync } from "./daybook-sync";
 import { TallyDaybookReview } from "./daybook-review";
@@ -189,8 +190,9 @@ export function TallySettings({ daybookMonth }: { daybookMonth?: string }) {
           <h2 className="font-medium">Balances kept for review</h2>
           <ul>
             {q.data.job.summary.held.slice(0, 20).map((row) => (
-              <li key={row.name}>
-                {row.name}: {reasonText(row.reason)}
+              <li key={row.name} className="flex items-start gap-2">
+                <span>{row.name}: {reasonText(row.reason)}</span>
+                <RecoveryDiagnosticButton ledgerName={row.name} jobId={q.data.job?.id} />
               </li>
             ))}
           </ul>

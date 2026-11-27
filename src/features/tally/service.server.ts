@@ -1,4 +1,5 @@
 import "server-only";
+import { recoveryEvidence, publicRecoverySummary } from "./recovery-evidence";
 import {salesSyncEnabled} from "./sales-rollout";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Prisma, Role } from "@prisma/client";
@@ -215,7 +216,7 @@ export async function status() {
     process.env.VERCEL_ENV === "preview" && branch && /^[a-z0-9.-]+\.vercel\.app$/i.test(branch)
       ? "https://" + branch
       : null;
-  return { configured: true, ...c, job, connectionAddress };
+  return { configured: true, ...c, job: job ? { ...job, summary: publicRecoverySummary(job.summary) } : null, connectionAddress };
 }
 export async function syncProgress(): Promise<import("./progress").SyncProgress> {
   try {
@@ -831,6 +832,7 @@ export async function agent(req: Request, raw: unknown) {
           zeroedUnavailable: verified.zeroedUnavailable,
           creditAdvances: verified.creditAdvances,
           held: verified.held,
+          _recoveryEvidence: recoveryEvidence(verified.report, scope.aliases, verified.held),
           asOf: job.asOf,
           observedAt: verified.report.observedAt,
           sourceSha256: verified.report.sourceSha256,

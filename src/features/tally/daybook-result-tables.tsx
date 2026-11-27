@@ -1,4 +1,5 @@
 "use client";
+import { RecoveryDiagnosticButton } from "./recovery-diagnostic-dialog";
 import { useState } from "react";
 import Link from "next/link";
 import type { DaybookDealerRow, DaybookExcludedVoucher } from "./daybook-result-types";
@@ -208,6 +209,9 @@ export function DaybookResultTables({
                   </span>
                 </summary>
                 <div className="space-y-4 border-t p-4">
+                  {!!dealer.row?.ledgers.length && !["Needs dealer link", "Accounting ledger"].includes(dealer.row.status) && (
+                    <div className="flex items-center gap-2 text-sm"><span>Check Recovery against Daybook</span><RecoveryDiagnosticButton ledgerName={dealer.row.ledgers[0]} /></div>
+                  )}
                   {dealer.row && (
                     <details className="text-xs text-muted-foreground">
                       <summary className="w-fit cursor-pointer">

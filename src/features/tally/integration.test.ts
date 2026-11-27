@@ -49,6 +49,7 @@ function load<T>(file: string): T {
     "@/lib/http": { ApiError },
     "./billwise": pure,
     "./changes": changes,
+    "./recovery-evidence": require("./recovery-evidence.ts"),
     "@/lib/audit": {
       writeAudit: async (data: unknown, tx: db.Prisma.TransactionClient) =>
         tx.auditLog.create({ data: data as db.Prisma.AuditLogCreateInput }),
@@ -405,6 +406,10 @@ async function main() {
     zeroedUnavailable: unknown[];
     creditAdvances: unknown[];
   };
+  assert.equal((published.summary as { _recoveryEvidence: { version: number } })._recoveryEvidence.version, 1);
+  const publicStatus = await svc.status();
+  assert.ok("job" in publicStatus);
+  assert.ok(!("_recoveryEvidence" in (publicStatus.job!.summary as object)), "status poll must not return detailed balances/bills");
   assert.equal(publishedSummary.zeroedUnavailable.length, 1);
   assert.equal(publishedSummary.creditAdvances.length, 1);
   const firstHistory = await svc.outstandingHistory("current");

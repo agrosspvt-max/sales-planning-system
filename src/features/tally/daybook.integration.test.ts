@@ -377,6 +377,49 @@ async function testIgnoredComparison() {
   }
 }
 
+async function testRecoveryDiagnostic() {
+  const diagnostic = load<typeof import("./recovery-diagnostic.server")>("src/features/tally/recovery-diagnostic.server.ts");
+  const connectionId = randomUUID(), recoveryJobId = randomUUID(), origin = randomUUID();
+  const ledgerName = "Diagnostic Party";
+  const date = "2026-04-30", readAt = new Date(date + "T10:00:00Z");
+  const allocations = (reference: string | null, type: string, amount: string) => ({ scope: "selected_credit", entryCount: 1, entries: [{ ledgerLineNumber: 1, allocationNumber: 1, ledgerName, billReference: reference, referenceType: type, amount }] });
+  await prisma.tallyConnection.create({ data: { id: connectionId, companyName: "Diagnostic Company", anchorName: "Anchor", anchorGuid: anchor, credentialHash: "disabled", authorizedById: auth.userId } });
+  await prisma.tallySyncJob.create({ data: {
+    id: recoveryJobId, connectionId, status: "COMPLETE", asOf: date, scopeHash: "hash", leaseHash: "disabled", leaseExpiresAt: readAt, completedAt: readAt,
+    scope: { aliases: [{ name: ledgerName, dealerId: "daybook-dealer" }] },
+    summary: { observedAt: readAt.toISOString(), held: [{ name: ledgerName, reason: "BILLS_LEDGER_MISMATCH" }], _recoveryEvidence: { version: 1, companyName: "Diagnostic Company", asOf: date, observedAt: readAt.toISOString(), ledgers: [{ name: ledgerName, dealerId: "daybook-dealer", reason: "BILLS_LEDGER_MISMATCH", guid: anchor, closingOutstanding: "30.00", pendingTotal: "35.00", difference: "-5.00", bills: [{ reference: "INV1", pendingAmount: "35.00", billDate: date, dueDate: date }] }] } },
+  } });
+  const credit = { guid: prefix + "-00090002", date, voucherNumber: "RCPT1", voucherType: "Receipt", ledgerName, creditAmount: "70.00", billAllocations: allocations("INV1", "Agst Ref", "70.00") };
+  const sales = { guid: prefix + "-00090001", billDate: date, billNumber: "INV1", typeName: "Sales", cancelled: false, optional: false, partyName: ledgerName, ledgerEntries: [{ name: ledgerName, amount: "-105.00" }, { name: "GST", amount: "5.00" }] };
+  const saleSource = { guid: sales.guid, date, voucherNumber: "INV1", voucherType: "Sales", ledgerName, amount: "105.00", direction: "debit", billAllocations: { ...allocations("INV1", "New Ref", "-105.00"), scope: "voucher_ledgers" } };
+  await prisma.tallyDaybookJob.create({ data: { id: origin, connectionId, monthKey: "2026-04", fromDate: "2026-04-01", throughDate: date, status: "SUCCEEDED", completedAt: readAt,
+    summary: { coverage: "all_vouchers", _daybookProducts: { capture: { status: "complete", vouchers: [sales, { ...sales, guid: prefix + "-00099999", partyName: "Other Dealer", ledgerEntries: [{ name: "Other Dealer", amount: "-999.00" }] }] } },
+      dealerRows: [{ key: "daybook-dealer", creditVouchers: [credit, { ...credit, guid: prefix + "-00090003", voucherNumber: "RET1", voucherType: "Sales Return", creditAmount: "5.00", billAllocations: allocations(null, "On Account", "5.00") }] }], excludedVouchers: [saleSource] } } });
+  await prisma.tallyDaybookJob.create({ data: { connectionId, monthKey: "2026-04", fromDate: "2026-04-01", throughDate: date, status: "FAILED", completedAt: new Date(), summary: { marker: "failed read cannot replace evidence" } } });
+  const financials = async () => JSON.stringify(await Promise.all([prisma.recoveryPlanDealer.findMany(), prisma.monthlyEntry.findMany(), prisma.dealerAlias.findMany()]));
+  const before = await financials();
+  const result = await diagnostic.getRecoveryDiagnostic(auth, { ledgerName, jobId: recoveryJobId });
+  assert.equal(result.coverageComplete, true);
+  assert.equal(result.evidence?.difference, "-5.00");
+  assert.equal(result.daybook.movement, "30.00");
+  assert.equal(result.daybook.onAccount, "-5.00");
+  assert.equal(result.daybook.vouchers.length, 3, "duplicates counted once; other party excluded");
+  assert.ok(result.messages.some(message => message.includes("exactly matches")));
+  assert.equal((await diagnostic.getRecoveryDiagnostic(auth, { ledgerName })).jobId, recoveryJobId);
+  assert.equal(await financials(), before, "diagnostics do not write financial or alias records");
+  await assert.rejects(diagnostic.getRecoveryDiagnostic({ ...auth, role: Role.SALES_OFFICER }, { ledgerName }), /Super Admin/);
+  await assert.rejects(diagnostic.getRecoveryDiagnostic(auth, { ledgerName: "Other Dealer" }), /not included/);
+  await prisma.tallySyncJob.update({ where: { id: recoveryJobId }, data: { summary: { held: [{ name: ledgerName, reason: "BILLS_LEDGER_MISMATCH" }] } } });
+  const legacy = await diagnostic.getRecoveryDiagnostic(auth, { ledgerName });
+  assert.equal(legacy.evidence, null);
+  assert.ok(legacy.messages.some(message => message.includes("next Recovery sync")));
+  approved = false;
+  await assert.rejects(diagnostic.getRecoveryDiagnostic(auth, { ledgerName }), /test Preview/);
+  approved = true;
+  await prisma.tallyConnection.delete({ where: { id: connectionId } });
+  console.log("Recovery diagnostic: real stored evidence and targeted Daybook SQL, gross amounts, source deduplication, failed-read isolation, legacy fallback, permissions and financial preservation passed.");
+}
+
 async function main() {
   await prisma.$executeRawUnsafe('TRUNCATE "TallyConnection", "User", "Dealer", "Season" CASCADE');
   await prisma.user.create({
@@ -1877,6 +1920,7 @@ print(json.dumps(messages,separators=(',',':')))
   assert.equal((await values()).srCr.toFixed(2), "0.00");
   await testIgnoredComparison();
   await testDealerAudit();
+  await testRecoveryDiagnostic();
   // Range is a read-only union of independently authorized monthly publications.
   {
     const months = ["2026-04", "2026-05", "2026-06"];

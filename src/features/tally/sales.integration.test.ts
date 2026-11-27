@@ -105,6 +105,7 @@ modules["./sales-units"] = load("src/features/tally/sales-units.ts");
 modules["@/features/tally/sales-units"] = modules["./sales-units"];
 modules["./sales-product-review"] = load("src/features/tally/sales-product-review.ts");
 modules["@/features/tally/sales-product-review"] = modules["./sales-product-review"];
+modules["./recovery-evidence"] = load("src/features/tally/recovery-evidence.ts");
 modules["./service.server"] = load("src/features/tally/service.server.ts");
 const svc = load<typeof import("./sales.server")>("src/features/tally/sales.server.ts");
 const today = billwise.indiaDay(),

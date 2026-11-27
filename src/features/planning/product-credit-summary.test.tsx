@@ -71,6 +71,20 @@ assert.equal(category.netSales, 100);
 assert.equal(category.netNbv, 15);
 const mismatch = productCreditSummary(201, 45, products, credits, "", []);
 assert.equal(mismatch.netSales, null);
+// CG's real report grouped identical NBV contributions on opposite sides of
+// the half-paise boundary. Reordering additions must not blank all net totals.
+const regroupedProducts = [{ ...products[0], actualAmount: 36937815.72999998, actualNbv: 16473316.605000002 }];
+const regrouped = productCreditSummary(36937815.73, 16473316.604999999, regroupedProducts, [credits[0]], "", []);
+assert.equal(regrouped.creditAmount, -10);
+assert.equal(regrouped.netSales, 36937805.73);
+assert.equal(typeof regrouped.netNbv, "number");
+assert.equal(regrouped.reason, undefined);
+assert.equal(productCreditSummary(36937815.74, 16473316.604999999, regroupedProducts, [credits[0]], "", []).netSales, null,
+  "a real one-paise sales mismatch must still block an unverified net total");
+assert.equal(productCreditSummary(36937815.73, 16473316.615, regroupedProducts, [credits[0]], "", []).netNbv, null,
+  "a real one-paise NBV mismatch must still block an unverified net total");
+assert.equal(productCreditSummary(36937815.73, 16473316.604999999, regroupedProducts, [{ ...credits[0], unavailable: true }], "", []).netSales, null,
+  "rounding tolerance must not bypass missing source history");
 const unknown = productCreditSummary(
   200,
   45,
@@ -230,6 +244,12 @@ const withPending = productCreditSummary(200, 15, [products[0], { ...products[1]
 assert.equal(withPending.netSales, 170);
 assert.equal(withPending.netNbv, null);
 assert.equal(withPending.nbvPending, true);
+const { ProductCreditFooter: ReasonFooter } = testLoader({})("src/features/planning/product-credit-footer.tsx") as typeof import("./product-credit-footer");
+for (const state of [unknown, mismatch, withPending]) {
+  const html = renderToStaticMarkup(<table><ReasonFooter columns={getProductPlanColumns(false)} totals={[]} summary={state} onOpenCredits={() => {}} /></table>);
+  assert.ok(html.includes('role="status"'), "unavailable or pending totals explain the reason next to the footer");
+  assert.ok(html.includes(state.reason!));
+}
 assert.equal(withPending.dealers.find(dealer => dealer.dealerId === "a")?.actualNbv, 13.5, "another dealer's known NBV stays available");
 assert.equal(dealerFinancialTotals(withPending.dealers).actualNbvAvailable, false);
 const { workbook: pendingWorkbook } = buildGroupPlanWorkbook(XLSX, {

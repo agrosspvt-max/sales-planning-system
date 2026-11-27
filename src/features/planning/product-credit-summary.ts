@@ -20,6 +20,16 @@ const sum = (values: (number | null)[]) =>
   values.some((value) => value === null)
     ? null
     : sumSalesMeasures(values.map((value) => ({ quantity: 0, amount: value! }))).amount;
+// Product and dealer totals group the same contributions in different orders.
+// A binary rounding remainder can straddle a half-paise boundary; it is not
+// missing money. Keep the normal paise comparison and allow only machine-scale
+// noise (capped far below one paise), never a genuine one-paise discrepancy.
+function sameFinancialTotal(left: number, right: number) {
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  const precision = Math.min(0.000001, Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right)) * 8);
+  return Math.abs(left - right) <= precision ||
+    sameSalesMeasure({ quantity: 0, amount: left }, { quantity: 0, amount: right });
+}
 export function productCreditSummary(
   beforeSales: number,
   beforeNbv: number,
@@ -38,8 +48,7 @@ export function productCreditSummary(
     0,
   );
   const reconciled =
-    sameSalesMeasure({ quantity: 0, amount: beforeSales }, { quantity: 0, amount: baseSales }) &&
-    sameSalesMeasure({ quantity: 0, amount: beforeNbv }, { quantity: 0, amount: baseNbv });
+    sameFinancialTotal(beforeSales, baseSales) && sameFinancialTotal(beforeNbv, baseNbv);
   if (categoryFilter)
     return {
       dealers,

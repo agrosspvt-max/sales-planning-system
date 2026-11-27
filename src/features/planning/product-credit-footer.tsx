@@ -133,6 +133,13 @@ export function ProductCreditFooter({
           ))}
         </TableRow>
       ))}
+      {summary?.applied && summary.reason && (
+        <TableRow>
+          <TableCell colSpan={columns.length + 1} className="py-2 text-xs text-muted-foreground">
+            <p role="status">{summary.reason}</p>
+          </TableCell>
+        </TableRow>
+      )}
     </tfoot>
   );
 }

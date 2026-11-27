@@ -207,6 +207,22 @@ assert.equal(mixedSplit.net.quantity, 0);
 assert.deepEqual(mixedSplit.net.units, [{ unit: "kg", quantity: 10 }, { unit: "litre", quantity: 20 }]);
 const mixedBillsHtml = renderToStaticMarkup(<DealerBillList bills={mixedBills} productIds={["Same"]} categoryFiltered={false} />);
 assert.ok(mixedBillsHtml.includes(">Kg<") && mixedBillsHtml.includes(">LITRE<"), "bill view keeps the exact recorded units");
+const financialCredit: DealerSalesBill = { ...bill("CN-NO-PRODUCT", "Credit Note", "CREDIT NOTE-OTHER", "", 0, 0), items: [], unallocatedAmount: -51355.94 };
+const beforeCredit = JSON.stringify(financialCredit);
+const creditHtml = renderToStaticMarkup(<DealerBillList bills={[financialCredit]} productIds={[]} categoryFiltered={false} />);
+assert.match(creditHtml.match(/<summary[^>]*>(.*?)<\/summary>/)![1], /-₹51,355.94/);
+assert.match(creditHtml, /Credit note without product lines \(excl. GST\)/);
+assert.equal((creditHtml.match(/-₹51,355.94/g) ?? []).length, 2, "amount appears in collapsed row and expanded details");
+assert.doesNotMatch(creditHtml, /₹60,600/, "do not substitute the gross credit including GST");
+assert.equal(JSON.stringify(financialCredit), beforeCredit, "rendering does not deduct or change the credit again");
+const zeroCredit = renderToStaticMarkup(<DealerBillList bills={[{ ...financialCredit, unallocatedAmount: 0 }]} productIds={[]} categoryFiltered={false} />);
+assert.match(zeroCredit, /₹0.00/);
+assert.doesNotMatch(zeroCredit, /Amount not recorded/);
+const unknownCredit = renderToStaticMarkup(<DealerBillList bills={[{ ...financialCredit, unallocatedAmount: null }]} productIds={[]} categoryFiltered={false} />);
+assert.match(unknownCredit, /Amount not recorded/);
+assert.doesNotMatch(unknownCredit, /₹0.00/);
+const filteredCredit = renderToStaticMarkup(<DealerBillList bills={[financialCredit]} productIds={[]} categoryFiltered />);
+assert.doesNotMatch(filteredCredit, /CN-NO-PRODUCT|-₹51,355.94/);
 console.log(
   "Sales / Returns / Credit notes split: signed source movements, zero-quantity and zero-net credits, status/category/held guards, exact reconciliation, preserved original net and unavailable-history rendering: PASS",
 );

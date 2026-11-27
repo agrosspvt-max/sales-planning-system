@@ -3,6 +3,7 @@
 import { formatCurrency } from "@/lib/utils";
 import type { DealerSalesBill } from "./dealer-sales-bills";
 
+const creditMoney = (amount: number) => amount.toLocaleString("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const qty = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 });
 const date = (day: string) =>
   new Date(day + "T00:00:00Z").toLocaleDateString("en-IN", {
@@ -42,7 +43,7 @@ export function DealerBillList({
     <div className="space-y-4 p-4">
       <p className="text-xs text-muted-foreground">
         {visible.length} vouchers · newest date first. Amounts below are product-line amounts before
-        invoice taxes and charges.
+        invoice taxes and charges. Credit notes without product lines show the credit amount excluding recorded GST.
         {categoryFiltered && " Only products in the selected category are shown."}
       </p>
       {visible.some((bill) => bill.items.some((item) => !item.productId)) && (
@@ -66,6 +67,12 @@ export function DealerBillList({
                 {bill.items.length > 0 && (
                   <span className="ml-2 font-medium tabular-nums">
                     {formatCurrency(bill.items.reduce((total, item) => total + item.amount, 0))}
+                  </span>
+                )}
+                {!bill.items.length && bill.family === "Credit Note" && (
+                  <span className="ml-2 font-semibold tabular-nums text-destructive">
+                    {bill.unallocatedAmount == null ? "Amount not recorded" : creditMoney(bill.unallocatedAmount)}
+                    <span className="ml-1 text-xs font-normal text-muted-foreground">excl. GST</span>
                   </span>
                 )}
               </summary>
@@ -115,11 +122,20 @@ export function DealerBillList({
                       </tr>
                     ))}
                     {!bill.items.length && (
-                      <tr>
-                        <td colSpan={4} className="p-3 text-muted-foreground">
-                          This voucher has no product lines.
-                        </td>
-                      </tr>
+                      bill.family === "Credit Note" ? (
+                        <tr className="bg-destructive/5 font-semibold text-destructive">
+                          <td colSpan={3} className="p-3">Credit note without product lines (excl. GST)</td>
+                          <td className="whitespace-nowrap p-3 text-right tabular-nums">
+                            {bill.unallocatedAmount == null ? "Amount not recorded" : creditMoney(bill.unallocatedAmount)}
+                          </td>
+                        </tr>
+                      ) : (
+                        <tr>
+                          <td colSpan={4} className="p-3 text-muted-foreground">
+                            This voucher has no product lines.
+                          </td>
+                        </tr>
+                      )
                     )}
                   </tbody>
                 </table>

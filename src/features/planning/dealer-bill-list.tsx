@@ -2,6 +2,7 @@
 
 import { formatCurrency } from "@/lib/utils";
 import type { DealerSalesBill } from "./dealer-sales-bills";
+import { isExcludedSalesProduct } from "@/features/tally/sales-reporting-products";
 
 const creditMoney = (amount: number) => amount.toLocaleString("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const qty = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 });
@@ -46,7 +47,7 @@ export function DealerBillList({
         invoice taxes and charges. Credit notes without product lines show the credit amount excluding recorded GST.
         {categoryFiltered && " Only products in the selected category are shown."}
       </p>
-      {visible.some((bill) => bill.items.some((item) => !item.productId)) && (
+      {visible.some((bill) => bill.items.some((item) => !item.productId && !item.excludedFromTotals && !isExcludedSalesProduct(item.productName))) && (
         <p className="text-xs text-muted-foreground">
           Some original Tally products are awaiting a website product match; their bill lines are
           shown here.

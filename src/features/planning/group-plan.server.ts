@@ -19,6 +19,7 @@ import { salesPartyNames } from "@/features/tally/sales-party-names";
 import type { DealerCreditRecord } from "./dealer-credit-adjustments";
 import { salesProductReview } from "@/features/tally/sales-product-review";
 import { recordedLedgerAmounts } from "@/lib/tally-ledger-amounts";
+import { isExcludedSalesProduct } from "@/features/tally/sales-reporting-products";
 
 function num(d: unknown): number {
   return typeof d === "object" && d !== null ? Number(d.toString()) : Number(d);
@@ -360,6 +361,9 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
     return row;
   }
   const isTotal = filter.view === "total";
+  const excludedProduct = (line: Parameters<typeof ensureRow>[0]) =>
+    isExcludedSalesProduct(line.product.name) ||
+    isExcludedSalesProduct(eff.meta(eff.effId(line.productId))?.name ?? "");
 
   // ===== SEASONAL pass (ALWAYS runs). Loads BOTH the Season-Baseline representative plans and the
   // period (Seasonal-Total) representative plans in ONE query. Baseline plans feed Season Qty / Season
@@ -410,6 +414,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       const isBaseline = baselineRepIds.has(pd.seasonPlanId);
       const periodBucket = repPlanBucket.get(pd.seasonPlanId); // set only for period (selected) reps
       for (const l of pd.lines) {
+        if (excludedProduct(l)) continue;
         const row = ensureRow(l);
         // Snapshot-first pricing (frozen on the line) with live-Master fallback.
         const rate = num(l.rateSnapshot ?? l.product.rate);
@@ -513,6 +518,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       if (!plan) continue;
       if (!isCurrentlyOwnedBy(monthlyOwnerByDealer.get(pd.dealer.id), plan.officerId)) continue;
       for (const l of pd.lines) {
+        if (excludedProduct(l)) continue;
         const row = ensureRow(l);
         // Snapshot-first pricing (frozen on the line) with live-Master fallback.
         const rate = num(l.rateSnapshot ?? l.product.rate);
@@ -622,6 +628,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
       uploadedWithoutBills = false,
       review?: { notice?: string; nbvPending?: boolean; units: { unit: string; quantity: string }[] },
     ) {
+      if (excludedProduct(line)) return;
       if (!qty && !amount) return;
       const pd = dealerPlans.get(dealer.id);
       const officerId = actualOwners.get(dealer.id) ?? monthlyOwnerByDealer.get(dealer.id)
@@ -781,7 +788,7 @@ export async function getGroupProductPlan(ctx: AuthContext, groupId: string, sea
         for (const row of held)
           if (typeof row?.dealerId === "string" && included(row.dealerId, monthId)) recordFor(row.dealerId).unavailable = true;
         for (const actual of snapshot.actuals)
-          if ((num(actual.quantity) || num(actual.amount)) && included(actual.dealerId, monthId)
+          if (!excludedProduct(actual) && (num(actual.quantity) || num(actual.amount)) && included(actual.dealerId, monthId)
             && !attributedSources.has(snapshot.id + ":" + actual.dealerId)) recordFor(actual.dealerId).unavailable = true;
       }
       const notes = scopedSnapshots.length ? await prisma.tallySalesVoucher.findMany({

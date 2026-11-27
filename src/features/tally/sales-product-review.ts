@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { ProductResolver } from "@/lib/product-resolver";
 import { cleanProductName } from "@/features/sales-upload/parser";
 import { tightKey } from "@/lib/match-key";
+import { isExcludedSalesProduct } from "./sales-reporting-products";
 
 export const pendingSalesProductId = (raw: string) =>
   `tally-pending:${tightKey(cleanProductName(raw)) || encodeURIComponent(raw)}`;
@@ -42,5 +43,8 @@ const schema = z.object({
 export type SalesProductReview = z.infer<typeof schema>;
 export function salesProductReview(raw: unknown): SalesProductReview | null {
   const result = schema.safeParse(raw);
-  return result.success ? result.data : null;
+  return result.success ? {
+    ...result.data,
+    pendingProducts: result.data.pendingProducts.filter(row => !isExcludedSalesProduct(row.name)),
+  } : null;
 }

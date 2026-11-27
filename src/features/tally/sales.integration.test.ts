@@ -103,6 +103,8 @@ modules["@/features/sales-upload/parser"] = load("src/features/sales-upload/pars
 modules["@/lib/product-resolver"] = load("src/lib/product-resolver.ts");
 modules["./sales-units"] = load("src/features/tally/sales-units.ts");
 modules["@/features/tally/sales-units"] = modules["./sales-units"];
+modules["./sales-reporting-products"] = load("src/features/tally/sales-reporting-products.ts");
+modules["@/features/tally/sales-reporting-products"] = modules["./sales-reporting-products"];
 modules["./sales-product-review"] = load("src/features/tally/sales-product-review.ts");
 modules["@/features/tally/sales-product-review"] = modules["./sales-product-review"];
 modules["./recovery-evidence"] = load("src/features/tally/recovery-evidence.ts");
@@ -1570,6 +1572,51 @@ async function main() {
   assert.equal(amount(await report(["approved"], true)), 300, "repeat capture replaces, never doubles sales");
   assert.equal((await actual("line-a", "sales-old")).planQty, 55);
   console.log("Approximate product review includes money with pending NBV; confirmed names and mixed original units never hold dealer totals: PASS");
+
+  // BAG is original bill evidence only, including historical unresolved captures.
+  const bagVoucher = (job: Parameters<typeof result>[0]) => {
+    const out = unitVoucher(job);
+    out.vouchers[0].items[1] = { ...out.vouchers[0].items[1], stockItemName: "BAG", quantity: "2.000000", unit: "Nos", amount: "70.00" };
+    return out;
+  };
+  await refresh(bagVoucher, oldKey);
+  const bagSnapshot = await prisma.tallySalesSnapshot.findUniqueOrThrow({ where: { connectionId_monthKey: { connectionId, monthKey: oldKey } } });
+  const capturedItems = await prisma.tallySalesItem.findMany({ where: { voucher: { snapshotId: bagSnapshot.id } }, orderBy: { lineNo: "asc" } });
+  assert.equal(capturedItems[1].stockItemName, "BAG");
+  assert.equal(capturedItems[1].amount.toString(), "70");
+  assert.equal((bagSnapshot.summary as { pendingProducts: unknown[] }).pendingProducts.length, 0);
+  assert.equal((await missingProducts.missingProductsStatus(actor)).products.some(row => row.stockItemName === "BAG"), false);
+  // Reproduce a previously saved pending BAG without changing its original bills.
+  await prisma.tallySalesSnapshot.update({ where: { id: bagSnapshot.id }, data: { summary: {
+    ...(bagSnapshot.summary as object), pendingProducts: [{ dealerId: "a", productId: "tally-pending:bag", name: "BAG", notice: "BAG: product match needs review", quantity: "2", amount: "70.00", units: [{ unit: "Nos", quantity: "2" }] }],
+  } } });
+  const withoutBag = await report(["approved"], true);
+  assert.equal(amount(withoutBag), 100);
+  assert.equal(withoutBag.products.some(row => row.productName === "BAG"), false);
+  const withoutBagCredits = productCreditSummary(100, 15, withoutBag.creditDealerProducts!, withoutBag.dealerCredits!, "", []);
+  assert.equal(withoutBagCredits.netSales, 100);
+  assert.equal(withoutBagCredits.netNbv, 15);
+  const bagStatus = await svc.salesStatus(actor, oldKey);
+  assert.equal((bagStatus.snapshot!.summary as { pendingProducts: unknown[] }).pendingProducts.length, 0);
+  const bagBills = await billService.getDealerSalesBills(actor, group.id, "sales-season", "a", { buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"] });
+  assert.equal(bagBills.bills[0].items[1].amount, 70);
+  assert.equal(bagBills.bills[0].items[1].excludedFromTotals, true);
+  assert.equal(bagBills.bills[0].items[1].reviewNotice, undefined);
+  assert.equal(bagBills.productBreakdown!.some(row => row.productName === "BAG"), false);
+  assert.equal(bagBills.productBreakdown!.reduce((sum, row) => sum + row.net.amount, 0), 100);
+  assert.ok(bagBills.productBreakdown!.every(row => row.reconciled));
+  // Creating a BAG master or planning line must not reintroduce it into reports.
+  await prisma.product.create({ data: { id: "bag", name: "BAG", rate: 35, nbvPercent: "0.5" } });
+  const bagLine = await prisma.planLine.create({ data: { planDealerId: "pd-a", productId: "bag", rateSnapshot: 35, nbvPercentSnapshot: "0.5" } });
+  await prisma.monthlyEntry.create({ data: { planLineId: bagLine.id, seasonMonthId: "sales-old", planQty: 20, saleQty: 2, saleValue: 70 } });
+  // A historical matched BAG actual is excluded immediately, without a refresh.
+  await prisma.tallySalesActual.create({ data: { snapshotId: bagSnapshot.id, dealerId: "a", productId: "bag", quantity: 2, amount: 70 } });
+  assert.equal(amount(await report(["approved"], true)), 100);
+  assert.equal((await dealerReport({ buckets: ["approved"], includeUnplanned: true, view: "month", monthIds: ["sales-old"] })).find(row => row.dealerId === "a")?.actualNbv, 15);
+  await refresh(bagVoucher, oldKey);
+  assert.equal(await prisma.tallySalesActual.count({ where: { snapshotId: bagSnapshot.id, productId: "bag" } }), 0);
+  assert.equal((await actual(bagLine.id, "sales-old")).planQty, 20);
+  console.log("BAG omitted from old/new sales, plans, NBV and notices while original bill amounts and planning inputs remain preserved: PASS");
 
   // Exercise publication above the 32,767-parameter failure threshold with a
   // realistic number of dealers, including unchanged zero actuals on all lines.

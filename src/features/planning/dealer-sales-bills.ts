@@ -13,6 +13,7 @@ export interface DealerSalesBill {
     productName: string;
     productId: string | null;
     reviewNotice?: string;
+    excludedFromTotals?: boolean;
     quantity: number;
     unit: string;
     amount: number;

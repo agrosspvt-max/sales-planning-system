@@ -1,4 +1,5 @@
 import { salesUnit } from "@/features/tally/sales-units";
+import { isExcludedSalesProduct } from "@/features/tally/sales-reporting-products";
 import type {
   DealerProductSalesBreakdown,
   DealerSalesBill,
@@ -69,7 +70,7 @@ export function dealerSalesBreakdown(
           ? "returns"
           : "creditNotes";
     for (const item of bill.items) {
-      if (!item.productId) continue;
+      if (!item.productId || item.excludedFromTotals || isExcludedSalesProduct(item.productName)) continue;
       const row = rows.get(item.productId) ?? {
         name: known.get(item.productId)?.productName ?? item.productName,
         sales: empty(),

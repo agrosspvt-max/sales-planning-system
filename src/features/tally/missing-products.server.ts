@@ -6,6 +6,7 @@ import { cleanProductName } from "@/features/sales-upload/parser";
 import { approvedTestPreview } from "./sales-rollout";
 import { assertSuper } from "./service.server";
 import type { MissingProductsStatus } from "./missing-products";
+import { isExcludedSalesProduct } from "./sales-reporting-products";
 
 export async function missingProductsStatus(ctx: AuthContext): Promise<MissingProductsStatus> {
   if (!approvedTestPreview())
@@ -39,6 +40,7 @@ export async function missingProductsStatus(ctx: AuthContext): Promise<MissingPr
   >();
   const key = (text: string) => text.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
   for (const line of lines) {
+    if (isExcludedSalesProduct(cleanProductName(line.stockItemName))) continue;
     if (!known.has(line.stockItemName))
       known.set(
         line.stockItemName,

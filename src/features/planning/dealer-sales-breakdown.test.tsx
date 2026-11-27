@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { testLoader } from "../dealer-tags/test-loader";
+import { isExcludedSalesProduct, salesReportingSummary } from "@/features/tally/sales-reporting-products";
 import { dealerSalesBreakdown, sameSalesMeasure, sumSalesMeasures } from "./dealer-sales-breakdown";
 import type { DealerSalesBill } from "./dealer-sales-bills";
 import type { TerritoryDealerSummary } from "./group-dealer-summary";
@@ -42,6 +43,27 @@ const expected = [
   { productId: "Return only", productName: "Return only", actualQty: -1, actualAmount: -75 },
 ];
 const original = JSON.stringify({ bills, expected });
+for (const name of ["BAG", " bag ", "ＢＡＧ"])
+  assert.equal(isExcludedSalesProduct(name), true);
+for (const name of ["BAG PLUS", "BAGGER", "MAXX BAG", "BAG 50KG", "TRICHO"])
+  assert.equal(isExcludedSalesProduct(name), false, "do not exclude different products by substring");
+const bagOnly = [{ ...bill("bag-only", "Sales", "Sales", "BAG", 2, 70), items: [{ lineNo: 0, productName: "BAG", productId: "bag", quantity: 2, amount: 70, unit: "Nos", excludedFromTotals: true }] }];
+assert.deepEqual(dealerSalesBreakdown([...bills, ...bagOnly], expected), dealerSalesBreakdown(bills, expected));
+const oldBagReview = {
+  productReviewVersion: 1, productUnits: [],
+  pendingProducts: [{ dealerId: "a", productId: "tally-pending:bag", name: "BAG", notice: "BAG needs review", quantity: "2", amount: "70", units: [] }],
+  unmatchedProductLines: 1, unmatchedProducts: [{ dealerId: "a", name: "Dealer", stockItems: ["BAG"] }],
+  changes: [{ product: "BAG", amount: "70" }],
+};
+const originalReview = JSON.stringify(oldBagReview);
+const { salesProductReview } = testLoader({})("src/features/tally/sales-product-review.ts") as typeof import("@/features/tally/sales-product-review");
+assert.equal(salesProductReview(oldBagReview)!.pendingProducts.length, 0);
+const hiddenBagNotices = salesReportingSummary(oldBagReview);
+assert.equal(hiddenBagNotices.pendingProducts.length, 0);
+assert.equal(hiddenBagNotices.unmatchedProducts.length, 0);
+assert.equal(hiddenBagNotices.unmatchedProductLines, 0);
+assert.equal(hiddenBagNotices.changes.length, 0);
+assert.equal(JSON.stringify(oldBagReview), originalReview, "saved history must remain unchanged");
 const split = dealerSalesBreakdown(bills, expected);
 const product = split.find((row) => row.productId === "Product <one>")!;
 assert.deepEqual(product.sales, { quantity: 10, amount: 1000, units: [{ unit: "kg", quantity: 10 }] });
@@ -199,6 +221,11 @@ assert.match(pendingHtml, /8 kg/);
 assert.match(pendingHtml, /aria-label="Net Sales NBV Total"[^>]*>Pending/);
 assert.match(pendingHtml, /aria-label="Net Sales Total"[^>]*>₹750/);
 const { DealerBillList } = load<typeof import("./dealer-bill-list")>("src/features/planning/dealer-bill-list.tsx");
+const bagBillHtml = renderToStaticMarkup(<DealerBillList bills={bagOnly.map(row => ({ ...row, items: row.items.map(item => ({ ...item, productId: null })) }))} productIds={[]} categoryFiltered={false} />);
+assert.match(bagBillHtml, /BAG/);
+assert.match(bagBillHtml, /₹70/);
+assert.match(bagBillHtml, /Nos/);
+assert.doesNotMatch(bagBillHtml, /awaiting a website product match|NBV pending|needs review/);
 const mixedBills = [bill("K", "Sales", "Sales", "Same", 10, 100), bill("L", "Sales", "Sales", "Same", 20, 200)];
 mixedBills[1].items[0].unit = "LITRE";
 const mixedSplit = dealerSalesBreakdown(mixedBills, [{ productId: "Same", productName: "Same", actualQty: 0, actualAmount: 300 }])[0];

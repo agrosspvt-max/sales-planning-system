@@ -11,6 +11,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, type AuthContext } from "@/lib/http";
 import { buildProductResolver } from "@/lib/product-resolver";
 import { salesProductMatch } from "./sales-product-review";
+import { isExcludedSalesProduct, salesReportingSummary } from "./sales-reporting-products";
 import { salesUnit } from "./sales-units";
 import { terminalSurvivor } from "@/lib/product-merge";
 import { indiaDay } from "./billwise";
@@ -183,7 +184,9 @@ export function projectSales(result: SalesResult, s: Scope) {
     const rows = totals.get(id) ?? new Map();
     totals.set(id, rows);
     for (const line of v.items) {
+      if (isExcludedSalesProduct(line.stockItemName)) continue;
       const match = resolve(line.stockItemName);
+      if (isExcludedSalesProduct(match.name) || match.product && isExcludedSalesProduct(match.product.name)) continue;
       const productId = match.productId;
       if (!match.product) {
         const stockItems = unmatchedProducts.get(id) ?? new Set<string>();
@@ -897,5 +900,8 @@ export async function salesStatus(ctx: AuthContext, monthKey: string) {
       select: { observedAt: true, fromDate: true, throughDate: true, summary: true },
     }),
   ]);
-  return { configured: true, job, snapshot };
+  return { configured: true,
+    job: job ? { ...job, summary: salesReportingSummary(job.summary) } : null,
+    snapshot: snapshot ? { ...snapshot, summary: salesReportingSummary(snapshot.summary) } : null,
+  };
 }

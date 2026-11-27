@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiRequestError } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { salesMonths } from "./sales-range";
+import { salesReportingSummary } from "./sales-reporting-products";
 const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 const retryStatus = (count: number, error: Error) =>
   count < 2 && (!(error instanceof ApiRequestError) || error.status >= 500 || error.status === 429);
@@ -75,7 +76,7 @@ function SalesMonthRefresh({
     if (stamp) last.current = stamp;
   }, [q.data?.snapshot?.observedAt, qc]);
   const job = q.data?.job,
-    summary = q.data?.snapshot?.summary;
+    summary = salesReportingSummary(q.data?.snapshot?.summary);
   return (
     <div className="my-3 space-y-2 rounded border p-3">
       {chooseMonth && (

@@ -10,6 +10,7 @@ import { getGroupProductPlan, type GroupPlanFilter } from "./group-plan.server";
 import type { DealerSalesBills } from "./dealer-sales-bills";
 import { dealerSalesBreakdown } from "./dealer-sales-breakdown";
 import { recordedCreditAmount } from "./dealer-credit-adjustments";
+import { isExcludedSalesProduct } from "@/features/tally/sales-reporting-products";
 
 const reviewSummary = z.object({ held: z.array(z.object({ dealerId: z.string() })).optional() });
 
@@ -97,11 +98,13 @@ export async function getDealerSalesBills(
       const review = reviews.get(v.snapshotId);
       const pending = review?.pendingProducts.find(row => row.dealerId === dealerId && row.productId === pendingSalesProductId(item.stockItemName));
       const original = resolver.resolveProductUnique(cleanProductName(item.stockItemName), { fuzzy: !review });
+      const excludedFromTotals = isExcludedSalesProduct(cleanProductName(item.stockItemName)) || !!original && isExcludedSalesProduct(original.name);
       return {
         lineNo: item.lineNo,
         productName: item.stockItemName,
-        productId: pending?.productId ?? original?.id ?? null,
-        reviewNotice: pending?.notice,
+        productId: excludedFromTotals ? null : pending?.productId ?? original?.id ?? null,
+        reviewNotice: excludedFromTotals ? undefined : pending?.notice,
+        ...(excludedFromTotals ? { excludedFromTotals: true } : {}),
         quantity: Number(item.quantity),
         amount: Number(item.amount),
         unit: item.unit,
